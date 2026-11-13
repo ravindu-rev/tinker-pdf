@@ -98,7 +98,12 @@ a table of each code's glyph name — the first name an array gives a code is
 the one it keeps, every item resolved, an integer or a real setting the code
 as the interpreter always read it — and keeps it beside `/CharProcs` and the
 matrix, so a glyph is one probe of the table and one lookup of its
-procedure.
+procedure. What the glyph stands for — its `/ToUnicode` text, or the
+character its `/Differences` name gives — is extracted and searched where the
+glyph stands, as a shown glyph's is: the interpreter reports the glyph to the
+text device once its procedure has run, and a procedure that showed text of
+its own is read by that text alone ([content and
+text](content-and-text.md)).
 
 **Composite fonts** (9.7.4). The CID the encoding CMap produces — not the
 code — selects both the glyph and the advance. The advance is `/W`'s, read in
@@ -1360,9 +1365,12 @@ corpora already vendored here. So every name stays on the list.
   round trip through the engine's encoder proves only self-agreement;
   `predefined_cmaps_absent.rs` pins the `cmap-predefined`-off behaviour.
 - `crates/tinker-pdf/tests/type3_fonts.rs` — glyph procedures run as content
-  under `/FontMatrix`; `vertical_metrics.rs` — `/W2` both forms, the `/DW2`
-  default, and the position vector; `substitute_fonts.rs` — the
-  `FontProvider` seam, including declining symbolic fonts, and a composite
+  under `/FontMatrix`, and their text extracted and found where the glyphs
+  stand, once where a procedure shows text of its own, in invisible text and
+  inside a form, with nothing drawn changed by it; `vertical_metrics.rs` —
+  `/W2` both forms, the `/DW2` default, and the position vector;
+  `substitute_fonts.rs` — the `FontProvider` seam, including declining
+  symbolic fonts, and a composite
   font's request carrying its character collection
   (`the_provider_is_told_the_character_collection`), which
   `crates/tinker-pdf-cos/tests/fonts.rs`'s

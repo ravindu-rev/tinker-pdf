@@ -1075,6 +1075,13 @@ impl Device for TextDevice {
         }
     }
 
+    /// 9.6.4: a Type 3 glyph stands for its text as any glyph does, though
+    /// what it draws is its procedure's; it is read where it is placed, as a
+    /// shown glyph is, and a code that maps to nothing adds nothing.
+    fn show_type3_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        self.show_glyph(glyph, state);
+    }
+
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
         if self.artifacts > 0 && !self.keep_artifacts {
             return;
@@ -2523,5 +2530,172 @@ mod tests {
         );
         let (_, y0, _, _) = raised.quad.bounds();
         assert!(y0 > 700.0, "its quad is on the baseline: {y0}");
+    }
+
+    /// A scope with one ordinary font, `/F`, every byte of which stands for
+    /// itself but `0x01`, which stands for nothing, and one Type 3 font,
+    /// `/T3`, whose codes each test a way a glyph procedure can go:
+    ///
+    /// - `a` and `b` stand for `H` and `i`, a full em and half an em wide,
+    ///   and fill a square;
+    /// - `s` stands for `S` and shows `x` in `/F`;
+    /// - `u` stands for `U` and shows `/F`'s code that stands for nothing;
+    /// - `z` stands for nothing, takes no width, and fills;
+    /// - `r` stands for `R` and shows itself, with no identity to be taken
+    ///   for a cycle by, so it runs until the depth cap stops it.
+    struct Threes;
+
+    impl crate::interpret::FontSource for Threes {
+        fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| {
+                    let (text, width) = match (font, b) {
+                        (b"T3", b'a') => ("H".to_string(), 1000.0),
+                        (b"T3", b'b') => ("i".to_string(), 500.0),
+                        (b"T3", b's') => ("S".to_string(), 1000.0),
+                        (b"T3", b'u') => ("U".to_string(), 1000.0),
+                        (b"T3", b'r') => ("R".to_string(), 1000.0),
+                        (b"T3", _) => (String::new(), 0.0),
+                        (_, 1) => (String::new(), 600.0),
+                        _ => (char::from(b).to_string(), 600.0),
+                    };
+                    (u32::from(b), text, width)
+                })
+                .collect()
+        }
+
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+
+        fn type3_glyph(&self, font: &[u8], code: u32) -> Option<crate::interpret::Type3Glyph> {
+            if font != b"T3" {
+                return None;
+            }
+            let content: &[u8] = match u8::try_from(code).ok()? {
+                b's' => b"1000 0 d0 BT /F 1000 Tf (x) Tj ET",
+                b'u' => b"1000 0 d0 BT /F 1000 Tf <01> Tj ET",
+                b'r' => b"1000 0 d0 0 0 1000 500 re f BT /T3 1000 Tf (r) Tj ET",
+                _ => b"1000 0 d0 0 0 1000 1000 re f",
+            };
+            Some(crate::interpret::Type3Glyph {
+                content: content.to_vec(),
+                matrix: Matrix::scale(0.001, 0.001),
+                stream: 0,
+            })
+        }
+    }
+
+    fn extract_threes(content: &[u8]) -> TextPage {
+        let mut device = TextDevice::new();
+        crate::interpret::interpret(content, Matrix::IDENTITY, &mut device, &Threes);
+        device.finish()
+    }
+
+    fn near(a: (f64, f64), b: (f64, f64)) -> bool {
+        (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9
+    }
+
+    /// 9.6.4: a Type 3 glyph's text is read where the glyph is placed — the
+    /// text matrix and the size, the font matrix taking its width to text
+    /// space — though nothing of the glyph but its procedure's square is
+    /// drawn.
+    #[test]
+    fn a_type3_glyph_is_read_where_it_is_placed() {
+        let page = extract_threes(b"BT /T3 10 Tf 100 700 Td (ab) Tj ET");
+        assert_eq!(page.plain_text(), "Hi\n");
+        let line = page.lines().first().copied().expect("one line");
+        assert_eq!(line.chars.len(), 2);
+        let (h, i) = (&line.chars[0], &line.chars[1]);
+        assert!(near(h.origin, (100.0, 700.0)), "{:?}", h.origin);
+        // A full em of a ten-unit size, through the font matrix's 0.001.
+        assert!(near(i.origin, (110.0, 700.0)), "{:?}", i.origin);
+        assert!(near(h.quad.ll, (100.0, 698.0)), "{:?}", h.quad);
+        assert!(near(h.quad.ur, (110.0, 708.0)), "{:?}", h.quad);
+        // Half an em wide.
+        assert!(near(i.quad.lr, (115.0, 698.0)), "{:?}", i.quad);
+        assert_eq!(page.search("hi").len(), 1, "and it is found");
+    }
+
+    /// A procedure that draws its glyph with text of its own has handed that
+    /// text over already, so the glyph's own is not read again: `s` reads as
+    /// the `x` its procedure shows, once.
+    #[test]
+    fn a_procedure_that_shows_text_is_read_once() {
+        let page = extract_threes(b"BT /T3 10 Tf 100 700 Td (s) Tj ET");
+        assert_eq!(page.plain_text(), "x\n");
+    }
+
+    /// But text that stands for nothing is no text: `u`'s procedure shows a
+    /// code that maps to nothing, and the glyph reads as its own `U`.
+    #[test]
+    fn a_procedure_whose_own_text_maps_nothing_is_read_as_its_glyph() {
+        let page = extract_threes(b"BT /T3 10 Tf 100 700 Td (u) Tj ET");
+        assert_eq!(page.plain_text(), "U\n");
+    }
+
+    /// A code that maps to nothing adds nothing, as a shown glyph's does, and
+    /// the glyphs either side of it stay one line.
+    #[test]
+    fn a_type3_code_that_maps_nothing_adds_nothing() {
+        let page = extract_threes(b"BT /T3 10 Tf 100 700 Td (azb) Tj ET");
+        assert_eq!(page.plain_text(), "Hi\n");
+        assert!(extract_threes(b"BT /T3 10 Tf 100 700 Td (zz) Tj ET")
+            .plain_text()
+            .is_empty());
+    }
+
+    /// A procedure passed over — here at the depth cap, the innermost of the
+    /// sixteen runs of a glyph that shows itself — is a drawing's limit and
+    /// not the text's: the innermost glyph is read, and every glyph around it
+    /// has that text as its procedure's own, so `R` is read once.
+    #[test]
+    fn a_glyph_passed_over_at_the_depth_cap_is_read_once() {
+        let page = extract_threes(b"BT /T3 10 Tf 100 700 Td (r) Tj ET");
+        assert_eq!(page.plain_text(), "R\n");
+    }
+
+    /// A Type 3 glyph's text is the page's as any glyph's is: inside an
+    /// artifact it is dropped (14.8.2.2), and beside an ordinary font's
+    /// glyphs it joins their line.
+    #[test]
+    fn a_type3_glyph_reads_as_any_glyph_reads() {
+        assert!(
+            extract_threes(b"/Artifact BMC BT /T3 10 Tf 100 700 Td (ab) Tj ET EMC")
+                .plain_text()
+                .is_empty()
+        );
+        let page = extract_threes(b"BT /F 10 Tf 100 700 Td (x) Tj /T3 10 Tf (ab) Tj ET");
+        assert_eq!(page.plain_text(), "xHi\n");
+        assert_eq!(page.lines().len(), 1);
+    }
+
+    /// Every drawing device leaves the report alone: a recording of a Type 3
+    /// run is the procedure's paints and nothing else, the same calls in the
+    /// same order whatever the glyph's codes stand for.
+    #[test]
+    fn a_recording_keeps_none_of_a_type3_glyphs_text() {
+        use crate::record::{EventKind, RecordingDevice};
+        let kinds = |content: &[u8]| {
+            let mut device = RecordingDevice::new();
+            crate::interpret::interpret(content, Matrix::IDENTITY, &mut device, &Threes);
+            device.kinds()
+        };
+        let mapped = kinds(b"BT /T3 10 Tf 100 700 Td (ab) Tj ET");
+        let unmapped = kinds(b"BT /T3 10 Tf 100 700 Td (zz) Tj ET");
+        assert_eq!(mapped, unmapped, "the text a code stands for draws nothing");
+        assert_eq!(
+            mapped
+                .iter()
+                .filter(|kind| **kind == EventKind::FillPath)
+                .count(),
+            2,
+            "each glyph's square: {mapped:?}"
+        );
+        assert!(
+            !mapped.contains(&EventKind::ShowGlyph),
+            "a Type 3 glyph is run, not shown: {mapped:?}"
+        );
     }
 }

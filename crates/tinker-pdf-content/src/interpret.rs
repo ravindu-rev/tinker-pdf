@@ -1570,6 +1570,13 @@ impl<D: Device> Device for Out<'_, D> {
         }
     }
 
+    // Not taped: a recording keeps none of it ([`Device::show_type3_glyph`]),
+    // and only a device that answers alike — one that draws — is handed a
+    // replay, which leaves the report alone.
+    fn show_type3_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        self.device.show_type3_glyph(glyph, state);
+    }
+
     fn begin_text(&mut self) {
         self.device.begin_text();
         if self.tape.taping() {
@@ -1829,6 +1836,10 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     /// The nested streams running, innermost last, and which of the text and
     /// line matrices each has set since it began ([`RunMarks`]).
     runs: Vec<RunMarks>,
+    /// How many glyphs carrying text the device has been handed, shown or
+    /// reported as Type 3 glyphs: what tells a Type 3 procedure that showed
+    /// text of its own from one that did not ([`Device::show_type3_glyph`]).
+    texts_handed: u64,
 }
 
 impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
@@ -1867,6 +1878,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             nested_budget_told: false,
             steps: Steps::default(),
             runs: Vec::new(),
+            texts_handed: 0,
         }
     }
 
@@ -3898,6 +3910,10 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             // outside it.
             if let Some(glyph) = self.fonts.type3_glyph(&font_name, code) {
                 let font_matrix = glyph.matrix;
+                // What the procedure hands the device of text of its own, the
+                // glyphs it shows and the Type 3 glyphs they report, is counted
+                // from here, so the glyph is reported only where there was none.
+                let texts_before = self.texts_handed;
                 // A procedure that shows its own glyph while it runs, directly
                 // or through other glyphs and forms, draws once; and every run
                 // spends from the nested-content budget.
@@ -3949,6 +3965,31 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     }
                 }
 
+                // 9.6.4: the glyph itself, for a device that reads text, after
+                // its procedure — run, or passed over for depth, a cycle or the
+                // budget, which is a drawing's limit and not the text's. Its
+                // `/Widths` entry is in glyph space, so the font matrix takes it
+                // to text space. A procedure that showed text of its own has
+                // handed it over already, and reporting the glyph's as well
+                // would read it twice.
+                if self.texts_handed == texts_before {
+                    let reported = Glyph {
+                        code,
+                        text,
+                        transform,
+                        baseline,
+                        advance: width * font_matrix.a * ts.size,
+                        size: ts.size,
+                        vertical: false,
+                        font_id,
+                        font_name: font_label.clone(),
+                    };
+                    if !reported.text.is_empty() {
+                        self.texts_handed = self.texts_handed.saturating_add(1);
+                    }
+                    self.device.show_type3_glyph(&reported, &self.gs);
+                }
+
                 // The advance still comes from /Widths, which are in glyph
                 // space and so scale by the font matrix rather than by 1/1000.
                 let advance = width * font_matrix.a * ts.size * ts.horizontal_scale;
@@ -3970,6 +4011,9 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 font_id,
                 font_name: font_label.clone(),
             };
+            if !glyph.text.is_empty() {
+                self.texts_handed = self.texts_handed.saturating_add(1);
+            }
             self.device.show_glyph(&glyph, &self.gs);
 
             // 9.4.4: word spacing applies to a single-byte code 32 only, which

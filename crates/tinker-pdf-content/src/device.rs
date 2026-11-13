@@ -162,6 +162,29 @@ pub trait Device {
         let _ = (glyph, state);
     }
 
+    /// A Type 3 glyph was shown (9.6.4): the glyph itself, with its code, its
+    /// text, its placement and its advance, reported after its procedure ran.
+    ///
+    /// A Type 3 glyph is a procedure, so what it draws arrives as the
+    /// procedure's own fills, strokes and images inside the text object that
+    /// shows it, and nothing of the glyph reaches [`Device::show_glyph`].
+    /// This is the one call that carries what the glyph stands for — its
+    /// `/ToUnicode` text, or the character its encoding names — so a device
+    /// that reads text reads it here as it reads a shown glyph. Every drawing
+    /// device leaves it a no-op: the procedure's paints are the drawing, and
+    /// a recording of them ([`crate::RecordingDevice`]) keeps none of it.
+    ///
+    /// [`Glyph::transform`] places the glyph as [`Device::show_glyph`]'s does,
+    /// before the font's `/FontMatrix`, and [`Glyph::advance`] is the width
+    /// that matrix gives in text space; a code that maps to no text has an
+    /// empty [`Glyph::text`]. The interpreter makes the report only where the
+    /// procedure showed no text of its own: a procedure that draws its glyph
+    /// with text has handed that text to [`Device::show_glyph`] already, and
+    /// reporting the glyph's as well would read it twice.
+    fn show_type3_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        let _ = (glyph, state);
+    }
+
     /// A text object began (`BT`).
     fn begin_text(&mut self) {}
 

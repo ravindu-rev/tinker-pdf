@@ -53,6 +53,12 @@
 //! agree with each other first — which is the property five ad-hoc recorders
 //! did not have.
 //!
+//! One call is not kept: [`Device::show_type3_glyph`](crate::device::Device::show_type3_glyph),
+//! the text a Type 3 glyph stands for. What the glyph draws is its procedure's
+//! paints, which are kept as they were drawn, and a transcript is replayed only
+//! into a device that draws ([`Device::answers_alike`](crate::device::Device::answers_alike));
+//! the text reaches a device that reads it from the interpreter itself.
+//!
 //! ## What an event carries, and what that costs
 //!
 //! Every method of the trait is handed a `&GraphicsState`, and the default is
@@ -233,9 +239,11 @@ pub struct MarkedScope {
 
 /// One call to a [`Device`] method, with the state it saw.
 ///
-/// The variants are one per trait method that carries information; the three
-/// that ask a question also record the answer that was given, because the
-/// matching `end_` event arrives only for a question answered `true`.
+/// The variants are one per trait method that carries information, but for
+/// [`Device::show_type3_glyph`], which the module documentation says why this
+/// keeps none of; the three that ask a question also record the answer that
+/// was given, because the matching `end_` event arrives only for a question
+/// answered `true`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// `BT`.

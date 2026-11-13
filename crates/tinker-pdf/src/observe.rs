@@ -411,6 +411,10 @@ impl Device for Observer {
         self.text.show_glyph(glyph, state);
     }
 
+    fn show_type3_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        self.text.show_type3_glyph(glyph, state);
+    }
+
     fn end_text(&mut self) {
         self.text.end_text();
     }

@@ -307,6 +307,15 @@ impl<D: Device + ?Sized> Device for Culled<'_, D> {
         self.inner.show_glyph(glyph, state.get());
     }
 
+    /// The text's, as the glyph's own paints are.
+    fn show_type3_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        if !self.passes(Class::Text) {
+            return;
+        }
+        let state = self.painted(Class::Text, state);
+        self.inner.show_type3_glyph(glyph, state.get());
+    }
+
     fn begin_text(&mut self) {
         self.text_objects = self.text_objects.saturating_add(1);
         self.inner.begin_text();
@@ -1291,5 +1300,51 @@ mod tests {
         for class in [Class::Clips, Class::Images, Class::Shadings] {
             assert!(!both.forces(class), "{class:?} paints no forced colour");
         }
+    }
+
+    /// `/P3`, a Type 3 font whose every code stands for itself and fills its
+    /// em square, the one way a glyph's text reaches a device that reads it.
+    struct Squares;
+
+    impl FontSource for Squares {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|b| (u32::from(*b), char::from(*b).to_string(), 1000.0))
+                .collect()
+        }
+
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 0.0, 0.0)
+        }
+
+        fn type3_glyph(&self, font: &[u8], _code: u32) -> Option<Type3Glyph> {
+            (font == b"P3").then(|| Type3Glyph {
+                content: b"1000 0 d0 0 0 1000 1000 re f".to_vec(),
+                matrix: Matrix::scale(0.001, 0.001),
+                stream: 0,
+            })
+        }
+    }
+
+    /// **A Type 3 glyph's text is the text class's**, as its paints are: the
+    /// report reaches a text device through a filter that keeps text, and none
+    /// of it through one that drops text.
+    #[test]
+    fn a_type3_glyphs_text_is_the_text_class() {
+        let read = |cull: Cull| {
+            let mut text = crate::text::TextDevice::new();
+            let mut culled = Culled::new(&mut text, cull, Black::NONE);
+            interpret(
+                b"BT /P3 10 Tf 0 700 Td (ok) Tj ET",
+                Matrix::IDENTITY,
+                &mut culled,
+                &Squares,
+            );
+            text.finish().plain_text()
+        };
+        assert_eq!(read(Cull::NONE), "ok\n");
+        assert_eq!(read(Cull::TEXT_ONLY), "ok\n");
+        assert_eq!(read(Cull::NO_TEXT), "");
     }
 }

@@ -117,7 +117,16 @@ no buffer must not have `ca 0.5` reset underneath it. A soft-mask group is
 run at the `gs` that installs it, at the CTM in force there (11.6.5.2). A
 Type 3 glyph is a content stream, not an outline, so it is run the way a
 form is, with `/FontMatrix` inside the placing transform and the advance
-scaled by it (9.6.5). Each of the three runs as a stream of its own: it
+scaled by it (9.6.5). Once its procedure has run — or been passed over for
+depth, a cycle or a budget, which are a drawing's limits and not the text's —
+the glyph itself is reported to `Device::show_type3_glyph`, with its code, its
+text, the transform `show_glyph` would have placed it with and the advance
+its `/Widths` entry gives through the font matrix; the text device reads it
+as a shown glyph, so a Type 3 run's `/ToUnicode` text, or the character its
+`/Differences` name stands for, is extracted and found where its glyphs
+stand, and every drawing device leaves it alone. A procedure that handed the
+device text of its own is not reported as well, so a glyph its procedure
+draws with text reads once. Each of the three runs as a stream of its own: it
 starts with an empty `q` stack, so a `Q` it has no `q` for restores nothing
 of its caller's, and every `q` and marked-content scope it leaves open is
 closed, at the device too, before control returns — so no nested stream, and
@@ -608,7 +617,10 @@ recording is the calls the device was handed between `begin_form` and
 `end_form`, made through a tape that copies each call with the device's own
 answer as the device is handed it; what the drawing spent of the budgets for
 nested content, in order; and where it left the current point, the subpath's
-start and a waiting clip, which a form does not restore. The text matrix, the
+start and a waiting clip, which a form does not restore. A Type 3 glyph's
+report is not among the calls kept: what the glyph draws is its procedure's
+paints, which are, and a recording is replayed only into a device that draws.
+The text matrix, the
 line matrix, the current point and the subpath's start are not in the key,
 since a page leaves them wherever its last text object and path did: a
 recording notes each one its drawing read before it set its own — a `Tj`
@@ -635,7 +647,8 @@ colorants at the `K` plate alone, as `k` carries them there — and every other
 field of the state as it was). Every call that draws
 or clips inside a text object is the text's, which is what makes a Type 3
 glyph's paints text: they arrive inside the text object that shows the glyph,
-with no `show_glyph` of their own. No text object outlives the stream or the
+with no `show_glyph` of their own, and the glyph's report,
+`show_type3_glyph`, is the text's too. No text object outlives the stream or the
 `q` it was opened in, so a stream that never ends its text makes nothing after
 it text. The questions — `begin_form`, `begin_group`, `begin_soft_mask`,
 `is_cancelled`, `answers_alike` and `composites_colorants` — are the inner
@@ -1243,7 +1256,10 @@ kept, the glyphs of each of those under a half and a quarter turn read into
 the lines they make upright, and every threshold met exactly on an upright
 line, under the identity, a shift and `scaleX(2)`, decided as the page's `x`
 and `y` decide, search hit geometry,
-wmode/rtl separation, non-finite glyphs dropped),
+wmode/rtl separation, non-finite glyphs dropped, and a Type 3 glyph read
+where it is placed, once whether its procedure shows text of its own or is
+passed over at the depth cap, adding nothing for a code that maps nothing and
+recorded by no drawing device),
 `crates/tinker-pdf/src/text_order.rs` (ruling 14 on hand-built lines: a
 visual Hebrew line, one already in reading order, a mark on either side of
 its base, digits in a right-to-left line, an out-of-order left-to-right line
