@@ -457,6 +457,19 @@ operation budget, `vsindex` after a `blend`, twice, without an operand or
 past the store's subtables, and `blend` or `vsindex` in a table with no
 store.
 
+At an instance, `Cff2::blends_at` gathers the store's region scalars at a
+`Location` — the design's 16.16 values — for each item variation data
+subtable in its column order, once, and `Cff2::outline_at`, or
+`Cff2::outline_with` over blends a caller keeps, draws a glyph through them:
+each `blend` adds to its defaults their deltas times the scalars of the
+subtable the `vsindex` in force selects, in region order, rounded to 16.16,
+so a blended operand is again one a Type 2 charstring can carry; for integer
+deltas that is the numeric model's exact sum. `Cff2::private_dict_at` reads
+a Private DICT's blends the same way. `Cff2::blends_in` holds the store's
+axis count to a design space's, refusing a mismatch by name. At the default
+location every scalar is zero, so a face whose regions all peak away from
+zero draws there exactly what `Cff2::outline` draws.
+
 ## API
 
 Everything reaches callers through the facade (ruling 11). Reading:
@@ -1297,7 +1310,14 @@ corpora already vendored here. So every name stays on the list.
   both a glyph's and a Private DICT's `vsindex`; every refusal by name; and
   every truncation and single-byte change of two faces read or refused
   without a panic. Every `cff.rs` and `cff_subset/tests.rs` test holds
-  unchanged.
+  unchanged. At an instance, at every named instance and at coordinates no
+  instance names: each subtable's scalars, each glyph's outline — two values
+  blended at once, `vsindex` switching the subtable in a charstring and in a
+  Private DICT, blends inside local and global subroutines — and each Private
+  DICT's blended values equal to the default plus the deltas times the
+  scalars the specification computes in the test; the default location
+  drawing the unblended outline; and a design space of another axis count
+  refused.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

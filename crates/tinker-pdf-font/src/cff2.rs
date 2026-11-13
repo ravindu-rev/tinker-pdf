@@ -35,7 +35,23 @@ use crate::cff::{
 };
 use crate::outline::Outline;
 use crate::variation::item_store::ItemVariationStore;
-use crate::variation::VariationError;
+use crate::variation::{DesignSpace, Location, VariationError};
+
+/// The scalars a CFF2 table's blends read at one instance: each item
+/// variation data subtable's regions', in its column order — what
+/// [`Cff2::blends_at`] computes once and every glyph of the instance reads.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Blends {
+    per_data: Vec<Vec<f64>>,
+}
+
+impl Blends {
+    /// The scalars a `blend` under `vsindex` multiplies its deltas by.
+    #[must_use]
+    pub fn scalars(&self, vsindex: u16) -> Option<&[f64]> {
+        self.per_data.get(usize::from(vsindex)).map(Vec::as_slice)
+    }
+}
 
 /// `CharStringINDEXOffset`.
 const CHARSTRINGS: u16 = 17;
@@ -616,6 +632,110 @@ impl<'a> Cff2<'a> {
     /// DICT's refusals.
     pub fn private_dict(&self, font_dict: u16) -> Result<Vec<(u16, Vec<f64>)>, Cff2Error> {
         self.private_entries(font_dict, None)
+    }
+
+    /// The scalars every `blend` reads at a location, computed once (CFF2
+    /// chapter, 'OpenType Font Variations in CFF2'): the variation store's
+    /// region scalars, the design's 16.16 values, gathered for each item
+    /// variation data subtable in its column order. The location's
+    /// coordinates are read in the order of `fvar`'s axes, which the store's
+    /// regions follow. A table with no store has no scalars, and any `blend`
+    /// in it is refused as at the default.
+    #[must_use]
+    pub fn blends_at(&self, location: &Location) -> Blends {
+        let Some(store) = &self.store else {
+            return Blends::default();
+        };
+        let regions = store.region_scalars(location);
+        let per_data = (0..store.data_count())
+            .map(|outer| {
+                // Every subtable was read when the table was parsed.
+                store
+                    .data(outer)
+                    .ok()
+                    .flatten()
+                    .map_or_else(Vec::new, |data| {
+                        data.region_indexes()
+                            .iter()
+                            .map(|region| {
+                                regions
+                                    .get(usize::from(*region))
+                                    .map_or(0.0, |scalar| scalar.to_f64())
+                            })
+                            .collect()
+                    })
+            })
+            .collect();
+        Blends { per_data }
+    }
+
+    /// [`Cff2::blends_at`] for a location in a design space, the store's axis
+    /// count held to the space's first.
+    ///
+    /// # Errors
+    ///
+    /// [`Cff2Error::VariationStore`] carrying
+    /// [`VariationError::AxisCount`] where the store's region list does not
+    /// have the design space's axis count.
+    pub fn blends_in(&self, space: &DesignSpace, location: &Location) -> Result<Blends, Cff2Error> {
+        if let Some(store) = &self.store {
+            let expected = u16::try_from(space.axis_count()).unwrap_or(u16::MAX);
+            if store.axis_count() != expected {
+                return Err(Cff2Error::VariationStore(VariationError::AxisCount {
+                    table: *b"CFF2",
+                    found: store.axis_count(),
+                    expected,
+                }));
+            }
+        }
+        Ok(self.blends_at(location))
+    }
+
+    /// One glyph's outline at a location: every `blend` adds to its defaults
+    /// their deltas times the scalars of the data subtable the `vsindex` in
+    /// force selects, in region order, rounded to 16.16
+    /// (`docs/design/variable-fonts.md`, 'The numeric model').
+    ///
+    /// # Errors
+    ///
+    /// As [`Cff2::outline`].
+    pub fn outline_at(&self, glyph: u16, location: &Location) -> Result<Outline, Cff2Error> {
+        let blends = self.blends_at(location);
+        let mut outline = Outline::default();
+        let mut machine = Machine::new();
+        self.outline_with(glyph, &blends, &mut outline, &mut machine)?;
+        Ok(outline)
+    }
+
+    /// [`Cff2::outline_at`] for blends a caller computed once, written into
+    /// `outline` through `machine`'s stack, so a caller reading every glyph
+    /// of an instance computes the scalars, and allocates the buffers, once.
+    ///
+    /// # Errors
+    ///
+    /// As [`Cff2::outline`]; `outline` is left empty.
+    pub fn outline_with(
+        &self,
+        glyph: u16,
+        blends: &Blends,
+        outline: &mut Outline,
+        machine: &mut Machine,
+    ) -> Result<(), Cff2Error> {
+        self.run(glyph, outline, machine, Some(&blends.per_data))
+    }
+
+    /// A Font DICT's Private DICT entries at the instance `blends` were
+    /// computed for: every `blend` resolved as a charstring's is.
+    ///
+    /// # Errors
+    ///
+    /// As [`Cff2::private_dict`].
+    pub fn private_dict_at(
+        &self,
+        font_dict: u16,
+        blends: &Blends,
+    ) -> Result<Vec<(u16, Vec<f64>)>, Cff2Error> {
+        self.private_entries(font_dict, Some(&blends.per_data))
     }
 
     /// A Private DICT's entries under a `blend` reading `scalars`.

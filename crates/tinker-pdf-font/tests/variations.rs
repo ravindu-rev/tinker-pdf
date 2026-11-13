@@ -2805,3 +2805,247 @@ fn garbage_cff2_is_refused_without_panicking() {
         }
     }
 }
+
+// ---- CFF2 blends at an instance (FT-05.7) -----------------------------------------
+
+/// The regions each of the blended face's item variation data subtables
+/// names, as [`cff2_store`] writes them.
+fn cff2_data_regions(vsindex: usize) -> Vec<u16> {
+    [vec![0, 2], vec![1, 3, 4]][vsindex].clone()
+}
+
+/// A blended value at 2.14 coordinates, as the CFF2 chapter's `blend` and
+/// the overview's scalars give it: the default plus each delta times the
+/// scalar of the region its column names — exact in 16.16 for integer
+/// deltas, so rounding it to 16.16 changes nothing.
+fn blend_value(default: i32, deltas: &[i32], vsindex: usize, coordinates: &[i16]) -> f64 {
+    let regions = regions();
+    let mut bits = i64::from(default) * 65_536;
+    for (delta, region) in deltas.iter().zip(cff2_data_regions(vsindex)) {
+        bits += spec::region_scalar(&regions[usize::from(region)], coordinates) * i64::from(*delta);
+    }
+    bits as f64 / 65_536.0
+}
+
+/// What each blended glyph draws at 2.14 coordinates, from the values its
+/// charstring states and the blends the specification computes.
+fn blend_expected(c: &[i16]) -> Vec<Vec<Segment>> {
+    let first = {
+        let (x, y) = (
+            blend_value(100, &[20, 30], 0, c),
+            blend_value(200, &[40, 50], 0, c),
+        );
+        let dx = blend_value(300, &[-10, 5], 0, c);
+        vec![
+            Segment::MoveTo { x, y },
+            Segment::LineTo { x: x + dx, y },
+            Segment::Close,
+        ]
+    };
+    let second = {
+        let x = blend_value(50, &[1, 2, 3], 1, c);
+        vec![
+            Segment::MoveTo { x, y: 0.0 },
+            Segment::LineTo {
+                x: x + 20.0,
+                y: 30.0,
+            },
+            Segment::Close,
+        ]
+    };
+    let third = {
+        let (x, y) = (
+            blend_value(10, &[5, 5], 0, c),
+            blend_value(20, &[6, 6], 0, c),
+        );
+        let dy = blend_value(40, &[-2, 2], 0, c);
+        vec![
+            Segment::MoveTo { x, y },
+            Segment::LineTo { x, y: y + dy },
+            Segment::Close,
+        ]
+    };
+    let fourth = {
+        let (x, y) = (
+            blend_value(70, &[1, 1, 1], 1, c),
+            blend_value(80, &[2, 2, 2], 1, c),
+        );
+        vec![Segment::MoveTo { x, y }, Segment::Close]
+    };
+    let fifth = {
+        let x = blend_value(5, &[1, 1], 0, c);
+        vec![
+            Segment::MoveTo { x, y: 5.0 },
+            Segment::LineTo {
+                x: x + 10.0,
+                y: 5.0,
+            },
+            Segment::Close,
+        ]
+    };
+    vec![first, second, third, fourth, fifth]
+}
+
+/// Every location the CFF2 tests read: each named instance's, and user
+/// coordinates no instance names, as the specification normalises them.
+fn cff2_locations() -> Vec<Vec<i16>> {
+    metric_locations()
+        .into_iter()
+        .map(|(_, user)| spec::location(&axis_ranges(), &user))
+        .collect()
+}
+
+#[test]
+fn cff2_blends_equal_the_deltas_applied_in_the_test() {
+    let table = blend_cff2();
+    let cff2 = Cff2::parse(&table).expect("a CFF2 table");
+    let mut outline = Outline::default();
+    let mut machine = Machine::new();
+    let mut moved = 0;
+    for coordinates in cff2_locations() {
+        let location = Location::new(coordinates.clone());
+        let blends = cff2.blends_at(&location);
+        // The scalars, gathered for each subtable in its column order.
+        for vsindex in 0..2u16 {
+            let scalars = blends.scalars(vsindex).expect("a subtable's scalars");
+            let expected: Vec<f64> = cff2_data_regions(usize::from(vsindex))
+                .iter()
+                .map(|region| {
+                    spec::region_scalar(&regions()[usize::from(*region)], &coordinates) as f64
+                        / 65_536.0
+                })
+                .collect();
+            assert_eq!(scalars, expected.as_slice());
+        }
+        assert_eq!(blends.scalars(2), None);
+        let expected = blend_expected(&coordinates);
+        for (glyph, segments) in expected.iter().enumerate() {
+            let glyph = u16::try_from(glyph).expect("few");
+            let drawn = cff2.outline_at(glyph, &location).expect("an outline");
+            assert_eq!(
+                &drawn.segments, segments,
+                "glyph {glyph} at {coordinates:?}"
+            );
+            // The same through blends computed once and one machine.
+            cff2.outline_with(glyph, &blends, &mut outline, &mut machine)
+                .expect("an outline");
+            assert_eq!(&outline.segments, segments);
+            if drawn.segments != blend_defaults()[usize::from(glyph)] {
+                moved += 1;
+            }
+        }
+    }
+    assert!(moved > 0, "some instance moves some glyph");
+    // A design space whose axis count the store shares is accepted; one it
+    // does not is refused by name.
+    let face = Face::opentype()
+        .with(*b"fvar", fvar(&two_axes(), &six_instances()))
+        .build();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let location = Location::new(vec![16_384, 8_192]);
+    assert_eq!(
+        cff2.blends_in(&space, &location),
+        Ok(cff2.blends_at(&location))
+    );
+    let mut three = two_axes();
+    three.push(AxisSpec::new(*b"opsz", 6.0, 12.0, 72.0, 258));
+    let wider = DesignSpace::parse(&fvar(&three, &[]), None).expect("three axes");
+    assert_eq!(
+        cff2.blends_in(&wider, &location).err(),
+        Some(Cff2Error::VariationStore(VariationError::AxisCount {
+            table: *b"CFF2",
+            found: 2,
+            expected: 3
+        }))
+    );
+}
+
+#[test]
+fn a_private_dict_blend_resolves_at_the_instance() {
+    let table = blend_cff2();
+    let cff2 = Cff2::parse(&table).expect("a CFF2 table");
+    for coordinates in cff2_locations() {
+        let location = Location::new(coordinates.clone());
+        let blends = cff2.blends_at(&location);
+        let first = cff2.private_dict_at(0, &blends).expect("a Private DICT");
+        let blue_values: Vec<f64> = [(-20, [10, 0]), (0, [0, 0]), (500, [-5, -5]), (520, [2, 2])]
+            .iter()
+            .map(|(default, deltas)| blend_value(*default, deltas, 0, &coordinates))
+            .collect();
+        assert!(
+            first.contains(&(6, blue_values.clone())),
+            "BlueValues at {coordinates:?}: {first:?} against {blue_values:?}"
+        );
+        assert!(first.contains(&(10, vec![blend_value(50, &[10, -5], 0, &coordinates)])));
+        // The second Private DICT's own vsindex selects the second subtable.
+        let second = cff2.private_dict_at(1, &blends).expect("a Private DICT");
+        assert_eq!(
+            second,
+            vec![
+                (22, vec![1.0]),
+                (11, vec![blend_value(80, &[1, 2, 3], 1, &coordinates)])
+            ]
+        );
+    }
+    let blends = cff2.blends_at(&Location::new(vec![16_384, 0]));
+    assert_eq!(
+        cff2.private_dict_at(2, &blends).err(),
+        Some(Cff2Error::FontDict {
+            glyph: 0,
+            font_dict: 2
+        })
+    );
+}
+
+#[test]
+fn the_default_instance_is_the_unblended_outline() {
+    let table = blend_cff2();
+    let cff2 = Cff2::parse(&table).expect("a CFF2 table");
+    let default = Location::new(vec![0, 0]);
+    let blends = cff2.blends_at(&default);
+    for glyph in 0u16..5 {
+        assert_eq!(
+            cff2.outline_at(glyph, &default)
+                .expect("an outline")
+                .segments,
+            cff2.outline(glyph).expect("an outline").segments,
+            "glyph {glyph}"
+        );
+        assert_eq!(
+            cff2.outline_at(glyph, &default)
+                .expect("an outline")
+                .segments,
+            blend_defaults()[usize::from(glyph)]
+        );
+    }
+    for font_dict in 0u16..2 {
+        assert_eq!(
+            cff2.private_dict_at(font_dict, &blends),
+            cff2.private_dict(font_dict)
+        );
+    }
+    // An empty location is the default too: every missing coordinate is
+    // zero.
+    assert_eq!(cff2.blends_at(&Location::default()), blends);
+    // A table with no store has no scalars at any location, and its blends
+    // are refused there as at the default.
+    let plain = plain_cff2(None);
+    let cff2 = Cff2::parse(&plain).expect("a CFF2 table");
+    let blends = cff2.blends_at(&Location::new(vec![16_384, 16_384]));
+    assert_eq!(blends.scalars(0), None);
+    for glyph in 0u16..8 {
+        assert_eq!(
+            cff2.outline_at(glyph, &Location::new(vec![16_384, 16_384]))
+                .map(|outline| outline.segments),
+            cff2.outline(glyph).map(|outline| outline.segments),
+            "a face with no variations draws the same everywhere"
+        );
+    }
+    let blending = single_glyph(cs(&blended(&[1], &[&[2, 3]])), None);
+    let cff2 = Cff2::parse(&blending).expect("parses");
+    assert_eq!(
+        cff2.outline_at(0, &Location::new(vec![16_384, 0])).err(),
+        Some(Cff2Error::NoVariationStore)
+    );
+}
