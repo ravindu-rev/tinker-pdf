@@ -506,7 +506,10 @@ is filled under the 2x2 and the phase alone into a mask in the glyph's own
 frame, and the mask is placed at the whole pixel, windowed to what the
 canvas, the clip and the soft mask can show, multiplied by the clip and the
 soft mask, restored under in a knockout group and composited by
-`fill_mask_inked`, as a path's coverage is. So the same glyph at the same
+`fill_mask_inked`, as a path's coverage is; it writes the rendering-parameter
+plane with the placed mask times the clip and takes the ink tables, as a
+path's paint does (`device_state.rs`'s
+`a_glyph_takes_the_transfer_and_the_ink_tables`). So the same glyph at the same
 phase is the same pixels wherever it stands, and a tile, which takes the
 phase from the page's frame and subtracts its corner only to index the
 mask, draws the page's pixels (ruling 5;
@@ -1053,13 +1056,59 @@ group form's resource name, `Truncated { limit }` and
 the blend mode, whose `ExtGState` no device is told: the interpreter hands
 every device the state a `gs` made, never the `gs`.
 
-The parameters a `gs` stores rather than applies — black-point
+The parameters a `gs` stores — black-point
 compensation, overprint, flatness, smoothness, stroke adjustment, alpha
 source, text knockout, the black generation, undercolour removal and
 transfer functions, and the halftone and its origin — travel in the state as
 one shared `StoredParameters` value with the rendering intent, which flat
 colours apply, `None` while every one has its initial value, so a
-`q` copies one word more and a copy allocates nothing. The display list's
+`q` copies one word more and a copy allocates nothing. The transfer functions
+and black generation and undercolour removal are applied
+([design/device-dependent-state.md](../design/device-dependent-state.md)); the
+rest move no pixel until their rows apply them.
+
+**Transfer functions** (`/TR2` over `/TR`, 10.5) are kept per point, as
+11.7.5.2 has them: each elementary object writes, where its shape is not zero,
+its own transfer if it is fully opaque — its alpha constant 1, `Normal`, no
+soft mask, an image without a soft mask, every enclosing group invoked the same
+way, a tiling cell all of whose paints were — and the device's own if it is
+not, into a one-byte plane over the page canvas (`DeviceParameters`) made at
+the first paint that needs it; a soft mask's group writes nothing. The shape
+is the coverage without the soft mask, an image's square through its `/Mask`
+or stencil drawn once more by the sampler, `sh`'s geometry, a mesh's coverage,
+a pattern fill where its cells painted. At the end of the render, once the page
+is in its output format, each pixel's components pass through its entry's
+functions sampled once to 256 entries: red, green and blue through the first
+three, in either byte order; grey through the fourth; ink through all four in
+additive form, `255 − T(255 − c)`, and black alone through the fourth where the
+topmost object was DeviceGray. `/Identity` and `/Default` are the device's own,
+and a page that sets no transfer keeps no plane and moves no byte
+(`device_state.rs`'s `a_transfer_function_maps_each_component_through_its_curve`,
+`a_transfer_function_is_the_topmost_fully_opaque_object_s`,
+`a_device_gray_colour_on_ink_takes_the_grey_function_alone`,
+`a_transferred_tile_is_the_page_under_it`). Past 255 distinct sets on one page
+a further set is kept as the device's own and named,
+`RenderWarning::DeviceParametersSpent`.
+
+**Black generation and undercolour removal** (`/BG2` over `/BG`, `/UCR2` over
+`/UCR`) apply only where DeviceRGB becomes DeviceCMYK (11.7.5.3): a colour of
+DeviceRGB's family painted onto an ink buffer — the ink page, or a
+`/DeviceCMYK` group's buffer on any render — with the functions in force at
+the paint, and an RGB group composited onto an ink buffer, with those in force
+at its `Do`. The colour's family travels in the state (`GraphicsState::fill_family`,
+`stroke_family`: set by `g`, `rg` and `k`, by `cs` through
+`FontSource::color_family`, and by `sc` read by count; an `/Indexed` space is its
+base's, a `/Separation` its alternate's, a defaulted device space its
+substitute's), on `DecodedImage::family` for an image and from its space for a
+shading. The ink is 10.4.2.4's, `k = 255 − max(r, g, b)`, each ink
+`clamp(255 − v − UCR[k])` and the black `clamp(BG[k])`, through the tables an ink
+canvas holds while the paint lasts (`Canvas::set_ink_tables`), an uncoloured
+tiling pattern's colour among them, which `Canvas::composite_tinted` takes into
+ink through the tables in force at its blit; with one function
+set the other is `k` itself, and with neither the conversion is maximum
+undercolour removal, today's, byte for byte. A DeviceGray colour stays 10.4.2.3's
+black alone and a DeviceCMYK one its own ink
+(`black_generation_and_undercolour_removal_make_the_ink_the_test_computes`). The display list's
 budget counts that value once per change rather than once per event: the
 recorder remembers the value it last counted and counts again when an event
 holds another. A function is kept parsed, never sampled — sampling is the

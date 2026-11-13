@@ -491,7 +491,7 @@ what a render shows, is its applying row's.
    stored as typed functions, read as written and kept per scope by
    reference, and the soft mask's `/TR` through the same reader. Exit:
    `display.rs`'s `every_function_key_is_stored`; `ext_gstate.rs`
-   `every_function_key_draws_as_the_page_without_it`, which also draws a soft
+   `every_function_key_draws_as_applied` (RC-08.2 gave its transfer keys their pixel half), which also draws a soft
    mask whose `/TR` is a type 0 or type 4 function as its twin whose `/TR` is
    the type 2 function of the same curve.
 3. **K-01.4: the halftone keys.** `/HT` of types 1, 5, 6, 10 and 16, and

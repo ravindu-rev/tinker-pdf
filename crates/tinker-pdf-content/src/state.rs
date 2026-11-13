@@ -384,6 +384,56 @@ impl BlendMode {
     }
 }
 
+/// The device space family a colour's values are in, as the device-dependent
+/// rules ask it: black generation and undercolour removal apply only where
+/// DeviceRGB becomes DeviceCMYK (11.7.5.3), and a DeviceGray colour on a CMYK
+/// device takes only the grey transfer function (10.5).
+///
+/// An `/Indexed` colour is its base's family and a `/Separation` or
+/// `/DeviceN` one its alternate's, as 11.7.4.3's NOTE 2 reads "the current
+/// colour space"; a device space a default colour space replaces (8.6.5.6)
+/// is its substitute's. Every CIE-based, ICC and pattern space with no base
+/// is `Other`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorFamily {
+    /// DeviceGray, the initial space (8.6.8).
+    #[default]
+    Gray,
+    /// DeviceRGB.
+    Rgb,
+    /// DeviceCMYK.
+    Cmyk,
+    /// Any other space.
+    Other,
+}
+
+impl ColorFamily {
+    /// The family a device space is named by — `DeviceGray`, `DeviceRGB`,
+    /// `DeviceCMYK` and their inline abbreviations `G`, `RGB`, `CMYK` — and
+    /// `Other` for every other name.
+    #[must_use]
+    pub fn of_device_name(name: &[u8]) -> ColorFamily {
+        match name {
+            b"DeviceGray" | b"G" => ColorFamily::Gray,
+            b"DeviceRGB" | b"RGB" => ColorFamily::Rgb,
+            b"DeviceCMYK" | b"CMYK" => ColorFamily::Cmyk,
+            _ => ColorFamily::Other,
+        }
+    }
+
+    /// The family components read by their count alone are in: one is grey,
+    /// four CMYK, any other count RGB — the reading `sc` takes with no space
+    /// named.
+    #[must_use]
+    pub fn by_count(count: usize) -> ColorFamily {
+        match count {
+            1 => ColorFamily::Gray,
+            4 => ColorFamily::Cmyk,
+            _ => ColorFamily::Rgb,
+        }
+    }
+}
+
 /// A rendering intent (8.6.5.8), as `/RI` and `ri` name it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RenderingIntent {
@@ -605,6 +655,12 @@ pub struct GraphicsState {
     pub fill_ink: Option<[u8; 4]>,
     /// The same for the stroking colour: `K`, `SC`, `SCN`.
     pub stroke_ink: Option<[u8; 4]>,
+    /// The device space family the non-stroking colour's values are in
+    /// ([`ColorFamily`]), for the rules that ask it: set with the colour by
+    /// `g`, `rg` and `k`, by `cs`, and by `sc`/`scn` read by count.
+    pub fill_family: ColorFamily,
+    /// The same for the stroking colour.
+    pub stroke_family: ColorFamily,
     /// `w`, the line width in user space.
     pub line_width: f64,
     /// `J`, the line cap.
@@ -675,6 +731,8 @@ impl GraphicsState {
             // 8.6.8: the initial space is DeviceGray, so there is no ink.
             fill_ink: None,
             stroke_ink: None,
+            fill_family: ColorFamily::Gray,
+            stroke_family: ColorFamily::Gray,
             // 8.4.3.2: the initial line width is 1.0 user-space units.
             line_width: 1.0,
             line_cap: LineCap::Butt,

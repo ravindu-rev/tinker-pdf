@@ -258,7 +258,11 @@ caller asks for it twice (`RenderOptions::allow_cmyk`). The two device relations
 rasterizer turns stored components into light, and a leaf takes bytes and plain
 values in; a test holds the copy to the original so the two cannot drift. The
 inverse takes maximum undercolour removal, which makes it **exact**: every one
-of the sixteen million colours survives the round trip.
+of the sixteen million colours survives the round trip. A caller may put black
+generation and undercolour removal in force on an ink canvas instead
+(`Canvas::set_ink_tables` with `InkTables`, two tables over the nominal black),
+and it then turns light into ink by 10.4.2.4's formula wherever it encodes
+light, until the device's own is put back.
 `fill_mask_with` blends a colour through a mask under any of the sixteen
 `BlendMode`s — the twelve separable modes of 11.3.5.2 and the four
 non-separable ones of 11.3.5.3 — with the whole operation scaled by an

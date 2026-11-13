@@ -1123,6 +1123,10 @@ impl FontSource for Recorded {
         self.inner.resolve_ink(space, components)
     }
 
+    fn color_family(&self, space: &[u8]) -> tinker_pdf_content::ColorFamily {
+        self.inner.color_family(space)
+    }
+
     fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
         self.inner.initial_color(space)
     }

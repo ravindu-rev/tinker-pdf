@@ -2950,6 +2950,27 @@ impl FontSource for PageResources {
         Some([byte(0), byte(1), byte(2), byte(3)])
     }
 
+    fn color_family(&self, space: &[u8]) -> tinker_pdf_content::ColorFamily {
+        // The space as painted: a device space a default replaces is its
+        // substitute's family (8.6.5.6), which a default that is a CIE-based
+        // or ICC space makes `Other`, so black generation leaves it alone.
+        let device = match space {
+            b"DeviceGray" => Some(ColorSpace::DeviceGray),
+            b"DeviceRGB" => Some(ColorSpace::DeviceRgb),
+            b"DeviceCMYK" => Some(ColorSpace::DeviceCmyk),
+            _ => None,
+        };
+        match device {
+            Some(device) => match self.defaults().for_device(&device) {
+                Some(default) => tinker_pdf_render::color_family(default),
+                None => tinker_pdf_render::color_family(&device),
+            },
+            None => self
+                .named_space(space, Answer::Painted, tinker_pdf_render::color_family)
+                .unwrap_or(tinker_pdf_content::ColorFamily::Other),
+        }
+    }
+
     fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
         // 8.6.8's initial value of the space as selected, carried into the
         // default as every other value is: `/DeviceCMYK cs` and `0 0 0 1 k`
@@ -3675,6 +3696,9 @@ impl GlyphSource for PageResources {
         // it and is only a shape: the renderer composites its coverage in the
         // `SCN` colour (`Canvas::composite_tinted`), so nothing about colour
         // is decided here and the cell is the same whatever it is filled in.
+        //
+        // 11.7.5.2 asks whether every object of the cell was fully opaque.
+        let opaque = renderer.painted_opaquely();
         let (canvas, warnings, counts) = renderer.finish_counted();
         // The cell's renderer is one of this render's own, so what it drew is.
         stats::add_render(self.op.work.as_deref(), counts);
@@ -3703,7 +3727,11 @@ impl GlyphSource for PageResources {
             }
         }
 
-        Some(tinker_pdf_render::Tile { canvas, warnings })
+        Some(tinker_pdf_render::Tile {
+            canvas,
+            warnings,
+            opaque,
+        })
     }
 
     fn inline_image(
@@ -4734,6 +4762,7 @@ impl PageResources {
                 // tool — paints as an opaque rectangle over the page.
                 if let Some(mask) = self.soft_mask(&dict) {
                     apply_soft_mask(&mut image, &mask);
+                    image.soft_masked = true;
                 }
                 image
             });
@@ -5022,6 +5051,16 @@ impl PageResources {
         stats::jpeg_transformed(work, frame.transformed);
         let layout = frame.layout;
         let pixels = (layout.width as usize) * (layout.height as usize);
+        // The family of the space the samples are drawn in: the dictionary's,
+        // or the codec's own colour where it is drawn in that.
+        let family = match (&into.space, into.color) {
+            (Some((space, _)), _) => tinker_pdf_render::color_family(space),
+            (None, JpegColor::Gray) => tinker_pdf_content::ColorFamily::Gray,
+            (None, JpegColor::Rgb) => tinker_pdf_content::ColorFamily::Rgb,
+            (None, JpegColor::Cmyk | JpegColor::CmykInverted) => {
+                tinker_pdf_content::ColorFamily::Cmyk
+            }
+        };
         let mut rgb = into.rgb;
         rgb.resize(pixels * 3, 255);
         let reduced = (layout.scale != JpegScale::Full).then(|| Reduced {
@@ -5035,6 +5074,8 @@ impl PageResources {
             rgb,
             alpha: Vec::new(),
             stencil: false,
+            family,
+            soft_masked: false,
             interpolate,
             two_colour: None,
             reduced,
@@ -5096,7 +5137,13 @@ impl PageResources {
         let image = decoded?;
 
         let count = (image.width as usize) * (image.height as usize);
-        let mut rgb = match self.codec_space(named, usize::from(image.components), name) {
+        let drawn = self.codec_space(named, usize::from(image.components), name);
+        // A codestream's own colour is no PDF device space.
+        let family = drawn.as_ref().map_or(
+            tinker_pdf_content::ColorFamily::Other,
+            tinker_pdf_render::color_family,
+        );
+        let mut rgb = match drawn {
             // 8.9.5.4 ignores `/Decode`, so none is applied, and a sixteen-bit
             // codestream is read at its own precision.
             Some(space) => {
@@ -5148,12 +5195,16 @@ impl PageResources {
             }
         };
 
+        // `/SMaskInData`'s opacity is the only alpha a codestream brings.
+        let soft_masked = !alpha.is_empty();
         Ok(DecodedImage {
             width: image.width,
             height: image.height,
             rgb,
             alpha,
             stencil: false,
+            family,
+            soft_masked,
             interpolate,
             two_colour: None,
             reduced: None,
@@ -5452,6 +5503,14 @@ impl PageResources {
             interpolate,
             two_colour,
             reduced: None,
+            // A stencil is painted in the fill colour, whose family the
+            // state carries.
+            family: if is_mask {
+                tinker_pdf_content::ColorFamily::Other
+            } else {
+                tinker_pdf_render::color_family(&space)
+            },
+            soft_masked: false,
         })
     }
 
@@ -5746,6 +5805,14 @@ impl PageResources {
             interpolate,
             two_colour,
             reduced: None,
+            // A stencil is painted in the fill colour, whose family the
+            // state carries.
+            family: if is_mask {
+                tinker_pdf_content::ColorFamily::Other
+            } else {
+                tinker_pdf_render::color_family(&space)
+            },
+            soft_masked: false,
         })
     }
 

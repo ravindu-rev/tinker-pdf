@@ -2855,7 +2855,7 @@ impl Page {
             renderer = renderer.with_cancel(cancel.clone());
         }
         paint(&mut renderer, resources);
-        let (canvas, warnings, counts) = renderer.finish_counted();
+        let (canvas, warnings, counts, parameters) = renderer.finish_with_parameters();
         stats::add_render(resources.work().map(|work| &**work), counts);
         let met = Met {
             renderer: warnings,
@@ -2875,11 +2875,17 @@ impl Page {
         // Back to something a caller can read. A page group composited over
         // ink comes back as light, which is 11.4.7's own last step — unless
         // the caller asked for ink by name *and* said they know it is ink.
-        let canvas = if canvas.format == wanted {
+        let mut canvas = if canvas.format == wanted {
             canvas
         } else {
             canvas.extract(canvas.origin(), canvas.width, canvas.height, wanted)
         };
+        // 10.5 and 11.7.5.2: the transfer functions of each point's topmost
+        // fully opaque object, on the output's own components, now that the
+        // final colour there is known and in the output's space.
+        if let Some(parameters) = &parameters {
+            parameters.apply(&mut canvas);
+        }
 
         let mut pixels = Bitmap {
             width: canvas.width,

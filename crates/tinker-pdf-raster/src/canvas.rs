@@ -187,6 +187,43 @@ impl Color {
     }
 }
 
+/// Black generation and undercolour removal (ISO 32000-2 10.4.2.4), as two
+/// tables over the nominal black `k`, `0..=255`: the black ink, and the
+/// amount taken from each of the other three, which may be negative (Table
+/// 57: undercolour removal "maps the interval [0.0 1.0] to the interval
+/// [−1.0 1.0]").
+///
+/// What an ink canvas turns light into ink by while a caller holds it in
+/// force ([`Canvas::set_ink_tables`]); with none, the canvas takes maximum
+/// undercolour removal ([`rgb_to_cmyk`]). Plain numbers: the functions that
+/// fill them are the caller's (ruling 8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InkTables {
+    /// `BG(k)`, the black ink, at each nominal black.
+    pub black: [u8; 256],
+    /// `UCR(k)`, what each of cyan, magenta and yellow loses, at each
+    /// nominal black.
+    pub removal: [i16; 256],
+}
+
+impl InkTables {
+    /// 10.4.2.4's conversion of one light: `c = 1 − red` and its siblings,
+    /// `k = min(c, m, y)`, each ink `min(1, max(0, c − UCR(k)))` and the black
+    /// `min(1, max(0, BG(k)))`, in bytes.
+    #[must_use]
+    pub fn ink(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
+        let k = 255 - usize::from(r.max(g).max(b));
+        let take = i32::from(self.removal.get(k).copied().unwrap_or(0));
+        let ink = |v: u8| (255 - i32::from(v) - take).clamp(0, 255) as u8;
+        (
+            ink(r),
+            ink(g),
+            ink(b),
+            self.black.get(k).copied().unwrap_or(0),
+        )
+    }
+}
+
 /// What a rendered buffer is read as when it becomes a mask (11.6.5.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaskKind {
@@ -257,6 +294,10 @@ pub struct Canvas {
     /// not, which is why the flag exists on the buffer that can see it —
     /// nothing lower down knows what a warning is (ruling 8).
     approximated_blends: u32,
+    /// The black generation and undercolour removal a `CmykA8` canvas turns
+    /// light into ink by, while a caller holds them in force; `None` is
+    /// maximum undercolour removal. Every other format never reads it.
+    ink_tables: Option<std::sync::Arc<InkTables>>,
 }
 
 impl Canvas {
@@ -280,6 +321,7 @@ impl Canvas {
             origin: (0, 0),
             backdrop: None,
             approximated_blends: 0,
+            ink_tables: None,
         };
         canvas.clear(background);
         canvas
@@ -380,7 +422,10 @@ impl Canvas {
             PixelFormat::Rgb8 => [color.r, color.g, color.b, 0, 0],
             PixelFormat::Rgba8 => [color.r, color.g, color.b, color.a, 0],
             PixelFormat::CmykA8 => {
-                let (c, m, y, k) = rgb_to_cmyk(color.r, color.g, color.b);
+                let (c, m, y, k) = match &self.ink_tables {
+                    Some(tables) => tables.ink(color.r, color.g, color.b),
+                    None => rgb_to_cmyk(color.r, color.g, color.b),
+                };
                 [c, m, y, k, color.a]
             }
             PixelFormat::LabA8 => {
@@ -390,6 +435,20 @@ impl Canvas {
             PixelFormat::Bgr8 => [color.b, color.g, color.r, 0, 0],
             PixelFormat::Bgra8 => [color.b, color.g, color.r, color.a, 0],
         }
+    }
+
+    /// Puts black generation and undercolour removal in force for the light
+    /// this canvas turns into ink from now on, or maximum removal again for
+    /// `None`, and hands back what was in force.
+    ///
+    /// Read only by a `CmykA8` canvas, wherever it encodes light: a colour
+    /// without ink of its own, an image's sample, a shading's pixel, a buffer
+    /// of another format composited onto it.
+    pub fn set_ink_tables(
+        &mut self,
+        tables: Option<std::sync::Arc<InkTables>>,
+    ) -> Option<std::sync::Arc<InkTables>> {
+        std::mem::replace(&mut self.ink_tables, tables)
     }
 
     /// Composites `color` through `mask` onto the canvas.
@@ -731,6 +790,10 @@ impl Canvas {
     /// step depends on a pixel's alpha, so one source word serves the whole
     /// cell. A `src` with no alpha channel, which `recolor` leaves as it is,
     /// composites its own colours.
+    ///
+    /// The colour has no ink of its own, so on a `CmykA8` canvas it becomes
+    /// ink by the tables in force here ([`Canvas::set_ink_tables`]), as any
+    /// colour painted here does.
     #[allow(clippy::too_many_arguments)]
     pub fn composite_tinted(
         &mut self,
@@ -746,7 +809,11 @@ impl Canvas {
             self.composite_through(src, None, at, alpha, mode, mask, stop);
             return;
         }
-        let swatch = Canvas::new(1, 1, src.format, color);
+        let mut swatch = Canvas::new(1, 1, src.format, color);
+        if self.format == PixelFormat::CmykA8 && self.ink_tables.is_some() {
+            swatch.ink_tables = self.ink_tables.clone();
+            swatch.clear(color);
+        }
         let Some((tint, _)) = self.source_from(&swatch, 0, 0) else {
             return;
         };
@@ -983,6 +1050,7 @@ impl Canvas {
             origin: self.origin,
             backdrop: None,
             approximated_blends: 0,
+            ink_tables: None,
         }
     }
 
@@ -2140,6 +2208,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **Black generation and undercolour removal are 10.4.2.4's formula**:
+    /// with the identity for both, every light is `c − k` of ink and `k` of
+    /// black; with no black generation and no removal it is all ink and no
+    /// black; a negative removal adds ink. An ink canvas holding tables
+    /// encodes light by them, a colour's own ink is untouched, and putting
+    /// the device's own back restores maximum removal, byte for byte.
+    #[test]
+    fn black_generation_and_undercolour_removal_are_the_clauses_formula() {
+        let identity = {
+            let mut t = InkTables {
+                black: [0; 256],
+                removal: [0; 256],
+            };
+            for k in 0..256 {
+                t.black[k] = k as u8;
+                t.removal[k] = k as i16;
+            }
+            t
+        };
+        let none = InkTables {
+            black: [0; 256],
+            removal: [0; 256],
+        };
+        let adding = InkTables {
+            black: [0; 256],
+            removal: [-40; 256],
+        };
+        // (r, g, b): c = 255 − r and the rest, k = min(c, m, y).
+        for (r, g, b) in [
+            (255, 255, 255),
+            (0, 0, 0),
+            (64, 128, 192),
+            (250, 10, 90),
+            (128, 128, 128),
+        ] {
+            let (c, m, y) = (255 - r as i32, 255 - g as i32, 255 - b as i32);
+            let k = c.min(m).min(y);
+            let byte = |v: i32| v.clamp(0, 255) as u8;
+            assert_eq!(
+                identity.ink(r, g, b),
+                (byte(c - k), byte(m - k), byte(y - k), byte(k)),
+                "identity at ({r}, {g}, {b})"
+            );
+            assert_eq!(
+                none.ink(r, g, b),
+                (byte(c), byte(m), byte(y), 0),
+                "no black at ({r}, {g}, {b})"
+            );
+            assert_eq!(
+                adding.ink(r, g, b),
+                (byte(c + 40), byte(m + 40), byte(y + 40), 0),
+                "a negative removal at ({r}, {g}, {b})"
+            );
+        }
+
+        let mask = square_mask(1.0, 1.0, 4.0, 4.0, 6);
+        let light = Color::rgb(64, 128, 192);
+        let mut maximum = Canvas::new(6, 6, PixelFormat::CmykA8, Color::WHITE);
+        maximum.fill_mask(&mask, light, 1.0);
+        let mut generated = Canvas::new(6, 6, PixelFormat::CmykA8, Color::WHITE);
+        let tables = std::sync::Arc::new(identity.clone());
+        assert_eq!(generated.set_ink_tables(Some(tables)), None);
+        generated.fill_mask(&mask, light, 1.0);
+        let (c, m, y, k) = identity.ink(64, 128, 192);
+        assert_eq!(&generated.data[(2 * 6 + 2) * 5..][..5], &[c, m, y, k, 255]);
+        assert_ne!(generated.data, maximum.data, "the tables changed nothing");
+        // An uncoloured cell's tint has no ink of its own either: composited
+        // onto the canvas the tables are in force on, it is their ink.
+        let mut cell = Canvas::new(6, 6, PixelFormat::CmykA8, Color::TRANSPARENT);
+        cell.fill_mask(&mask, Color::BLACK, 1.0);
+        let mut tinted = Canvas::new(6, 6, PixelFormat::CmykA8, Color::WHITE);
+        tinted.set_ink_tables(Some(std::sync::Arc::new(identity.clone())));
+        tinted.composite_tinted(&cell, light, (0, 0), 1.0, BlendMode::Normal, None, None);
+        assert_eq!(tinted.data, generated.data, "the tint took no tables");
+        let mut untinted = Canvas::new(6, 6, PixelFormat::CmykA8, Color::WHITE);
+        untinted.composite_tinted(&cell, light, (0, 0), 1.0, BlendMode::Normal, None, None);
+        assert_eq!(untinted.data, maximum.data, "the tint without tables");
+        // A colour's own ink is the document's, whatever is in force.
+        let mut owned = generated.clone();
+        owned.fill_mask_inked(&mask, light, Some([1, 2, 3, 4]), 1.0, BlendMode::Normal);
+        assert_eq!(&owned.data[(2 * 6 + 2) * 5..][..5], &[1, 2, 3, 4, 255]);
+        // And the device's own back is maximum removal again.
+        assert!(generated.set_ink_tables(None).is_some());
+        let mut again = Canvas::new(6, 6, PixelFormat::CmykA8, Color::WHITE);
+        again.set_ink_tables(None);
+        again.fill_mask(&mask, light, 1.0);
+        assert_eq!(again.data, maximum.data);
+        // A light canvas never reads them.
+        let mut rgb = Canvas::new(6, 6, PixelFormat::Rgb8, Color::WHITE);
+        let mut plain = rgb.clone();
+        rgb.set_ink_tables(Some(std::sync::Arc::new(identity)));
+        rgb.fill_mask(&mask, light, 1.0);
+        plain.fill_mask(&mask, light, 1.0);
+        assert_eq!(rgb.data, plain.data);
     }
 
     /// **A blue-first canvas composites as the red-first one does,

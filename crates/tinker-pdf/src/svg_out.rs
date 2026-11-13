@@ -2200,6 +2200,12 @@ mod tests {
                         stencil,
                         interpolate,
                         reduced: None,
+                        family: if stencil {
+                            tinker_pdf_content::ColorFamily::Other
+                        } else {
+                            tinker_pdf_content::ColorFamily::Rgb
+                        },
+                        soft_masked: false,
                     };
                     let expanded = DecodedImage {
                         width,
@@ -2210,6 +2216,12 @@ mod tests {
                         stencil,
                         interpolate,
                         reduced: None,
+                        family: if stencil {
+                            tinker_pdf_content::ColorFamily::Other
+                        } else {
+                            tinker_pdf_content::ColorFamily::Rgb
+                        },
+                        soft_masked: false,
                     };
                     let written = write(&two, &state);
                     assert!(
@@ -2238,6 +2250,8 @@ mod tests {
             stencil: false,
             interpolate: false,
             reduced: None,
+            family: tinker_pdf_content::ColorFamily::Rgb,
+            soft_masked: false,
         };
         assert_eq!(
             write(&short, &state),

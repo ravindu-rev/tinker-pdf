@@ -25,14 +25,15 @@ use std::sync::Arc;
 pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
 pub use shading::{ColorTable, Shading, ShadingScratch, TABLE_ENTRIES};
+use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::{
-    Device, EventKind, Glyph, GraphicsState, ImageRef, LineCap as ContentCap,
-    LineJoin as ContentJoin, Matrix, PathSegment,
+    ColorFamily, Device, EventKind, Glyph, GraphicsState, ImageRef, LineCap as ContentCap,
+    LineJoin as ContentJoin, Matrix, PathSegment, StoredParameters, Transfer,
 };
 
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
-    canvas::{Canvas, Color, MaskKind, PixelFormat},
+    canvas::{Canvas, Color, InkTables, MaskKind, PixelFormat},
     fill::{fill_outline, fill_with, FillScratch, Mask},
     fragments::Fragments,
     geom::{FillRule, Path},
@@ -292,6 +293,10 @@ pub enum RenderWarning {
     NestedBudgetSpent,
     /// The render stopped because it was cancelled.
     Cancelled,
+    /// More distinct sets of transfer functions than one page keeps per
+    /// point (11.7.5.2): past 255, a further set's paints are kept, and
+    /// drawn, as the device's own (ruling 2).
+    DeviceParametersSpent,
     /// A [`PixelRegion`] reached past the edge of the page, so the part that
     /// is on the page was rendered and the rest was trimmed away.
     ///
@@ -402,6 +407,10 @@ pub struct TileRequest {
 pub struct Tile {
     /// The cell's pixels, transparent where it did not paint.
     pub canvas: Canvas,
+    /// Whether every paint of the cell was fully opaque, which 11.7.5.2
+    /// asks of a tiling pattern's cell before an object painted with it is
+    /// ([`Renderer::painted_opaquely`]).
+    pub opaque: bool,
     /// What drawing the cell had to tolerate. Merged into the page's warnings
     /// rather than dropped — a JPX inside a pattern is exactly as missing as a
     /// JPX anywhere else, and the page is the only place a caller looks.
@@ -452,6 +461,16 @@ pub struct DecodedImage {
     /// `None` for an image decoded at its full size, which is every image but
     /// a JPEG a draw asked for at a fraction of its size.
     pub reduced: Option<Reduced>,
+    /// The device space family the samples are in ([`ColorFamily`]): what
+    /// black generation and undercolour removal (11.7.5.3) and the grey
+    /// transfer function (10.5) ask. A stencil's colour is the fill's, which
+    /// the renderer reads from the state, so a stencil says `Other`.
+    pub family: ColorFamily,
+    /// Whether `alpha` is opacity — an `/SMask`, or a JPEG 2000 image's own
+    /// under `/SMaskInData` — rather than a `/Mask`'s shape. 11.7.5.2 counts
+    /// an image with a soft mask as not fully opaque, and its shape is its
+    /// whole square (11.6.4.2).
+    pub soft_masked: bool,
 }
 
 /// A reduced decode's grid: [`DecodedImage::width`] by
@@ -804,6 +823,14 @@ struct GroupFrame {
     /// off the common path — a knockout group pays for it and nothing else
     /// does.
     initial: Option<Canvas>,
+    /// Whether the group was invoked fully opaque — `ca` 1, `Normal`, no soft
+    /// mask at the `Do` — which 11.7.5.2 asks of every group enclosing an
+    /// object before the object counts as fully opaque.
+    opaque: bool,
+    /// The black generation and undercolour removal in force at the `Do` of
+    /// a group compositing in RGB, which take its result into ink on an ink
+    /// parent (11.7.5.3); `None` for every other group.
+    removal: Option<Arc<InkTables>>,
     /// How deep the clip stack was when the group opened.
     ///
     /// A content stream may leave a `q` unbalanced; the interpreter drops the
@@ -1118,6 +1145,181 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// the largest and reused by the rest. A tiling cell is drawn by a
     /// renderer of its own, with its own.
     scratch: FillScratch,
+    /// 11.7.5.2's rendering parameters at each device pixel of the page
+    /// canvas — an index into `sets`, 0 the device's own — or `None` until a
+    /// paint sets one. See [`DeviceParameters`].
+    plane: Option<Vec<u8>>,
+    /// The page canvas's device rectangle, which the plane covers whatever
+    /// buffer a paint lands in.
+    page_rect: (i32, i32, u32, u32),
+    /// The parameter sets the plane names, entry `i + 1` at `sets[i]`.
+    sets: Vec<ParameterSet>,
+    /// Each transfer function met, sampled once, by the functions' identity.
+    transfers: Vec<([usize; 4], Arc<[[u8; 256]; 4]>)>,
+    /// Each black generation and undercolour removal pair met, sampled once.
+    removals: Vec<((usize, usize), Arc<InkTables>)>,
+    /// Whether a page met more parameter sets than the plane names.
+    parameters_spent: bool,
+    /// Whether every paint was fully opaque (11.7.5.2), for a tiling cell's
+    /// [`Tile::opaque`].
+    every_paint_opaque: bool,
+}
+
+/// One set of the rendering parameters 11.7.5.2 keeps per point: the
+/// transfer functions, red or cyan, green or magenta, blue or yellow, grey or
+/// black (10.5), and whether the topmost object was DeviceGray, which on a
+/// CMYK output takes the grey function alone.
+#[derive(Clone, Debug)]
+struct ParameterSet {
+    transfer: Arc<[[u8; 256]; 4]>,
+    gray: bool,
+}
+
+/// What a paint takes from the device-dependent state: the plane entry it
+/// writes (0 where it is not fully opaque, or keeps the device's own) and the
+/// ink tables its light becomes ink by on an ink buffer.
+#[derive(Clone, Debug, Default)]
+struct DeviceSet {
+    entry: u8,
+    removal: Option<Arc<InkTables>>,
+}
+
+/// **11.7.5.2's rendering parameters, per point, for a finished page.**
+///
+/// "The halftone and transfer function to be used at any given point on the
+/// page shall be those in effect at the time of painting the last (topmost)
+/// elementary graphics object enclosing that point, but only if the object is
+/// fully opaque"; elsewhere, the page's defaults. Each paint writes its set
+/// where its shape is not zero, so this holds the topmost object's at every
+/// device pixel of the page canvas (`docs/design/device-dependent-state.md`).
+/// A render whose paints set no transfer function keeps none.
+#[derive(Clone, Debug)]
+pub struct DeviceParameters {
+    x0: i32,
+    y0: i32,
+    width: u32,
+    height: u32,
+    plane: Vec<u8>,
+    sets: Vec<ParameterSet>,
+}
+
+impl DeviceParameters {
+    /// Maps every pixel of `canvas` — the page's output, standing where the
+    /// page canvas stood — through its topmost object's transfer functions,
+    /// on the output's own components (10.5): red, green and blue through the
+    /// first three on a light page, in either order; grey through the fourth;
+    /// cyan, magenta, yellow and black through all four, each complemented on
+    /// the way in and out ("converted to additive form"), and black alone
+    /// through the fourth where the object was DeviceGray. Alpha is untouched.
+    pub fn apply(&self, canvas: &mut Canvas) {
+        let n = canvas.format.components();
+        let (ox, oy) = canvas.origin();
+        let stride = canvas.stride;
+        for row in 0..canvas.height {
+            let y = i64::from(oy) + i64::from(row) - i64::from(self.y0);
+            if y < 0 || y >= i64::from(self.height) {
+                continue;
+            }
+            for col in 0..canvas.width {
+                let x = i64::from(ox) + i64::from(col) - i64::from(self.x0);
+                if x < 0 || x >= i64::from(self.width) {
+                    continue;
+                }
+                let at = y as usize * self.width as usize + x as usize;
+                let entry = usize::from(self.plane.get(at).copied().unwrap_or(0));
+                let Some(set) = entry.checked_sub(1).and_then(|i| self.sets.get(i)) else {
+                    continue;
+                };
+                let base = row as usize * stride + col as usize * n;
+                let Some(pixel) = canvas.data.get_mut(base..base + n) else {
+                    continue;
+                };
+                let tables = &set.transfer;
+                let additive = |slot: &mut u8, table: &[u8; 256]| {
+                    *slot = table[usize::from(*slot)];
+                };
+                let subtractive = |slot: &mut u8, table: &[u8; 256]| {
+                    *slot = 255 - table[usize::from(255 - *slot)];
+                };
+                match canvas.format {
+                    PixelFormat::Gray8 | PixelFormat::GrayA8 => {
+                        if let Some(slot) = pixel.first_mut() {
+                            additive(slot, &tables[3]);
+                        }
+                    }
+                    PixelFormat::Rgb8 | PixelFormat::Rgba8 => {
+                        for (slot, table) in pixel.iter_mut().zip(tables.iter()).take(3) {
+                            additive(slot, table);
+                        }
+                    }
+                    PixelFormat::Bgr8 | PixelFormat::Bgra8 => {
+                        for (slot, table) in pixel.iter_mut().zip([2, 1, 0]) {
+                            additive(slot, &tables[table]);
+                        }
+                    }
+                    PixelFormat::CmykA8 => {
+                        if set.gray {
+                            if let Some(slot) = pixel.get_mut(3) {
+                                subtractive(slot, &tables[3]);
+                            }
+                        } else {
+                            for (slot, table) in pixel.iter_mut().zip(tables.iter()).take(4) {
+                                subtractive(slot, table);
+                            }
+                        }
+                    }
+                    // A page is never handed back in Lab.
+                    PixelFormat::LabA8 => {}
+                }
+            }
+        }
+    }
+}
+
+/// The device space family `space`'s colours are in (`ColorFamily`): a
+/// device space's own, an `/Indexed` space's base's, a `/Separation` or
+/// `/DeviceN` space's alternate's and an uncoloured pattern space's base's;
+/// `Other` for every CIE-based and ICC space.
+#[must_use]
+pub fn color_family(space: &ColorSpace) -> ColorFamily {
+    match space {
+        ColorSpace::DeviceGray => ColorFamily::Gray,
+        ColorSpace::DeviceRgb => ColorFamily::Rgb,
+        ColorSpace::DeviceCmyk => ColorFamily::Cmyk,
+        ColorSpace::Indexed { base, .. } => color_family(base),
+        ColorSpace::Separation { alternate, .. } => color_family(alternate),
+        ColorSpace::Pattern { base: Some(base) } => color_family(base),
+        _ => ColorFamily::Other,
+    }
+}
+
+/// The family a shading's colours are in.
+fn shading_family(shading: &Shading) -> ColorFamily {
+    match shading {
+        Shading::FunctionBased { space, .. }
+        | Shading::Axial { space, .. }
+        | Shading::Radial { space, .. } => color_family(space),
+        Shading::Mesh(mesh) => color_family(&mesh.space),
+    }
+}
+
+/// A function of one input over `[0 1]`, sampled to 256 entries and read in
+/// `[low 1]`: a transfer function's (10.5) or a black generation's, from 0,
+/// and an undercolour removal's, from −1 (Table 57). Evaluated once, never
+/// per pixel (ruling 4); a value that is not finite reads as the input.
+fn sample_function(function: &Function, low: f64) -> [f64; 256] {
+    let mut table = [0.0; 256];
+    for (i, slot) in table.iter_mut().enumerate() {
+        let input = f64::from(i as u8) / 255.0;
+        let value = function.eval(&[input]).first().copied().unwrap_or(input);
+        *slot = if value.is_finite() { value } else { input }.clamp(low, 1.0);
+    }
+    table
+}
+
+/// [`sample_function`] in bytes, for a transfer function.
+fn transfer_table(function: &Function) -> [u8; 256] {
+    sample_function(function, 0.0).map(|v| (v * 255.0).round() as u8)
 }
 
 impl<'g, G: GlyphSource> Renderer<'g, G> {
@@ -1128,6 +1330,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// the top-left.
     pub fn new(canvas: Canvas, base: Matrix, glyphs: &'g G) -> Renderer<'g, G> {
         let frame = Bounds::of_rect(canvas.device_rect());
+        let canvas_rect = canvas.device_rect();
         Renderer {
             canvas,
             glyphs: Scope::Borrowed(glyphs),
@@ -1162,6 +1365,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             #[cfg(test)]
             mask_pixels: 0,
             scratch: FillScratch::new(),
+            plane: None,
+            page_rect: canvas_rect,
+            sets: Vec::new(),
+            transfers: Vec::new(),
+            removals: Vec::new(),
+            parameters_spent: false,
+            every_paint_opaque: true,
         }
     }
 
@@ -1437,8 +1647,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// shown and the outlines it painted, for a caller keeping a tally.
     #[must_use]
     pub fn finish_counted(self) -> (Canvas, Vec<RenderWarning>, RenderCounts) {
-        let counts = self.counts;
-        let (canvas, warnings) = self.finish();
+        let (canvas, warnings, counts, _) = self.finish_with_parameters();
         (canvas, warnings, counts)
     }
 
@@ -1453,6 +1662,278 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     #[must_use]
     pub fn met(&self) -> &[RenderWarning] {
         &self.warnings
+    }
+
+    /// [`Renderer::finish_counted`], and the page's rendering parameters per
+    /// point (11.7.5.2), for the caller to apply once the canvas is in its
+    /// output format ([`DeviceParameters::apply`]); `None` for a render whose
+    /// paints set no transfer function.
+    #[must_use]
+    pub fn finish_with_parameters(
+        mut self,
+    ) -> (
+        Canvas,
+        Vec<RenderWarning>,
+        RenderCounts,
+        Option<DeviceParameters>,
+    ) {
+        let counts = self.counts;
+        let plane = self.plane.take();
+        let sets = std::mem::take(&mut self.sets);
+        let (x0, y0, width, height) = self.page_rect;
+        let spent = self.parameters_spent;
+        let (canvas, mut warnings) = self.finish();
+        if spent && !warnings.contains(&RenderWarning::DeviceParametersSpent) {
+            warnings.push(RenderWarning::DeviceParametersSpent);
+        }
+        let parameters = plane.map(|plane| DeviceParameters {
+            x0,
+            y0,
+            width,
+            height,
+            plane,
+            sets,
+        });
+        (canvas, warnings, counts, parameters)
+    }
+
+    /// Whether every paint so far was fully opaque in 11.7.5.2's sense — the
+    /// answer a tiling cell's renderer gives its [`Tile::opaque`].
+    #[must_use]
+    pub fn painted_opaquely(&self) -> bool {
+        self.every_paint_opaque
+    }
+
+    /// Whether a paint made now is fully opaque (11.7.5.2): its own alpha
+    /// constant 1, the blend mode `Normal`, no soft mask, its source opaque
+    /// (an image with no soft mask, a cell all of whose paints were), and
+    /// every group around it invoked the same way.
+    fn fully_opaque(&self, state: &GraphicsState, alpha: f64, source_opaque: bool) -> bool {
+        source_opaque
+            && alpha >= 1.0
+            && state.blend == tinker_pdf_content::BlendMode::Normal
+            && self.soft.is_none()
+            && self.groups.iter().all(|frame| frame.opaque)
+    }
+
+    /// What a paint takes from the device-dependent state: its plane entry,
+    /// and the ink tables its light becomes ink by — only for a colour of
+    /// DeviceRGB's family, the one conversion 11.7.5.3 applies them to.
+    fn device_set(
+        &mut self,
+        state: &GraphicsState,
+        alpha: f64,
+        family: ColorFamily,
+        source_opaque: bool,
+    ) -> DeviceSet {
+        let opaque = self.fully_opaque(state, alpha, source_opaque);
+        if !opaque {
+            self.every_paint_opaque = false;
+        }
+        let stored = state.stored_parameters();
+        let entry = if opaque {
+            self.entry_for(stored.transfer.as_ref(), family)
+        } else {
+            0
+        };
+        let removal = if family == ColorFamily::Rgb {
+            self.removal_for(stored)
+        } else {
+            None
+        };
+        DeviceSet { entry, removal }
+    }
+
+    /// The plane entry of a transfer, 0 for the device's own: `/Identity`,
+    /// `/Default` and an unset key alike (10.5).
+    fn entry_for(&mut self, transfer: Option<&Transfer>, family: ColorFamily) -> u8 {
+        let functions: [&Arc<Function>; 4] = match transfer {
+            None | Some(Transfer::Identity) => return 0,
+            Some(Transfer::One(one)) => [one, one, one, one],
+            Some(Transfer::Four([red, green, blue, gray])) => [red, green, blue, gray],
+        };
+        let key = functions.map(|function| Arc::as_ptr(function) as usize);
+        let tables = match self.transfers.iter().find(|(known, _)| *known == key) {
+            Some((_, tables)) => Arc::clone(tables),
+            None => {
+                let tables = Arc::new(functions.map(|function| transfer_table(function)));
+                // A function written into the dictionary itself is read anew
+                // at every `gs`, so the identities are bounded rather than the
+                // tables, which the sets below share by value.
+                if self.transfers.len() < 64 {
+                    self.transfers.push((key, Arc::clone(&tables)));
+                }
+                tables
+            }
+        };
+        let gray = family == ColorFamily::Gray;
+        if let Some(at) = self
+            .sets
+            .iter()
+            .position(|set| set.gray == gray && *set.transfer == *tables)
+        {
+            return u8::try_from(at + 1).unwrap_or(0);
+        }
+        if self.sets.len() >= usize::from(u8::MAX) {
+            self.parameters_spent = true;
+            return 0;
+        }
+        self.sets.push(ParameterSet {
+            transfer: tables,
+            gray,
+        });
+        u8::try_from(self.sets.len()).unwrap_or(0)
+    }
+
+    /// The ink tables black generation and undercolour removal in force make
+    /// (10.4.2.4), or `None` with neither set — the device's own, maximum
+    /// removal. With one set, the other is `k` itself.
+    fn removal_for(&mut self, stored: &StoredParameters) -> Option<Arc<InkTables>> {
+        let (black, removal) = (
+            stored.black_generation.as_ref(),
+            stored.undercolor_removal.as_ref(),
+        );
+        if black.is_none() && removal.is_none() {
+            return None;
+        }
+        let identity = |function: Option<&Arc<Function>>| {
+            function.map_or(0, |function| Arc::as_ptr(function) as usize)
+        };
+        let key = (identity(black), identity(removal));
+        if let Some((_, tables)) = self.removals.iter().find(|(known, _)| *known == key) {
+            return Some(Arc::clone(tables));
+        }
+        let unit: [f64; 256] = core::array::from_fn(|k| f64::from(k as u8) / 255.0);
+        let black = black.map_or(unit, |function| sample_function(function, 0.0));
+        let removal = removal.map_or(unit, |function| sample_function(function, -1.0));
+        let tables = Arc::new(InkTables {
+            black: black.map(|v| (v * 255.0).round() as u8),
+            removal: removal.map(|v| (v * 255.0).round() as i16),
+        });
+        if self.removals.len() < 64 {
+            self.removals.push((key, Arc::clone(&tables)));
+        }
+        Some(tables)
+    }
+
+    /// Puts `removal` in force on an ink canvas for one paint, handing back
+    /// what was, or does nothing on any other canvas.
+    fn hold_removal(&mut self, removal: &Option<Arc<InkTables>>) -> Option<Option<Arc<InkTables>>> {
+        (removal.is_some() && self.canvas.format == PixelFormat::CmykA8)
+            .then(|| self.canvas.set_ink_tables(removal.clone()))
+    }
+
+    /// Puts back what [`Renderer::hold_removal`] displaced.
+    fn release_removal(&mut self, held: Option<Option<Arc<InkTables>>>) {
+        if let Some(previous) = held {
+            self.canvas.set_ink_tables(previous);
+        }
+    }
+
+    /// Whether a paint with this entry writes the plane at all: a soft
+    /// mask's group paints no page, and an entry of 0 changes nothing while
+    /// there is no plane.
+    fn records(&self, entry: u8) -> bool {
+        self.mask_frames.is_empty() && (entry != 0 || self.plane.is_some())
+    }
+
+    /// Writes `entry` into the plane wherever `shape` is not zero.
+    fn record(&mut self, shape: &Mask, entry: u8) {
+        if !self.records(entry) {
+            return;
+        }
+        let (px0, py0, width, height) = self.page_rect;
+        let plane = self
+            .plane
+            .get_or_insert_with(|| vec![0; width as usize * height as usize]);
+        let (x0, y0, x1, y1) = shape.overlap_at((px0, py0), width, height);
+        for row in y0..y1 {
+            for col in x0..x1 {
+                let (x, y) = (
+                    px0.saturating_add(col as i32),
+                    py0.saturating_add(row as i32),
+                );
+                if shape.at(x, y) == 0 {
+                    continue;
+                }
+                if let Some(slot) = plane.get_mut(row as usize * width as usize + col as usize) {
+                    *slot = entry;
+                }
+            }
+        }
+    }
+
+    /// Records a path's or a stroke's shape: the coverage it composites
+    /// through, or, under a soft mask, the coverage again without it — the
+    /// mask is opacity, not shape (11.6.4.3).
+    fn record_shape(&mut self, shape: Shape<'_>, painted: &Mask, entry: u8) {
+        if !self.records(entry) {
+            return;
+        }
+        if self.soft.is_none() {
+            self.record(painted, entry);
+            return;
+        }
+        let soft = self.soft.take();
+        let unmasked = self.coverage(shape, None);
+        self.soft = soft;
+        self.record(&unmasked, entry);
+    }
+
+    /// The coverage of `shape` without the soft mask, for the plane, where a
+    /// soft mask is in force and the paint records; `None` otherwise, when
+    /// the coverage the paint composites through is its shape.
+    fn unmasked(&mut self, shape: Shape<'_>, entry: u8) -> Option<Mask> {
+        if !self.records(entry) || self.soft.is_none() {
+            return None;
+        }
+        let soft = self.soft.take();
+        let unmasked = self.coverage(shape, None);
+        self.soft = soft;
+        Some(unmasked)
+    }
+
+    /// Records where a shading defines a colour over `area`, its shape for
+    /// the plane (11.6.4.2: `sh`'s shape is its painting geometry).
+    fn record_shading(
+        &mut self,
+        shading: &Shading,
+        inverse: &Matrix,
+        area: Option<&Mask>,
+        entry: u8,
+    ) {
+        if !self.records(entry) {
+            return;
+        }
+        let (ox, oy, width, height) = self.device();
+        let (x0, y0, x1, y1) = area.map_or((0, 0, width, height), |mask| {
+            mask.overlap_at((ox, oy), width, height)
+        });
+        let mut shape = Mask::empty(
+            ox.saturating_add(x0 as i32),
+            oy.saturating_add(y0 as i32),
+            x1 - x0,
+            y1 - y0,
+        );
+        let mut scratch = ShadingScratch::default();
+        for row in y0..y1 {
+            let py = oy.saturating_add(row as i32);
+            let mut walk = shading.row(inverse, f64::from(py) + 0.5);
+            for col in x0..x1 {
+                let px = ox.saturating_add(col as i32);
+                if area.is_some_and(|mask| mask.at(px, py) == 0) {
+                    continue;
+                }
+                if walk.color_at(i64::from(px), &mut scratch).is_some() {
+                    let at = (row - y0) as usize * (x1 - x0) as usize + (col - x0) as usize;
+                    if let Some(slot) = shape.data.get_mut(at) {
+                        *slot = 255;
+                    }
+                }
+            }
+        }
+        self.count_evaluations(&scratch);
+        self.record(&shape, entry);
     }
 
     /// The canvas and everything the render had to tolerate.
@@ -1588,6 +2069,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
 
         let initial = group.knockout.then(|| buffer.snapshot());
+        // 11.7.5.2's conditions at the `Do`, and 11.7.5.3's functions for a
+        // group whose result is RGB light reaching an ink parent.
+        let opaque = state.fill_alpha >= 1.0
+            && state.blend == tinker_pdf_content::BlendMode::Normal
+            && self.soft.is_none();
+        let removal = if format == PixelFormat::Rgba8 {
+            self.removal_for(state.stored_parameters())
+        } else {
+            None
+        };
 
         let frame = GroupFrame {
             parent: std::mem::replace(&mut self.canvas, buffer),
@@ -1600,6 +2091,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             soft_bounds: self.soft_bounds.take(),
             frame: self.frame,
             initial,
+            opaque,
+            removal,
             clip_depth: self.clip_stack.len(),
         };
         // The buffer a whole-page render would have made: the clip's
@@ -1690,6 +2183,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // looks like when it has been done element by element -- the mask
         // shows through every seam the group exists to remove.
         let stop = self.stop_predicate();
+        let held = self.hold_removal(&frame.removal);
         self.canvas.composite(
             &buffer,
             frame.at,
@@ -1698,6 +2192,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             soft.as_ref(),
             Some(&stop),
         );
+        self.release_removal(held);
         self.soft = soft;
         self.soft_bounds = frame.soft_bounds;
     }
@@ -1883,12 +2378,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             b: 0xBF,
             a: 0xFF,
         };
+        // It stands where the image would have, as an opaque fill of its
+        // square under the state's alpha.
+        let set = self.device_set(state, state.fill_alpha, ColorFamily::Other, true);
         self.paint(
             &path,
             FillRule::NonZero,
             PLACEHOLDER,
             state.fill_alpha,
             blend_mode(state.blend),
+            &set,
         );
     }
 
@@ -1914,6 +2413,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         state: &GraphicsState,
         alpha: f64,
         color: Color,
+        family: ColorFamily,
     ) {
         match self.glyphs.pattern(name) {
             Some(PatternPaint::Shading(shading, matrix)) => {
@@ -1925,7 +2425,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
             }
             Some(PatternPaint::Tiling(tiling)) => {
-                if !self.fill_with_tiles(shape, name, &tiling, state, alpha, color) {
+                if !self.fill_with_tiles(shape, name, &tiling, state, alpha, color, family) {
                     self.report_unpainted_pattern(name);
                 }
             }
@@ -1965,21 +2465,42 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let area = self.coverage(shape, Some(&stop));
         let alpha = alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
+        let set = self.device_set(state, alpha, shading_family(shading), true);
+        // The shape for the plane: the fill's coverage, without the soft mask
+        // where one is in force (11.6.4.3).
+        let unmasked = self.unmasked(shape, set.entry);
 
         // A mesh is geometry rather than a function of position, so it takes
         // the other route entirely — and it does its own knockout restore,
         // with its own coverage rather than the shape's.
         if let Some(mesh) = shading.mesh() {
             let limit = self.page_region(shape);
-            return self.paint_mesh(mesh, to_device, Some(&area), limit, alpha, mode);
+            let shape_area = unmasked.as_ref().unwrap_or(&area);
+            return self.paint_mesh(
+                mesh,
+                to_device,
+                Some(&area),
+                Some(shape_area),
+                limit,
+                alpha,
+                mode,
+                &set,
+            );
         }
 
         let Some(inverse) = invert(&to_device) else {
             return true;
         };
+        self.record_shading(
+            shading,
+            &inverse,
+            unmasked.as_ref().or(Some(&area)),
+            set.entry,
+        );
         if self.in_knockout() {
             self.knockout_restore(&area);
         }
+        let held = self.hold_removal(&set.removal);
         // The shape's own rectangle. A shading is evaluated per pixel, so a
         // gradient-filled comma used to run the inverse transform and the
         // function over every pixel of the page to paint two hundred of them.
@@ -1994,6 +2515,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
         for row in y_start..y_end {
             if self.stopping() {
+                self.release_removal(held);
                 self.count_evaluations(&scratch);
                 return true;
             }
@@ -2016,6 +2538,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     .blend_pixel_with(col, row, Color { r, g, b, a: 0xFF }, weight, mode);
             }
         }
+        self.release_removal(held);
         self.count_evaluations(&scratch);
         true
     }
@@ -2044,14 +2567,21 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ///
     /// `limit` is `area`'s rectangle on a render of the whole page, which is
     /// what the mesh's region is taken from: see [`draw_mesh_over`].
+    ///
+    /// `shape_area` is `area` without the soft mask, the region the mesh's
+    /// shape is recorded over for the plane (11.6.4.3), and `set` what the
+    /// paint takes from the device-dependent state.
+    #[allow(clippy::too_many_arguments)]
     fn paint_mesh(
         &mut self,
         mesh: &Mesh,
         to_device: Matrix,
         area: Option<&Mask>,
+        shape_area: Option<&Mask>,
         limit: Bounds,
         alpha: f64,
         mode: RasterBlend,
+        set: &DeviceSet,
     ) -> bool {
         let Some(tessellation) = mesh.tessellate(&to_device) else {
             return false;
@@ -2135,6 +2665,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             buffer.coverage.harden();
         }
 
+        // The mesh's shape for the plane: its coverage over the area the
+        // paint is shaped by, without the soft mask.
+        if self.records(set.entry) {
+            let mut shape = buffer.coverage.clone();
+            if let Some(shape_area) = shape_area {
+                shape.intersect_in_place(shape_area);
+            }
+            self.record(&shape, set.entry);
+        }
         // The element's coverage is the mesh's own, not the clip's: 11.4.5's
         // restore has to know where this element actually painted, and `sh`
         // with a mesh does not paint the whole clip the way `sh` with a
@@ -2151,8 +2690,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             buffer
                 .coverage
                 .overlap_at((ox, oy), self.canvas.width, self.canvas.height);
+        let held = self.hold_removal(&set.removal);
         for row in y_start..y_end {
             if self.stopping() {
+                self.release_removal(held);
                 return true;
             }
             for col in x_start..x_end {
@@ -2168,6 +2709,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 self.canvas.blend_pixel_with(col, row, color, weight, mode);
             }
         }
+        self.release_removal(held);
         true
     }
 
@@ -2192,6 +2734,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// not spill into them. With the buffer sized to the box there is nowhere
     /// for a neighbour's ink to be — the spill is impossible by construction
     /// rather than prevented by a clip that could be forgotten.
+    #[allow(clippy::too_many_arguments)]
     fn fill_with_tiles(
         &mut self,
         shape: Shape<'_>,
@@ -2200,6 +2743,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         state: &GraphicsState,
         alpha: f64,
         color: Color,
+        family: ColorFamily,
     ) -> bool {
         if self.pattern_depth >= MAX_PATTERN_DEPTH {
             return false;
@@ -2378,10 +2922,14 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 self.warnings.push(warning);
             }
         }
+        // 11.7.5.2: an object painted with a tiling pattern is fully opaque
+        // only if every object of its cell is.
+        let set = self.device_set(state, alpha, family, tile.opaque);
         let tile = tile.canvas;
 
         let stop = self.stop_predicate();
         let coverage = self.coverage(shape, Some(&stop));
+        let unmasked = self.unmasked(shape, set.entry);
         if self.in_knockout() {
             self.knockout_restore(&coverage);
         }
@@ -2396,6 +2944,17 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let tint = tiling
             .uncolored
             .then(|| Color::rgb(color.r, color.g, color.b));
+        // That colour is light of the state's family, and on an ink canvas it
+        // becomes ink by the black generation and undercolour removal the
+        // state holds (11.7.5.3); a coloured cell's paints took their own.
+        let held = if tint.is_some() {
+            self.hold_removal(&set.removal)
+        } else {
+            None
+        };
+        // The fill's shape for the plane: the shape where the cells painted
+        // (11.6.4.2, 11.6.7), gathered as they are placed.
+        let mut cells = Vec::new();
 
         // The lattice step as a device *vector*: a translation in pattern
         // space, so the matrix's translation cancels and only its linear part
@@ -2406,6 +2965,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             // work it exists for, and `composite` is asked again every sixteen
             // rows inside each cell.
             if self.stopping() {
+                self.release_removal(held);
                 return true;
             }
             for i in i0..=i1 {
@@ -2433,7 +2993,45 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                             .composite(&tile, at, alpha, mode, Some(&coverage), Some(&stop));
                     }
                 }
+                if self.records(set.entry) {
+                    cells.push(at);
+                }
             }
+        }
+        self.release_removal(held);
+        if self.records(set.entry) {
+            let shape_area = unmasked.as_ref().unwrap_or(&coverage);
+            let mut painted = Mask::empty(
+                shape_area.x0,
+                shape_area.y0,
+                shape_area.width,
+                shape_area.height,
+            );
+            for (cx, cy) in cells {
+                for sy in 0..tile.height {
+                    for sx in 0..tile.width {
+                        if tile.pixel(sx, sy).is_none_or(|pixel| pixel.a == 0) {
+                            continue;
+                        }
+                        let (x, y) = (cx.saturating_add(sx as i32), cy.saturating_add(sy as i32));
+                        if shape_area.at(x, y) == 0 {
+                            continue;
+                        }
+                        let (lx, ly) = (
+                            i64::from(x) - i64::from(painted.x0),
+                            i64::from(y) - i64::from(painted.y0),
+                        );
+                        if lx < 0 || ly < 0 {
+                            continue;
+                        }
+                        let at = ly as usize * painted.width as usize + lx as usize;
+                        if let Some(slot) = painted.data.get_mut(at) {
+                            *slot = 255;
+                        }
+                    }
+                }
+            }
+            self.record(&painted, set.entry);
         }
         true
     }
@@ -2539,8 +3137,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// that follows it, and every one of them checks before building a path
     /// whose rasterization is the expensive part. A caller's entry is a
     /// different moment from this one, and this is the moment the work starts.
-    fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
-        self.paint_inked(Shape::Fill(path, rule), color, None, alpha, mode);
+    fn paint(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        color: Color,
+        alpha: f64,
+        mode: RasterBlend,
+        set: &DeviceSet,
+    ) {
+        self.paint_inked(Shape::Fill(path, rule), color, None, alpha, mode, set);
     }
 
     /// As [`Renderer::paint`], for any shape, with the colour's DeviceCMYK
@@ -2549,6 +3155,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// composites the document's own components rather than the light turned
     /// back into ink, which would lose every separation the file chose but
     /// one.
+    ///
+    /// `set` is what the paint takes from the device-dependent state: the
+    /// plane entry its shape records (11.7.5.2), and the ink tables a light
+    /// colour of DeviceRGB's family becomes ink by on an ink buffer
+    /// (11.7.5.3).
     fn paint_inked(
         &mut self,
         shape: Shape<'_>,
@@ -2556,29 +3167,30 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         ink: Option<[u8; 4]>,
         alpha: f64,
         mode: RasterBlend,
+        set: &DeviceSet,
     ) {
         if self.stopping() {
             return;
         }
         let stop = self.stop_predicate();
         let mask = self.coverage(shape, Some(&stop));
+        self.record_shape(shape, &mask, set.entry);
         if self.in_knockout() {
             self.knockout_restore(&mask);
         }
+        let held = self.hold_removal(&set.removal);
         self.canvas.fill_mask_inked(&mask, color, ink, alpha, mode);
+        self.release_removal(held);
     }
 
     /// Composites a glyph's mask, rasterised in its own frame
     /// (`glyph::rasterise`), with its pixel (0, 0) at the page-frame pixel
     /// `origin` — through the clip, the soft mask and a knockout group's
-    /// restore, as [`Renderer::paint_inked`] composites a path's coverage.
-    ///
-    /// The mask is placed by an integer offset, which cannot round, and is
-    /// windowed to the pixels the canvas, the clip and the soft mask can show
-    /// before either multiplies into it: the region `coverage` would have
-    /// asked `fill` for. So a tile composites exactly the page's pixels under
-    /// it (ruling 5), and the clip multiplies into a mask already hardened
-    /// when anti-aliasing is off, as it does on the path route.
+    /// restore, as [`Renderer::paint_inked`] composites a path's coverage,
+    /// and taking `set`, the paint's device-dependent state, as that does:
+    /// the glyph's shape for the plane is its placed mask times the clip,
+    /// without the soft mask, which is opacity (11.6.4.3).
+    #[allow(clippy::too_many_arguments)]
     fn paint_glyph_mask(
         &mut self,
         local: &Mask,
@@ -2587,7 +3199,38 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         ink: Option<[u8; 4]>,
         alpha: f64,
         mode: RasterBlend,
+        set: &DeviceSet,
     ) {
+        let mask = self.placed_glyph(local, origin, true);
+        if self.records(set.entry) {
+            if self.soft.is_some() {
+                let shape = self.placed_glyph(local, origin, false);
+                self.record(&shape, set.entry);
+            } else {
+                self.record(&mask, set.entry);
+            }
+        }
+        if self.in_knockout() {
+            self.knockout_restore(&mask);
+        }
+        let held = self.hold_removal(&set.removal);
+        self.canvas.fill_mask_inked(&mask, color, ink, alpha, mode);
+        self.release_removal(held);
+    }
+
+    /// A glyph's mask placed with its pixel (0, 0) at the page-frame pixel
+    /// `origin`, multiplied by the clip and, with `soft`, by the soft mask:
+    /// the coverage the glyph composites through, or without the soft mask
+    /// its shape.
+    ///
+    /// The mask is placed by an integer offset, which cannot round, and is
+    /// windowed to the pixels the canvas, the clip and the soft mask can show
+    /// before either multiplies into it: the region `coverage` would have
+    /// asked `fill` for. So a tile composites exactly the page's pixels under
+    /// it (ruling 5), and the clip multiplies into a mask already hardened
+    /// when anti-aliasing is off, as it does on the path route.
+    fn placed_glyph(&self, local: &Mask, origin: [i32; 2], soft: bool) -> Mask {
+        let soft = if soft { self.soft.as_ref() } else { None };
         let left = i64::from(origin[0]) + i64::from(local.x0);
         let top = i64::from(origin[1]) + i64::from(local.y0);
         let placed = Bounds {
@@ -2597,10 +3240,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             bottom: top + i64::from(local.height),
         };
         let mut region = placed.meet(Bounds::of_rect(self.device()));
-        for limit in [self.clip.as_ref(), self.soft.as_ref()]
-            .into_iter()
-            .flatten()
-        {
+        for limit in [self.clip.as_ref(), soft].into_iter().flatten() {
             region = region.meet(Bounds::of_mask(limit));
         }
         let (x0, y0, width, height) = region.rect();
@@ -2628,13 +3268,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if let Some(clip) = &self.clip {
             mask.intersect_in_place(clip);
         }
-        if let Some(soft) = &self.soft {
+        if let Some(soft) = soft {
             mask.intersect_in_place(soft);
         }
-        if self.in_knockout() {
-            self.knockout_restore(&mask);
-        }
-        self.canvas.fill_mask_inked(&mask, color, ink, alpha, mode);
+        mask
     }
 
     /// The question the rasterizer asks while it is working.
@@ -2683,6 +3320,67 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let samples_to_device = image
             .reduced
             .and_then(|grid| reduced_square(&unit_to_device, image.width, image.height, grid));
+        // 11.7.5.2: an image with a soft mask is not fully opaque; a stencil
+        // is painted in the fill colour, of the fill's family.
+        let family = if image.stencil {
+            state.fill_family
+        } else {
+            image.family
+        };
+        let set = self.device_set(state, state.fill_alpha, family, !image.soft_masked);
+        // The image's shape for the plane, drawn once more through the
+        // sampler over nothing: its square, a `/Mask` or a stencil's samples,
+        // and the clip — not a soft mask, which is opacity.
+        if self.records(set.entry) {
+            if let Some((bx, by, bw, bh)) = image_bounds_in(&unit_to_device, self.device()) {
+                let mut probe =
+                    Canvas::new(bw, bh, PixelFormat::GrayA8, Color::TRANSPARENT).at_origin(bx, by);
+                let shape_alpha: &[u8] = if image.soft_masked { &[] } else { &image.alpha };
+                // A two-colour image's colours carry its alpha, which is its
+                // shape unless it is a soft mask's opacity.
+                let shape_two = image.two_colour.as_ref().map(|two| TwoColour {
+                    samples: &two.samples,
+                    colours: if image.soft_masked {
+                        two.colours.map(|[r, g, b, _]| [r, g, b, 255])
+                    } else {
+                        two.colours
+                    },
+                });
+                let probe_draw = ImageDraw {
+                    image: ImageSource {
+                        width: image.width,
+                        height: image.height,
+                        rgb: &image.rgb,
+                        alpha: shape_alpha,
+                        two_colour: shape_two,
+                    },
+                    // Placed as the draw below places it: a reduced decode's
+                    // samples over their own square, cut at the unit square.
+                    unit_to_device: samples_to_device.unwrap_or(unit_to_device),
+                    cut: samples_to_device.map(|_| unit_to_device),
+                    interpolate: image.interpolate,
+                    alpha: 1.0,
+                    blend: RasterBlend::Normal,
+                    clip: self.clip.as_ref(),
+                    tint: image.stencil.then_some(Color::WHITE),
+                    ink: None,
+                    stop: None,
+                    edge_bits: if self.antialias { 8 } else { 0 },
+                };
+                draw_image(
+                    &mut probe,
+                    &probe_draw,
+                    &mut Pyramid::new(),
+                    &mut self.scratch,
+                );
+                let shape = probe.to_mask((bx, by), MaskKind::Alpha, None);
+                self.record(&shape, set.entry);
+            }
+        }
+        // Black generation on an ink buffer takes each sample's light into
+        // ink as it is drawn, so such an image composites on its own rather
+        // than through a run, which holds no tables.
+        let removing = set.removal.is_some() && self.canvas.format == PixelFormat::CmykA8;
         // 8.9.6.2: a stencil selects where the *current fill colour* is
         // painted; it has no colour of its own. That colour is a flat fill
         // like any other, so a canvas compositing in ink is handed its own
@@ -2724,7 +3422,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let pixels = self.frame_area();
         // 11.4.5 gives every element inside a knockout group its own shape, so
         // a run there would restore the wrong one.
-        let direct = self.in_knockout() || pixels > MAX_IMAGE_RUN_PIXELS;
+        let direct = self.in_knockout() || pixels > MAX_IMAGE_RUN_PIXELS || removing;
         let masks = self.mask_ids();
         let state_changed = self.run.as_ref().is_some_and(|run| {
             run.alpha.to_bits() != state.fill_alpha.to_bits()
@@ -2785,7 +3483,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // phase 08's, so this deliberately does not invent one.
         let mut pyramid = Pyramid::new();
         if direct {
+            let held = removing.then(|| self.canvas.set_ink_tables(set.removal.clone()));
             draw_image(&mut self.canvas, &draw, &mut pyramid, &mut self.scratch);
+            if let Some(previous) = held {
+                self.canvas.set_ink_tables(previous);
+            }
             return;
         }
 
@@ -3232,17 +3934,20 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 state,
                 state.fill_alpha,
                 fill_color(state),
+                state.fill_family,
             );
             return;
         }
 
         let color = fill_color(state);
+        let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
         self.paint_inked(
             Shape::Fill(&built, rule),
             color,
             state.fill_ink,
             state.fill_alpha,
             blend_mode(state.blend),
+            &set,
         );
     }
 
@@ -3394,17 +4099,20 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 state,
                 state.stroke_alpha,
                 stroke_color(state),
+                state.stroke_family,
             );
             return;
         }
 
         let color = stroke_color(state);
+        let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
         self.paint_inked(
             outline,
             color,
             state.stroke_ink,
             state.stroke_alpha,
             blend_mode(state.blend),
+            &set,
         );
     }
 
@@ -3518,6 +4226,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     }
                 };
                 if let Some(local) = local {
+                    let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
                     self.paint_glyph_mask(
                         &local,
                         placement.origin,
@@ -3525,6 +4234,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                         state.fill_ink,
                         state.fill_alpha,
                         blend_mode(state.blend),
+                        &set,
                     );
                     return;
                 }
@@ -3589,14 +4299,17 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     state,
                     state.fill_alpha,
                     fill_color(state),
+                    state.fill_family,
                 );
             } else {
+                let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
                 self.paint_inked(
                     Shape::Fill(&path, FillRule::NonZero),
                     fill_color(state),
                     state.fill_ink,
                     state.fill_alpha,
                     blend_mode(state.blend),
+                    &set,
                 );
             }
         }
@@ -3616,14 +4329,17 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     state,
                     state.stroke_alpha,
                     stroke_color(state),
+                    state.stroke_family,
                 );
             } else {
+                let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
                 self.paint_inked(
                     outlined,
                     stroke_color(state),
                     state.stroke_ink,
                     state.stroke_alpha,
                     blend_mode(state.blend),
+                    &set,
                 );
             }
         }
@@ -3716,11 +4432,29 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             (None, None) => None,
         };
 
+        let set = self.device_set(state, alpha, shading_family(&shading), true);
+        // `sh`'s shape for the plane is its geometry within the clip, the soft
+        // mask aside (11.6.4.2, 11.6.4.3).
+        let shape_area = if self.records(set.entry) {
+            self.clip.clone()
+        } else {
+            None
+        };
+
         // A mesh paints its own geometry rather than the whole clip, so it
         // brings its own coverage and its own knockout restore with it.
         if let Some(mesh) = shading.mesh() {
             let limit = self.page_limit();
-            if !self.paint_mesh(mesh, to_device, area.as_ref(), limit, alpha, mode) {
+            if !self.paint_mesh(
+                mesh,
+                to_device,
+                area.as_ref(),
+                shape_area.as_ref(),
+                limit,
+                alpha,
+                mode,
+                &set,
+            ) {
                 let warning = RenderWarning::UnsupportedShading { kind: mesh.kind };
                 if !self.warnings.contains(&warning) {
                     self.warnings.push(warning);
@@ -3732,6 +4466,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         let Some(inverse) = invert(&to_device) else {
             return;
         };
+        self.record_shading(&shading, &inverse, shape_area.as_ref(), set.entry);
         let (ox, oy, width, height) = self.device();
         let (x_start, y_start, x_end, y_end) =
             area.as_ref().map_or((0, 0, width, height), |mask| {
@@ -3750,8 +4485,10 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if let Some((space, function)) = shading.parametric() {
             scratch.tabulate(space, function, 0.0, 1.0, self.page_limit().area());
         }
+        let held = self.hold_removal(&set.removal);
         for row in y_start..y_end {
             if self.stopping() {
+                self.release_removal(held);
                 self.count_evaluations(&scratch);
                 return;
             }
@@ -3774,6 +4511,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     .blend_pixel_with(col, row, Color::rgb(r, g, b), effective, mode);
             }
         }
+        self.release_removal(held);
         self.count_evaluations(&scratch);
     }
 
@@ -5120,6 +5858,8 @@ mod tests {
             self.cancel.cancel();
             Ok(Some(DecodedImage {
                 stencil: false,
+                family: ColorFamily::Rgb,
+                soft_masked: false,
                 interpolate: false,
                 width: 2,
                 height: 2,
@@ -5360,6 +6100,8 @@ mod tests {
             let (r, g, b) = self.color;
             Ok(Some(DecodedImage {
                 stencil: false,
+                family: ColorFamily::Rgb,
+                soft_masked: false,
                 interpolate: false,
                 width: 2,
                 height: 2,
@@ -5391,6 +6133,8 @@ mod tests {
             }
             Ok(Some(DecodedImage {
                 stencil: false,
+                family: ColorFamily::Rgb,
+                soft_masked: false,
                 interpolate: self.interpolate,
                 width: 2,
                 height: 2,
@@ -5462,6 +6206,8 @@ mod tests {
                 stencil: false,
                 interpolate: false,
                 reduced: None,
+                family: ColorFamily::Rgb,
+                soft_masked: false,
             })
         }
     }
@@ -5569,6 +6315,8 @@ mod tests {
                 stencil: false,
                 interpolate: false,
                 reduced,
+                family: ColorFamily::Rgb,
+                soft_masked: false,
             }))
         }
     }
@@ -5899,6 +6647,12 @@ mod tests {
                     stencil,
                     interpolate,
                     reduced: None,
+                    family: if stencil {
+                        ColorFamily::Other
+                    } else {
+                        ColorFamily::Rgb
+                    },
+                    soft_masked: false,
                 }));
             }
             let mut rgb = Vec::new();
@@ -5917,6 +6671,12 @@ mod tests {
                 stencil,
                 interpolate,
                 reduced: None,
+                family: if stencil {
+                    ColorFamily::Other
+                } else {
+                    ColorFamily::Rgb
+                },
+                soft_masked: false,
             }))
         }
     }
@@ -6248,6 +7008,7 @@ mod tests {
             self.size.set((request.width, request.height));
             Some(Tile {
                 canvas: Canvas::new(request.width, request.height, request.format, self.cell),
+                opaque: true,
                 warnings: Vec::new(),
             })
         }
@@ -6302,6 +7063,7 @@ mod tests {
             }
             Some(Tile {
                 canvas,
+                opaque: true,
                 warnings: Vec::new(),
             })
         }

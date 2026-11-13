@@ -7,8 +7,8 @@
 
 use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::state::{
-    BlackPointCompensation, BlendMode, ColorSource, GraphicsState, Halftone, LineCap, LineJoin,
-    Matrix, RenderingIntent, Rgb, TextRenderMode, Transfer,
+    BlackPointCompensation, BlendMode, ColorFamily, ColorSource, GraphicsState, Halftone, LineCap,
+    LineJoin, Matrix, RenderingIntent, Rgb, TextRenderMode, Transfer,
 };
 use crate::tokenizer::{Token, Tokenizer};
 use core::mem;
@@ -477,6 +477,17 @@ pub trait FontSource {
     fn resolve_ink(&self, space: &[u8], components: &[f64]) -> Option<[u8; 4]> {
         let _ = (space, components);
         None
+    }
+
+    /// The device space family a named space's colours are in
+    /// ([`ColorFamily`]): an `/Indexed` space's base's, a `/Separation` or
+    /// `/DeviceN` space's alternate's, a device space a default replaces its
+    /// substitute's. Asked once at `cs`, never per colour.
+    ///
+    /// The default reads the device names alone, which is right for a
+    /// source that names no resource spaces and no defaults.
+    fn color_family(&self, space: &[u8]) -> ColorFamily {
+        ColorFamily::of_device_name(space)
     }
 
     /// The colour `cs` resets a named space to (8.6.8), which each space's
@@ -1461,6 +1472,11 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     } else {
                         None
                     };
+                    let family = if remapped.is_some() {
+                        self.fonts.color_family(b"DeviceGray")
+                    } else {
+                        ColorFamily::Gray
+                    };
                     let (color, ink, source) = remapped.unwrap_or_else(|| {
                         let value = to_byte(v);
                         let color = Rgb {
@@ -1470,7 +1486,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                         };
                         (color, None, None)
                     });
-                    self.set_device_color(op == b"g", color, ink, source);
+                    self.set_device_color(op == b"g", color, ink, source, family);
                 }
             }
             b"rg" | b"RG" => {
@@ -1480,6 +1496,11 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     } else {
                         None
                     };
+                    let family = if remapped.is_some() {
+                        self.fonts.color_family(b"DeviceRGB")
+                    } else {
+                        ColorFamily::Rgb
+                    };
                     let (color, ink, source) = remapped.unwrap_or_else(|| {
                         let color = Rgb {
                             r: to_byte(r),
@@ -1488,7 +1509,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                         };
                         (color, None, None)
                     });
-                    self.set_device_color(op == b"rg", color, ink, source);
+                    self.set_device_color(op == b"rg", color, ink, source, family);
                 }
             }
             b"k" | b"K" => {
@@ -1500,11 +1521,16 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     } else {
                         None
                     };
+                    let family = if remapped.is_some() {
+                        self.fonts.color_family(b"DeviceCMYK")
+                    } else {
+                        ColorFamily::Cmyk
+                    };
                     let (color, ink, source) = remapped.unwrap_or_else(|| {
                         let ink = [to_byte(c), to_byte(m), to_byte(y), to_byte(k)];
                         (cmyk_to_rgb(c, m, y, k), Some(ink), None)
                     });
-                    self.set_device_color(op == b"k", color, ink, source);
+                    self.set_device_color(op == b"k", color, ink, source, family);
                 }
             }
             b"cs" | b"CS" => {
@@ -1534,7 +1560,8 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     })
                 });
                 let initial = resolved.unwrap_or(Rgb::BLACK);
-                self.set_color(fill, initial, Some(space), ink, source);
+                let family = self.fonts.color_family(&space);
+                self.set_color(fill, initial, Some(space), ink, source, Some(family));
             }
             b"sc" | b"SC" | b"scn" | b"SCN" => {
                 let fill = op == b"sc" || op == b"scn";
@@ -1573,7 +1600,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                                 family: None,
                                 components,
                             });
-                            self.set_color(fill, color, None, None, Some(source));
+                            self.set_color(fill, color, None, None, Some(source), None);
                         }
                     }
                     self.set_pattern(fill, name);
@@ -1583,6 +1610,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     return;
                 }
 
+                // A named space keeps the family `cs` gave it; a reading by
+                // count is in the family the count names, or its default's.
+                let mut family = None;
                 let (resolved, ink, source) = match &space {
                     Some(space) => {
                         let intent = self.intent();
@@ -1600,9 +1630,15 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     // asked by that device space's name (8.6.5.6).
                     None => {
                         let remapped = match self.defaults.remapped_by_count(components.len()) {
-                            Some(family) => self.remapped(family, components.clone()),
+                            Some(name) => {
+                                family = Some(self.fonts.color_family(name));
+                                self.remapped(name, components.clone())
+                            }
                             None => None,
                         };
+                        if remapped.is_none() {
+                            family = Some(ColorFamily::by_count(components.len()));
+                        }
                         match remapped {
                             Some((color, ink, source)) => (Some(color), ink, source),
                             None => (
@@ -1619,7 +1655,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     }
                 };
                 if let Some(color) = resolved {
-                    self.set_color(fill, color, space, ink, source);
+                    self.set_color(fill, color, space, ink, source, family);
                 }
             }
 
@@ -2027,8 +2063,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         color: Rgb,
         ink: Option<[u8; 4]>,
         source: Option<Arc<ColorSource>>,
+        family: ColorFamily,
     ) {
-        self.set_color(fill, color, None, ink, source);
+        self.set_color(fill, color, None, ink, source, Some(family));
         if fill {
             self.gs.fill_space = None;
         } else {
@@ -2037,8 +2074,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     }
 
     /// Applies a colour to the fill or stroke slot, with its DeviceCMYK
-    /// components when it has them, and what it was resolved from where the
-    /// seam resolved it.
+    /// components when it has them, what it was resolved from where the
+    /// seam resolved it, and its family where the operator says one (`None`
+    /// keeps the slot's).
     fn set_color(
         &mut self,
         fill: bool,
@@ -2046,6 +2084,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         space: Option<Vec<u8>>,
         ink: Option<[u8; 4]>,
         source: Option<Arc<ColorSource>>,
+        family: Option<ColorFamily>,
     ) {
         if fill {
             self.gs.fill_color = color;
@@ -2055,6 +2094,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             if let Some(space) = space {
                 self.gs.fill_space = Some(space);
             }
+            if let Some(family) = family {
+                self.gs.fill_family = family;
+            }
         } else {
             self.gs.stroke_color = color;
             self.gs.stroke_ink = ink;
@@ -2062,6 +2104,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             self.gs.stroke_source = source;
             if let Some(space) = space {
                 self.gs.stroke_space = Some(space);
+            }
+            if let Some(family) = family {
+                self.gs.stroke_family = family;
             }
         }
     }
@@ -4054,6 +4099,60 @@ mod tests {
         assert_eq!(states[2].fill_color, Rgb::BLACK, "to black, not white");
         assert_eq!(states[3].stroke_ink, Some([128, 0, 0, 0]), "`SC`");
         assert_eq!(states[4].stroke_ink, None, "`G` is light");
+    }
+
+    /// A colour carries the family its values are in: each device operator
+    /// its own, `cs` its space's (the seam's answer, here the device names'),
+    /// `sc` in a named space the family `cs` gave it and `sc` read by count
+    /// the family its count names; `Q` restores it with the colour, and the
+    /// page starts in DeviceGray (8.6.8).
+    #[test]
+    fn a_colour_carries_the_family_its_space_is_read_in() {
+        assert_eq!(
+            GraphicsState::new(Matrix::IDENTITY).fill_family,
+            ColorFamily::Gray
+        );
+        let mut d = RecordingDevice::new();
+        interpret(
+            b"0 0 m 1 1 l S \
+              0.5 G 0 0 m 1 1 l S \
+              1 0 0 RG 0 0 m 1 1 l S \
+              0 0 0 1 K 0 0 m 1 1 l S \
+              /DeviceRGB CS 0.1 0.2 0.3 SC 0 0 m 1 1 l S \
+              0.3 G 0.1 0.2 0.3 SC 0 0 m 1 1 l S \
+              0.3 G 0.1 0.2 0.3 0.4 SC 0 0 m 1 1 l S \
+              /CS0 CS 0 0 m 1 1 l S \
+              q 0.4 G Q 0 0 m 1 1 l S \
+              0.2 0.4 0.6 rg 0 0 m 1 1 l f",
+            Matrix::IDENTITY,
+            &mut d,
+            &CmykSpaces,
+        );
+        let strokes: Vec<ColorFamily> = d
+            .of_kind(EventKind::StrokePath)
+            .filter_map(Event::state)
+            .map(|state| state.stroke_family)
+            .collect();
+        assert_eq!(
+            strokes,
+            [
+                ColorFamily::Gray,
+                ColorFamily::Gray,
+                ColorFamily::Rgb,
+                ColorFamily::Cmyk,
+                ColorFamily::Rgb,
+                ColorFamily::Rgb,
+                ColorFamily::Cmyk,
+                ColorFamily::Other,
+                ColorFamily::Other,
+            ]
+        );
+        let fills: Vec<ColorFamily> = d
+            .of_kind(EventKind::FillPath)
+            .filter_map(Event::state)
+            .map(|state| state.fill_family)
+            .collect();
+        assert_eq!(fills, [ColorFamily::Rgb], "`rg` sets the fill's alone");
     }
 
     // -----------------------------------------------------------------------

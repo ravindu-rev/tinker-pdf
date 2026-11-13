@@ -201,7 +201,8 @@ per object:
   own words for "return its k operand unchanged" — since maximum removal
   written in 10.4.2.4's terms is that pair.
 - **In the leaf**, an ink canvas carries its conversion of light into ink as a
-  plain value, maximum removal or a pair of tables (`InkConversion`), which
+  plain value — a pair of tables, `InkTables`, put in force by
+  `Canvas::set_ink_tables`, or none for maximum removal — which
   `Canvas::encode` reads for `CmykA8`. The renderer sets it for a paint, and for
   a group's composite, and puts the device's own back after; a flat colour, a
   shading's pixel, an image's sample and a group's pixel all become ink there,
@@ -380,7 +381,7 @@ per object:
 ## Milestones
 
 1. **RC-08.2, the function keys.** The plane, the transfer functions on every
-   output, `ColorFamily`, `InkConversion` and 10.4.2.4. Exit:
+   output, `ColorFamily`, `InkTables` and 10.4.2.4. Exit:
    `device_state.rs`'s `a_transfer_function_maps_each_component_through_its_curve`
    — a fill, an image and a shading under one function and under four render as
    the page without them with each covered pixel passed through the curves,
@@ -390,10 +391,12 @@ per object:
    leaving the default where they are topmost; an opaque object over a
    transferred one taking its own; DeviceGray on the ink page transferred on K
    alone; a tile the page's; `black_generation_and_undercolour_removal_make_the_ink_the_test_computes`
-   — an `rg` fill, an RGB image and an RGB group on the ink page and in a
-   `/DeviceCMYK` group at 10.4.2.4's ink, a `g` fill at 10.4.2.3's and a `k`
-   fill at its own; `ext_gstate.rs`'s pins for these keys take their pixel
-   halves.
+   — an `rg` fill, an RGB image, an RGB group and an uncoloured pattern of
+   `[/Pattern /DeviceRGB]` on the ink page and in a `/DeviceCMYK` group at
+   10.4.2.4's ink, a `g` fill at 10.4.2.3's and a `k` fill at its own;
+   `a_glyph_takes_the_transfer_and_the_ink_tables` — a glyph drawn from its
+   own mask transferred and inked as a path is; `ext_gstate.rs`'s pins for
+   these keys take their pixel halves.
 2. **RC-08.3, flatness.** Exit: `device_state.rs`'s
    `flatness_sets_the_tolerance_a_curve_is_flattened_to` — a circle and an
    ellipse, filled, stroked, as a clip and as a glyph, under three `/FL` values,

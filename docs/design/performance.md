@@ -3202,7 +3202,11 @@ soft mask's — the clip and then the soft mask multiply into the window, after
 any hardening, a knockout group restores its backdrop under it (11.4.5), and
 `Canvas::fill_mask_inked` composites it with the fill colour, its ink, the fill
 alpha and the blend mode. Nothing of the clip, the soft mask or the group is in
-the mask, so one mask serves a glyph wherever it is clipped.
+the mask, so one mask serves a glyph wherever it is clipped. The paint's
+device-dependent state is held as `paint_inked` holds it
+([device-dependent-state.md](device-dependent-state.md)): the window times the
+clip, without the soft mask, is the glyph's shape for the rendering-parameter
+plane, and the ink tables are in force while it composites.
 
 #### The key, and the font in it
 

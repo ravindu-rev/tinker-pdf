@@ -8,7 +8,8 @@
 //! included, and each applied key's page also differs from the page without
 //! it, so a pair that agrees because neither applies anything fails. A key the
 //! engine stores for the row that applies it (`/SM`, `/OP`, ...) moves no
-//! pixel yet, so its page draws as the page without it.
+//! pixel yet, so its page draws as the page without it; the function keys
+//! draw as applied.
 //!
 //! `/CA`, `/ca`, `/BM` and `/SMask` have no operator twin; their pages are held
 //! to pinned pixels.
@@ -289,12 +290,18 @@ fn inverting_streams() -> Vec<String> {
     ]
 }
 
-/// **Every function key draws as the page without it**, until the row that
-/// applies it does; and **a soft mask's `/TR` is read as written**: a sampled
+/// **Every function key draws as it is applied** (RC-08.2,
+/// `docs/design/device-dependent-state.md`): a transfer function of `1 − x`
+/// — sampled, four calculators, or `/TR2`'s type 2 — maps each component of
+/// the opaque fill it is in force for, so the fill's pixels are the page
+/// without it inverted and the white it leaves is the page's; `/Identity` and
+/// `/Default` are the device's own; and black generation and undercolour
+/// removal, which convert DeviceRGB into ink, draw as the page without them on
+/// this light page. And **a soft mask's `/TR` is read as written**: a sampled
 /// and a calculator function, both streams, draw as the type 2 function of the
 /// same curve, and unlike the mask with no `/TR`.
 #[test]
-fn every_function_key_draws_as_the_page_without_it() {
+fn every_function_key_draws_as_applied() {
     let inverse = "<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>";
     let states = format!(
         "/TR << /TR 5 0 R >> /TRFour << /TR [6 0 R 6 0 R 6 0 R 6 0 R] >> \
@@ -331,10 +338,35 @@ fn every_function_key_draws_as_the_page_without_it() {
     let bitmaps = render_all(document_with(&states, &inverting_streams(), &contents));
 
     let without = &bitmaps[keys.len()];
+    // The fill, `5 5 30 30 re` on the 40 by 40 page: rows and columns 5 to 34.
+    let fill = |x: u32, y: u32| (5..35).contains(&x) && (5..35).contains(&y);
+    let mut inverted = without.data.clone();
+    for y in 0..without.height {
+        for x in 0..without.width {
+            if fill(x, y) {
+                let at = y as usize * without.stride + x as usize * 3;
+                for c in &mut inverted[at..at + 3] {
+                    *c = 255 - *c;
+                }
+            }
+        }
+    }
+    assert_ne!(inverted, without.data, "the fill is on the page");
     for (key, page) in keys.iter().zip(&bitmaps) {
+        let transferred = matches!(*key, "TR" | "TRFour" | "TR2");
         assert_eq!(
-            page.data, without.data,
-            "/{key}: a stored function moved a pixel before its row applies it"
+            &page.data,
+            if transferred {
+                &inverted
+            } else {
+                &without.data
+            },
+            "/{key}: {}",
+            if transferred {
+                "the fill is not the page without the transfer, inverted"
+            } else {
+                "the key moved a pixel on a light page"
+            }
         );
     }
     let [type2, type0, type4, untransferred] = [1, 2, 3, 4].map(|at| &bitmaps[keys.len() + at]);
