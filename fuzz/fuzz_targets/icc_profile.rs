@@ -19,7 +19,8 @@
 //! matrix and its curves when it is built, where a table declaring more than
 //! fifteen outputs, a stage past the tag's end, a singular matrix or a
 //! falling curve is a typed refusal (`docs/design/icc.md`, "The output
-//! transform"); and the connection-space value each intent's source gives,
+//! transform"), and the gamut tag beside it answers for the same values;
+//! and the connection-space value each intent's source gives,
 //! which that transform takes from another profile, is read for components
 //! of every count. A device link — class `link`, its connection-space field
 //! naming the device it converts to — reads its `D2B0` or `A2B0` (`mft1`,
@@ -116,7 +117,8 @@ fn link_all(link: &Link) {
 
 /// A transform out of the connection space must answer for any value a
 /// caller hands it: black, the PCS white, a Lab white, values past either end
-/// of the axis, and values that are not numbers.
+/// of the axis, and values that are not numbers; and so must its gamut tag,
+/// where the profile carries one.
 fn output_all(output: &Output) {
     for pcs in [
         [0.0, 0.0, 0.0],
@@ -127,6 +129,7 @@ fn output_all(output: &Output) {
         [f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
     ] {
         let _ = output.apply(pcs);
+        let _ = output.in_gamut(pcs);
     }
 }
 

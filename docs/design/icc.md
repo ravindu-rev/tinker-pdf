@@ -1156,9 +1156,15 @@ reading. The link is
 zero is in gamut and any other value out. The table interpolates, so a value
 is out of gamut where its interpolated output, in the table's own precision,
 is half a step or more — a step of 1/255 for an `mft1` or 8-bit `mBA ` grid,
-of 1/65 535 otherwise — and in gamut below it (RC-20.8). A profile with no
-`gamt` answers `None`, never in gamut. A proof's gamut warning is RC-05's use
-of it; nothing here maps a colour.
+of 1/65 535 otherwise — and in gamut below it (RC-20.8). The answer is
+`Output::in_gamut(pcs)`: the value taken as a `B2A*` table takes it, divided
+by the media white first under absolute colorimetric, and the table read
+with its grid's fractions as they are, in `f64`'s four operations, since the
+integer evaluator's 256ths of a cell and whole-step sums are coarser than
+the half step the answer turns on. A profile with no `gamt`, or one whose
+`gamt` does not read, answers `None`, never in gamut, and its transform
+compiles all the same. A proof's gamut warning is RC-05's use of it; nothing
+here maps a colour.
 
 ##### Named colours
 

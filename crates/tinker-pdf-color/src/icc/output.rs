@@ -34,8 +34,8 @@
 use std::sync::Arc;
 
 use super::{
-    compile_curve, fixed, round_shift, Curve, IccError, Intent, LinkSource, Lut, Model, Profile,
-    Step, CURVE_ENTRIES, ONE,
+    compile_curve, fixed, round_shift, Curve, IccError, Intent, LinkSource, Lut, MatrixStage,
+    Model, Profile, Step, CURVE_ENTRIES, ONE,
 };
 
 /// The most device channels a transform out of the connection space gives:
@@ -84,6 +84,30 @@ impl DeviceColour {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Output {
     inverse: Inverse,
+    /// The profile's gamut tag, where it carries one that reads.
+    gamut: Option<Gamut>,
+}
+
+/// A gamut tag (ICC.1 9.2.28), read beside the profile's output tables: a
+/// table from the connection space to one channel, zero in gamut and any
+/// other value out.
+#[derive(Clone, PartialEq)]
+struct Gamut {
+    lut: Arc<Lut>,
+    /// ICC-absolute colorimetry's media scale, which a value is divided by
+    /// before it enters, as it is before an output table.
+    media: Option<[f64; 3]>,
+}
+
+/// The table's precision and connection space, not its grid.
+impl std::fmt::Debug for Gamut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gamut")
+            .field("bits", &self.lut.bits)
+            .field("lab", &self.lut.lab)
+            .field("media", &self.media)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What an [`Output`] runs a connection-space value through.
@@ -163,10 +187,19 @@ impl Output {
     /// one giving another count than the data space has; and
     /// [`IccError::MissingTags`] for a profile carrying neither a `B2A*`
     /// table nor a model.
+    ///
+    /// The profile's gamut tag, `gamt`, is read beside the transform
+    /// ([`Output::in_gamut`]), and one that does not read refuses nothing: the
+    /// transform then answers no gamut.
     pub fn compile(profile: &Profile, intent: Intent) -> Result<Output, IccError> {
         let media = (intent == Intent::AbsoluteColorimetric)
             .then(|| profile.media_scale())
             .filter(|scale| *scale != [1.0; 3]);
+        let gamut = profile
+            .tables
+            .read_gamut()
+            .and_then(Result::ok)
+            .map(|lut| Gamut { lut, media });
         let mut passed_over = None;
         for step in intent.order() {
             let built = match step {
@@ -191,13 +224,46 @@ impl Output {
                 },
             };
             match built {
-                Ok(inverse) => return Ok(Output { inverse }),
+                Ok(inverse) => return Ok(Output { inverse, gamut }),
                 Err(error) => {
                     passed_over.get_or_insert(error);
                 }
             }
         }
         Err(passed_over.unwrap_or(IccError::MissingTags))
+    }
+
+    /// Whether `pcs`, a connection-space value as [`Output::apply`] takes
+    /// it, is in the gamut the profile's gamut tag describes (ICC.1 9.2.28):
+    /// `None` where the profile carries no `gamt` that reads, never in gamut
+    /// for want of one.
+    ///
+    /// The tag's table takes the value as a `B2A*` table does — divided by
+    /// the media white over the PCS white first under ICC-absolute
+    /// colorimetry, then encoded as its type defines its connection space —
+    /// to one channel, and 9.2.28 has an output of zero in gamut and any other
+    /// value out. The table interpolates, so the value is out of gamut where
+    /// its output is half a step of the table's own precision or more — a
+    /// step of 1/255 for an `mft1`, or an `mBA ` whose grid holds a byte an
+    /// entry, and of 1/65 535 otherwise — and in gamut below it
+    /// (`docs/design/icc.md`, "The gamut tag"). The output is read with its
+    /// grid's fractions as they are ([`exact_output`]), so a half step is
+    /// not lost to the integer evaluator's rounding. Nothing here maps a
+    /// colour.
+    #[must_use]
+    pub fn in_gamut(&self, pcs: [f64; 3]) -> Option<bool> {
+        let gamut = self.gamut.as_ref()?;
+        let pcs = match gamut.media {
+            Some(scale) => scale_connection(pcs, gamut.lut.lab, scale.map(|s| 1.0 / s)),
+            None => pcs,
+        };
+        let value = exact_output(&gamut.lut, gamut.lut.encode_connection(pcs));
+        let step = if gamut.lut.bits == 8 {
+            1.0 / 255.0
+        } else {
+            1.0 / 65535.0
+        };
+        Some(value < step / 2.0)
     }
 
     /// How many device channels the transform gives: three for a matrix/TRC
@@ -271,6 +337,89 @@ impl Output {
             }
         }
     }
+}
+
+/// A gamut tag's table at `encoded`, its three inputs in the table's currency
+/// over `0..=1`, as a real number over `0..=1`: its stages in the order its
+/// type runs them — the input or B curves, an `mBA `'s matrix and M curves,
+/// the grid, the output or A curve — each table read linearly and the grid
+/// multilinearly with its fractions as they are, in `f64`'s four operations,
+/// the same on every target. The integer evaluator rounds each fraction to a
+/// 256th of a cell and its grid's sum down to a whole step, which is the
+/// half step a gamut answer turns on (ICC.1 9.2.28).
+fn exact_output(lut: &Lut, encoded: [f64; 3]) -> f64 {
+    let mut coords = [0.0f64; 3];
+    for (channel, slot) in coords.iter_mut().enumerate() {
+        *slot = table_at(lut.input_tables.get(channel), encoded[channel]);
+    }
+    if lut.matrix_stage == MatrixStage::BeforeGrid {
+        if let Some(m) = &lut.matrix {
+            let [x, y, z] = coords;
+            coords = [0, 1, 2].map(|row| {
+                (m[3 * row] * x + m[3 * row + 1] * y + m[3 * row + 2] * z + m[9 + row])
+                    .clamp(0.0, 1.0)
+            });
+        }
+        if let Some(curves) = &lut.m_tables {
+            for (channel, slot) in coords.iter_mut().enumerate() {
+                *slot = table_at(curves.get(channel), *slot);
+            }
+        }
+    }
+    let value = if lut.clut.is_empty() {
+        coords[0]
+    } else {
+        let mut base = [0usize; 3];
+        let mut fraction = [0.0f64; 3];
+        let mut points = [2usize; 3];
+        for axis in 0..3 {
+            points[axis] = lut.grids.get(axis).copied().unwrap_or(2).max(2);
+            let scaled = coords[axis].clamp(0.0, 1.0) * (points[axis] - 1) as f64;
+            let index = (scaled.floor() as usize).min(points[axis] - 2);
+            base[axis] = index;
+            fraction[axis] = scaled - index as f64;
+        }
+        let mut sum = 0.0;
+        for corner in 0..8usize {
+            let mut weight = 1.0;
+            let mut offset = 0usize;
+            for axis in 0..3 {
+                let high = (corner >> (2 - axis)) & 1 == 1;
+                weight *= if high {
+                    fraction[axis]
+                } else {
+                    1.0 - fraction[axis]
+                };
+                offset = offset * points[axis] + base[axis] + usize::from(high);
+            }
+            let node = lut
+                .clut
+                .get(offset.saturating_mul(lut.outputs))
+                .copied()
+                .unwrap_or(0);
+            sum += weight * f64::from(node) / 65535.0;
+        }
+        sum
+    };
+    table_at(lut.output_tables.first(), value)
+}
+
+/// A sampled table at `x`, held to `0..=1`, read linearly between its two
+/// entries either side in `f64`, over `0..=1`; an absent or empty table is
+/// the identity.
+fn table_at(table: Option<&Vec<u16>>, x: f64) -> f64 {
+    let x = if x.is_nan() { 0.0 } else { x.clamp(0.0, 1.0) };
+    let Some(table) = table.filter(|table| !table.is_empty()) else {
+        return x;
+    };
+    let Some(last) = table.len().checked_sub(1).filter(|&last| last > 0) else {
+        return f64::from(table[0]) / 65535.0;
+    };
+    let position = x * last as f64;
+    let index = (position.floor() as usize).min(last - 1);
+    let fraction = position - index as f64;
+    let (a, b) = (f64::from(table[index]), f64::from(table[index + 1]));
+    (a + (b - a) * fraction) / 65535.0
 }
 
 /// A device link's transform (ICC.1 8.6): one device's values to another's,
@@ -672,6 +821,7 @@ mod tests {
                     invert_curve(&Curve::Gamma(2.2)).expect("inverts"),
                 ],
             },
+            gamut: None,
         };
         let grey = |lab: bool| Output {
             inverse: Inverse::Grey {
@@ -680,6 +830,7 @@ mod tests {
                 factor: i64::from(fixed(1.0 / 0.9)),
                 curve: invert_curve(&Curve::Identity).expect("inverts"),
             },
+            gamut: None,
         };
         for output in [matrix, grey(false), grey(true)] {
             for pcs in [
@@ -691,6 +842,7 @@ mod tests {
             ] {
                 let colour = output.apply(pcs);
                 assert_eq!(colour.channels().len(), output.channels(), "{pcs:?}");
+                assert_eq!(output.in_gamut(pcs), None, "no gamut tag, no answer");
             }
         }
     }

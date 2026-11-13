@@ -643,6 +643,10 @@ pub struct Tables {
     output_slots: [Option<usize>; 3],
     /// One a distinct `B2A*` element, in the order the tags first name them.
     outputs: Vec<Element<Lut>>,
+    /// The gamut tag, `gamt` (ICC.1 9.2.28): a table from the connection
+    /// space to one channel, kept unread, as a `B2A*` table is, until a
+    /// transform out of the connection space reads it.
+    gamut: Option<Element<Lut>>,
     /// A device link's `A2B0` and `D2B0`, from one device to another
     /// (ICC.1 8.6): located only for a profile of class `link`, and never
     /// an intent's table.
@@ -768,18 +772,21 @@ impl Tables {
     /// The tables at the elements `places` names — `A2B0`, `A2B1` and
     /// `A2B2`'s offset and size in `bytes`, where the profile carries them —
     /// the pipelines at the elements `pipeline_places` names, `D2B0` to
-    /// `D2B3`'s, and the other direction's tables at the elements
-    /// `output_places` names, `B2A0` to `B2A2`'s, none of them read yet.
+    /// `D2B3`'s, the other direction's tables at the elements
+    /// `output_places` names, `B2A0` to `B2A2`'s, and the gamut tag at
+    /// `gamut_place`, none of them read yet.
     fn locate(
         places: [Option<(usize, usize)>; 3],
         pipeline_places: [Option<(usize, usize)>; 4],
         output_places: [Option<(usize, usize)>; 3],
+        gamut_place: Option<(usize, usize)>,
         bytes: &[u8],
         lab: bool,
     ) -> Result<Tables, IccError> {
         let (slots, tables) = Element::locate(places, bytes)?;
         let (pipeline_slots, pipelines) = Element::locate(pipeline_places, bytes)?;
         let (output_slots, outputs) = Element::locate(output_places, bytes)?;
+        let (_, mut gamut) = Element::locate([gamut_place], bytes)?;
         Ok(Tables {
             slots,
             tables,
@@ -787,6 +794,7 @@ impl Tables {
             pipelines,
             output_slots,
             outputs,
+            gamut: gamut.pop(),
             link: None,
             lab,
         })
@@ -802,6 +810,7 @@ impl Tables {
             pipelines: Vec::new(),
             output_slots: [None; 3],
             outputs: Vec::new(),
+            gamut: None,
             link: None,
             lab,
         }
@@ -834,6 +843,14 @@ impl Tables {
     /// `channels` device channels, read now if nothing has read it yet.
     fn read_output(&self, element: &Element<Lut>, channels: usize) -> Result<Arc<Lut>, IccError> {
         element.read(|bytes| read_lut(bytes, self.lab, Direction::Output { channels }))
+    }
+
+    /// The gamut tag's table, from the connection space to one channel, read
+    /// now if nothing has read it yet; `None` where the profile carries no
+    /// `gamt`.
+    fn read_gamut(&self) -> Option<Result<Arc<Lut>, IccError>> {
+        let element = self.gamut.as_ref()?;
+        Some(element.read(|bytes| read_lut(bytes, self.lab, Direction::Output { channels: 1 })))
     }
 
     /// The `D2B*` pipeline at `element`, read now if nothing has read it yet.
@@ -1090,6 +1107,10 @@ pub struct Lut {
     lab: bool,
     /// How the table encodes a Lab connection space in its currency.
     lab_scale: LabScale,
+    /// How many bits the table's grid holds a value in: 8 for an `mft1` and
+    /// a v4 grid of one byte an entry, 16 otherwise. A gamut tag's answer is
+    /// read in it (ICC.1 9.2.28, [`Output::in_gamut`]).
+    bits: u32,
 }
 
 /// How a table encodes `L*a*b*` in its 16-bit currency (ICC.1 6.3.4.2,
@@ -2168,6 +2189,7 @@ impl Profile {
                     place(b"D2B3"),
                 ],
                 [place(b"B2A0"), place(b"B2A1"), place(b"B2A2")],
+                place(b"gamt"),
                 bytes,
                 lab,
             )?
@@ -2447,6 +2469,7 @@ fn read_lut(data: &[u8], lab: bool, direction: Direction) -> Result<Lut, IccErro
         } else {
             LabScale::Full
         },
+        bits: if wide { 16 } else { 8 },
     })
 }
 
@@ -2582,13 +2605,13 @@ fn read_mab(data: &[u8], lab: bool, link: Option<(usize, usize)>) -> Result<Lut,
         read_curve_run(data, a_at, inputs)?
     };
 
-    let (grids, clut) = if clut_at == 0 {
+    let (grids, clut, bits) = if clut_at == 0 {
         // No grid: every input passes straight through to the M stage, which
         // only makes sense when there are as many of one as the other.
         if inputs != outputs {
             return Err(IccError::UnsupportedSpace);
         }
-        (vec![2; inputs], Vec::new())
+        (vec![2; inputs], Vec::new(), 16)
     } else {
         read_mab_clut(data, clut_at, inputs, outputs)?
     };
@@ -2620,6 +2643,7 @@ fn read_mab(data: &[u8], lab: bool, link: Option<(usize, usize)>) -> Result<Lut,
         input_matrix: None,
         lab,
         lab_scale: LabScale::Full,
+        bits,
     })
 }
 
@@ -2678,13 +2702,13 @@ fn read_mba(data: &[u8], lab: bool, channels: usize) -> Result<Lut, IccError> {
     } else {
         Some(read_curve_run(data, m_at, inputs)?)
     };
-    let (grids, clut) = if clut_at == 0 {
+    let (grids, clut, bits) = if clut_at == 0 {
         // No grid: the M stage's channels are the outputs, which only makes
         // sense when there are as many of one as the other (10.11.5).
         if inputs != outputs {
             return Err(IccError::UnsupportedSpace);
         }
-        (vec![2; inputs], Vec::new())
+        (vec![2; inputs], Vec::new(), 16)
     } else {
         read_mab_clut(data, clut_at, inputs, outputs)?
     };
@@ -2709,6 +2733,7 @@ fn read_mba(data: &[u8], lab: bool, channels: usize) -> Result<Lut, IccError> {
         input_matrix: None,
         lab,
         lab_scale: LabScale::Full,
+        bits,
     })
 }
 
@@ -2740,13 +2765,13 @@ fn read_v4_matrix(reader: &Reader<'_>, at: usize) -> Result<Option<[f64; 12]>, I
 }
 
 /// A v4 table's CLUT, `mAB `'s and `mBA `'s alike: sixteen grid counts, a
-/// precision byte, then the table.
+/// precision byte, then the table; with the bits an entry holds, 8 or 16.
 fn read_mab_clut(
     data: &[u8],
     at: usize,
     inputs: usize,
     outputs: usize,
-) -> Result<(Vec<usize>, Vec<u16>), IccError> {
+) -> Result<(Vec<usize>, Vec<u16>, u32), IccError> {
     let head = data.get(at..).ok_or(IccError::MalformedTag)?;
     let mut grids = Vec::with_capacity(inputs);
     let mut points: usize = 1;
@@ -2783,7 +2808,7 @@ fn read_mab_clut(
             .collect(),
         _ => return Err(IccError::MalformedTag),
     };
-    Ok((grids, clut))
+    Ok((grids, clut, u32::from(precision) * 8))
 }
 
 /// An `XYZType` tag: a signature, four reserved bytes, then one `XYZNumber`.
@@ -3724,6 +3749,7 @@ impl Tables {
             .tables
             .iter()
             .chain(&self.outputs)
+            .chain(&self.gamut)
             .map(|table| table.held_bound(Lut::held_bytes, |raw| lut_bound(raw.len())));
         let pipelines = self
             .pipelines
@@ -3767,6 +3793,7 @@ impl Tables {
             .tables
             .iter()
             .chain(&self.outputs)
+            .chain(&self.gamut)
             .map(|table| table.held(Lut::held_bytes))
             .sum();
         let pipelines: usize = self
@@ -4013,7 +4040,10 @@ pub(crate) mod tests {
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 14] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 15] = [
+            // [`b2a_seed`]'s profile with a gamut tag beside its `B2A0`: the
+            // seed that reaches the `gamt` reader and its answer.
+            ("gamut-mft2-cmyk", gamut_seed(), Reaches::Output),
             // A CMYK-to-CMYK device link carrying a `D2B0`, a matrix that
             // swaps two inks and halves a third, and an `mft2` `A2B0` beside
             // it: the seed that reaches the link readers, the elements first
@@ -4225,6 +4255,46 @@ pub(crate) mod tests {
                     graded_mft2(3, 4, |node, channel| {
                         (((node * 5 + channel * 3) % 17) * 3855) as u16
                     }),
+                ),
+            ],
+        )
+    }
+
+    /// The `gamut-mft2-cmyk` seed: [`b2a_seed`]'s two tables, and a `gamt`
+    /// (ICC.1 9.2.28), an `mft2` from the connection space to one channel
+    /// over a two-point grid, whose corners holding at most one full
+    /// component are zero, in gamut, and the rest `FFFFh`, out.
+    fn gamut_seed() -> Vec<u8> {
+        build(
+            b"CMYK",
+            b"Lab ",
+            &[
+                (
+                    *b"A2B0",
+                    graded_mft2(4, 3, |node, channel| match channel {
+                        0 => 0xFF00 - node.count_ones() as u16 * 0x3000,
+                        _ => 0x8000,
+                    }),
+                ),
+                (
+                    *b"B2A0",
+                    graded_mft2(3, 4, |node, channel| {
+                        (((node * 5 + channel * 3) % 17) * 3855) as u16
+                    }),
+                ),
+                (
+                    *b"gamt",
+                    graded_mft2(
+                        3,
+                        1,
+                        |node, _| {
+                            if node.count_ones() <= 1 {
+                                0
+                            } else {
+                                0xFFFF
+                            }
+                        },
+                    ),
                 ),
             ],
         )
@@ -8859,5 +8929,135 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
                 "channel {channel}: {got:?} against {want:?}"
             );
         }
+    }
+
+    // ---- the gamut tag -----------------------------------------------------
+
+    /// **A gamut tag is read beside the output tables** (ICC.1 9.2.28): kept
+    /// unread at parse, read when a transform out of the connection space
+    /// first asks, from the connection space to one channel. Each table
+    /// type says the precision its answer is read in: 8 bits for an `mft1`
+    /// and an `mBA ` whose grid holds a byte an entry, 16 for an `mft2` and
+    /// an `mBA ` of two. The seed's corners holding at most one full
+    /// component answer in gamut and the rest out; a `gamt` of three outputs
+    /// does not read and answers none, its transform compiled all the same;
+    /// a profile of tables alone carrying only a `gamt` has no transform out
+    /// of the connection space for it to stand beside; and the tag is
+    /// counted in the profile's bound, read or not.
+    #[test]
+    fn a_gamut_tag_is_read_beside_the_output_tables() {
+        let profile = Profile::parse(&gamut_seed()).expect("the gamut seed parses");
+        let gamut = profile.tables.gamut.as_ref().expect("a gamt element");
+        assert!(gamut.read.get().is_none(), "unread at parse");
+        let bound = profile.tables.held_bound();
+        let output = Output::compile(&profile, Intent::RelativeColorimetric).expect("a B2A0");
+        assert!(
+            profile
+                .tables
+                .gamut
+                .as_ref()
+                .and_then(|g| g.read.get())
+                .is_some(),
+            "read by the transform out of the connection space"
+        );
+        assert!(
+            profile.tables.held_bound() <= bound,
+            "the bound only falls as it is read"
+        );
+        // The legacy Lab encoding (10.8), whose full currency is 65 535 over
+        // 65 280 of the space: each corner of the encoded cube in `L*a*b*`.
+        let reach = 65535.0 / 65280.0;
+        let corner = |bits: [u8; 3]| -> [f64; 3] {
+            let [l, a, b] = bits.map(f64::from);
+            [
+                l * 100.0 * reach,
+                a * 255.0 * reach - 128.0,
+                b * 255.0 * reach - 128.0,
+            ]
+        };
+        for node in 0..8usize {
+            let bits = [
+                ((node >> 2) & 1) as u8,
+                ((node >> 1) & 1) as u8,
+                (node & 1) as u8,
+            ];
+            let pcs = corner(bits);
+            let want = node.count_ones() <= 1;
+            assert_eq!(output.in_gamut(pcs), Some(want), "corner {node}: {pcs:?}");
+        }
+
+        for (tag, bits) in [
+            (graded_mft2(3, 1, |_, _| 0), 16),
+            (
+                {
+                    let mut eight = b"mft1".to_vec();
+                    eight.extend_from_slice(&[0; 4]);
+                    eight.extend_from_slice(&[3, 1, 2, 0]);
+                    for entry in [1i32, 0, 0, 0, 1, 0, 0, 0, 1] {
+                        eight.extend_from_slice(&(entry << 16).to_be_bytes());
+                    }
+                    for _ in 0..3 {
+                        eight.extend((0..=255u8).collect::<Vec<u8>>());
+                    }
+                    eight.extend_from_slice(&[0; 8]);
+                    eight.extend((0..=255u8).collect::<Vec<u8>>());
+                    eight
+                },
+                8,
+            ),
+            (
+                V4Stages {
+                    b: identities(3),
+                    clut: Some((vec![2, 2, 2], vec![0; 8])),
+                    ..V4Stages::default()
+                }
+                .tag(b"mBA ", 3, 1),
+                16,
+            ),
+        ] {
+            let lut = read_lut(&tag, true, Direction::Output { channels: 1 })
+                .unwrap_or_else(|error| panic!("{bits} bits: {error:?}"));
+            assert_eq!(lut.bits, bits);
+        }
+        let mut byte_grid = V4Stages {
+            b: identities(3),
+            clut: Some((vec![2, 2, 2], vec![0; 8])),
+            ..V4Stages::default()
+        }
+        .tag(b"mBA ", 3, 1);
+        let at = stage_offset(&byte_grid, 3);
+        byte_grid[at + 16] = 1;
+        let lut = read_lut(&byte_grid, true, Direction::Output { channels: 1 })
+            .expect("a grid of a byte an entry");
+        assert_eq!(lut.bits, 8, "an mBA whose grid holds a byte an entry");
+
+        // Three outputs: the tag does not read, and answers none.
+        let broken = build(
+            b"CMYK",
+            b"Lab ",
+            &[
+                (*b"A2B0", graded_mft2(4, 3, |_, _| 0x8000)),
+                (*b"B2A0", graded_mft2(3, 4, |_, _| 0)),
+                (*b"gamt", graded_mft2(3, 3, |_, _| 0)),
+            ],
+        );
+        let broken = Profile::parse(&broken).expect("the tables read");
+        let output = Output::compile(&broken, Intent::Perceptual).expect("a B2A0");
+        assert_eq!(output.in_gamut([50.0, 0.0, 0.0]), None);
+
+        // A gamut tag alone stands beside nothing.
+        let alone = build(
+            b"CMYK",
+            b"Lab ",
+            &[
+                (*b"A2B0", graded_mft2(4, 3, |_, _| 0x8000)),
+                (*b"gamt", graded_mft2(3, 1, |_, _| 0)),
+            ],
+        );
+        let alone = Profile::parse(&alone).expect("the A2B0 reads");
+        assert_eq!(
+            Output::compile(&alone, Intent::RelativeColorimetric),
+            Err(IccError::MissingTags)
+        );
     }
 }

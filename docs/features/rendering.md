@@ -155,9 +155,18 @@ a curve that decreases anywhere or never rises, is refused as
 `IccError::NoInverse`, and a profile carrying neither a `B2A*` table nor a
 model as `MissingTags`. `Profile::connection_value(intent, components)` is
 the forward half a transform out of another profile takes: the value the
-intent's source gives, in the profile's own connection space. No render
-converts through either; they are the colour crate's transforms toward a
-device.
+intent's source gives, in the profile's own connection space. The profile's
+**gamut tag**, `gamt` (9.2.28), is read beside its output tables:
+`Output::in_gamut(pcs)` takes the value as a `B2A*` table does — divided by
+the media white first under absolute colorimetric, encoded as the tag's type
+encodes the connection space — through the tag's `mft1`, `mft2` or `mBA `
+table to one channel, read with its grid's fractions as they are, and
+answers out of gamut where that is half a step of the table's own precision
+or more (1/255 for an `mft1` and an `mBA ` whose grid holds a byte an entry,
+1/65 535 otherwise) and in gamut below it; a profile with no `gamt`, or one
+whose `gamt` does not read, answers none, never in gamut. Nothing maps a
+colour by it. No render converts through either transform; they are the
+colour crate's transforms toward a device.
 
 **A device link**, a profile of class `link` (ICC.1 8.6), takes one device's
 values to another's: its data space is the space it takes, and its

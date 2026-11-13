@@ -2253,3 +2253,240 @@ fn a_link_names_its_output_space_in_the_connection_space_field() {
         "three inputs for a four-channel data space"
     );
 }
+
+// ---- the gamut tag -------------------------------------------------------------
+//
+// `gamt` (ICC.1 9.2.28) is a table from the connection space to one channel,
+// in `lut8Type`, `lut16Type` or `lutBToAType`: an output of zero is in gamut
+// and any other value out. The table interpolates, so a value is out of gamut
+// where its output, in the table's own precision, is half a step or more.
+
+/// The structures a gamut tag takes, with the bits its grid holds a value in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GamutForm {
+    /// `lut8Type`.
+    Lut8,
+    /// `lut16Type`.
+    Lut16,
+    /// `lutBToAType` whose grid holds a byte an entry.
+    BToA8,
+    /// `lutBToAType` whose grid holds two bytes an entry.
+    BToA16,
+}
+
+impl GamutForm {
+    /// The most the grid's entries hold: 255 for a byte, 65 535 for two.
+    fn top(self) -> u16 {
+        match self {
+            GamutForm::Lut8 | GamutForm::BToA8 => 255,
+            GamutForm::Lut16 | GamutForm::BToA16 => 65_535,
+        }
+    }
+}
+
+/// Grid points along each axis of the gamut tables here.
+const GAMUT_GRID: usize = 5;
+
+/// Whether node `(i, j, k)` of a [`GAMUT_GRID`]-point grid is in the gamut:
+/// the cube of nodes `1..=3` on every axis, a quarter of the way in from each
+/// end of the encoded connection space.
+fn in_the_box(i: usize, j: usize, k: usize) -> bool {
+    [i, j, k].iter().all(|index| (1..=3).contains(index))
+}
+
+/// A `gamt` tag of `form` over the connection space's three channels to one,
+/// identity curves either side of a [`GAMUT_GRID`]-point grid whose nodes in
+/// the box are zero and whose others are the grid's top.
+fn gamut_tag(form: GamutForm) -> Vec<u8> {
+    let top = form.top();
+    let mut nodes = Vec::new();
+    for i in 0..GAMUT_GRID {
+        for j in 0..GAMUT_GRID {
+            for k in 0..GAMUT_GRID {
+                nodes.push(if in_the_box(i, j, k) { 0 } else { top });
+            }
+        }
+    }
+    match form {
+        GamutForm::Lut8 | GamutForm::Lut16 => {
+            let wide = form == GamutForm::Lut16;
+            V2Table {
+                wide,
+                inputs: 3,
+                outputs: 1,
+                grid: GAMUT_GRID,
+                matrix: IDENTITY,
+                input_curves: vec![
+                    if wide {
+                        vec![0, 65_535]
+                    } else {
+                        byte_curve(1.0)
+                    };
+                    3
+                ],
+                clut: nodes,
+                output_curves: vec![if wide {
+                    vec![0, 65_535]
+                } else {
+                    byte_curve(1.0)
+                }],
+            }
+            .tag()
+        }
+        GamutForm::BToA8 | GamutForm::BToA16 => {
+            fn pad(out: &mut Vec<u8>) {
+                while out.len() % 4 != 0 {
+                    out.push(0);
+                }
+            }
+            let identity = || {
+                let mut curve = b"curv".to_vec();
+                curve.extend_from_slice(&[0; 8]);
+                curve
+            };
+            let mut out = b"mBA ".to_vec();
+            out.extend_from_slice(&[0; 4]);
+            out.extend_from_slice(&[3, 1, 0, 0]);
+            out.extend_from_slice(&[0; 20]);
+            let b_at = out.len() as u32;
+            for _ in 0..3 {
+                out.extend_from_slice(&identity());
+            }
+            let clut_at = out.len() as u32;
+            let mut counts = [0u8; 16];
+            counts[..3].fill(GAMUT_GRID as u8);
+            out.extend_from_slice(&counts);
+            let bytes = if form == GamutForm::BToA8 { 1 } else { 2 };
+            out.extend_from_slice(&[bytes, 0, 0, 0]);
+            for node in &nodes {
+                if bytes == 1 {
+                    out.push(*node as u8);
+                } else {
+                    out.extend_from_slice(&node.to_be_bytes());
+                }
+            }
+            pad(&mut out);
+            for (slot, offset) in [(0, b_at), (3, clut_at)] {
+                out[12 + 4 * slot..16 + 4 * slot].copy_from_slice(&offset.to_be_bytes());
+            }
+            out
+        }
+    }
+}
+
+/// The table's output at `u`, a point of the encoded connection space's cube,
+/// over 0..=1: the box's grid interpolated multilinearly, the identity curves
+/// either side changing nothing.
+fn gamut_value(form: GamutForm, u: [f64; 3]) -> f64 {
+    let last = (GAMUT_GRID - 1) as f64;
+    let mut base = [0usize; 3];
+    let mut fraction = [0.0f64; 3];
+    for axis in 0..3 {
+        let p = u[axis].clamp(0.0, 1.0) * last;
+        let index = (p.floor() as usize).min(GAMUT_GRID - 2);
+        base[axis] = index;
+        fraction[axis] = p - index as f64;
+    }
+    let mut value = 0.0;
+    for corner in 0..8usize {
+        let bits = [(corner >> 2) & 1, (corner >> 1) & 1, corner & 1];
+        let weight: f64 = (0..3)
+            .map(|axis| {
+                if bits[axis] == 1 {
+                    fraction[axis]
+                } else {
+                    1.0 - fraction[axis]
+                }
+            })
+            .product();
+        let [i, j, k] = [0, 1, 2].map(|axis| base[axis] + bits[axis]);
+        if !in_the_box(i, j, k) {
+            value += weight * f64::from(form.top());
+        }
+    }
+    value / f64::from(form.top())
+}
+
+/// **A gamut tag answers in and out where its table says** (ICC.1 9.2.28).
+/// An RGB profile over XYZ carries a `gamt` whose five-point grid is zero in
+/// a box of nodes and its top elsewhere, in each structure the tag takes —
+/// `mft1`, `mft2` and an `mBA ` whose grid holds one byte an entry or two.
+/// At points inside the box, on its faces and corners, a quarter of a cell
+/// past its faces, and far outside it, the transform out of the connection
+/// space answers in gamut exactly where the table's output recomputed here is
+/// below half a step of its own precision — 1/255 for the one-byte grids,
+/// 1/65 535 for the others — the value encoded in `u1Fixed15` on the way in.
+/// Under absolute colorimetric the value is divided by the media white over
+/// the PCS white first, so a value on the paper's white answers as its
+/// relative value does. A profile with no `gamt` answers none rather than in,
+/// and so does one whose `gamt` does not read, its transform compiled all the
+/// same.
+#[test]
+fn a_gamut_tag_answers_in_and_out_where_its_table_says() {
+    let quarter = 0.25 / (GAMUT_GRID - 1) as f64;
+    let points: Vec<([f64; 3], &str)> = vec![
+        ([0.5, 0.5, 0.5], "inside the box"),
+        ([0.375, 0.625, 0.4], "inside the box, between its nodes"),
+        ([0.25, 0.5, 0.5], "on a face"),
+        ([0.75, 0.75, 0.75], "on a corner"),
+        ([0.25, 0.25, 0.25], "on the opposite corner"),
+        ([0.25 - quarter, 0.5, 0.5], "a quarter cell past a face"),
+        ([0.75, 0.75, 0.75 + quarter], "a quarter cell past a corner"),
+        (
+            [0.5, 0.75 + quarter, 0.5],
+            "a quarter cell past another face",
+        ),
+        ([0.9, 0.1, 0.9], "far outside"),
+        ([0.0, 0.0, 0.0], "black"),
+        ([1.0, 1.0, 1.0], "the top of the cube"),
+    ];
+    let scale = media_scale();
+    for form in [
+        GamutForm::Lut8,
+        GamutForm::Lut16,
+        GamutForm::BToA8,
+        GamutForm::BToA16,
+    ] {
+        let mut tags = rgb_model(2.2);
+        tags.extend([(*b"gamt", gamut_tag(form)), (*b"wtpt", xyz_tag(PAPER))]);
+        let parsed = Profile::parse(&profile(b"RGB ", b"XYZ ", &tags)).expect("the profile parses");
+        let relative = Output::compile(&parsed, Intent::RelativeColorimetric).expect("the model");
+        let absolute = Output::compile(&parsed, Intent::AbsoluteColorimetric).expect("the model");
+        let step = 1.0 / f64::from(form.top());
+        for (u, what) in &points {
+            let want = gamut_value(form, *u) < step / 2.0;
+            // `u1Fixed15`: 1.0 of the connection space at 8000h of 65 535.
+            let xyz = u.map(|v| v * 65535.0 / 32768.0);
+            assert_eq!(
+                relative.in_gamut(xyz),
+                Some(want),
+                "{form:?}, {what} ({u:?}): the table's output is {}",
+                gamut_value(form, *u)
+            );
+            let on_paper = [0, 1, 2].map(|k| xyz[k] * scale[k]);
+            assert_eq!(
+                absolute.in_gamut(on_paper),
+                Some(want),
+                "{form:?}, {what}, under absolute colorimetric"
+            );
+        }
+        // The box and its outside are both reached, so the answers above
+        // are the table's and not one value throughout.
+        let some_in = points.iter().any(|(u, _)| gamut_value(form, *u) == 0.0);
+        let some_out = points.iter().any(|(u, _)| gamut_value(form, *u) > 0.2);
+        assert!(some_in && some_out, "{form:?}: the points reach both sides");
+    }
+
+    // No `gamt`: none, never in.
+    let plain = Profile::parse(&profile(b"RGB ", b"XYZ ", &rgb_model(2.2))).expect("a profile");
+    let output = Output::compile(&plain, Intent::RelativeColorimetric).expect("the model");
+    assert_eq!(output.in_gamut([0.5, 0.5, 0.4]), None);
+
+    // A `gamt` that does not read — three outputs where it gives one — is
+    // none as well, and refuses nothing.
+    let mut tags = rgb_model(2.2);
+    tags.push((*b"gamt", lut16(3).tag()));
+    let broken = Profile::parse(&profile(b"RGB ", b"XYZ ", &tags)).expect("a profile");
+    let output = Output::compile(&broken, Intent::RelativeColorimetric).expect("the model");
+    assert_eq!(output.in_gamut([0.5, 0.5, 0.4]), None);
+}
