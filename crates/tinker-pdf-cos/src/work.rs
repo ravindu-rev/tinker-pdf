@@ -174,6 +174,12 @@ pub struct Stats {
     ///
     /// Counted by the facade's resource scopes.
     pub graphics_states_read: u64,
+    /// Pages interpreted for a reading-order inference: each page whose
+    /// content an inference ran, for its own order or for a neighbour's
+    /// margin bands. A batch of pages runs each once.
+    ///
+    /// Counted by the facade's reading-order inference.
+    pub pages_interpreted: u64,
     /// Runs of a stream's filter chain: each time an operation read a
     /// stream's bytes decoded, whatever the chain returned — a refusal, and
     /// output stopped at the decode ceiling, included. A stream read twice is
@@ -258,6 +264,8 @@ pub enum Counter {
     FunctionsRead,
     /// [`Stats::graphics_states_read`].
     GraphicsStatesRead,
+    /// [`Stats::pages_interpreted`].
+    PagesInterpreted,
 }
 
 impl Stats {
@@ -291,6 +299,7 @@ impl Stats {
             self.color_spaces_parsed,
             self.functions_read,
             self.graphics_states_read,
+            self.pages_interpreted,
             self.streams_decoded,
         ]
         .into_iter()
@@ -321,6 +330,7 @@ impl Stats {
             Counter::ColorSpacesParsed => &mut self.color_spaces_parsed,
             Counter::FunctionsRead => &mut self.functions_read,
             Counter::GraphicsStatesRead => &mut self.graphics_states_read,
+            Counter::PagesInterpreted => &mut self.pages_interpreted,
         }
     }
 }
@@ -377,6 +387,9 @@ impl Add for Stats {
             graphics_states_read: self
                 .graphics_states_read
                 .saturating_add(other.graphics_states_read),
+            pages_interpreted: self
+                .pages_interpreted
+                .saturating_add(other.pages_interpreted),
             streams_decoded: self.streams_decoded.saturating_add(other.streams_decoded),
             most_decodes_of_one_stream: self
                 .most_decodes_of_one_stream
@@ -483,7 +496,7 @@ mod tests {
     use super::*;
 
     /// Every counter, so a test of one property covers them all.
-    const ALL: [Counter; 21] = [
+    const ALL: [Counter; 22] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::FontDictionariesResolved,
@@ -505,6 +518,7 @@ mod tests {
         Counter::ColorSpacesParsed,
         Counter::FunctionsRead,
         Counter::GraphicsStatesRead,
+        Counter::PagesInterpreted,
     ];
 
     #[test]

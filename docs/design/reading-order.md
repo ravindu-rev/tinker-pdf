@@ -199,9 +199,12 @@ looked for, so a head across the page is never a spanner, and are read first
 and last with their roles; a caller that wants them gone filters on the
 role. The window is the pages around the page: `RUNNING_WINDOW` (16) pages,
 half before and half after, because page 300's running head names its
-chapter and is not on pages 1 to 16. `Document::inferred_orders` reads each
-page's margins once for a whole range; `Page::inferred_order`,
-`Document::inferred_order` and it give the same answer. With fewer than two
+chapter and is not on pages 1 to 16. `Document::inferred_orders` interprets
+each page of a range once, for its own order and for its neighbours' margins,
+holding at most half a window of pages ahead of the one it infers, and
+`Document::inferred_pages` hands the same orders out a page at a time;
+`Page::inferred_order`, `Document::inferred_order` and they give the same
+answer. With fewer than two
 other pages to compare — a one-page document — a block wholly in a band is
 `Unplaced` where it stands and `InferenceWarning::NoCrossPageEvidence` says
 why; nothing is called a running head on no evidence. Each neighbour is
@@ -354,7 +357,15 @@ nothing moved; a small source line under a table's bottom rule is body, not
 a footnote; a book's bordered table moves nothing and is one `Table` block.
 Every `InferenceWarning` variant is reached by a fixture — `VerticalWriting`
 and `Declined { VerticalWriting }` by a hand-assembled `/Identity-V` page,
-since the document builder writes no vertical font.
+since the document builder writes no vertical font. A forty-page untagged book
+whose furniture is found only across its pages interprets forty pages inferred
+as a batch, each order the one its page gets alone, where a page asked alone
+interprets its whole window again; a batch over part of it, its pages and the
+neighbours outside them once each; and the tagged book's pages once each,
+declined for their tree or with it hidden
+(`batch_inference_interprets_each_page_once`). `reading_order.rs`'s own
+`a_batch_holds_at_most_half_a_window_ahead` holds the batch to keeping at most
+half a window of pages ahead of the one it infers.
 
 **What none of this measures.** Whether the producer's order is the one a
 person would choose. A tagging tool that emits structure in stream order —

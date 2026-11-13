@@ -125,8 +125,8 @@ pub use pdfx::{
 /// geometry and labelled as such: [`Page::text_in`], [`Page::inferred_order`]
 /// (`docs/design/reading-order.md`).
 pub use reading_order::{
-    DeclineReason, InferenceOptions, InferenceWarning, InferredBlock, InferredOrder, OrderedText,
-    ReadingOrder, Role,
+    DeclineReason, InferenceOptions, InferenceWarning, InferredBlock, InferredOrder, InferredPages,
+    OrderedText, ReadingOrder, Role,
 };
 pub use signature::{
     Anchor, Coverage, CoverageDefect, SecurityStore, SecurityStoreWarning, Signature,

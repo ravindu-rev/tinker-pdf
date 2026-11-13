@@ -661,7 +661,9 @@ by, both its readings at once, the first time it is asked about the name;
 shading's, a tint transform, a stitching function's piece, a graphics
 state's — once an object, a stitching function once for each depth it is read
 at; `graphics_states_read`, each graphics state a scope reads out of
-`/ExtGState`, at the first `gs` of its name; and
+`/ExtGState`, at the first `gs` of its name; `pages_interpreted`, each page a
+reading-order inference interprets, which no render does
+([content and text](content-and-text.md)); and
 `streams_decoded`, each run of a stream's filter chain — the page's content, a
 form's at each `Do`, a tiling pattern's cell, an appearance, an image's
 samples and its soft mask's, a font's program and its CMaps, an ICC profile —

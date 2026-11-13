@@ -50,12 +50,14 @@
 //! a rule through a clip it cannot intersect. A rule in a hidden layer
 //! (8.11.3.2) is not on the page and is not kept.
 
+use std::sync::Arc;
+
 use tinker_pdf_content::{
     interpret, Device, Glyph, GraphicsState, MarkedProps, Matrix, PathSegment, TextDevice,
     TextPage, TextWarning,
 };
-use tinker_pdf_cos::pages as cos_pages;
 
+use crate::stats::{self, Work};
 use crate::tables::{TableRule, MAX_TABLE_RULES};
 use crate::{resources, Page};
 
@@ -116,10 +118,21 @@ impl Observed {
     /// `keep_artifacts` reads `/Artifact` scopes as content; see the module
     /// documentation.
     pub(crate) fn read(page: &Page, keep_artifacts: bool) -> Observed {
-        let content = cos_pages::content_bytes(&page.doc, &page.inner);
+        Observed::read_counted(page, keep_artifacts, None)
+    }
+
+    /// [`Observed::read`], the content's decode and what the page's scope
+    /// reads counted into `work` when the operation is counting.
+    pub(crate) fn read_counted(
+        page: &Page,
+        keep_artifacts: bool,
+        work: Option<&Arc<Work>>,
+    ) -> Observed {
+        let content = stats::content(&page.doc, &page.inner, work);
         // `Page::text`'s own resources: no glyph outlines are needed, so no
         // provider is consulted.
-        let resources = resources::PageResources::new(&page.doc, &page.inner, None);
+        let resources =
+            resources::PageResources::new_counted(&page.doc, &page.inner, None, work.cloned());
         let mut observer = Observer::new(keep_artifacts);
         interpret(&content, Matrix::IDENTITY, &mut observer, &resources);
         for name in resources.missing_fonts() {

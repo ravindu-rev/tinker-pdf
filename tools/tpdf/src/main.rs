@@ -35,10 +35,10 @@ macro_rules! say {
 }
 
 use tinker_pdf::{
-    BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, HeaderEvidence, LadderLevel,
-    ObjRef, Object, OrderedText, Page, PageTables, ReadingOrder, RenderOptions, Sanitise,
-    SimpleFontProvider, StreamObj, StructureTree, TableEvidence, TableSource, TextFormat,
-    TextWriter, Tier, WriteMode, WriteOptions, XrefEntry,
+    BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, HeaderEvidence,
+    InferenceOptions, InferredOrder, LadderLevel, ObjRef, Object, OrderedText, Page, PageTables,
+    ReadingOrder, RenderOptions, Sanitise, SimpleFontProvider, StreamObj, StructureTree,
+    TableEvidence, TableSource, TextFormat, TextWriter, Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -1141,7 +1141,19 @@ fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
         print!("{}", writer.finish());
         return Ok(());
     }
-    for index in options.pages(doc) {
+    let pages = options.pages(doc);
+    // An inferred order is read a run of consecutive pages at a time, each
+    // page interpreted once for its own order and its neighbours' margins.
+    // A document with a structure tree keeps `text_in`'s answer, the order
+    // the tree states, page by page.
+    if options.order == ReadingOrder::Inferred && !options.tables && doc.structure().is_none() {
+        for (text, label) in inferred_texts(doc, &pages) {
+            sound()?;
+            print_page(options, &text, Some(label));
+        }
+        return Ok(());
+    }
+    for index in pages {
         let Some(page) = doc.page(index) else {
             continue;
         };
@@ -1153,17 +1165,61 @@ fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
         }
         let (text, label) = page_text(&page, index, options.order)?;
         sound()?;
-        if let (Some(label), false) = (label, options.quiet) {
-            eprintln!("{label}");
-        }
-        print!("{text}");
-        // A form feed between pages, which is what every other text extractor
-        // emits and what makes the output splittable again.
-        if options.page.is_none() {
-            print!("\u{c}");
-        }
+        print_page(options, &text, label);
     }
     Ok(())
+}
+
+/// One page's plain text, after its label on standard error unless
+/// `--quiet`.
+fn print_page(options: &Options, text: &str, label: Option<String>) {
+    if let (Some(label), false) = (label, options.quiet) {
+        eprintln!("{label}");
+    }
+    print!("{text}");
+    // A form feed between pages, which is what every other text extractor
+    // emits and what makes the output splittable again.
+    if options.page.is_none() {
+        print!("\u{c}");
+    }
+}
+
+/// The plain text and the label of each page `pages` lists that exists, in
+/// the order listed, in an inferred order — `page_text`'s answer for each,
+/// for a document that carries no structure tree — inferred a run of
+/// consecutive pages at a time through `Document::inferred_pages`, which
+/// interprets each page of the run once where a page alone reads its
+/// neighbours again.
+fn inferred_texts<'a>(
+    doc: &'a Document,
+    pages: &'a [u32],
+) -> impl Iterator<Item = (String, String)> + 'a {
+    let mut runs: Vec<std::ops::Range<u32>> = Vec::new();
+    for &index in pages {
+        match runs.last_mut() {
+            Some(run) if run.end == index && index < u32::MAX => run.end = index + 1,
+            _ => runs.push(index..index.saturating_add(1)),
+        }
+    }
+    runs.into_iter().flat_map(move |run| {
+        doc.inferred_pages(run, &InferenceOptions::default())
+            .map(|(index, order)| (order.plain_text(), inferred_label(index + 1, &order)))
+    })
+}
+
+/// The line labelling page `number`'s inferred order: its columns, and what
+/// the inference had to tolerate.
+fn inferred_label(number: u32, inferred: &InferredOrder) -> String {
+    let mut label = format!(
+        "page {number}: an inferred order, {} column{}",
+        inferred.columns,
+        if inferred.columns == 1 { "" } else { "s" }
+    );
+    if !inferred.warnings.is_empty() {
+        let warnings: Vec<String> = inferred.warnings.iter().map(|w| format!("{w:?}")).collect();
+        label.push_str(&format!("; {}", warnings.join(", ")));
+    }
+    label
 }
 
 /// Page `index`'s plain text in `order`, and, for any order but the stream's,
@@ -1187,19 +1243,7 @@ fn page_text(
     let label = match &text {
         OrderedText::Stream(_) => format!("page {number}: the content stream's order"),
         OrderedText::Stated(_) => format!("page {number}: the structure tree's order"),
-        OrderedText::Inferred(inferred) => {
-            let mut label = format!(
-                "page {number}: an inferred order, {} column{}",
-                inferred.columns,
-                if inferred.columns == 1 { "" } else { "s" }
-            );
-            if !inferred.warnings.is_empty() {
-                let warnings: Vec<String> =
-                    inferred.warnings.iter().map(|w| format!("{w:?}")).collect();
-                label.push_str(&format!("; {}", warnings.join(", ")));
-            }
-            label
-        }
+        OrderedText::Inferred(inferred) => inferred_label(number, inferred),
     };
     Ok((text.plain_text(), Some(label)))
 }
@@ -4488,6 +4532,65 @@ mod tests {
              \x20 row 1, column 1: a\n\
              \x20 row 1, column 2: b\n\
              \x20 row 2, column 1-2: c\n"
+        );
+    }
+
+    /// **`--order inferred` over many pages prints what each page alone
+    /// would**: an untagged book whose running heads and page numbers are
+    /// found only by reading the pages around each, listed in runs, out of
+    /// order and with a page twice, reads through the batch inference, a run
+    /// at a time, exactly the text and the label `page_text` gives each page.
+    #[test]
+    fn inferred_pages_print_what_each_page_alone_prints() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        for at in 0..6u32 {
+            builder.add_page(612.0, 792.0, |page| {
+                let head = if at % 2 == 0 {
+                    "A Treatise On Columns"
+                } else {
+                    "Chapter Two: The Gap"
+                };
+                page.text(b"F0", 9.0, 72.0, 760.0, head);
+                page.text(b"F0", 9.0, 300.0, 30.0, &(at + 1).to_string());
+                for row in 0..12 {
+                    let y = 680.0 - f64::from(row) * 12.0;
+                    for (x, column) in [(72.0, "left"), (324.0, "right")] {
+                        page.text(
+                            b"F0",
+                            10.0,
+                            x,
+                            y,
+                            &format!("{column} column line {row} of page {at}"),
+                        );
+                    }
+                }
+            });
+        }
+        let doc = Document::open(builder.finish()).expect("it opens");
+        assert!(doc.structure().is_none(), "the book is untagged");
+        let pages = [4, 5, 0, 1, 2, 2, 3];
+        let printed: Vec<(String, String)> = inferred_texts(&doc, &pages).collect();
+        assert_eq!(printed.len(), pages.len());
+        for (index, (text, label)) in pages.iter().zip(&printed) {
+            let page = doc.page(*index).expect("a page");
+            let alone = page_text(&page, *index, ReadingOrder::Inferred).expect("an order");
+            assert_eq!(
+                (text, Some(label)),
+                (&alone.0, alone.1.as_ref()),
+                "page {index}"
+            );
+        }
+        let (_, head) = printed.first().expect("page 5");
+        assert!(
+            head.starts_with("page 5: an inferred order, 2 columns"),
+            "{head}"
+        );
+        let first = printed[2].0.lines().next();
+        assert_eq!(
+            first,
+            Some("A Treatise On Columns"),
+            "the head is read first"
         );
     }
 

@@ -212,6 +212,7 @@ already carries it.
 | `color_spaces_parsed` | a resource name's colour space a scope reads out of `/ColorSpace` and parses, both its readings at once, at the first question about the name (P-02, "Colour spaces, functions and graphics states") | the facade's scopes (`PageResources::kept_space`) | built |
 | `functions_read` | a function a scope reads from an object of its own — a shading's, a tint transform, a stitching function's piece, a graphics state's — once an object, and a stitching function once for each depth it is read at | the facade's scopes (`PageResources::kept_function`) | built |
 | `graphics_states_read` | a `gs` name's state a scope reads out of `/ExtGState`, its entry a dictionary, at the first `gs` of the name | the facade's scopes (`PageResources::read_ext_g_state`) | built |
+| `pages_interpreted` | a page's content interpreted for a reading-order inference, for its own order or for a neighbour's margin bands (P-02, "Batch inference") | the facade's reading-order inference (`reading_order.rs`'s `Batch::observe`) | built |
 | `streams_decoded` | a run of a stream's filter chain, whatever it returned | cos's two filter-chain entry points and every `Resolve` view | built |
 | `most_decodes_of_one_stream` | the most runs any one stream had in the operation — a maximum, the quantity A5 holds to one | the same | built |
 | `most_decoded_stream` | the reference of the stream that had those runs, the lowest of a tie — what names a stream a page keeps decoding | the same | built |
@@ -290,6 +291,7 @@ tree — or a list, or a verdict whose fields other code compares.
 | image extraction, the decode door | `Page::images_counted(&self)` | `(Vec<PageImage>, Stats)` | built |
 | validation | `Document::validate_pdfa_counted(&self, PdfACoverage)`, and `validate_pdfua_counted` and `validate_pdfx_counted` alike | `(verdict, Stats)` | built |
 | page lookup, the document door | `Document::page_counted(&self, index: u32)` | `(Option<Page>, Stats)` | built |
+| reading-order inference | `Document::inferred_orders_counted(&self, Range<u32>, &InferenceOptions)` | `(Vec<InferredOrder>, Stats)` | built |
 
 `Bitmap::stats` is a public field rather than a method: a method needs a field
 the caller cannot see, and one private field would stop every hand-built
@@ -1157,7 +1159,7 @@ text of the document the operation reads, so all six stay inside the group.
 | --- | --- | --- | --- | --- | --- |
 | `analysis/text of the 5 report pages` | pages · 5 | `report(5)` | the relations' denominator; floor 1 | in | built |
 | `analysis/redact a rectangle on each of 5 pages` | pages · 14 × 5 | `report(5)`, `redact::apply` on every page of one editor a call (`crates/tinker-pdf/src/redact.rs:1106`), unsaved: saving is the write group's | not measured; ≤ 1.5 × text | ×14 | built |
-| `analysis/reading order inferred over 5 pages` | pages · 5 | `report(5)`, `Document::inferred_orders` (`crates/tinker-pdf/src/reading_order.rs:484`); the document is untagged, so the default options infer (`:173-176`) | not measured; ≤ 1.5 × text | in | built |
+| `analysis/reading order inferred over 5 pages` | pages · 5 | `report(5)`, `Document::inferred_orders` (`crates/tinker-pdf/src/reading_order.rs`); the document is untagged, so the default options infer (`InferenceOptions`'s `Default`) | not measured; ≤ 1.5 × text | in | built |
 | `analysis/tables inferred over 5 pages` | pages · 5 | `report(5)`, `Page::tables(TableSource::Inferred)` (`crates/tinker-pdf/src/tables.rs:448`) | not measured; ≤ 1.5 × text | in | built |
 | `analysis/text of the 5 claiming pages` | pages · 5 | `claiming(5)` | the validators' denominator; floor 1 | in | built |
 | `analysis/PDF-A validation of 5 pages` | pages · 10 × 5 | `claiming(5)`, `validate_pdfa` (`lib.rs:1990`) | not measured; ≤ 3 × text | ×10 | built |
@@ -2454,16 +2456,24 @@ costs. `TEXT_FORMAT_VERSION` does not move, because no byte does.
 
 #### Batch inference
 
-`Document::inferred_orders` reads each page once. It walks its range in order
-and keeps what one interpretation of a page gave (`Observed`): its text for
-the page's own inference, and its margin bands for its neighbours'. A page
-ahead of the one being inferred is read when a neighbour first needs its bands
-and its observation kept until its own turn, at most `RUNNING_WINDOW` of them;
-a page behind keeps only its bands, as `MarginCache` keeps them. What a page's
-inference decides does not change, only how often a page is read, so every
-`InferredOrder` is `Page::inferred_order`'s for the page. `tpdf text --order
-inferred` infers its pages through `inferred_orders`, and a page of a tagged
-document keeps `text_in`'s answer, its stated order.
+`Document::inferred_orders` reads each page once. A batch (`Batch` in
+`reading_order.rs`) walks its range in order and keeps what one interpretation
+of a page gave (`Observed`): its text for the page's own inference, and its
+margin bands for its neighbours'. A page ahead of the one being inferred is
+read when a neighbour first needs its bands and its observation kept until its
+own turn, at most half of `RUNNING_WINDOW` of them; a page behind keeps only
+its bands, until no page still to come is near enough to read them. What a
+page's inference decides does not change, only how often a page is read, so
+every `InferredOrder` is `Page::inferred_order`'s for the page: that one is a
+batch of one page, which reads the page and its window. `Document::inferred_pages`
+hands the batch's orders out a page at a time, an iterator, and
+`inferred_orders` collects it. `pages_interpreted` counts each interpretation,
+through `Document::inferred_orders_counted`, whose interpretations count what
+they read and decode too: a batch over a range is its pages and the neighbours
+outside it, each once. `tpdf text --order inferred` infers each run of
+consecutive pages it lists through `inferred_pages`, writing each page as it
+comes, and a document whose structure tree binds keeps `text_in`'s answer, its
+stated order, page by page.
 
 #### Each operation's path, and the step that brings it within bound
 

@@ -49,11 +49,13 @@
 //! (ruling 4).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tinker_pdf_content::{Quad, TextChar, TextLine, TextPage, WritingMode};
 use tinker_pdf_cos::CosDocument;
 
 use crate::observe::Observed;
+use crate::stats::{self, Counter, Stats, Work};
 use crate::structure::StructuredText;
 use crate::tables::TableRule;
 use crate::{Document, Page};
@@ -465,11 +467,12 @@ impl Page {
     /// bands of up to [`RUNNING_WINDOW`] pages around this one; that is the
     /// whole of what the inference reads beyond the page, and the answer for a
     /// page is the same whichever of [`Page::inferred_order`],
-    /// [`Document::inferred_order`] and [`Document::inferred_orders`] asked.
+    /// [`Document::inferred_order`], [`Document::inferred_orders`] and
+    /// [`Document::inferred_pages`] asked.
     #[must_use]
     pub fn inferred_order(&self, options: &InferenceOptions) -> InferredOrder {
-        let mut margins = MarginCache::new(self, options);
-        infer_page(self, options, &mut margins)
+        let end = self.index().saturating_add(1);
+        Batch::new(&self.doc, self.fonts.as_ref(), *options, end, None).infer(self)
     }
 }
 
@@ -484,48 +487,233 @@ impl Document {
     }
 
     /// The inferred order of every page in `pages` that exists, in page
-    /// order — [`Page::inferred_order`] for each, with each page's margin
-    /// bands read once rather than once for every page that consults them.
+    /// order — [`Page::inferred_order`] for each, with each page interpreted
+    /// once for its own order and for its neighbours' margin bands
+    /// ([`Document::inferred_pages`], collected).
     #[must_use]
     pub fn inferred_orders(
         &self,
         pages: std::ops::Range<u32>,
         options: &InferenceOptions,
     ) -> Vec<InferredOrder> {
-        let mut out = Vec::new();
-        let mut margins: Option<MarginCache> = None;
-        for index in pages {
-            let Some(page) = self.page(index) else {
-                continue;
-            };
-            let cache = margins.get_or_insert_with(|| MarginCache::new(&page, options));
-            out.push(infer_page(&page, options, cache));
-        }
-        out
+        self.inferred_pages(pages, options)
+            .map(|(_, order)| order)
+            .collect()
+    }
+
+    /// [`Document::inferred_orders`], counting: the orders, and what
+    /// inferring them did ([`Stats`]) — each page interpreted
+    /// (`Stats::pages_interpreted`), one a page of the range and of the
+    /// neighbours around it, and what each interpretation read and decoded,
+    /// and every page lookup.
+    #[must_use]
+    pub fn inferred_orders_counted(
+        &self,
+        pages: std::ops::Range<u32>,
+        options: &InferenceOptions,
+    ) -> (Vec<InferredOrder>, Stats) {
+        let work = Arc::new(Work::new());
+        let orders = InferredPages::new(self, pages, options, Some(Arc::clone(&work)))
+            .map(|(_, order)| order)
+            .collect();
+        (orders, work.stats())
+    }
+
+    /// The inferred order of every page in `pages` that exists, a page at a
+    /// time and in page order, each with its index: what
+    /// [`Document::inferred_orders`] lists, for a caller that writes each
+    /// page out before it reads the next.
+    ///
+    /// Each page is interpreted once. Its interpretation gives its own order
+    /// its text and its neighbours' their margin bands: a page ahead of the
+    /// one being inferred is read when that one first needs its bands, and
+    /// what it gave is kept until its own turn — at most half of
+    /// [`RUNNING_WINDOW`] pages ahead — and a page behind keeps only its
+    /// bands, until no page still to come is near enough to read them.
+    #[must_use]
+    pub fn inferred_pages(
+        &self,
+        pages: std::ops::Range<u32>,
+        options: &InferenceOptions,
+    ) -> InferredPages {
+        InferredPages::new(self, pages, options, None)
     }
 }
 
-/// One page's inference, its neighbours' margins read through `margins`.
-fn infer_page(page: &Page, options: &InferenceOptions, margins: &mut MarginCache) -> InferredOrder {
-    let tagged = has_structure_tree(&page.doc);
-    if tagged && !options.hide_structure {
-        let observed = Observed::read(page, false);
-        return declined(&observed.text, DeclineReason::TreePresent, Vec::new());
+/// The pages [`Document::inferred_pages`] infers, each with its index, in
+/// page order: an iterator, so a document's pages are written out as they are
+/// inferred rather than held at once.
+pub struct InferredPages {
+    batch: Batch,
+    /// The next page to infer.
+    next: u32,
+    /// The end of the range asked for.
+    end: u32,
+}
+
+impl InferredPages {
+    fn new(
+        document: &Document,
+        pages: std::ops::Range<u32>,
+        options: &InferenceOptions,
+        work: Option<Arc<Work>>,
+    ) -> InferredPages {
+        InferredPages {
+            batch: Batch::new(
+                &document.inner,
+                document.fonts.as_ref(),
+                *options,
+                pages.end,
+                work,
+            ),
+            next: pages.start,
+            end: pages.end,
+        }
     }
-    let observed = Observed::read(page, options.hide_structure);
-    let frame = page.crop_box();
-    // Tables first, then order: the ruled tables' characters, by the same
-    // one interpretation, in each table's order.
-    let tables: Vec<Held> = crate::tables::ruled_tables(&observed, frame)
-        .iter()
-        .map(Held::of)
-        .collect();
-    let neighbours = margins.around(page.index());
-    let mut order = infer(&observed.text, frame, &neighbours, &observed.rules, &tables);
-    if tagged {
-        order.warnings.insert(0, InferenceWarning::TreePresent);
+}
+
+impl Iterator for InferredPages {
+    type Item = (u32, InferredOrder);
+
+    fn next(&mut self) -> Option<(u32, InferredOrder)> {
+        while self.next < self.end {
+            let index = self.next;
+            self.next += 1;
+            if let Some(page) = self.batch.page(index) {
+                return Some((index, self.batch.infer(&page)));
+            }
+        }
+        None
     }
-    order
+}
+
+/// One inference's reading of a document's pages: each page interpreted once,
+/// what it gave kept for its own order and its margin bands for its
+/// neighbours' (`docs/design/performance.md`, P-02, "Batch inference").
+struct Batch {
+    doc: Arc<CosDocument>,
+    fonts: Option<Arc<dyn crate::FontProvider>>,
+    options: InferenceOptions,
+    /// Whether the document carries a structure tree.
+    tagged: bool,
+    /// The document's pages, as the page tree counts them.
+    count: u32,
+    /// The pages this batch infers end here: a neighbour ahead of the page
+    /// being inferred and before this keeps what its interpretation gave for
+    /// its own turn, and any other keeps only its bands.
+    end: u32,
+    /// What the pages ahead of the one being inferred gave, read for its
+    /// bands and kept for their own turn: at most half of [`RUNNING_WINDOW`].
+    ahead: BTreeMap<u32, Observed>,
+    /// The margin bands of the pages read that a page still to come reads.
+    margins: BTreeMap<u32, Margins>,
+    /// The tally of the operation, when it is counting.
+    work: Option<Arc<Work>>,
+}
+
+impl Batch {
+    fn new(
+        doc: &Arc<CosDocument>,
+        fonts: Option<&Arc<dyn crate::FontProvider>>,
+        options: InferenceOptions,
+        end: u32,
+        work: Option<Arc<Work>>,
+    ) -> Batch {
+        Batch {
+            doc: Arc::clone(doc),
+            fonts: fonts.cloned(),
+            options,
+            tagged: has_structure_tree(doc),
+            count: tinker_pdf_cos::pages::count_counted(doc, work.as_deref()),
+            end,
+            ahead: BTreeMap::new(),
+            margins: BTreeMap::new(),
+            work,
+        }
+    }
+
+    /// Page `index`, looked up as [`Document::page`] looks it up.
+    fn page(&self, index: u32) -> Option<Page> {
+        let inner = tinker_pdf_cos::pages::at_counted(&self.doc, index, self.work.as_deref())?;
+        Some(Page {
+            doc: Arc::clone(&self.doc),
+            inner,
+            fonts: self.fonts.clone(),
+        })
+    }
+
+    /// `page` interpreted, counted as a page interpreted.
+    fn observe(&self, page: &Page, keep_artifacts: bool) -> Observed {
+        stats::count(self.work.as_deref(), Counter::PagesInterpreted);
+        Observed::read_counted(page, keep_artifacts, self.work.as_ref())
+    }
+
+    /// `page`'s inference: its own interpretation, kept from when a page
+    /// before it read its bands or made now, and the bands of the pages
+    /// around it, each read the first time a page asks for them.
+    fn infer(&mut self, page: &Page) -> InferredOrder {
+        let index = page.index();
+        if self.tagged && !self.options.hide_structure {
+            let observed = self.observe(page, false);
+            return declined(&observed.text, DeclineReason::TreePresent, Vec::new());
+        }
+        let keep_artifacts = self.options.hide_structure;
+        let observed = match self.ahead.remove(&index) {
+            Some(observed) => observed,
+            None => self.observe(page, keep_artifacts),
+        };
+        let frame = page.crop_box();
+        // Tables first, then order: the ruled tables' characters, by the same
+        // one interpretation, in each table's order.
+        let tables: Vec<Held> = crate::tables::ruled_tables(&observed, frame)
+            .iter()
+            .map(Held::of)
+            .collect();
+        // This page's own bands, for the pages after it.
+        self.margins
+            .entry(index)
+            .or_insert_with(|| Margins::of(&observed.text, frame));
+        let half = RUNNING_WINDOW / 2;
+        let from = index.saturating_sub(half);
+        let to = index.saturating_add(half).min(self.count.saturating_sub(1));
+        for other in from..=to {
+            if self.margins.contains_key(&other) {
+                continue;
+            }
+            let margins = match self.page(other) {
+                Some(neighbour) => {
+                    let seen = self.observe(&neighbour, keep_artifacts);
+                    let margins = Margins::of(&seen.text, neighbour.crop_box());
+                    if other > index && other < self.end {
+                        self.ahead.insert(other, seen);
+                    }
+                    margins
+                }
+                None => Margins::default(),
+            };
+            self.margins.insert(other, margins);
+        }
+        // A page the lookups find past the pages the walk counts — a damaged
+        // linearized file's hinted page — has no window, and a range that
+        // runs backwards is asked for nothing.
+        let neighbours: Vec<(i64, &Margins)> = if from <= to {
+            self.margins
+                .range(from..=to)
+                .filter(|(other, _)| **other != index)
+                .map(|(other, margins)| (i64::from(*other) - i64::from(index), margins))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut order = infer(&observed.text, frame, &neighbours, &observed.rules, &tables);
+        if self.tagged {
+            order.warnings.insert(0, InferenceWarning::TreePresent);
+        }
+        // No page after this one reads the bands of a page before its window.
+        let needed = index.saturating_add(1).saturating_sub(half);
+        self.margins = self.margins.split_off(&needed);
+        order
+    }
 }
 
 /// Whether the catalog names a structure tree root that is a dictionary —
@@ -2186,58 +2374,6 @@ fn roman(text: &str) -> Option<i64> {
     (total > 0 && total < 5000 && spelled == lower).then_some(total)
 }
 
-/// The margin lines of the pages around the ones being inferred, each page
-/// read once.
-pub(crate) struct MarginCache {
-    doc: std::sync::Arc<CosDocument>,
-    fonts: Option<std::sync::Arc<dyn crate::FontProvider>>,
-    count: u32,
-    keep_artifacts: bool,
-    read: BTreeMap<u32, Margins>,
-}
-
-impl MarginCache {
-    fn new(page: &Page, options: &InferenceOptions) -> MarginCache {
-        MarginCache {
-            doc: std::sync::Arc::clone(&page.doc),
-            fonts: page.fonts.clone(),
-            count: tinker_pdf_cos::pages::count(&page.doc),
-            keep_artifacts: options.hide_structure,
-            read: BTreeMap::new(),
-        }
-    }
-
-    /// The margins of up to [`RUNNING_WINDOW`] pages around `index`, each
-    /// with its offset from it.
-    fn around(&mut self, index: u32) -> Vec<(i64, &Margins)> {
-        let half = RUNNING_WINDOW / 2;
-        let from = index.saturating_sub(half);
-        let to = index.saturating_add(half).min(self.count.saturating_sub(1));
-        for other in from..=to {
-            if other == index || self.read.contains_key(&other) {
-                continue;
-            }
-            let margins = tinker_pdf_cos::pages::at(&self.doc, other)
-                .map(|inner| {
-                    let neighbour = Page {
-                        doc: std::sync::Arc::clone(&self.doc),
-                        inner,
-                        fonts: self.fonts.clone(),
-                    };
-                    let observed = Observed::read(&neighbour, self.keep_artifacts);
-                    Margins::of(&observed.text, neighbour.crop_box())
-                })
-                .unwrap_or_default();
-            self.read.insert(other, margins);
-        }
-        self.read
-            .range(from..=to)
-            .filter(|(other, _)| **other != index)
-            .map(|(other, margins)| (i64::from(*other) - i64::from(index), margins))
-            .collect()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Columns
 // ---------------------------------------------------------------------------
@@ -2703,5 +2839,89 @@ mod tests {
         // A word that is a numeral in canonical form is read as one; the
         // cross-page count is what keeps it from being a page number.
         assert_eq!(roman("mix"), Some(1009));
+    }
+
+    /// **A batch holds at most half a window ahead** (P-02.7): inferring the
+    /// pages of a book in order, it keeps what a page ahead of the one being
+    /// inferred gave for that page's own turn — never more than half of
+    /// `RUNNING_WINDOW` of them, each still to be inferred — and the bands of
+    /// only the pages a page still to come reads; a batch of one page keeps
+    /// nothing ahead.
+    #[test]
+    fn a_batch_holds_at_most_half_a_window_ahead() {
+        use super::{InferenceOptions, InferredPages, RUNNING_WINDOW};
+        use tinker_pdf_cos::DocumentBuilder;
+
+        let pages = 30u32;
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F1", b"Helvetica");
+        for at in 0..pages {
+            builder.add_page(612.0, 792.0, |page| {
+                page.text(b"F1", 9.0, 72.0, 760.0, "A Running Head");
+                page.text(b"F1", 10.0, 72.0, 600.0, &format!("The body of page {at}"));
+                page.text(b"F1", 9.0, 300.0, 40.0, &(at + 1).to_string());
+            });
+        }
+        let document = crate::Document::open(builder.finish()).expect("the book opens");
+        let half = (RUNNING_WINDOW / 2) as usize;
+        let mut batch = InferredPages::new(&document, 0..pages, &InferenceOptions::default(), None);
+        let mut most = 0;
+        let mut inferred = Vec::new();
+        while let Some((index, order)) = batch.next() {
+            assert!(!order.blocks.is_empty(), "page {index}");
+            inferred.push(index);
+            let ahead: Vec<u32> = batch.batch.ahead.keys().copied().collect();
+            assert!(ahead.len() <= half, "after page {index}: {ahead:?}");
+            assert!(
+                ahead.iter().all(|at| *at > index && *at < pages),
+                "after page {index}: {ahead:?}"
+            );
+            assert!(
+                batch.batch.margins.len() <= RUNNING_WINDOW as usize,
+                "after page {index}: {:?}",
+                batch.batch.margins.keys().collect::<Vec<_>>()
+            );
+            most = most.max(ahead.len());
+        }
+        assert_eq!(inferred, (0..pages).collect::<Vec<_>>());
+        assert_eq!(most, half, "the window ahead is reached");
+
+        let page = document.page(12).expect("a page");
+        let mut alone = InferredPages::new(&document, 12..13, &InferenceOptions::default(), None);
+        let (index, order) = alone.next().expect("the page");
+        assert_eq!(index, 12);
+        assert!(alone.batch.ahead.is_empty(), "nothing ahead is kept");
+        assert_eq!(
+            order.plain_text(),
+            page.inferred_order(&InferenceOptions::default())
+                .plain_text()
+        );
+        assert!(alone.next().is_none());
+    }
+
+    /// A page the lookups find past the pages the tree's walk counts — what a
+    /// damaged linearized file's hinted page can be — has no window of
+    /// neighbours: it is inferred alone, and nothing asks for a range of
+    /// pages that runs backwards.
+    #[test]
+    fn a_page_past_the_pages_counted_is_inferred_with_no_window() {
+        use super::{Batch, InferenceOptions};
+        use tinker_pdf_cos::DocumentBuilder;
+
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F1", b"Helvetica");
+        for at in 0..12u32 {
+            builder.add_page(612.0, 792.0, |page| {
+                page.text(b"F1", 10.0, 72.0, 600.0, &format!("The body of page {at}"));
+            });
+        }
+        let document = crate::Document::open(builder.finish()).expect("the book opens");
+        let page = document.page(11).expect("page twelve");
+        let mut batch = Batch::new(&document.inner, None, InferenceOptions::default(), 12, None);
+        // The walk counted none of the pages the lookup found.
+        batch.count = 0;
+        let order = batch.infer(&page);
+        assert_eq!(order.plain_text(), "The body of page 11\n");
+        assert_eq!(batch.margins.keys().copied().collect::<Vec<_>>(), [11]);
     }
 }

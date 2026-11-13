@@ -1229,6 +1229,126 @@ fn every_way_of_asking_gives_the_same_order_of(doc: &Document) {
     }
 }
 
+/// An untagged book of `pages` pages: a verso head and a recto head, the
+/// page's number at its foot, and two columns of body drawn line by line
+/// across both, so each page's furniture is found only by reading the pages
+/// around it.
+fn untagged_book(pages: usize) -> Document {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for at in 0..pages {
+        let runs: Vec<Run> = two_columns(16)
+            .into_iter()
+            .enumerate()
+            .map(|(line, r)| Run {
+                text: prose(at * 1000 + line, r.text.len()),
+                ..r
+            })
+            .collect();
+        builder.add_page(612.0, 792.0, |page| {
+            let head = if at % 2 == 0 {
+                "A Treatise On Columns"
+            } else {
+                "Chapter Two: The Gap"
+            };
+            page.text(b"F1", 9.0, 72.0, 760.0, head);
+            for line in across(16, 2) {
+                let r = &runs[line];
+                page.text(b"F1", r.size, r.x, r.y, &r.text);
+            }
+            page.text(b"F1", 9.0, 300.0, 40.0, &(at + 1).to_string());
+        });
+    }
+    open(builder.finish())
+}
+
+/// Everything an inferred order says, to compare two of one page.
+fn said(order: &tinker_pdf::InferredOrder) -> String {
+    let blocks: Vec<_> = order
+        .blocks
+        .iter()
+        .map(|b| (b.role, b.section, b.column, b.start, b.lines.len()))
+        .collect();
+    format!(
+        "{}\n{blocks:?}\n{} columns\n{:?}\n{:?}",
+        order.plain_text(),
+        order.columns,
+        order.permutation,
+        order.warnings
+    )
+}
+
+/// **P-02.7: batch inference interprets each page once.** Over a book of 40
+/// pages whose furniture is found only by reading the pages around each, a
+/// batch interprets 40 pages — each page once, for its own order and for its
+/// neighbours' margin bands — where asking a page at a time interprets each
+/// page and the up to 16 around it again; and every page's order is the one
+/// it is given alone. A batch over part of the book interprets its pages and
+/// the neighbours outside it once each, and a tagged book's pages, declined
+/// for their tree, once each.
+#[test]
+fn batch_inference_interprets_each_page_once() {
+    const PAGES: u32 = 40;
+    let doc = untagged_book(PAGES as usize);
+    let options = InferenceOptions::default();
+    let (orders, stats) = doc.inferred_orders_counted(0..PAGES, &options);
+    assert_eq!(orders.len(), PAGES as usize);
+    assert_eq!(stats.pages_interpreted, u64::from(PAGES), "{stats:?}");
+    for (index, together) in (0..PAGES).zip(&orders) {
+        let alone = doc.page(index).expect("a page").inferred_order(&options);
+        assert_eq!(said(&alone), said(together), "page {index}");
+        assert_eq!(
+            together.blocks.first().map(|b| b.role),
+            Some(Role::RunningHead),
+            "page {index}: the furniture is found across the pages"
+        );
+    }
+    // The orders handed out a page at a time are the orders listed.
+    let streamed: Vec<(u32, String)> = doc
+        .inferred_pages(0..PAGES, &options)
+        .map(|(index, order)| (index, said(&order)))
+        .collect();
+    let listed: Vec<(u32, String)> = (0..PAGES).zip(orders.iter().map(said)).collect();
+    assert_eq!(streamed, listed);
+
+    // A page at a time reads its whole window again: itself and up to eight
+    // on either side, 608 pages for the book where the batch reads 40.
+    let half = 8u32;
+    let window = |index: u32| u64::from(1 + index.min(half) + (PAGES - 1 - index).min(half));
+    let windows: u64 = (0..PAGES).map(window).sum();
+    for index in [0, 1, 7, 8, 20, 32, 39] {
+        let (_, alone) = doc.inferred_orders_counted(index..index + 1, &options);
+        assert_eq!(alone.pages_interpreted, window(index), "page {index}");
+    }
+
+    // Part of the book: pages 10 to 19 and the eight on either side.
+    let (part, stats) = doc.inferred_orders_counted(10..20, &options);
+    assert_eq!(part.len(), 10);
+    assert_eq!(stats.pages_interpreted, 10 + 2 * u64::from(half));
+    for (index, together) in (10..20).zip(&part) {
+        assert_eq!(
+            said(together),
+            said(&orders[index as usize]),
+            "page {index}"
+        );
+    }
+
+    // A tagged book declines for its tree, reading each page once; with the
+    // tree hidden it is inferred, each page once too.
+    let tagged = furnished_book(PAGES as usize, false);
+    for options in [InferenceOptions::default(), hidden()] {
+        let (orders, stats) = tagged.inferred_orders_counted(0..PAGES, &options);
+        assert_eq!(stats.pages_interpreted, u64::from(PAGES), "{options:?}");
+        for (index, together) in (0..PAGES).zip(&orders) {
+            let alone = tagged.page(index).expect("a page").inferred_order(&options);
+            assert_eq!(said(&alone), said(together), "{options:?}, page {index}");
+        }
+    }
+    println!(
+        "batch-inference: RAN {PAGES} pages interpreted once each, against {windows} a page at a time"
+    );
+}
+
 // ---- footnotes ------------------------------------------------------------------
 
 /// How a footnote fixture marks and separates its notes.

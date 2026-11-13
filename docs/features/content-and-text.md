@@ -754,9 +754,19 @@ body. A rotated or vertical line is `Role::Unplaced`, read where its stream
 drew it among the body. A ruled table the
 table inference finds is one `Role::Table` block of an inferred order, read
 in the table's own order (`InferenceWarning::TableSuspected`), and a page
-mostly table, vertical or rotated is declined (`DeclineReason`). `tpdf text
+mostly table, vertical or rotated is declined (`DeclineReason`).
+`Document::inferred_orders(Range<u32>, &InferenceOptions)` infers a range of
+pages, each page interpreted once — its text for its own order, its margin
+bands for its neighbours' — where a page asked alone reads the up to sixteen
+pages around it as well; `Document::inferred_pages` hands the same orders out
+a page at a time, an `InferredPages` iterator of `(index, InferredOrder)`
+holding at most half a window of pages ahead; and
+`Document::inferred_orders_counted` counts the pages it interpreted
+(`Stats::pages_interpreted`) and what they read. `tpdf text
 --order stream|stated|inferred` prints the order asked for and says on
-standard error which order each page got.
+standard error which order each page got; an inferred order is read a run of
+consecutive listed pages at a time through `inferred_pages`, and a document
+whose structure tree binds prints the tree's order, page by page.
 
 **Tables a producer stated are read as a grid.** `Page::stated_tables()`
 walks the tree's `Table`, `TR`, `TH` and `TD` elements and places each cell
