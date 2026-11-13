@@ -351,15 +351,20 @@ impl DocumentEditor {
                 // (`check_save` names what that writes of an import).
                 let key = self.doc.file_key();
                 let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
-                write::incremental_update(
+                write::incremental_update_reserving(
                     self.doc.bytes(),
                     &set,
                     &trailer,
                     self.doc.last_startxref(),
-                    self.doc.names_table(),
-                    options.compress,
-                    cipher.as_ref().map(|c| c as &dyn write::ObjectCipher),
+                    &write::UpdatePlan {
+                        names: self.doc.names_table(),
+                        compress: options.compress,
+                        crypt: cipher.as_ref().map(|c| c as &dyn write::ObjectCipher),
+                        reserved: None,
+                        parallelism: options.parallelism,
+                    },
                 )
+                .0
             }
             WriteMode::Rewrite => {
                 // 7.6.1: a rewrite decrypts on the way through — `stream_raw`

@@ -131,6 +131,8 @@ pub use edit::{
 };
 pub use fill::{text_appearance, TextLayout};
 pub use flight::{Filled, Flights};
+// The pool's one knob, so a caller of this crate alone can ask the writer for
+// threads (`WriteOptions::parallelism`).
 pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
 pub use form::{
     acro_form, calculation_order, catalog_scripts, catalog_scripts_within, document_scripts,
@@ -165,6 +167,7 @@ pub use tiff_embed::{tiff_image, tiff_image_directory, TiffImageData, TiffRoute}
 /// The host's randomness, which a public-key encrypted save draws its seed,
 /// its content key and every recipient's padding from.
 pub use tinker_pdf_crypto::EntropySource;
+pub use tinker_pdf_pool::Parallelism;
 pub use trees::{
     name_tree, name_tree_lookup, number_tree, number_tree_lookup, write_name_tree,
     write_number_tree, TreeWriteError,

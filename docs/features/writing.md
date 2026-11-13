@@ -77,6 +77,28 @@ object-stream container is compressed whenever compression is on at all;
 a cross-reference stream never is, because a reader finds it by offset
 before it knows anything about filters.
 
+**Compression on the pool, when asked.** `WriteOptions::parallelism` is
+`Parallelism::Serial` by default, and each object is compressed and written in
+turn. With `Threads(n)` and `compress` on, the writer compresses the streams
+an output carries on the engine's own pool (`tinker-pdf-pool`) a window at a
+time — eight streams a worker, each deflated alone into a pre-sized slot of
+its own — and then serialises the window's objects in their order as the
+serial writer does, so a rewrite holds one window's compressed streams beside
+the file and no more. A rewrite, an incremental update and the object-stream
+container, built before the loose objects are written and compressed beside
+them, take that path; the linearized layout, which holds every serialised
+object to measure its offsets, compresses all of its streams before it lays
+the file out. Encryption stays after compression and in object order, so
+every IV and every ciphertext, like every other byte, is the serial writer's
+at any thread count; a write that compresses nothing is the serial one.
+`crates/tinker-pdf-cos/tests/parallel_save.rs`'s
+`saves_on_2_3_4_and_7_threads_are_the_serial_bytes` holds a rewrite, one
+packing objects, a linearized one — each encrypted and not — an incremental
+update to a plain file and to one sealed under its own key, and a rewrite that
+collects garbage and merges streams to that, and `write.rs`'s
+`compression_on_four_threads_runs_on_no_caller_thread` counts every stream of
+a four-thread write made ready on a worker.
+
 **Cost is the object count, never the object numbering.** Both tables are
 written in subsections — the classic one by its `first count` runs (7.5.4),
 the stream by `/Index` (7.5.8.2 Table 17) — so a file holding four objects
@@ -191,9 +213,9 @@ Everything goes through the facade (ruling 11, [rulings](../rulings.md)):
 traits in the core, because `wasm32-unknown-unknown` has no files.
 `WriteOptions` carries `mode` (`WriteMode::Rewrite` or
 `WriteMode::Incremental`), `linearize`, `version`, `object_streams`,
-`compress`, `encryption` (`Option<Encryption>`), `garbage_collect` and
-`deduplicate_streams`;
-the default is a plain uncompressed rewrite.
+`compress`, `encryption` (`Option<Encryption>`), `garbage_collect`,
+`deduplicate_streams` and `parallelism` (`Parallelism::Serial`);
+the default is a plain uncompressed rewrite on the calling thread.
 
 ```rust
 let doc = Document::open(bytes.clone())?;
@@ -219,7 +241,8 @@ cutting every embedded program down to the glyphs the document still draws
 verbatim plus `fonts: FontPolicy`, whose default is `FontPolicy::Subset` —
 `FontPolicy::Keep` is the other value and there is no third — `images`, below,
 `stats`, which counts the save's work, and `parallelism`, the threads the
-font pass's walk may spend.
+font pass's walk may spend, handed to the writer in place of
+`WriteOptions::parallelism` where it asks for any.
 
 ```rust
 use tinker_pdf::write::{save, SaveOptions};
@@ -247,8 +270,9 @@ through `DocumentEditor::save` — the door this page documents — would set it
 get no subsetting, and be told nothing; and the caller who reaches for that
 flag is by definition the caller redacting something. A silent flag on the
 disclosure path is worse than no flag, so there is none: `WriteOptions` has
-eight fields, all of them about bytes on disk and every one acted on where it
-is carried, and its own documentation says why there is no ninth. Moving the
+nine fields, eight about bytes on disk and one about the threads the writer
+spends making them, every one acted on where it is carried, and its own
+documentation says why there is no font switch among them. Moving the
 subsetting down into `tinker-pdf-cos`
 instead would mean moving the interpreter down or writing a second glyph
 resolver there, and a second answer to "what does this code decode to" is a

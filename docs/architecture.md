@@ -60,7 +60,7 @@ tinker-pdf-shape    → font
 tinker-pdf-layout   → css
 tinker-pdf-svg      → xml, css, math
 
-tinker-pdf-cos      → filters, crypto, font, pki, shape
+tinker-pdf-cos      → filters, crypto, font, pki, shape, pool
 tinker-pdf-content  → cos, font, color
 tinker-pdf-render   → content, raster, font, color
 tinker-pdf          → every crate above but math
@@ -112,8 +112,8 @@ above it *“nothing internal beyond the maths”* — so depending on it is the
 baseline every leaf starts from and not a coupling anyone has to argue for.
 
 **Three** of `cos`'s edges into a leaf need an argument — its full set is
-`filters`, `crypto`, `font`, `shape`, `pki` — and the first two make the
-same argument:
+`filters`, `crypto`, `font`, `shape`, `pki`, `pool` — and the first two make
+the same argument:
 
 - `cos → font` — reading a font *dictionary* (`/Encoding`, `/ToUnicode`,
   standard-14 metrics) is object-model work that needs the leaf's CMap parser
@@ -147,6 +147,11 @@ reader might expect *not* to be here:
   `tinker-pdf-shape` learns no PDF vocabulary. `tinker-pdf-content` and
   `tinker-pdf-render` have no edge to it, and cos interprets no content
   streams at all. The only text it shapes is an appearance it built itself.
+
+`cos → pool` needs none: the writer compresses the streams it writes side
+by side on the engine's own pool when `WriteOptions::parallelism` asks, and
+the pool is a leaf with nothing under it that learns nothing of what it
+schedules.
 
 `cos` is not a leaf, so none of the three is leaf-to-leaf however useful
 it is.
@@ -305,7 +310,9 @@ On wasm32 the same types compile single-threaded.
 **The engine's own pool, serial unless asked.** Every operation that can use
 threads takes a `Parallelism` in its options — the page walks,
 `Document::render_pages` and `Document::text_pages` and the
-`Document::walk_pages` both are — and it is `Serial` by default, so no
+`Document::walk_pages` both are, a save's walk of its pages for the font pass
+(`SaveOptions::parallelism`) and the writer's compression of the streams it
+writes (`WriteOptions::parallelism`) — and it is `Serial` by default, so no
 caller's behaviour changes unless it asks. `Threads(n)` runs the operation's
 independent parts on at most `n` threads that the call starts in a scope and
 joins before it returns: no persistent runtime, no global pool, no thread
@@ -314,7 +321,8 @@ outliving its call. The pool is `tinker-pdf-pool`, a PDF-free leaf on
 Results go to pre-sized slots and are joined in index order, so no output
 depends on the thread count or on which thread finished first, and guard A9
 holds every page walk byte-identical to its serial run at 2, 3, 4 and 7
-threads, warnings included. On wasm32 no thread starts and the same work runs
+threads, warnings included, as `parallelism.rs` and `parallel_save.rs` hold a
+save's report and bytes. On wasm32 no thread starts and the same work runs
 on the caller, with the same result. The library owns no global mutable state
 beyond once-cells; a worker marks itself in a thread-local, so that a pooled
 operation inside another runs on the worker it is on. An embedder with an

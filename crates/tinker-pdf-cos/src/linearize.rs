@@ -170,7 +170,14 @@ pub(crate) fn linearize_sealed(
         Some(sealing) => Some(crate::write::build_sealing(sealing, names)?),
         None => None,
     };
-    let plan = Plan::build(objects, trailer, names, options.compress, encryption)?;
+    let plan = Plan::build_on(
+        objects,
+        trailer,
+        names,
+        options.compress,
+        options.parallelism,
+        encryption,
+    )?;
     Some(plan.emit(options, names))
 }
 
@@ -245,11 +252,33 @@ struct Placed {
 }
 
 impl Plan {
+    /// [`Plan::build_on`], compressing on the calling thread.
+    #[cfg(test)]
     fn build(
         objects: &ObjectSet,
         trailer: &Dict,
         names: &NameTable,
         compress: bool,
+        encryption: Option<(Dict, StreamCipher)>,
+    ) -> Option<Plan> {
+        Plan::build_on(
+            objects,
+            trailer,
+            names,
+            compress,
+            tinker_pdf_pool::Parallelism::Serial,
+            encryption,
+        )
+    }
+
+    /// The layout of `objects`, every object serialised: its streams
+    /// compressed when `compress` asks, on the threads `parallelism` names.
+    fn build_on(
+        objects: &ObjectSet,
+        trailer: &Dict,
+        names: &NameTable,
+        compress: bool,
+        parallelism: tinker_pdf_pool::Parallelism,
         encryption: Option<(Dict, StreamCipher)>,
     ) -> Option<Plan> {
         let root = trailer.get_ref(Name::ROOT)?;
@@ -468,15 +497,32 @@ impl Plan {
             });
         }
 
+        // Every object renumbered first, and every stream among them
+        // compressed before one is laid out — side by side on the pool when
+        // the write asks for threads — so that each object's bytes, and so
+        // every length and offset measured from them, are the serial
+        // writer's. Encryption follows, in order, as each is serialised.
+        let mut renumbered = Vec::with_capacity(order.len());
         for (old, section) in &order {
             let entry = objects.get(*old)?;
-            let renumbered = renumber_entry(entry, &mapping);
-            let number = *mapping.get(old)?;
+            renumbered.push((
+                *mapping.get(old)?,
+                *section,
+                renumber_entry(entry, &mapping),
+            ));
+        }
+        let made = if crate::write::pooled(compress, parallelism) {
+            let entries: Vec<&Written> = renumbered.iter().map(|(_, _, entry)| entry).collect();
+            crate::write::ready_all(&entries, names, compress, parallelism)
+        } else {
+            renumbered.iter().map(|_| None).collect()
+        };
+        for ((number, section, entry), made) in renumbered.iter().zip(made) {
+            let made = made.unwrap_or_else(|| crate::write::ready(entry, names, compress));
             let mut bytes = Vec::new();
-            write_indirect(&mut bytes, number, &renumbered, names, compress, crypt);
-
+            write_indirect_ready(&mut bytes, *number, made, names, crypt);
             ordered.push(Placed {
-                number,
+                number: *number,
                 section: *section,
                 bytes,
             });
@@ -1350,6 +1396,22 @@ fn write_indirect(
     compress: bool,
     crypt: Option<&StreamCipher>,
 ) {
+    // The linearized layout does not go through `write_entry`, so it
+    // compresses here, through the ordinary writer's own `ready`, or
+    // `compress` would do nothing on this path.
+    let made = crate::write::ready(entry, names, compress);
+    write_indirect_ready(out, number, made, names, crypt);
+}
+
+/// [`write_indirect`] for an object already made ready
+/// ([`crate::write::ready`]): a stream's bytes compressed as asked.
+fn write_indirect_ready(
+    out: &mut Vec<u8>,
+    number: u32,
+    entry: crate::write::Ready<'_>,
+    names: &NameTable,
+    crypt: Option<&StreamCipher>,
+) {
     out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
     match entry {
         // 7.6.2: every string in the file is encrypted too, not only the
@@ -1357,17 +1419,11 @@ fn write_indirect(
         // contents in plain sight inside a file that claims to be encrypted —
         // and the ciphertext is longer than the plaintext, so this changes the
         // object's length as well as its contents.
-        Written::Object(object) => match crypt {
+        crate::write::Ready::Object(object) => match crypt {
             Some(cipher) => write_object(out, &cipher.encrypt_strings(object, number), names),
             None => write_object(out, object, names),
         },
-        Written::Stream(stream) => {
-            // `compress` had no effect at all on this path: the ordinary
-            // writer compresses inside `write_entry`, which the linearized
-            // layout does not use. Asking for both gave an uncompressed file
-            // and no error — four times the size, measured.
-            let mut dict = stream.dict.clone();
-            let data = crate::write::maybe_compress(&stream.data, &mut dict, names, compress);
+        crate::write::Ready::Stream(mut dict, data) => {
             // Encryption is the last thing applied and the first thing undone,
             // so it wraps the compressed bytes rather than the other way
             // round. /Length is then taken from the encrypted data, which is

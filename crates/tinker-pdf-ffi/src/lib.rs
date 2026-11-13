@@ -2299,6 +2299,10 @@ unsafe fn write_options(options: *const TpdfWriteOptions) -> Result<WriteOptions
         // change owed to the bindings row rather than made in passing. The
         // facade's default is what crosses until then.
         deduplicate_streams: false,
+        // Not projected either, for the same reason: projecting `Parallelism`
+        // onto every surface is the bindings row's (SU-12). The facade's
+        // default, serial, crosses.
+        parallelism: tinker_pdf::Parallelism::Serial,
     })
 }
 

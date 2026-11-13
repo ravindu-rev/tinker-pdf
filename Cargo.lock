@@ -594,6 +594,7 @@ dependencies = [
  "tinker-pdf-filters",
  "tinker-pdf-font",
  "tinker-pdf-pki",
+ "tinker-pdf-pool",
  "tinker-pdf-shape",
 ]
 

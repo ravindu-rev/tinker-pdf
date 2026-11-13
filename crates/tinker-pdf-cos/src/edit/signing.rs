@@ -145,6 +145,7 @@ impl DocumentEditor {
                 compress: options.compress,
                 crypt: cipher.as_ref().map(|c| c as &dyn write::ObjectCipher),
                 reserved: Some((signature_ref.num, &reserved)),
+                parallelism: options.parallelism,
             },
         );
         let placeholder = placeholder.ok_or(SignError::RangeDoesNotFit)?;

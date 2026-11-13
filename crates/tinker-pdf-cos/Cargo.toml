@@ -33,6 +33,11 @@ tinker-pdf-shape = { workspace = true }
 # which is `tinker-pdf-pki`'s — the same split as `cos -> font`, where reading
 # a font *dictionary* is object-model work that needs the leaf's parser.
 tinker-pdf-pki = { workspace = true }
+# Row P-15: the writer compresses the streams it writes side by side on the
+# engine's own pool when `WriteOptions::parallelism` asks for threads, and
+# serially otherwise. The edge goes down into a leaf with nothing under it,
+# which ruling 8 allows without argument; `xtask`'s ALLOWED declares it.
+tinker-pdf-pool = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.11.0"

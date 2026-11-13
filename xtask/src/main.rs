@@ -905,6 +905,12 @@ const ALLOWED: &[(&str, &[&str])] = &[
             // an appearance it built itself, and the only text it reads is a
             // string in an object.
             "tinker-pdf-shape",
+            // Row P-15. The writer compresses the streams a save carries side
+            // by side on the engine's own pool when `WriteOptions::parallelism`
+            // asks for threads. The edge goes down into a leaf with nothing
+            // under it, which ruling 8 allows without argument, and the pool
+            // learns nothing of what it compresses.
+            "tinker-pdf-pool",
         ],
     ),
     // Content interpretation emits to a `Device`; it never rasterizes.

@@ -13,6 +13,8 @@
 
 use std::collections::BTreeMap;
 
+use tinker_pdf_pool::Parallelism;
+
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, Object, PdfString};
 
@@ -56,10 +58,11 @@ pub struct Encryption {
 
 /// Options for writing.
 ///
-/// Eight fields, all of them about **bytes on disk**: layout, declared
-/// version, containers, compression, encryption, what is dropped on the way
-/// and what is written once instead of twice. That is deliberate and there is
-/// one absence worth naming, because it is the field the next person will
+/// Nine fields: eight about **bytes on disk** — layout, declared version,
+/// containers, compression, encryption, what is dropped on the way and what
+/// is written once instead of twice — and one about the threads the writer
+/// may spend making them, which changes no byte. That is deliberate and there
+/// is one absence worth naming, because it is the field the next person will
 /// reach for.
 ///
 /// **There is no font-subsetting switch here, and there must not be.**
@@ -153,6 +156,21 @@ pub struct WriteOptions {
     /// this one is acted on here: the pass needs the object set and the
     /// filters, and this crate has both.
     pub deduplicate_streams: bool,
+    /// The threads the writer may spend compressing. [`Parallelism::Serial`]
+    /// by default.
+    ///
+    /// With `Threads(n)` and [`WriteOptions::compress`] on, the streams an
+    /// output carries are compressed on the engine's own pool a window at a
+    /// time — a window's streams side by side, each into a pre-sized slot of
+    /// its own, then its objects serialised in their order — for a rewrite,
+    /// an incremental update, the object-stream container and the linearized
+    /// layout, which compresses every stream before it lays the file out.
+    /// Each stream deflates alone and encryption stays after compression and
+    /// in object order, so every byte, every IV and every ciphertext is the
+    /// serial writer's at any thread count; the extra memory is one window's
+    /// compressed streams. `Serial`, and a write that compresses nothing,
+    /// write each object in turn.
+    pub parallelism: Parallelism,
 }
 
 impl Default for WriteOptions {
@@ -166,6 +184,7 @@ impl Default for WriteOptions {
             encryption: None,
             garbage_collect: false,
             deduplicate_streams: false,
+            parallelism: Parallelism::Serial,
         }
     }
 }
@@ -740,6 +759,148 @@ pub(crate) fn maybe_compress(
     packed
 }
 
+/// One numbered object as it is serialised: an object as it stands, or a
+/// stream's dictionary and bytes once [`maybe_compress`] has made of them what
+/// the write asks.
+pub(crate) enum Ready<'a> {
+    /// An object, written as it stands.
+    Object(&'a Object),
+    /// A stream's dictionary and its bytes, compressed as asked, with no
+    /// `/Length` yet.
+    Stream(Dict, Vec<u8>),
+}
+
+/// `entry` made ready to serialise: a stream compressed as [`maybe_compress`]
+/// compresses it.
+pub(crate) fn ready<'a>(entry: &'a Written, names: &NameTable, compress: bool) -> Ready<'a> {
+    match entry {
+        Written::Object(object) => Ready::Object(object),
+        Written::Stream(stream) => {
+            let mut dict = stream.dict.clone();
+            let data = maybe_compress(&stream.data, &mut dict, names, compress);
+            Ready::Stream(dict, data)
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) static COMPRESSED: std::sync::Mutex<Vec<(std::thread::ThreadId, bool)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Records, under `cfg(test)` only, that a stream of a pooled write called on
+/// `caller`'s thread was made ready on a worker or not: what
+/// `compression_on_four_threads_runs_on_no_caller_thread` reads, its own
+/// thread's entries apart from every other test's.
+#[cfg(test)]
+fn compressed_on(caller: std::thread::ThreadId) {
+    if let Ok(mut compressed) = COMPRESSED.lock() {
+        compressed.push((caller, tinker_pdf_pool::on_worker()));
+    }
+}
+
+/// Nothing is recorded outside a test.
+#[cfg(not(test))]
+fn compressed_on(_caller: std::thread::ThreadId) {}
+
+/// Every stream of `entries` made ready ([`ready`]) on the threads
+/// `parallelism` names, each into a pre-sized slot of its own, in entry
+/// order; `None` for an entry that is no stream.
+pub(crate) fn ready_all<'a>(
+    entries: &[&'a Written],
+    names: &NameTable,
+    compress: bool,
+    parallelism: Parallelism,
+) -> Vec<Option<Ready<'a>>> {
+    let streams: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| matches!(entry, Written::Stream(_)))
+        .map(|(at, _)| at)
+        .collect();
+    let caller = std::thread::current().id();
+    let made = tinker_pdf_pool::map(&parallelism, streams.len(), |slot| {
+        compressed_on(caller);
+        streams
+            .get(slot)
+            .and_then(|at| entries.get(*at))
+            .map(|entry| ready(entry, names, compress))
+    });
+    let mut out: Vec<Option<Ready<'a>>> = entries.iter().map(|_| None).collect();
+    for (at, made) in streams.into_iter().zip(made) {
+        if let Some(slot) = out.get_mut(at) {
+            *slot = made;
+        }
+    }
+    out
+}
+
+/// Whether a write compresses on the pool: it compresses at all, and was
+/// asked for threads.
+pub(crate) fn pooled(compress: bool, parallelism: Parallelism) -> bool {
+    compress && matches!(parallelism, Parallelism::Threads(threads) if threads > 0)
+}
+
+/// How many streams a window of a pooled write holds for each worker it may
+/// start: enough that one slow stream does not leave the rest idle for long,
+/// few enough that a window's compressed bytes are a small part of the file.
+const WINDOW_PER_WORKER: usize = 8;
+
+/// Writes `entries` into `out` in their order, recording where each begins in
+/// `offsets`.
+///
+/// Serially, and for a write that compresses nothing, each object is made
+/// ready and written in turn, as [`write_entry`] writes it. On the pool
+/// ([`pooled`]) the streams are made ready a window at a time — the window's
+/// streams side by side, each into a slot of its own ([`ready_all`]), then its
+/// objects serialised in their order — so the output is the serial writer's
+/// and the extra memory one window's compressed streams. Encryption is applied
+/// as each object is serialised, in object order, whichever way.
+fn write_entries(
+    out: &mut Vec<u8>,
+    offsets: &mut Vec<(u32, u64)>,
+    entries: &[(u32, &Written)],
+    names: &NameTable,
+    compress: bool,
+    crypt: Option<&dyn ObjectCipher>,
+    parallelism: Parallelism,
+) {
+    if !pooled(compress, parallelism) {
+        for (num, entry) in entries {
+            offsets.push((*num, out.len() as u64));
+            write_entry(out, *num, entry, names, compress, crypt);
+        }
+        return;
+    }
+    let window = parallelism
+        .workers(entries.len())
+        .max(1)
+        .saturating_mul(WINDOW_PER_WORKER);
+    let mut rest = entries;
+    while !rest.is_empty() {
+        // The window: entries up to and including its `window`th stream.
+        let mut streams = 0;
+        let mut len = 0;
+        for (_, entry) in rest {
+            len += 1;
+            if matches!(entry, Written::Stream(_)) {
+                streams += 1;
+                if streams == window {
+                    break;
+                }
+            }
+        }
+        let (now, later) = rest.split_at(len.min(rest.len()));
+        let inner: Vec<&Written> = now.iter().map(|(_, entry)| *entry).collect();
+        let made = ready_all(&inner, names, compress, parallelism);
+        for ((num, entry), made) in now.iter().zip(made) {
+            offsets.push((*num, out.len() as u64));
+            let made = made.unwrap_or_else(|| ready(entry, names, compress));
+            write_ready(out, *num, made, names, crypt);
+        }
+        rest = later;
+    }
+}
+
 /// Writes one numbered object, whichever kind it is.
 fn write_entry(
     out: &mut Vec<u8>,
@@ -747,6 +908,18 @@ fn write_entry(
     entry: &Written,
     names: &NameTable,
     compress: bool,
+    crypt: Option<&dyn ObjectCipher>,
+) {
+    write_ready(out, num, ready(entry, names, compress), names, crypt);
+}
+
+/// Writes one numbered object made ready ([`ready`]), encrypting it with
+/// `crypt` as it goes.
+fn write_ready(
+    out: &mut Vec<u8>,
+    num: u32,
+    entry: Ready<'_>,
+    names: &NameTable,
     crypt: Option<&dyn ObjectCipher>,
 ) {
     out.extend_from_slice(
@@ -757,7 +930,7 @@ fn write_entry(
         .as_bytes(),
     );
     match entry {
-        Written::Object(object) => match crypt {
+        Ready::Object(object) => match crypt {
             // 7.6.2: every string in the file is encrypted too, not only the
             // streams. Leaving them in the clear puts titles, form values and
             // annotation contents in plain sight inside a file that claims to
@@ -765,11 +938,9 @@ fn write_entry(
             Some(cipher) => write_object(out, &cipher.encrypt_strings(object, num), names),
             None => write_object(out, object, names),
         },
-        Written::Stream(stream) => {
+        Ready::Stream(mut dict, data) => {
             // 7.3.8.2: /Length must agree with the bytes that follow, so the
             // writer computes it rather than trusting whatever was there.
-            let mut dict = stream.dict.clone();
-            let data = maybe_compress(&stream.data, &mut dict, names, compress);
             // Encryption is the last thing applied and the first thing undone,
             // so it wraps the compressed bytes rather than the other way round.
             let data = match crypt {
@@ -840,6 +1011,7 @@ pub fn incremental_update(
             compress,
             crypt,
             reserved: None,
+            parallelism: Parallelism::Serial,
         },
     )
     .0
@@ -855,6 +1027,9 @@ pub(crate) struct UpdatePlan<'a> {
     pub(crate) crypt: Option<&'a dyn ObjectCipher>,
     /// One object serialised by the caller, appended verbatim.
     pub(crate) reserved: Option<(u32, &'a crate::sign::Reserved)>,
+    /// The threads the update's compression may spend
+    /// ([`WriteOptions::parallelism`]).
+    pub(crate) parallelism: Parallelism,
 }
 
 /// [`incremental_update`], optionally appending one object whose bytes the
@@ -887,15 +1062,25 @@ pub(crate) fn incremental_update_reserving(
     }
 
     let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(changed.entries.len());
-    for (num, object) in &changed.entries {
-        offsets.push((*num, out.len() as u64));
-        // 7.6.2: an update inherits the original file's encryption, so the
-        // appended objects are sealed with *that* file's key and methods — not
-        // with a scheme of this writer's choosing. Appending plaintext under a
-        // trailer that still carries `/Encrypt` produces a file every
-        // conforming reader decrypts into garbage.
-        write_entry(&mut out, *num, object, names, compress, crypt);
-    }
+    // 7.6.2: an update inherits the original file's encryption, so the
+    // appended objects are sealed with *that* file's key and methods — not
+    // with a scheme of this writer's choosing. Appending plaintext under a
+    // trailer that still carries `/Encrypt` produces a file every conforming
+    // reader decrypts into garbage.
+    let entries: Vec<(u32, &Written)> = changed
+        .entries
+        .iter()
+        .map(|(num, entry)| (*num, entry))
+        .collect();
+    write_entries(
+        &mut out,
+        &mut offsets,
+        &entries,
+        names,
+        compress,
+        crypt,
+        plan.parallelism,
+    );
 
     // The signature object, if there is one: written verbatim, uncompressed
     // and unencrypted, with its reserved fields' offsets carried out.
@@ -1145,6 +1330,7 @@ pub(crate) fn rewrite_sealed(
     let linearized = names.intern(b"Linearized");
     let hollow = Written::Object(Object::Dict(Dict::new()));
 
+    let mut entries: Vec<(u32, &Written)> = Vec::with_capacity(objects.entries.len() + 1);
     for (num, object) in &objects.entries {
         if packed.contains(num) {
             continue;
@@ -1153,13 +1339,14 @@ pub(crate) fn rewrite_sealed(
             object,
             Written::Object(Object::Dict(dict)) if dict.contains_key(linearized)
         );
-        offsets.push((*num, out.len() as u64));
-        let object = if stale { &hollow } else { object };
-        write_entry(&mut out, *num, object, names, options.compress, crypt);
+        entries.push((*num, if stale { &hollow } else { object }));
     }
 
+    // The container is built before anything is written, so that its stream
+    // is compressed beside the loose objects' streams; it is written after
+    // them all, where it always stands.
     let container = objects.max_number().saturating_add(1);
-    if !packed.is_empty() {
+    let container_stream = (!packed.is_empty()).then(|| {
         let mut prologue = Vec::new();
         let mut body = Vec::new();
         for num in &packed {
@@ -1180,21 +1367,24 @@ pub(crate) fn rewrite_sealed(
         dict.insert(Name::TYPE, Object::Name(names.intern(b"ObjStm")));
         dict.insert(Name::N, Object::Int(packed.len() as i64));
         dict.insert(Name::FIRST, Object::Int(first as i64));
-
-        offsets.push((container, out.len() as u64));
-        write_entry(
-            &mut out,
-            container,
-            &Written::Stream(StreamData { dict, data }),
-            names,
-            // The container is compressed whenever compression is on at all:
-            // packing many small objects together and then leaving the result
-            // uncompressed makes the file *larger* than not packing it, which
-            // is the opposite of the reason object streams exist.
-            options.compress,
-            crypt,
-        );
+        Written::Stream(StreamData { dict, data })
+    });
+    if let Some(stream) = &container_stream {
+        entries.push((container, stream));
     }
+    // The container is compressed whenever compression is on at all: packing
+    // many small objects together and then leaving the result uncompressed
+    // makes the file *larger* than not packing it, which is the opposite of
+    // the reason object streams exist.
+    write_entries(
+        &mut out,
+        &mut offsets,
+        &entries,
+        names,
+        options.compress,
+        crypt,
+        options.parallelism,
+    );
 
     // 7.6.1: the /Encrypt dictionary is the one object never encrypted, since
     // a reader needs it to decrypt everything else.
@@ -1807,6 +1997,156 @@ mod tests {
         let mut dct = Dict::new();
         dct.insert(Name::FILTER, Object::Name(table.intern(b"DCTDecode")));
         assert_eq!(maybe_compress(&data, &mut dct, &table, true), data);
+    }
+
+    /// A catalog, and `streams` streams of text that deflates, each its own,
+    /// with a dictionary between every pair of them.
+    fn a_set_of_streams(streams: u32, table: &NameTable) -> (ObjectSet, Dict) {
+        let mut objects = ObjectSet::new();
+        let mut catalog = Dict::new();
+        catalog.insert(Name::TYPE, Object::Name(table.intern(b"Catalog")));
+        objects.insert(1, Object::Dict(catalog));
+        for index in 0..streams {
+            let text: String = (0..60)
+                .map(|line| format!("({index} {line}) Tj T* "))
+                .collect();
+            objects.insert_stream(
+                2 + 2 * index,
+                StreamData {
+                    dict: Dict::new(),
+                    data: text.into_bytes(),
+                },
+            );
+            objects.insert(3 + 2 * index, Object::Int(i64::from(index)));
+        }
+        let mut trailer = Dict::new();
+        trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(1, 0)));
+        (objects, trailer)
+    }
+
+    /// This thread's records of where a pooled write made its streams ready,
+    /// taken out of the shared record.
+    fn taken() -> Vec<bool> {
+        let me = std::thread::current().id();
+        let mut taken = Vec::new();
+        if let Ok(mut compressed) = COMPRESSED.lock() {
+            compressed.retain(|(caller, on_worker)| {
+                if *caller == me {
+                    taken.push(*on_worker);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        taken
+    }
+
+    /// **Compression on four threads runs on no caller thread.** A rewrite of
+    /// forty streams compressing on four threads — two windows, of thirty-two
+    /// streams and of eight — makes every stream ready on a worker and none
+    /// on the calling thread; on `wasm32-wasip1`, where no thread starts, all
+    /// forty on the caller. The same rewrite serially, and one on four
+    /// threads that compresses nothing, put no stream on the pool at all.
+    #[test]
+    fn compression_on_four_threads_runs_on_no_caller_thread() {
+        let table = names();
+        let (objects, trailer) = a_set_of_streams(40, &table);
+        let _ = taken();
+
+        let four = WriteOptions {
+            compress: true,
+            parallelism: Parallelism::Threads(4),
+            ..WriteOptions::default()
+        };
+        let pooled = rewrite(&objects, &trailer, &four, &table);
+        let ran = taken();
+        assert_eq!(ran.len(), 40, "every stream was made ready on the pool");
+        if cfg!(target_family = "wasm") {
+            assert!(ran.iter().all(|on_worker| !on_worker), "the caller ran all");
+        } else {
+            assert!(
+                ran.iter().all(|on_worker| *on_worker),
+                "a stream was compressed on the calling thread"
+            );
+        }
+
+        let serial = rewrite(
+            &objects,
+            &trailer,
+            &WriteOptions {
+                compress: true,
+                ..WriteOptions::default()
+            },
+            &table,
+        );
+        assert!(taken().is_empty(), "a serial write uses no pool");
+        assert!(pooled == serial, "and writes the pooled write's bytes");
+
+        let _ = rewrite(
+            &objects,
+            &trailer,
+            &WriteOptions {
+                parallelism: Parallelism::Threads(4),
+                ..WriteOptions::default()
+            },
+            &table,
+        );
+        assert!(taken().is_empty(), "nothing to compress, nothing pooled");
+    }
+
+    /// **A pooled write is the serial write at every window's edge.** Sets of
+    /// one, two, seven, eight, nine, thirty-one to thirty-three and sixty-five
+    /// streams — windows exactly full, one short, one over, and a window of a
+    /// single stream — rewritten and appended as an update on 1, 2, 3, 4 and 7
+    /// threads, each byte for byte the serial write.
+    #[test]
+    fn a_pooled_write_is_the_serial_write_at_every_window_edge() {
+        let table = names();
+        for streams in [1u32, 2, 7, 8, 9, 31, 32, 33, 65] {
+            let (objects, trailer) = a_set_of_streams(streams, &table);
+            let options = |parallelism| WriteOptions {
+                compress: true,
+                parallelism,
+                ..WriteOptions::default()
+            };
+            let serial = rewrite(&objects, &trailer, &options(Parallelism::Serial), &table);
+            let original = rewrite(&objects, &trailer, &WriteOptions::default(), &table);
+            let update = |parallelism| {
+                incremental_update_reserving(
+                    &original,
+                    &objects,
+                    &trailer,
+                    0,
+                    &UpdatePlan {
+                        names: &table,
+                        compress: true,
+                        crypt: None,
+                        reserved: None,
+                        parallelism,
+                    },
+                )
+                .0
+            };
+            let serial_update = update(Parallelism::Serial);
+            for threads in [1usize, 2, 3, 4, 7] {
+                let pooled = rewrite(
+                    &objects,
+                    &trailer,
+                    &options(Parallelism::Threads(threads)),
+                    &table,
+                );
+                assert!(
+                    pooled == serial,
+                    "{streams} streams on {threads} threads: the rewrite differs"
+                );
+                assert!(
+                    update(Parallelism::Threads(threads)) == serial_update,
+                    "{streams} streams on {threads} threads: the update differs"
+                );
+            }
+        }
+        let _ = taken();
     }
 }
 

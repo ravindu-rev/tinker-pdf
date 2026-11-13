@@ -197,7 +197,10 @@ pub struct SaveOptions {
     /// programs cut, the [`SubsetReport`] and every saved byte are the serial
     /// save's. A counted save then counts where each page was walked
     /// ([`crate::Stats::pool_items_on_workers`]); a save asked for no threads
-    /// walks on the calling thread and counts no part.
+    /// walks on the calling thread and counts no part. Handed to the writer
+    /// too, in place of [`WriteOptions::parallelism`], which then compresses
+    /// the streams it writes on the same threads; with `Serial` here the
+    /// writer's own setting stands.
     pub parallelism: Parallelism,
 }
 
@@ -398,8 +401,15 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
             }
         }
     };
+    // The save's threads are handed to the writer, which compresses the
+    // streams it writes on them, where the save asks for any; otherwise the
+    // writer's own `WriteOptions::parallelism` stands.
+    let mut write = options.write.clone();
+    if matches!(options.parallelism, Parallelism::Threads(threads) if threads > 0) {
+        write.parallelism = options.parallelism;
+    }
     Saved {
-        bytes: editor.save_counted(&options.write, work.as_deref()),
+        bytes: editor.save_counted(&write, work.as_deref()),
         fonts,
         images,
         stats: work.filter(|_| options.stats).map(|work| work.stats()),
