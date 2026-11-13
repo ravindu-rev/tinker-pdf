@@ -964,10 +964,12 @@ to it in the commit that adds the capability.
   MS-09's, relations held inside one run (`docs/verification.md`).
 - **Memory and wasm.** MS-05's probe, `tests/peak_memory.rs`, builds its
   cases from these inputs and keeps its own bands. MS-10.1 builds this set for
-  `wasm32-wasip1` and runs it under a wasm runtime, less the operations it
-  lists as unable to run there — a child, a thread — so every file here
-  compiles for that target and reads its committed inputs by path, which the
-  runtime's directory grant reaches.
+  `wasm32-wasip1` and runs it under a wasm runtime, less the operations
+  `benches/wasm.json` lists as unable to run there — a child, a thread — so
+  every file here compiles for that target and reads its committed inputs
+  under the path `TINKER_BENCH_CRATE_DIR` gives the crate, which the
+  runtime's directory grant reaches (`docs/verification.md`, "The wasm
+  legs").
 - **A number an outside program measures.** The level-6 byte counts are
   brought in once (ruling 17), and no outside program runs while the set does
   (ruling 13): a fixture an outside program made once is bytes with its

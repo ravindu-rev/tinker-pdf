@@ -323,6 +323,46 @@ fn a_list_the_reader_cannot_read_is_refused_by_what_is_wrong() {
     assert!(refused(&LISTS[..LISTS.len() / 2], "open").contains("at byte"));
 }
 
+/// What a wasm build of the harness leaves out is read from the committed
+/// `wasm.json` by the harness's own reader, and every id it reads is an
+/// operation of a committed list, so a leg leaves out what the file names
+/// and nothing a slip in it would hide.
+#[test]
+fn the_wasm_exclusions_read_as_operations_of_the_lists() {
+    let excluded = list::excluded_on_wasm();
+    assert!(!excluded.is_empty(), "the committed exclusions");
+    for id in &excluded {
+        let (group, name) = id.split_once('/').expect("an id is <group>/<name>");
+        assert!(
+            list::committed(group)
+                .iter()
+                .any(|listed| listed.name == name),
+            "{id} is an operation of the `{group}` list"
+        );
+    }
+    assert!(list::excluded("{}")
+        .expect_err("no list")
+        .contains("no `excluded` list"));
+    assert!(
+        list::excluded(r#"{ "excluded": [ { "why": "threads" } ] }"#)
+            .expect_err("no id")
+            .contains("entry 0 has no `id` string")
+    );
+}
+
+/// The committed files are read where the process finds the crate: where
+/// cargo built it unless `TINKER_BENCH_CRATE_DIR` says otherwise, as a wasm
+/// leg does. Unset here, so every read is the checkout's own.
+#[test]
+fn a_committed_file_is_read_under_the_crate_where_cargo_built_it() {
+    assert!(std::env::var_os(inputs::CRATE_DIR).is_none());
+    assert_eq!(
+        inputs::in_tree("benches/baseline.json"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/baseline.json")
+    );
+    assert!(inputs::in_tree("benches/wasm.json").is_file());
+}
+
 #[test]
 fn every_group_file_has_a_committed_list() {
     let benches = Path::new(env!("CARGO_MANIFEST_DIR")).join("benches");

@@ -1,18 +1,21 @@
 //! The lists `baseline.json` commits, one a group: each operation's name,
-//! its unit and what one iteration processes in it.
+//! its unit and what one iteration processes in it; and the operations
+//! `wasm.json` names as ones a wasm target cannot run.
 //!
 //! The harness defines an operation the first time criterion calls its
 //! routine, and criterion takes the figure it reports a rate in when the
 //! operation starts, before that. So the harness hands criterion the figure
 //! the list commits and holds what the group file declares to it once the
 //! operation is defined (`support/mod.rs`). This file holds no criterion
-//! type, so a test reaches it by path, as it reaches `inputs.rs`.
+//! type, so a test reaches it by path, as it reaches `inputs.rs`, beside
+//! which it is always reached: it reads each committed file where
+//! `inputs.rs`' [`super::inputs::in_tree`] says the process finds it, so a
+//! wasm leg reads them through its runtime's directory grant.
 //!
-//! The reader is a whole JSON reader over the one file, so what it hands
-//! back depends on no key order, unlike `cargo xtask`'s, which cuts the file
-//! at its first keys and which `cargo xtask baseline` holds the file to.
-
-use std::path::Path;
+//! The reader is a whole JSON reader over each file, so what it hands back
+//! depends on no key order, unlike `cargo xtask`'s, which cuts
+//! `baseline.json` at its first keys and which `cargo xtask baseline` holds
+//! the file to.
 
 /// One operation of a group's list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,10 +31,43 @@ pub struct Listed {
 /// The group `group`'s list, as the committed `benches/baseline.json` holds
 /// it; a file that cannot be read, or that holds no such list, panics.
 pub fn committed(group: &str) -> Vec<Listed> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/baseline.json");
+    let path = super::inputs::in_tree("benches/baseline.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("the committed lists, {}: {error}", path.display()));
     list(&text, group).unwrap_or_else(|problem| panic!("{}: {problem}", path.display()))
+}
+
+/// The ids, `<group>/<name>`, of the operations the committed
+/// `benches/wasm.json` excludes from the wasm legs, which a wasm build of
+/// the harness leaves out; a file that cannot be read, or whose list does
+/// not read, panics.
+pub fn excluded_on_wasm() -> Vec<String> {
+    let path = super::inputs::in_tree("benches/wasm.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("the wasm exclusions, {}: {error}", path.display()));
+    excluded(&text).unwrap_or_else(|problem| panic!("{}: {problem}", path.display()))
+}
+
+/// The id of each entry of the `excluded` list in `text`, a `wasm.json`, in
+/// its order, or what keeps it from being read. Why each is excluded is
+/// `cargo xtask baseline`'s to hold; the harness needs the ids alone.
+pub fn excluded(text: &str) -> Result<Vec<String>, String> {
+    let root = Json::parse(text)?;
+    let entries = root
+        .get("excluded")
+        .and_then(Json::array)
+        .ok_or("the file holds no `excluded` list")?;
+    entries
+        .iter()
+        .enumerate()
+        .map(|(at, entry)| {
+            entry
+                .get("id")
+                .and_then(Json::text)
+                .map(str::to_string)
+                .ok_or_else(|| format!("the `excluded` list's entry {at} has no `id` string"))
+        })
+        .collect()
 }
 
 /// The group `group`'s list in `text`, a `baseline.json`, or what keeps it

@@ -31,6 +31,7 @@ recorded in the roadmap row it closes:
 | The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner |
 | The corpora | `cargo xtask corpus-fetch`, then `cargo xtask corpus-run --check` |
 | The benches | `cargo bench -p tinker-pdf`, then `cargo xtask bench-check --machine NAME` |
+| The benches on `wasm32-wasip1` | the set built plain and with `+simd128` and run under wasmtime beside a native run, each leg into its own tree ("The wasm legs") |
 | Instruction counts, on Linux | `cargo xtask bench-count --group NAME`, a group or a part of one at a time, with valgrind installed |
 | Peak memory, on Linux | `cargo test --release -p tinker-pdf --test peak_memory -- --ignored`, in both builds |
 | The bindings | each surface built, then `cargo xtask bindings-parity --require-all` |
@@ -1571,6 +1572,57 @@ record under another key — one holding any of the ten characters it writes as
 reported as new and never held to its band. Every band in the committed file is
 pushed against from both sides by a unit test, because a band nobody has ever
 crossed is a number nobody has checked.
+
+### The wasm legs
+
+The set also runs on `wasm32-wasip1`, built twice — plain, and with
+`-C target-feature=+simd128` — and run under wasmtime, the runtime the local
+`wasm32-wasip1` fingerprint runs use, beside a native run of the set on the
+same machine, because a ratio across two machines measures the machines. The
+runtime hosts the bench and judges nothing (ruling 13). Cargo starts each
+bench binary through the runner `CARGO_TARGET_WASM32_WASIP1_RUNNER` names, so
+no task here spawns it.
+
+A wasm target has no child process and no thread to start, so the operations
+that need one — every operation that times `tpdf`, and the render group's
+that run on threads they start — are named in `crates/tinker-pdf/benches/wasm.json`,
+each with which of the two it needs, and a wasm build of the harness leaves
+them out; count mode there refuses one by name. No other reason excludes an
+operation: one slow on wasm is what the legs measure. `cargo xtask baseline`
+refuses an exclusion naming an operation no list holds, one named twice, and a
+reason other than `a child process` or `threads`.
+
+The runtime reaches the host's files only through the directories it grants,
+at paths of its own, and a Windows host's drive path means nothing to it. So
+the harness reads every committed file under the crate's directory as the
+process sees it: `TINKER_BENCH_CRATE_DIR` when it is set, which a wasm build
+requires, and where cargo built the crate otherwise. Each leg writes
+criterion's estimates into a tree of its own, the `CRITERION_HOME` it is
+given, granted beside the checkout. Cargo runs a bench binary in its
+package's directory, so the grants are relative to `crates/tinker-pdf`, and
+each tree starts empty:
+
+```sh
+cargo build --release -p tpdf
+rm -rf target/criterion && cargo bench -p tinker-pdf
+grant="--dir ../..::/repo --env TINKER_BENCH_CRATE_DIR=/repo/crates/tinker-pdf"
+rm -rf target/criterion-wasm32-wasip1 && mkdir -p target/criterion-wasm32-wasip1
+CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run $grant \
+    --dir ../../target/criterion-wasm32-wasip1::/criterion --env CRITERION_HOME=/criterion" \
+  cargo bench -p tinker-pdf --target wasm32-wasip1
+rm -rf target/criterion-wasm32-wasip1-simd128 && mkdir -p target/criterion-wasm32-wasip1-simd128
+CARGO_TARGET_DIR=target/simd128 \
+CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS="-C target-feature=+simd128" \
+CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run $grant \
+    --dir ../../target/criterion-wasm32-wasip1-simd128::/criterion --env CRITERION_HOME=/criterion" \
+  cargo bench -p tinker-pdf --target wasm32-wasip1
+```
+
+The `+simd128` leg builds into a target directory of its own, so neither
+leg's build is redone for the other's flags. A leg's tree is the set less the
+exclusions, whole: a tree short of an operation the list does not exclude is
+refused by that operation, and so is one that holds an excluded operation's
+estimate, which no wasm build times, so the tree holds another run's.
 
 ## Counted work, guarded
 

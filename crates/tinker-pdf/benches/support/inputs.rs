@@ -37,6 +37,13 @@
 //! another is built from the other's generator, so a process writes the
 //! inputs its operation reads and no other's, and the calibration operation,
 //! which calls [`dense`] itself, keeps its own build's bytes.
+//!
+//! # Where the committed files are read
+//!
+//! Every file the tree commits is read through [`in_tree`], under the
+//! crate's directory as the process sees it: where cargo built the crate,
+//! or the directory [`CRATE_DIR`] names, which a wasm leg sets to the path
+//! its runtime's directory grant gives the crate.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -93,6 +100,42 @@ pub fn store() -> Store {
         dir
     );
     Store { dir: Some(dir) }
+}
+
+/// The variable naming this crate's directory as the bench process sees it,
+/// where that is not where cargo built it: under a wasm runtime, the guest
+/// path the runtime's directory grant puts the crate at
+/// (`docs/verification.md`, "The wasm legs").
+pub const CRATE_DIR: &str = "TINKER_BENCH_CRATE_DIR";
+
+/// `relative`, a path under this crate's directory, as this process reads
+/// it: under the directory [`CRATE_DIR`] names, or where cargo built the
+/// crate when it is unset. A wasm runtime reaches the host's files only
+/// through the directories it grants, at paths of its own, and a Windows
+/// host's drive path means nothing to it, so on a wasm target the variable
+/// is required; set to a relative path, which would resolve in whatever
+/// directory a process runs in, it is refused.
+pub fn in_tree(relative: &str) -> PathBuf {
+    let dir = match std::env::var_os(CRATE_DIR) {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            assert!(
+                dir.is_absolute(),
+                "{CRATE_DIR} is {dir:?}, and names no directory a process reads the same \
+                 wherever it runs: set it to an absolute path"
+            );
+            dir
+        }
+        None => {
+            assert!(
+                !cfg!(target_family = "wasm"),
+                "{CRATE_DIR} is unset, and a wasm runtime cannot read the crate where cargo \
+                 built it: set it to the path the runtime's directory grant gives the crate"
+            );
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        }
+    };
+    dir.join(relative)
 }
 
 impl Store {
@@ -489,9 +532,7 @@ pub fn triangles() -> Vec<u8> {
 /// One of the books committed under `crates/tinker-pdf/tests/epub/`, by its
 /// file name.
 pub fn committed_book(name: &str) -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/epub")
-        .join(name);
+    let path = in_tree("tests/epub").join(name);
     std::fs::read(&path)
         .unwrap_or_else(|error| panic!("the committed book {}: {error}", path.display()))
 }
@@ -499,11 +540,8 @@ pub fn committed_book(name: &str) -> Vec<u8> {
 /// One of the fixtures committed under `fuzz/corpus/render_page/`, by its
 /// file name.
 pub fn render_fixture(name: &str) -> Vec<u8> {
-    let path = format!(
-        "{}/../../fuzz/corpus/render_page/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    std::fs::read(&path).unwrap_or_else(|error| panic!("the fixture {path}: {error}"))
+    let path = in_tree("../../fuzz/corpus/render_page").join(name);
+    std::fs::read(&path).unwrap_or_else(|error| panic!("the fixture {}: {error}", path.display()))
 }
 
 /// The integer stream every seeded input draws from: SplitMix64, so an input
@@ -609,11 +647,7 @@ fn dense_text(pages: usize, seed: u64) -> Vec<Vec<String>> {
 
 /// Liberation Serif Regular, the face [`dense`] embeds.
 pub fn serif() -> Vec<u8> {
-    let path = format!(
-        "{}/../tinker-pdf-font/data/liberation/LiberationSerif-Regular.ttf",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed face {path}: {error}"))
+    liberation("LiberationSerif-Regular.ttf")
 }
 
 /// `pages` A4 pages of 70 lines each, about 5 600 characters a page, in
@@ -1013,11 +1047,9 @@ pub fn report(pages: usize) -> Vec<u8> {
 /// The CMYK output profile the fuzz corpus commits, which the claiming
 /// pages name as their destination.
 fn cmyk_profile() -> Vec<u8> {
-    let path = format!(
-        "{}/../../fuzz/corpus/icc_profile/cmyk-lut.icc",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed profile {path}: {error}"))
+    let path = in_tree("../../fuzz/corpus/icc_profile/cmyk-lut.icc");
+    std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("the committed profile {}: {error}", path.display()))
 }
 
 /// [`report`]'s pages tagged under PDF/A-2b, and claiming PDF/UA-1 and
@@ -1554,8 +1586,9 @@ fn hex(bytes: &[u8]) -> String {
 
 /// One of the codestreams committed under `benches/data/`, by its name.
 pub fn committed_data(name: &str) -> Vec<u8> {
-    let path = format!("{}/benches/data/{name}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed file {path}: {error}"))
+    let path = in_tree("benches/data").join(name);
+    std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("the committed file {}: {error}", path.display()))
 }
 
 /// A scan: the dense text page rendered at 300 dpi and thresholded to one
@@ -1853,12 +1886,9 @@ pub struct RsaKey {
 
 /// `pss-vect.txt`, as the crypto crate's tests commit it.
 pub fn pss_vectors() -> String {
-    let path = format!(
-        "{}/../tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = in_tree("../tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt");
     std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("the committed vectors {path}: {error}"))
+        .unwrap_or_else(|error| panic!("the committed vectors {}: {error}", path.display()))
 }
 
 /// Example 10's key, read from its block of `vectors`, [`pss_vectors`]'s
@@ -2156,10 +2186,7 @@ fn fixtures(dir: &str, extensions: &[&str], left_out: &[&str]) -> Vec<Fixture> {
         }
     }
     let mut paths = Vec::new();
-    walk(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir),
-        &mut paths,
-    );
+    walk(&in_tree(dir), &mut paths);
     let mut out: Vec<Fixture> = paths
         .into_iter()
         .filter(|path| {
@@ -2200,20 +2227,16 @@ pub fn cbz_fixtures() -> Vec<Fixture> {
 
 /// One of the three Liberation faces the fonts group outlines, by file name.
 pub fn liberation(name: &str) -> Vec<u8> {
-    let path = format!(
-        "{}/../tinker-pdf-font/data/liberation/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed face {path}: {error}"))
+    let path = in_tree("../tinker-pdf-font/data/liberation").join(name);
+    std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("the committed face {}: {error}", path.display()))
 }
 
 /// A face under `tinker-pdf-shape/data/`, by its path there.
 pub fn shape_face(path: &str) -> Vec<u8> {
-    let path = format!(
-        "{}/../tinker-pdf-shape/data/{path}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed face {path}: {error}"))
+    let path = in_tree("../tinker-pdf-shape/data").join(path);
+    std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("the committed face {}: {error}", path.display()))
 }
 
 /// Every committed CFF program, by file name: the four bare ones the `cff`
@@ -2221,10 +2244,9 @@ pub fn shape_face(path: &str) -> Vec<u8> {
 /// face — aots's 185, text-rendering-tests' three and the `sfnt` target's
 /// `opentype-cff.otf`.
 pub fn cff_programs() -> Vec<Fixture> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut out = Vec::new();
     let mut read = |dir: &str, extension: &str, whole: bool| {
-        let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(root.join(dir))
+        let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(in_tree(dir))
             .unwrap_or_else(|error| panic!("the font directory {dir}: {error}"))
             .map(|entry| entry.expect("a directory entry").path())
             .filter(|path| path.extension().is_some_and(|e| e == extension))

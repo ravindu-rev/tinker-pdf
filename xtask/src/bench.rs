@@ -77,6 +77,19 @@
 //! [`check`] refuses an operation with no gate, so none joins the set unheld
 //! against the baseline, and [`against_planning`] holds a head's rounds to the
 //! planning baseline's by them.
+//!
+//! # Why a wasm leg leaves operations out, and only these
+//!
+//! The set also runs on `wasm32-wasip1`, plain and with `+simd128`, under a
+//! wasm runtime (MS-10), and a wasm target has no child process and no
+//! thread to start. The operations that need one are named in
+//! `benches/wasm.json`, each with which of the two it needs
+//! ([`WASM_LACKS`]), and a wasm build of the harness leaves them out. No
+//! other reason is admitted: an operation slow on wasm is exactly what the
+//! legs exist to measure, so it stays in them. [`check`] holds each
+//! exclusion to an operation the lists hold, and [`wasm_leg`] holds a leg's
+//! tree to the set less them, so a leg that ran short is refused rather
+//! than compared on what it happened to time.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -107,6 +120,16 @@ pub const BENCH_DIR: &str = "crates/tinker-pdf/benches";
 
 /// The manifest that declares each group file a `[[bench]]`.
 pub const BENCH_MANIFEST: &str = "crates/tinker-pdf/Cargo.toml";
+
+/// Where the wasm legs' committed facts live: the operations a wasm target
+/// cannot run, which the legs leave out. Read whole, so its key order is
+/// free.
+pub const WASM_PATH: &str = "crates/tinker-pdf/benches/wasm.json";
+
+/// What a wasm target has not that an operation of the set may need, and so
+/// the only reasons `wasm.json` may exclude one for: a child process, for an
+/// operation that times `tpdf`, and threads it starts.
+pub const WASM_LACKS: [&str; 2] = ["a child process", "threads"];
 
 /// The ten characters criterion 0.5.1 writes as `_` in each part of an
 /// operation's directory (`make_filename_safe`, its `src/report.rs`).
@@ -2240,11 +2263,145 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
         }
     }
 
+    // The wasm legs' exclusions, each an operation the lists hold.
+    match std::fs::read_to_string(root.join(WASM_PATH)) {
+        Err(error) => problems.push(format!(
+            "cannot read {WASM_PATH}: {error}; a wasm build of the harness leaves out \
+             what it excludes, and the wasm legs are held to the set less those"
+        )),
+        Ok(text) => match wasm_excluded(&text) {
+            Err(problem) => problems.push(problem),
+            Ok(excluded) => {
+                if let Some(lists) = &lists {
+                    problems.extend(exclusion_problems(&excluded, lists));
+                }
+            }
+        },
+    }
+
     if problems.is_empty() {
         Ok(())
     } else {
         Err(problems)
     }
+}
+
+/// One operation the wasm legs leave out, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Excluded {
+    /// Its id, `<group>/<name>`.
+    pub id: String,
+    /// What it needs that a wasm target has not: one of [`WASM_LACKS`].
+    pub why: String,
+}
+
+/// The `excluded` list of `text`, a `wasm.json`, in its order: each entry's
+/// id and why. An entry that gives either as no string is refused, and so is
+/// a reason other than [`WASM_LACKS`]': an operation leaves the wasm legs
+/// because the target cannot run it, never because it is slow there.
+pub fn wasm_excluded(text: &str) -> Result<Vec<Excluded>, String> {
+    let root = json::parse(text).map_err(|error| format!("{WASM_PATH}: {error}"))?;
+    let entries = root
+        .get("excluded")
+        .and_then(Json::as_array)
+        .ok_or_else(|| format!("{WASM_PATH} holds no `excluded` list"))?;
+    entries
+        .iter()
+        .enumerate()
+        .map(|(at, entry)| {
+            let field = |key: &str| {
+                entry
+                    .get(key)
+                    .and_then(Json::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        format!(
+                            "{WASM_PATH}: the `excluded` list's entry {at} has no `{key}` string"
+                        )
+                    })
+            };
+            let (id, why) = (field("id")?, field("why")?);
+            if !WASM_LACKS.contains(&why.as_str()) {
+                return Err(format!(
+                    "{WASM_PATH} excludes `{id}` because `{why}`; an operation leaves the \
+                     wasm legs only for what a wasm target has not, `{}` or `{}`",
+                    WASM_LACKS[0], WASM_LACKS[1]
+                ));
+            }
+            Ok(Excluded { id, why })
+        })
+        .collect()
+}
+
+/// What is wrong with `excluded` against `lists`: an exclusion naming an
+/// operation no list holds, which leaves nothing out and hides the slip,
+/// and one named twice.
+#[must_use]
+pub fn exclusion_problems(excluded: &[Excluded], lists: &[Group]) -> Vec<String> {
+    let ids: Vec<String> = lists
+        .iter()
+        .flat_map(|list| list.operations.iter().map(|o| list.id(&o.name)))
+        .collect();
+    let mut problems = Vec::new();
+    for (index, exclusion) in excluded.iter().enumerate() {
+        if excluded[..index]
+            .iter()
+            .any(|other| other.id == exclusion.id)
+        {
+            problems.push(format!("{WASM_PATH} excludes `{}` twice", exclusion.id));
+        } else if !ids.contains(&exclusion.id) {
+            problems.push(format!(
+                "{WASM_PATH} excludes `{}`, which no list in {BASELINE_PATH} holds",
+                exclusion.id
+            ));
+        }
+    }
+    problems
+}
+
+/// The operations a wasm leg runs, by id and in the lists' order: every
+/// operation of the set but those `excluded` names.
+#[must_use]
+pub fn wasm_set(lists: &[Group], excluded: &[Excluded]) -> Vec<String> {
+    lists
+        .iter()
+        .flat_map(|list| list.operations.iter().map(|o| list.id(&o.name)))
+        .filter(|id| !excluded.iter().any(|exclusion| &exclusion.id == id))
+        .collect()
+}
+
+/// What keeps `now`, the estimates of one leg's tree, from being one run of
+/// the set less what `excluded` names: each operation of it the tree holds
+/// no estimate for, and each excluded one it holds, which no wasm build of
+/// the harness times, so the tree holds another run's. `leg` names the leg
+/// in each.
+#[must_use]
+pub fn wasm_leg(
+    leg: &str,
+    lists: &[Group],
+    excluded: &[Excluded],
+    now: &BTreeMap<String, f64>,
+) -> Vec<String> {
+    let mut problems: Vec<String> = wasm_set(lists, excluded)
+        .into_iter()
+        .filter(|id| !now.contains_key(id))
+        .map(|id| {
+            format!(
+                "the {leg} leg holds no estimate for `{id}`, which {WASM_PATH} does not \
+                 exclude; a leg runs the whole set less the exclusions"
+            )
+        })
+        .collect();
+    for exclusion in excluded {
+        if now.contains_key(&exclusion.id) {
+            problems.push(format!(
+                "the {leg} leg holds an estimate for `{}`, which {WASM_PATH} excludes ({}), \
+                 so its tree holds another run's: a leg starts from an empty tree",
+                exclusion.id, exclusion.why
+            ));
+        }
+    }
+    problems
 }
 
 /// How many rounds a paired run times each operation in on each side: a sign
@@ -3484,7 +3641,17 @@ mod tests {
         manifest: String,
         files: Vec<(String, String)>,
         baseline: String,
+        wasm: String,
     }
+
+    /// The wasm legs' exclusions in a tree that agrees: one of its three
+    /// operations, as a CLI-marked one would be.
+    const WASM: &str = r#"{
+  "note": ["One operation a wasm target cannot run."],
+  "excluded": [
+    { "id": "render/render a full-page axial shading at 150 dpi", "why": "a child process" }
+  ]
+}"#;
 
     const MANIFEST: &str = r#"[package]
 name = "tinker-pdf"
@@ -3579,6 +3746,7 @@ fn render(c: &mut Criterion) {
                     ),
                 ],
                 baseline: LISTS.to_string(),
+                wasm: WASM.to_string(),
             }
         }
 
@@ -3598,6 +3766,7 @@ fn render(c: &mut Criterion) {
                 *source = source.replace(from, to);
             }
             self.baseline = self.baseline.replace(from, to);
+            self.wasm = self.wasm.replace(from, to);
         }
 
         /// This tree written out under a root of its own, named for `tag` and
@@ -3613,6 +3782,7 @@ fn render(c: &mut Criterion) {
                 std::fs::write(benches.join(name), source).expect("a file");
             }
             std::fs::write(root.join(BASELINE_PATH), &self.baseline).expect("a file");
+            std::fs::write(root.join(WASM_PATH), &self.wasm).expect("a file");
             root
         }
 
@@ -3648,6 +3818,136 @@ fn render(c: &mut Criterion) {
     #[test]
     fn group_files_lists_and_counts_that_agree_pass() {
         assert_eq!(Tree::agreeing().problems("agrees"), Vec::<String>::new());
+    }
+
+    /// An exclusion naming no operation leaves nothing out of a wasm leg and
+    /// hides the slip that named it, so it is refused, as is every other
+    /// way the list can be wrong: an operation named twice, a reason a wasm
+    /// target does not lack, an entry with no reason, and no file at all.
+    #[test]
+    fn a_wasm_exclusion_naming_no_operation_is_refused() {
+        refuses(
+            "wasm-excluded",
+            &[
+                (
+                    "an exclusion naming an operation no list holds",
+                    |tree| {
+                        tree.wasm = tree.wasm.replace(
+                            "render/render a full-page axial shading at 150 dpi",
+                            "render/render a page nobody renders",
+                        );
+                    },
+                    "excludes `render/render a page nobody renders`, which no list",
+                ),
+                (
+                    "an exclusion by the operation's name alone",
+                    |tree| {
+                        tree.wasm = tree.wasm.replace(
+                            "render/render a full-page axial shading at 150 dpi",
+                            "render a full-page axial shading at 150 dpi",
+                        );
+                    },
+                    "excludes `render a full-page axial shading at 150 dpi`, which no list",
+                ),
+                (
+                    "an operation excluded twice",
+                    |tree| {
+                        tree.wasm = tree.wasm.replace(
+                            "\"why\": \"a child process\" }",
+                            "\"why\": \"a child process\" },\n    { \"id\": \"render/render a full-page \
+                             axial shading at 150 dpi\", \"why\": \"threads\" }",
+                        );
+                    },
+                    "excludes `render/render a full-page axial shading at 150 dpi` twice",
+                ),
+                (
+                    "an operation excluded for being slow",
+                    |tree| {
+                        tree.wasm = tree.wasm.replace("a child process", "slow under wasm");
+                    },
+                    "because `slow under wasm`",
+                ),
+                (
+                    "an exclusion with no reason",
+                    |tree| {
+                        tree.wasm = tree.wasm.replace(", \"why\": \"a child process\"", "");
+                    },
+                    "entry 0 has no `why` string",
+                ),
+                (
+                    "no exclusion list",
+                    |tree| tree.wasm = "{}".to_string(),
+                    "holds no `excluded` list",
+                ),
+            ],
+        );
+        let root = Tree::agreeing().stage("wasm-absent");
+        std::fs::remove_file(root.join(WASM_PATH)).expect("the staged exclusions");
+        let problems = check(&root).expect_err("there is no wasm.json");
+        std::fs::remove_dir_all(&root).ok();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains(&format!("cannot read {WASM_PATH}"))),
+            "{problems:?}"
+        );
+    }
+
+    /// A wasm leg is the set less its exclusions, whole: a tree short of an
+    /// operation the list does not exclude is refused by the operation, and
+    /// so is one holding an excluded operation's estimate, which no wasm
+    /// build times, so the tree holds another run's.
+    #[test]
+    fn an_operation_missing_from_a_wasm_leg_is_refused() {
+        let lists = groups(LISTS, "x").expect("the lists parse");
+        let excluded = wasm_excluded(WASM).expect("the exclusions parse");
+        assert_eq!(
+            wasm_set(&lists, &excluded),
+            vec![
+                "open/open a 3-page document".to_string(),
+                "render/render text at 150 dpi".to_string(),
+            ],
+            "a leg runs every listed operation but the excluded one"
+        );
+        let leg = |ids: &[&str]| -> BTreeMap<String, f64> {
+            ids.iter().map(|id| (id.to_string(), 1.0e6)).collect()
+        };
+        let whole = leg(&[
+            "open/open a 3-page document",
+            "render/render text at 150 dpi",
+        ]);
+        assert_eq!(
+            wasm_leg("plain", &lists, &excluded, &whole),
+            Vec::<String>::new()
+        );
+
+        let short = leg(&["open/open a 3-page document"]);
+        let problems = wasm_leg("plain", &lists, &excluded, &short);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0]
+                .contains("the plain leg holds no estimate for `render/render text at 150 dpi`"),
+            "{problems:?}"
+        );
+
+        let mut stale = whole.clone();
+        stale.insert(
+            "render/render a full-page axial shading at 150 dpi".to_string(),
+            1.0e6,
+        );
+        let problems = wasm_leg("+simd128", &lists, &excluded, &stale);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains(
+                "the +simd128 leg holds an estimate for `render/render a full-page axial \
+                 shading at 150 dpi`, which"
+            ),
+            "{problems:?}"
+        );
+        assert!(
+            wasm_leg("plain", &lists, &excluded, &BTreeMap::new()).len() == 2,
+            "an empty tree is short of every operation it runs"
+        );
     }
 
     /// Count mode runs what `Group::operation` declares and nothing else, so

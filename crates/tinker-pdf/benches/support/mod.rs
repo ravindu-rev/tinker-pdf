@@ -104,6 +104,24 @@
 //! run's own, and `cargo xtask bench-check` prints it beside the group's
 //! relations held inside one run and arms one named for a CPU count on it.
 //!
+//! # The wasm legs
+//!
+//! The set is built for `wasm32-wasip1` twice, plain and with
+//! `-C target-feature=+simd128`, and run under wasmtime, the runtime the
+//! local `wasm32-wasip1` fingerprint runs use, which hosts the bench and
+//! judges nothing (ruling 13). Cargo starts each bench binary through the
+//! runner its `CARGO_TARGET_WASM32_WASIP1_RUNNER` names, so nothing here or
+//! in `cargo xtask` spawns it (`docs/verification.md`, "The wasm legs").
+//! The runtime reaches the host's files only through the directories it
+//! grants, at paths of its own: the committed files are read under the path
+//! `inputs.rs`' `TINKER_BENCH_CRATE_DIR` gives the crate, and each leg
+//! writes criterion's estimates into its own tree, the one `CRITERION_HOME`
+//! names, granted beside it. An operation a wasm target cannot run — one
+//! that times `tpdf` as a child, or runs on threads it starts — is named,
+//! with which of the two it is, in the committed `wasm.json`, and a wasm
+//! build of [`Group`] leaves each of them out, so a leg is the set less
+//! those, which `cargo xtask bench-check` holds it to.
+//!
 //! # The planning baseline
 //!
 //! Tier P holds the head against `61adcde`, the planning baseline, and the
@@ -319,6 +337,17 @@ fn record_host(group: &str) {
         .unwrap_or_else(|error| panic!("the host record in {}: {error}", dir.display()));
 }
 
+/// The operations this build cannot run, by id: on a wasm target those the
+/// committed `wasm.json` excludes, a child process or threads being what
+/// such a target has not, and none on any other.
+fn excluded_here() -> Vec<String> {
+    if cfg!(target_family = "wasm") {
+        list::excluded_on_wasm()
+    } else {
+        Vec::new()
+    }
+}
+
 /// One group of the set as its file declares it: criterion's group, flat
 /// sampled, with its list from `baseline.json`; or in count mode the one
 /// operation `TINKER_BENCH_COUNT` names.
@@ -336,6 +365,9 @@ enum Mode<'c> {
     Measure {
         group: BenchmarkGroup<'c, WallTime>,
         listed: Vec<list::Listed>,
+        /// The ids this build leaves out: on a wasm target the operations
+        /// `wasm.json` excludes, and none elsewhere.
+        excluded: Vec<String>,
     },
     Count {
         operation: String,
@@ -346,13 +378,24 @@ enum Mode<'c> {
 impl<'c> Group<'c> {
     /// The group `id`: criterion's group, sampled flat, its host recorded
     /// beside its estimates and its list read, or in count mode the group's
-    /// one operation asked for, run outside criterion.
+    /// one operation asked for, run outside criterion. On a wasm target the
+    /// operations `wasm.json` excludes are left out, and count mode refuses
+    /// one of them by name.
     pub fn new(c: &'c mut Criterion, id: &str) -> Group<'c> {
         let mode = match count_mode() {
-            Some((operation, iterations)) => Mode::Count {
-                operation,
-                iterations,
-            },
+            Some((operation, iterations)) => {
+                if excluded_here().contains(&operation) {
+                    eprintln!(
+                        "count-mode: {operation} is one wasm.json excludes, which a wasm target \
+                         cannot run"
+                    );
+                    std::process::exit(2);
+                }
+                Mode::Count {
+                    operation,
+                    iterations,
+                }
+            }
             None => {
                 record_host(id);
                 let mut group = c.benchmark_group(id);
@@ -360,6 +403,7 @@ impl<'c> Group<'c> {
                 Mode::Measure {
                     group,
                     listed: list::committed(id),
+                    excluded: excluded_here(),
                 }
             }
         };
@@ -394,7 +438,14 @@ impl<'c> Group<'c> {
                 println!("count-mode: RAN {id} {iterations}");
                 std::process::exit(0);
             }
-            Mode::Measure { group, listed } => {
+            Mode::Measure {
+                group,
+                listed,
+                excluded,
+            } => {
+                if excluded.contains(&id) {
+                    return;
+                }
                 let listed = listed
                     .iter()
                     .find(|listed| listed.name == name)
