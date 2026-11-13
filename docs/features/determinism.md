@@ -56,7 +56,8 @@ each page of its table — `text`, `curves`, `shading`, `pattern`, `optional`,
 `image`, `jbig2`, `jpx`, `blend`, `transparency`, `tiling`, `mesh`, `cbz`,
 `xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
 `analytic_image`, `default_spaces`, `gs_text`, `strokes`, `bilevel`, `icc`,
-`jpeg_minified`, `jpx_minified`, `intents` — each a hash of rendered pixels
+`jpeg_minified`, `jpx_minified`, `intents`, `substituted_cjk` — each a hash of
+rendered pixels
 plus the page dimensions and
 ink counts it is computed from. `strokes` is the stroker's whole pen: the
 three caps and the three joins
@@ -99,7 +100,14 @@ intent and a media white other than D50, so each intent's table, and
 absolute colorimetric's scaling by the media white, are one picture on every
 target; `crates/tinker-pdf/tests/rendering_intents.rs`
 holds the same page, built by the same function in `tests/render_support/`,
-to the transforms recomputed from ICC.1.
+to the transforms recomputed from ICC.1. `substituted_cjk` is unembedded
+Adobe-Japan1 text drawn by a face a provider substitutes, a face built in
+`tests/render_support/` whose glyph at each CID's number is a decoy: `日本語A`
+under `UniJIS-UTF16-H` and `、` under `UniJIS-UTF16-V`, each reached through
+the collection's inverted `Uni*-UTF32` CMaps and the face's `cmap`, and the
+comma through the face's `vert` ([fonts](fonts.md)), so the inversion and the
+vertical form are one picture on every target; `substitute_fonts.rs` reads
+the same page.
 
 The `analytic_` pages are a different kind of fixture from the rest: their
 pixels have a **closed-form right answer**, which

@@ -58,6 +58,8 @@ pub struct Cff<'a> {
     /// Whether the Top DICT carries `ROS`, which is what makes a font
     /// CID-keyed and its charset a CID map rather than a name map.
     is_cid: bool,
+    /// `ROS`'s registry and ordering SIDs, where both are SIDs.
+    ros: Option<(u16, u16)>,
     /// CID-keyed fonts: which Font DICT each glyph draws its Private DICT and
     /// local subroutines from. Empty when the font is not CID-keyed.
     fd_select: Vec<u8>,
@@ -293,6 +295,17 @@ impl<'a> Cff<'a> {
         // 12 30 is ROS: its presence, and nothing else, is what makes a font
         // CID-keyed, which changes what the charset means.
         let is_cid = dict_get(&top, 0x0C1E).is_some();
+        // Its first two operands are the registry's and the ordering's SIDs,
+        // the third the supplement (Adobe Technical Note 5176, Table 10).
+        let ros = dict_get(&top, 0x0C1E).and_then(|operands| {
+            let sid = |at: usize| {
+                operands
+                    .get(at)
+                    .filter(|value| value.fract() == 0.0 && (0.0..=65_535.0).contains(*value))
+                    .map(|value| *value as u16)
+            };
+            Some((sid(0)?, sid(1)?))
+        });
 
         // 15 is charset. Absent means the ISOAdobe predefined one, whose
         // offset is also zero.
@@ -346,6 +359,7 @@ impl<'a> Cff<'a> {
             by_sid,
             encoding,
             is_cid,
+            ros,
             fd_select,
             fds,
             font_matrix,
@@ -367,6 +381,20 @@ impl<'a> Cff<'a> {
     #[must_use]
     pub fn is_cid(&self) -> bool {
         self.is_cid
+    }
+
+    /// The character collection a CID-keyed font declares in `ROS` (Top DICT
+    /// `12 30`): its registry and its ordering, read through the string
+    /// INDEX, as `("Adobe", "Japan1")`. `None` for a font that is not
+    /// CID-keyed, and for one whose `ROS` names strings it does not hold.
+    ///
+    /// What says whether the font's CIDs are another document's: a CID of a
+    /// collection reaches the same character in every face keyed by that
+    /// collection (`docs/design/fallback-faces.md`).
+    #[must_use]
+    pub fn registry_ordering(&self) -> Option<(&'a str, &'a str)> {
+        let (registry, ordering) = self.ros?;
+        Some((self.sid_name(registry)?, self.sid_name(ordering)?))
     }
 
     /// The name a glyph carries, through the charset and the string INDEX.
@@ -3067,6 +3095,30 @@ mod tests {
             "a CID-keyed font has CIDs, not names"
         );
         assert_eq!(cff.glyph_name(1), None);
+    }
+
+    /// **A CID-keyed font names its collection**: `ROS`'s registry and
+    /// ordering through the string INDEX, here `Adobe` and `Identity`; none
+    /// where `ROS` names a string the font does not hold, and none for a
+    /// font that is not CID-keyed.
+    #[test]
+    fn a_cid_keyed_font_names_its_collection() {
+        let font = cid_fixture(vec![0, 0, 0, 1, 1]).build();
+        let cff = Cff::parse(&font).expect("a CID-keyed font");
+        assert_eq!(cff.registry_ordering(), Some(("Adobe", "Identity")));
+
+        let short = Fixture {
+            strings: vec![b"Adobe".to_vec()],
+            ..cid_fixture(vec![0, 0, 0, 1, 1])
+        }
+        .build();
+        let cff = Cff::parse(&short).expect("a CID-keyed font missing a string");
+        assert!(cff.is_cid());
+        assert_eq!(cff.registry_ordering(), None, "SID 392 names nothing");
+
+        let named = abc(Table::Bytes(charset_0(&ABC))).build();
+        let cff = Cff::parse(&named).expect("a CFF font");
+        assert_eq!(cff.registry_ordering(), None, "not CID-keyed");
     }
 
     /// Every glyph in a CID-keyed font calls local subroutine 0, and the two

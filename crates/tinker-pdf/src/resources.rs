@@ -22,6 +22,7 @@ use tinker_pdf_filters::{
     JpegColor, JpegLayout, JpegScale, JpegSink, Warning as FilterWarning, MAX_JBIG2_SYMBOL_PIXELS,
     MAX_JBIG2_WORK_MULTIPLE,
 };
+use tinker_pdf_font::cmap::collection_character;
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_pool::{Executor, Parallelism};
 use tinker_pdf_raster::canvas::{Canvas, Color};
@@ -584,7 +585,7 @@ struct Caches {
     /// so a program the scopes of one operation draw — a page's and its
     /// forms', or every page's of a save — is decoded once between them, and
     /// the entry here is the operation's bytes, not a copy of them.
-    programs: Flights<u64, Option<Arc<Vec<u8>>>>,
+    programs: Flights<u64, Option<FontProgram>>,
     /// Decoded images, kept because a page may draw one many times: by the
     /// resource name, each name's decodes by the reduction they were made at
     /// and the conversion their colours took (`ImageEntry`), so a hit hands
@@ -3430,7 +3431,18 @@ impl PageResources {
     }
 }
 
-/// The embedded font program of a font resource, if it has one (9.9).
+/// A font's program, and whose it is.
+#[derive(Clone)]
+struct FontProgram {
+    /// The program's bytes.
+    bytes: Arc<Vec<u8>>,
+    /// Whether a provider substituted it for a program the document does not
+    /// embed. A substituted face numbers its glyphs in an order of its own,
+    /// so it is read by character rather than by the document's glyph
+    /// numbers (`docs/design/fallback-faces.md`).
+    substituted: bool,
+}
+
 /// The font program to draw a font's glyphs with: the embedded one, or a
 /// substitute the host supplied.
 ///
@@ -3447,17 +3459,25 @@ fn program_for(
     font: &ScopeFont,
     provider: Option<&dyn FontProvider>,
     op: &Operation,
-) -> Option<Arc<Vec<u8>>> {
+) -> Option<FontProgram> {
     let dict = font.dict.as_dict()?;
     if let Some(embedded) = embedded_program(doc, dict, op) {
-        return Some(embedded);
+        return Some(FontProgram {
+            bytes: embedded,
+            substituted: false,
+        });
     }
 
     let provider = provider?;
     if !fonts::is_substitutable(&font.font) {
         return None;
     }
-    provider.substitute(&FontRequest::read(doc, dict))
+    provider
+        .substitute(&FontRequest::read(doc, dict))
+        .map(|bytes| FontProgram {
+            bytes,
+            substituted: true,
+        })
 }
 
 fn embedded_program(doc: &CosDocument, font: &Dict, op: &Operation) -> Option<Arc<Vec<u8>>> {
@@ -5365,8 +5385,8 @@ impl PageResources {
     }
 
     /// The font program behind a font id, read once a scope and decoded once
-    /// an operation.
-    fn program(&self, font_id: u64) -> Option<Arc<Vec<u8>>> {
+    /// an operation, and whether a provider substituted it.
+    fn program(&self, font_id: u64) -> Option<FontProgram> {
         let made = Cell::new(false);
         let program = self.caches.programs.read(font_id, || {
             made.set(true);
@@ -5631,7 +5651,10 @@ impl PageResources {
 
     /// Pulls one glyph's outline out of an embedded font program.
     fn extract_outline(&self, font_id: u64, code: u32) -> Option<Outline> {
-        let program = self.program(font_id)?;
+        let FontProgram {
+            bytes: program,
+            substituted,
+        } = self.program(font_id)?;
 
         // The font's own character mapping decides which glyph a code means.
         let found = self.font_by_id(font_id)?;
@@ -5649,14 +5672,22 @@ impl PageResources {
             if sfnt.table(0x676C_7966).is_none() {
                 if let Some(table) = sfnt.table(0x4346_4620) {
                     if let Some(cff) = Cff::parse(table) {
-                        let chosen = self.cff_selection(&cff, font, name, code);
-                        return self.cff_outline(&cff, chosen.glyph);
+                        let glyph = if substituted {
+                            self.substituted_glyph(Some(&sfnt), Some(&cff), font, name, code)
+                        } else {
+                            self.cff_selection(&cff, font, name, code).glyph
+                        };
+                        return self.cff_outline(&cff, glyph);
                     }
                 }
                 return None;
             }
 
-            let glyph = self.sfnt_selection(&sfnt, font, name, code)?.glyph;
+            let glyph = if substituted {
+                self.substituted_glyph(Some(&sfnt), None, font, name, code)
+            } else {
+                self.sfnt_selection(&sfnt, font, name, code)?.glyph
+            };
 
             let units = f64::from(sfnt.units_per_em.max(1));
             let outline = glyf::outline(&sfnt, glyph)?;
@@ -5664,8 +5695,12 @@ impl PageResources {
         }
 
         if let Some(cff) = Cff::parse(&program) {
-            let chosen = self.cff_selection(&cff, font, name, code);
-            return self.cff_outline(&cff, chosen.glyph);
+            let glyph = if substituted {
+                self.substituted_glyph(None, Some(&cff), font, name, code)
+            } else {
+                self.cff_selection(&cff, font, name, code).glyph
+            };
+            return self.cff_outline(&cff, glyph);
         }
 
         // 9.9: a `/FontFile` is a Type 1 program. Until this existed the bytes
@@ -5716,7 +5751,15 @@ impl PageResources {
     /// uses above is an index into *that* font's private ordering and not a
     /// glyph id any subsetter could act on.
     pub(crate) fn selection(&self, font_id: u64, code: u32) -> Option<Selection> {
-        let program = self.program(font_id)?;
+        let FontProgram {
+            bytes: program,
+            substituted,
+        } = self.program(font_id)?;
+        // A substituted face is not the document's, and nothing subsetting
+        // keeps is a glyph of it.
+        if substituted {
+            return None;
+        }
         let found = self.font_by_id(font_id)?;
         let (name, font) = (&found.name, &found.font);
 
@@ -5749,35 +5792,7 @@ impl PageResources {
             return Some(Selection::stated(self.cid_glyph(font, name, code)));
         }
 
-        let text = font.text_of(code);
-        let ch = text.chars().next();
-        let by_text = || ch.and_then(|c| sfnt.glyph_for_char(c)).filter(|g| *g != 0);
-        // 9.6.6.4: a symbolic font's codes go through its `cmap`
-        // directly rather than through a character — the (3,0)
-        // subtable maps the code into the F0xx private-use block,
-        // which is what `glyph_for_char` does with a character it is
-        // handed. Without this a symbolic face fell straight to the
-        // last resort below.
-        let by_code = || {
-            char::from_u32(code)
-                .and_then(|c| sfnt.glyph_for_char(c))
-                .filter(|g| *g != 0)
-        };
-        // **A symbolic font asks its code first.** Its `cmap` is keyed by
-        // the codes, and the character a code's `/ToUnicode` names is
-        // another code of the same table: an office suite's subset numbers
-        // its glyphs in the order the document used them, so the space can
-        // be code 3 while code 32, which U+0020 reaches through that table,
-        // is a letter. Asked the character first, every such space drew the
-        // letter, and both validators read the letter's advance against the
-        // space's width (MS-14). A table keyed by Unicode answers the code
-        // with nothing, and the character still decides there.
-        let stated = if font.is_symbolic() {
-            by_code().or_else(by_text)
-        } else {
-            by_text().or_else(by_code)
-        };
-        if let Some(glyph) = stated {
+        if let Some(glyph) = simple_glyph_by_cmap(sfnt, font, code) {
             return Some(Selection::stated(glyph));
         }
 
@@ -5791,6 +5806,132 @@ impl PageResources {
         // same number whenever the old reading was right and the
         // right one whenever it was not.
         Some(Selection::guessed(u16::try_from(code).ok()?))
+    }
+
+    /// Which glyph of a **substituted** face — a host's or a bundled one,
+    /// never the document's own program — a code selects
+    /// (`docs/design/fallback-faces.md`): `sfnt` the face's table directory
+    /// where it has one, `cff` its CFF outlines where they are CFF.
+    ///
+    /// A composite font's code reaches a glyph only through the CID its
+    /// encoding CMap maps it to, by the first of four routes that reaches one:
+    /// the face's own charset, where it is CID-keyed in the font's
+    /// collection; the collection's inverted `Uni*-UTF32` CMaps
+    /// ([`collection_character`]) to a character and the face's `cmap`, in
+    /// the face's vertical form ([`vertical_form`]) where the font writes
+    /// vertically or the CID is a vertical variant; `/ToUnicode`, where it
+    /// names one character; and otherwise `.notdef`, reported. **Never the
+    /// CID as a glyph index** (ruling 23): an `Identity`-ordered font with no
+    /// `/ToUnicode` draws `.notdef` and reports even where the face is the
+    /// document's own. A face with neither a `cmap` nor a `ROS` has no
+    /// characters to be read by — the synthetic face the corpus measures
+    /// with, the test faces — and keeps the reading an embedded program gets.
+    ///
+    /// A simple font's code takes the two readings a face with a `cmap`
+    /// admits — its character, and the code as the `cmap` reads a code, in
+    /// [`simple_glyph_by_cmap`]'s order — and otherwise draws `.notdef`,
+    /// reported, never the code as a glyph index; a face with no `cmap` keeps
+    /// that last resort. A CFF-flavoured face is read by the names the font's
+    /// encoding gives, as an embedded CFF is ([`cff_glyph`]).
+    fn substituted_glyph(
+        &self,
+        sfnt: Option<&Sfnt<'_>>,
+        cff: Option<&Cff<'_>>,
+        font: &cos_font::Font,
+        name: &[u8],
+        code: u32,
+    ) -> u16 {
+        /// `cmap`.
+        const CMAP: u32 = u32::from_be_bytes(*b"cmap");
+        let mapped = sfnt.filter(|sfnt| sfnt.table(CMAP).is_some());
+        if font.kind() != cos_font::FontKind::Type0 {
+            if let Some(cff) = cff {
+                return self.cff_selection(cff, font, name, code).glyph;
+            }
+            if let Some(sfnt) = mapped {
+                return simple_glyph_by_cmap(sfnt, font, code).unwrap_or_else(|| {
+                    self.report_unresolved_glyph(name);
+                    0
+                });
+            }
+            return sfnt
+                .and_then(|sfnt| self.sfnt_selection(sfnt, font, name, code))
+                .map_or(0, |chosen| chosen.glyph);
+        }
+
+        let keyed = cff.filter(|cff| cff.is_cid());
+        if mapped.is_none() && keyed.is_none() {
+            // No characters to be read by: the reading an embedded program
+            // of this shape gets.
+            return match cff {
+                Some(cff) => self.cff_selection(cff, font, name, code).glyph,
+                None => self.cid_glyph(font, name, code),
+            };
+        }
+
+        // The CID the document named; a code its CMap does not map, or a
+        // table this build left out, names none, and none is guessed.
+        let Some(cid) = font.mapped_cid(code) else {
+            self.report_unresolved_glyph(name);
+            return 0;
+        };
+        // CID 0 is `.notdef` by definition, and reports nothing.
+        if cid == 0 {
+            return 0;
+        }
+        let collection = font.character_collection();
+
+        // 1. The face's own charset, where it is keyed by the font's
+        //    collection.
+        if let (Some(cff), Some(collection)) = (keyed, collection) {
+            let same = cff.registry_ordering()
+                == Some((collection.registry.as_str(), collection.ordering.as_str()));
+            if same {
+                if let Some(glyph) = cff.gid_for_cid(cid).filter(|glyph| *glyph != 0) {
+                    return glyph;
+                }
+            }
+        }
+        if let Some(sfnt) = mapped {
+            // 2. The collection's character, through the face's `cmap`.
+            if let Some(found) = collection.and_then(|collection| {
+                collection_character(
+                    &collection.registry,
+                    &collection.ordering,
+                    font.is_vertical(),
+                    cid,
+                )
+            }) {
+                for c in found.characters.into_iter().flatten() {
+                    if let Some(glyph) = sfnt.glyph_for_char(c).filter(|glyph| *glyph != 0) {
+                        return if found.vertical {
+                            vertical_form(sfnt, glyph)
+                        } else {
+                            glyph
+                        };
+                    }
+                }
+            }
+            // 3. `/ToUnicode`, where it names one character.
+            let single = font.to_unicode_text(code).and_then(|text| {
+                let mut chars = text.chars();
+                let first = chars.next()?;
+                chars.next().is_none().then_some(first)
+            });
+            if let Some(glyph) = single
+                .and_then(|c| sfnt.glyph_for_char(c))
+                .filter(|glyph| *glyph != 0)
+            {
+                return if font.is_vertical() {
+                    vertical_form(sfnt, glyph)
+                } else {
+                    glyph
+                };
+            }
+        }
+        // 4. Nothing reaches it.
+        self.report_unresolved_glyph(name);
+        0
     }
 
     /// Which glyph of a CFF program a code selects, the way 9.6.6 says to
@@ -8318,6 +8459,61 @@ fn jpeg_rgb(color: JpegColor, samples: &[u8], pixels: usize, rgb: &mut Vec<u8>) 
             }
         }
     }
+}
+
+/// The glyph a simple font's code reaches through an sfnt's `cmap`, by the
+/// two readings a `cmap` admits: the code's character — `/ToUnicode`'s, or
+/// its encoding's — and the code itself as the `cmap` reads a code, which
+/// for a `(3,0)` symbol subtable is the `F0xx` private-use block
+/// `glyph_for_char` maps it into (9.6.6.4). `None` where neither reaches a
+/// glyph other than `.notdef`.
+///
+/// **A symbolic font asks its code first.** Its `cmap` is keyed by the codes,
+/// and the character a code's `/ToUnicode` names is another code of the same
+/// table: an office suite's subset numbers its glyphs in the order the
+/// document used them, so the space can be code 3 while code 32, which
+/// U+0020 reaches through that table, is a letter. Asked the character first,
+/// every such space drew the letter, and both validators read the letter's
+/// advance against the space's width (MS-14). A table keyed by Unicode
+/// answers the code with nothing, and the character still decides there.
+fn simple_glyph_by_cmap(sfnt: &Sfnt<'_>, font: &cos_font::Font, code: u32) -> Option<u16> {
+    let text = font.text_of(code);
+    let ch = text.chars().next();
+    let by_text = || ch.and_then(|c| sfnt.glyph_for_char(c)).filter(|g| *g != 0);
+    let by_code = || {
+        char::from_u32(code)
+            .and_then(|c| sfnt.glyph_for_char(c))
+            .filter(|g| *g != 0)
+    };
+    if font.is_symbolic() {
+        by_code().or_else(by_text)
+    } else {
+        by_text().or_else(by_code)
+    }
+}
+
+/// `glyph`'s vertical form in `sfnt` (`docs/design/fallback-faces.md`): the
+/// face's `vrt2` substitution where its `GSUB` has one for the Han script or
+/// its default, else its `vert`, and the glyph itself where it has neither —
+/// drawn upright, the line advancing by `/W2` as it does for any glyph.
+fn vertical_form(sfnt: &Sfnt<'_>, glyph: u16) -> u16 {
+    use tinker_pdf_shape::{Buffer, Layout, Limits, Tag};
+
+    let layout = Layout::parse(sfnt);
+    let Some(gsub) = layout.gsub() else {
+        return glyph;
+    };
+    let script = Tag::new(b"hani");
+    let Some(lookups) = [b"vrt2", b"vert"]
+        .into_iter()
+        .map(|feature| gsub.lookups_for(script, None, &[Tag::new(feature)]))
+        .find(|lookups| !lookups.is_empty())
+    else {
+        return glyph;
+    };
+    let mut buffer = Buffer::from_glyphs(&[glyph]);
+    let _ = layout.substitute(&mut buffer, &lookups, Limits::DEFAULT);
+    buffer.glyphs().first().map_or(glyph, |shaped| shaped.glyph)
 }
 
 /// Which glyph of a CFF program a character code selects.

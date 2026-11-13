@@ -776,3 +776,350 @@ fn a_simple_fonts_request_names_no_character_collection() {
         .iter()
         .all(|request| request.character_collection.is_none()));
 }
+
+// ---- a substituted face read by character (FT-01.3) -------------------------
+
+mod render_support;
+
+use render_support::{
+    composite_fonts_page, fallback_face, substituted_cjk_page, to_unicode_body, FaceBox,
+    UnembeddedFont, CJK_PENS, CJK_SIZE, JAPAN1, LOWER_LEFT, NOTDEF_BOX, UPPER_RIGHT,
+};
+
+/// The centre of a box in the face's 1000-unit em.
+fn centre([x0, y0, x1, y1]: FaceBox) -> (f64, f64) {
+    (
+        f64::from(i32::from(x0) + i32::from(x1)) / 2.0,
+        f64::from(i32::from(y0) + i32::from(y1)) / 2.0,
+    )
+}
+
+/// A point of the em inside no character's box, the `.notdef`'s or the
+/// vertical form's: only a decoy, the whole em, inks it.
+const DECOY_ONLY: (f64, f64) = (950.0, 500.0);
+
+/// Whether the pixel under the point `at` of a glyph's 1000-unit em is
+/// inked, the glyph's origin at `origin` and its size `size` in points, on a
+/// page `height` points tall drawn at 1x.
+fn inked(
+    bitmap: &tinker_pdf::Bitmap,
+    height: f64,
+    origin: (f64, f64),
+    size: f64,
+    at: (f64, f64),
+) -> bool {
+    let x = origin.0 + at.0 * size / 1000.0;
+    let y = height - (origin.1 + at.1 * size / 1000.0);
+    let (x, y) = (x.floor() as usize, y.floor() as usize);
+    let at = y * bitmap.stride + x * bitmap.components();
+    bitmap.data.get(at).is_some_and(|value| *value < 128)
+}
+
+/// A host provider answering every request with `face`, symbolic ones
+/// included, as a CJK font's descriptor says it is.
+fn provider_of(face: Vec<u8>) -> Arc<SimpleFontProvider> {
+    Arc::new(SimpleFontProvider::new(face).substituting_symbolic())
+}
+
+/// `bytes` rendered at 1x with `face` supplied.
+fn drawn_with(bytes: Vec<u8>, face: Vec<u8>) -> tinker_pdf::Bitmap {
+    Document::open(bytes)
+        .expect("it opens")
+        .with_fonts(provider_of(face))
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default())
+}
+
+/// Whether `bitmap` reports a font it could not draw.
+fn reports(bitmap: &tinker_pdf::Bitmap) -> bool {
+    bitmap
+        .warnings
+        .contains(&tinker_pdf::RenderWarning::UnreadableFont)
+}
+
+/// The resource name every one-character page's font is given.
+const FONT: &str = "F";
+
+/// A one-character page in `font` at [`CJK_SIZE`], its pen at `(20, 20)` on a
+/// 120-point-square page.
+fn one_glyph_page(font: UnembeddedFont<'_>, code: &str) -> Vec<u8> {
+    composite_fonts_page(
+        120.0,
+        120.0,
+        &[font],
+        &format!("BT /{FONT} {CJK_SIZE} Tf 20 20 Td <{code}> Tj ET"),
+    )
+}
+
+/// **A substituted face draws a composite font by character, not by CID**
+/// (`docs/design/fallback-faces.md`). An unembedded Adobe-Japan1 font under
+/// `UniJIS-UTF16-H` shows `日本語A`, and a provider's face draws it whose
+/// `cmap` gives each character its own quarter of the em and whose glyph at
+/// each CID's number is a decoy filling the whole em: every character inks
+/// its own quarter, and nothing else of its em — not another character's
+/// quarter, not the `.notdef`'s centre, and not the corner only the decoy
+/// covers. In a vertical font under `UniJIS-UTF16-V`, `、` is CID 7887, the
+/// vertical comma, reached through `UniJIS-UTF32-V` as `、` and drawn in the
+/// face's `vert` form. Nothing is reported.
+#[cfg(feature = "cmap-predefined")]
+#[test]
+fn a_substituted_face_draws_a_composite_font_by_character_not_by_cid() {
+    use render_support::{
+        CJK_VERTICAL_PEN, FALLBACK_CHARACTERS, LOWER_RIGHT, UPPER_LEFT, VERTICAL_COMMA,
+    };
+
+    let bitmap = drawn_with(substituted_cjk_page(), fallback_face(true, true));
+    assert!(!reports(&bitmap), "{:?}", bitmap.warnings);
+    let quarters = [LOWER_LEFT, LOWER_RIGHT, UPPER_LEFT, UPPER_RIGHT];
+    for (slot, (character, _, own)) in FALLBACK_CHARACTERS.iter().take(4).enumerate() {
+        let pen = CJK_PENS[slot];
+        assert!(
+            inked(&bitmap, 120.0, pen, CJK_SIZE, centre(*own)),
+            "{character} inks its own box"
+        );
+        for other in quarters.iter().filter(|quarter| *quarter != own) {
+            assert!(
+                !inked(&bitmap, 120.0, pen, CJK_SIZE, centre(*other)),
+                "{character} inks no other character's box"
+            );
+        }
+        for (point, what) in [(centre(NOTDEF_BOX), ".notdef"), (DECOY_ONLY, "the decoy")] {
+            assert!(
+                !inked(&bitmap, 120.0, pen, CJK_SIZE, point),
+                "{character} draws not {what}"
+            );
+        }
+    }
+    // 9.7.4.3: the vertical origin stands `(w0 / 2, 880)` units above and
+    // right of the glyph's own, `/DW 1000` and `/DW2`'s default.
+    let (x, y) = CJK_VERTICAL_PEN;
+    let origin = (x - 0.5 * CJK_SIZE, y - 0.88 * CJK_SIZE);
+    assert!(
+        inked(&bitmap, 120.0, origin, CJK_SIZE, centre(VERTICAL_COMMA.1)),
+        "the vertical comma is drawn in the face's vertical form"
+    );
+    assert!(
+        !inked(&bitmap, 120.0, origin, CJK_SIZE, centre(LOWER_LEFT)),
+        "and not as the horizontal comma"
+    );
+}
+
+/// **A CID no route reaches draws `.notdef` and reports.** `字`, which the
+/// face has no character for, under `UniJIS-UTF16-H`; `<FFFF>`, which that
+/// CMap maps to no CID; and an `Adobe-Identity` CIDFontType2 with no
+/// `/ToUnicode` showing CID 1, which is no character of any collection —
+/// drawn `.notdef` and reported even though glyph 1 of this face is a real
+/// glyph, which is the price ruling 23 takes. Each draws the face's
+/// `.notdef` and not the decoy at its CID's number. The same Identity font
+/// with a `/ToUnicode` naming `日` draws `日`'s box and reports nothing.
+#[test]
+fn an_unreached_cid_draws_notdef_and_reports() {
+    let japan1 = |code: &str| {
+        one_glyph_page(
+            UnembeddedFont {
+                name: FONT,
+                encoding: "/UniJIS-UTF16-H",
+                subtype: "CIDFontType0",
+                info: JAPAN1,
+                to_unicode: None,
+            },
+            code,
+        )
+    };
+    let identity = "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>";
+    let to_unicode = to_unicode_body(&[(0x0001, '\u{65e5}')]);
+    let unreached = [
+        ("a character the face does not have", japan1("5B57")),
+        ("a code the CMap maps to no CID", japan1("FFFF")),
+        (
+            "an Identity font with no /ToUnicode",
+            one_glyph_page(
+                UnembeddedFont {
+                    name: FONT,
+                    encoding: "/Identity-H",
+                    subtype: "CIDFontType2",
+                    info: identity,
+                    to_unicode: None,
+                },
+                "0001",
+            ),
+        ),
+    ];
+    for (what, page) in unreached {
+        let bitmap = drawn_with(page, fallback_face(true, false));
+        assert!(reports(&bitmap), "{what}: reported, {:?}", bitmap.warnings);
+        assert!(
+            inked(&bitmap, 120.0, (20.0, 20.0), CJK_SIZE, centre(NOTDEF_BOX)),
+            "{what}: the face's .notdef"
+        );
+        for (point, never) in [(DECOY_ONLY, "a decoy"), (centre(LOWER_LEFT), "glyph 1")] {
+            assert!(
+                !inked(&bitmap, 120.0, (20.0, 20.0), CJK_SIZE, point),
+                "{what}: never {never}"
+            );
+        }
+    }
+
+    let mapped = one_glyph_page(
+        UnembeddedFont {
+            name: FONT,
+            encoding: "/Identity-H",
+            subtype: "CIDFontType2",
+            info: identity,
+            to_unicode: Some(&to_unicode),
+        },
+        "0001",
+    );
+    let bitmap = drawn_with(mapped, fallback_face(true, false));
+    assert!(!reports(&bitmap), "{:?}", bitmap.warnings);
+    assert!(inked(
+        &bitmap,
+        120.0,
+        (20.0, 20.0),
+        CJK_SIZE,
+        centre(LOWER_LEFT)
+    ));
+    assert!(!inked(
+        &bitmap,
+        120.0,
+        (20.0, 20.0),
+        CJK_SIZE,
+        centre(NOTDEF_BOX)
+    ));
+}
+
+/// **A vertical font draws the face's vertical form**, and a face with no
+/// `vert` draws the character upright: `、` under `UniJIS-UTF16-V` is the
+/// vertical comma's CID, reached through `UniJIS-UTF32-V` as `、`.
+#[cfg(feature = "cmap-predefined")]
+#[test]
+fn a_vertical_font_draws_the_faces_vertical_form() {
+    use render_support::VERTICAL_COMMA;
+
+    let page = || {
+        composite_fonts_page(
+            120.0,
+            120.0,
+            &[UnembeddedFont {
+                name: FONT,
+                encoding: "/UniJIS-UTF16-V",
+                subtype: "CIDFontType0",
+                info: JAPAN1,
+                to_unicode: None,
+            }],
+            &format!("BT /{FONT} {CJK_SIZE} Tf 60 100 Td <3001> Tj ET"),
+        )
+    };
+    let origin = (60.0 - 0.5 * CJK_SIZE, 100.0 - 0.88 * CJK_SIZE);
+    for (with_vert, drawn, other) in [
+        (true, VERTICAL_COMMA.1, LOWER_LEFT),
+        (false, LOWER_LEFT, VERTICAL_COMMA.1),
+    ] {
+        let bitmap = drawn_with(page(), fallback_face(true, with_vert));
+        assert!(!reports(&bitmap), "{:?}", bitmap.warnings);
+        assert!(
+            inked(&bitmap, 120.0, origin, CJK_SIZE, centre(drawn)),
+            "with vert {with_vert}"
+        );
+        assert!(
+            !inked(&bitmap, 120.0, origin, CJK_SIZE, centre(other)),
+            "with vert {with_vert}"
+        );
+    }
+}
+
+/// **A face with no `cmap` keeps the index reading**: with no characters to
+/// be read by — the corpus's synthetic face, the test faces — an Adobe-Japan1
+/// CID is the face's glyph number, here the decoy at 3284, and nothing is
+/// reported.
+#[cfg(feature = "cmap-predefined")]
+#[test]
+fn a_face_with_no_cmap_keeps_the_index_reading() {
+    let page = one_glyph_page(
+        UnembeddedFont {
+            name: FONT,
+            encoding: "/UniJIS-UTF16-H",
+            subtype: "CIDFontType0",
+            info: JAPAN1,
+            to_unicode: None,
+        },
+        "65E5",
+    );
+    let bitmap = drawn_with(page, fallback_face(false, false));
+    assert!(!reports(&bitmap), "{:?}", bitmap.warnings);
+    assert!(inked(&bitmap, 120.0, (20.0, 20.0), CJK_SIZE, DECOY_ONLY));
+}
+
+/// **A simple font's code takes only the readings a `cmap` admits.** An
+/// unembedded WinAnsi TrueType font shows `A` and `B`: `A` reaches its box
+/// through the face's `cmap`; `B`, which the face has no character for, draws
+/// `.notdef` and reports, not glyph 66, the decoy its code would number. The
+/// same face with no `cmap` keeps the code as the glyph number, and draws the
+/// decoy for `B`.
+#[test]
+fn a_simple_font_takes_only_the_readings_a_cmap_admits() {
+    let content =
+        format!("BT /F {CJK_SIZE} Tf 20 20 Td (A) Tj ET BT /F {CJK_SIZE} Tf 120 20 Td (B) Tj ET");
+    let page = simple_font_page(&content);
+    let bitmap = drawn_with(page.clone(), fallback_face(true, false));
+    assert!(reports(&bitmap), "B is reported: {:?}", bitmap.warnings);
+    assert!(
+        inked(&bitmap, 120.0, (20.0, 20.0), CJK_SIZE, centre(UPPER_RIGHT)),
+        "A"
+    );
+    assert!(
+        !inked(&bitmap, 120.0, (20.0, 20.0), CJK_SIZE, DECOY_ONLY),
+        "A, not a decoy"
+    );
+    assert!(
+        inked(&bitmap, 120.0, (120.0, 20.0), CJK_SIZE, centre(NOTDEF_BOX)),
+        "B, .notdef"
+    );
+    assert!(
+        !inked(&bitmap, 120.0, (120.0, 20.0), CJK_SIZE, DECOY_ONLY),
+        "B, not glyph 66"
+    );
+
+    let bitmap = drawn_with(page, fallback_face(false, false));
+    assert!(
+        inked(&bitmap, 120.0, (120.0, 20.0), CJK_SIZE, DECOY_ONLY),
+        "B as glyph 66"
+    );
+}
+
+/// A 240 by 120 page showing `content` in `/F`, an unembedded, non-symbolic
+/// WinAnsi TrueType font whose two codes `A` and `B` are each a full em wide.
+fn simple_font_page(content: &str) -> Vec<u8> {
+    render_support::raw_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 120] \
+          /Resources << /Font << /F 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        render_support::raw_stream("", content.as_bytes()),
+        b"<< /Type /Font /Subtype /TrueType /BaseFont /Fallback-Simple \
+          /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 66 /Widths [1000 1000] \
+          /FontDescriptor 6 0 R >>"
+            .to_vec(),
+        b"<< /Type /FontDescriptor /FontName /Fallback-Simple /Flags 32 \
+          /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 1000 /Descent 0 \
+          /CapHeight 700 /StemV 80 >>"
+            .to_vec(),
+    ])
+}
+
+/// **Without the tables, unembedded CJK text is reported**, never guessed: a
+/// build without `cmap-predefined` maps no `UniJIS-UTF16-H` code to a CID and
+/// inverts no collection, so each character of `日本語A` draws `.notdef` and
+/// the page reports, the decoys at the codes' numbers undrawn.
+#[cfg(not(feature = "cmap-predefined"))]
+#[test]
+fn without_the_tables_unembedded_cjk_text_is_reported() {
+    let bitmap = drawn_with(substituted_cjk_page(), fallback_face(true, true));
+    assert!(reports(&bitmap), "{:?}", bitmap.warnings);
+    for pen in CJK_PENS {
+        assert!(inked(&bitmap, 120.0, pen, CJK_SIZE, centre(NOTDEF_BOX)));
+        assert!(!inked(&bitmap, 120.0, pen, CJK_SIZE, DECOY_ONLY));
+    }
+}

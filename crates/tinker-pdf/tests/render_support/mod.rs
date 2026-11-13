@@ -8,9 +8,11 @@
 //! of `fn render`, and two had their own copy of the comparator.
 //!
 //! It also builds the pages two files must agree on byte for byte: the analytic
-//! pages `determinism.rs` fingerprints and `render_analytic.rs` evaluates, and
-//! the pen, bilevel, minified JPEG and minified JPEG 2000 pages
-//! `determinism.rs` fingerprints and `render_regions.rs` tiles.
+//! pages `determinism.rs` fingerprints and `render_analytic.rs` evaluates, the
+//! pen, bilevel, minified JPEG and minified JPEG 2000 pages `determinism.rs`
+//! fingerprints and `render_regions.rs` tiles, and the substituted CJK page and
+//! the face that draws it, which `determinism.rs` fingerprints and
+//! `substitute_fonts.rs` reads.
 //!
 //! Only the helpers those four need live here. The twenty-odd other test
 //! binaries that open a document and look at a pixel keep their own copies
@@ -1640,4 +1642,355 @@ fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
     let bytes = builder.finish();
     written_support::authored(label, &bytes);
     bytes
+}
+
+// ---- a substituted face for composite fonts (FT-01.3) -----------------------
+
+/// A box in [`fallback_face`]'s 1000-unit em, as `[x0, y0, x1, y1]`.
+pub type FaceBox = [i16; 4];
+
+/// The em's lower-left quarter, lower-right, upper-left and upper-right, the
+/// boxes [`fallback_face`]'s characters are drawn as.
+pub const LOWER_LEFT: FaceBox = [100, 100, 300, 300];
+/// See [`LOWER_LEFT`].
+pub const LOWER_RIGHT: FaceBox = [600, 100, 900, 300];
+/// See [`LOWER_LEFT`].
+pub const UPPER_LEFT: FaceBox = [100, 600, 300, 900];
+/// See [`LOWER_LEFT`].
+pub const UPPER_RIGHT: FaceBox = [600, 600, 900, 900];
+/// [`fallback_face`]'s `.notdef`: a small box at the em's centre, so a glyph
+/// no route reached is ink that says so.
+pub const NOTDEF_BOX: FaceBox = [400, 400, 500, 500];
+/// The whole em: every decoy.
+pub const WHOLE_EM: FaceBox = [0, 0, 1000, 1000];
+
+/// [`fallback_face`]'s characters, the glyph each is, and its box: `日`, `本`,
+/// `語` and `A` a quarter of the em each, and `、` horizontally. In
+/// Adobe-Japan1 they are CIDs 3284, 3722, 1952, 34 and 634.
+pub const FALLBACK_CHARACTERS: [(char, u16, FaceBox); 5] = [
+    ('\u{65e5}', 1, LOWER_LEFT),
+    ('\u{672c}', 2, LOWER_RIGHT),
+    ('\u{8a9e}', 3, UPPER_LEFT),
+    ('A', 4, UPPER_RIGHT),
+    ('\u{3001}', 5, LOWER_LEFT),
+];
+
+/// The vertical form of `、`, which [`fallback_face`]'s `vert` substitutes for
+/// glyph 5, and its box.
+pub const VERTICAL_COMMA: (u16, FaceBox) = (6, UPPER_RIGHT);
+
+/// The glyph numbers [`fallback_face`] fills with a decoy, the whole em: each
+/// Adobe-Japan1 CID its characters and `字` reach (34, 634, 1952, 2248,
+/// 3284, 3722 and the vertical comma's 7887), and 66, which `B` reads as a
+/// glyph number. A face read by CID, or by code, as a glyph index draws one.
+pub const DECOYS: [u16; 8] = [34, 66, 634, 1952, 2248, 3284, 3722, 7887];
+
+/// A filled box, one contour of four on-curve points (TrueType `glyf`).
+fn box_glyph([x0, y0, x1, y1]: FaceBox) -> Vec<u8> {
+    let mut glyph = Vec::new();
+    for value in [1i16, x0, y0, x1, y1] {
+        glyph.extend_from_slice(&value.to_be_bytes());
+    }
+    glyph.extend_from_slice(&3u16.to_be_bytes()); // the contour's last point
+    glyph.extend_from_slice(&0u16.to_be_bytes()); // no instructions
+    glyph.extend_from_slice(&[0x01; 4]); // on-curve, word deltas
+    for dx in [x0, x1 - x0, 0, x0 - x1] {
+        glyph.extend_from_slice(&dx.to_be_bytes());
+    }
+    for dy in [y0, 0, y1 - y0, 0] {
+        glyph.extend_from_slice(&dy.to_be_bytes());
+    }
+    glyph
+}
+
+/// A face numbering its glyphs in an order of its own, the shape of every
+/// face a provider substitutes for a font that embeds none: `.notdef` the
+/// [`NOTDEF_BOX`]; glyphs 1 to 5 [`FALLBACK_CHARACTERS`]; glyph 6 the
+/// [`VERTICAL_COMMA`]; and a decoy filling the em at each of [`DECOYS`], so
+/// that reading a CID or a code as a glyph index draws the whole em.
+/// `with_cmap` gives it a `(3,1)` format-4 `cmap` for the characters, and
+/// `with_vert` a `GSUB` whose `vert` feature substitutes glyph 6 for glyph 5.
+pub fn fallback_face(with_cmap: bool, with_vert: bool) -> Vec<u8> {
+    let glyph_count = usize::from(DECOYS[DECOYS.len() - 1]) + 1;
+    let shape = |glyph: usize| -> Option<FaceBox> {
+        if glyph == 0 {
+            return Some(NOTDEF_BOX);
+        }
+        if let Some((_, _, at)) = FALLBACK_CHARACTERS
+            .iter()
+            .find(|(_, index, _)| usize::from(*index) == glyph)
+        {
+            return Some(*at);
+        }
+        if glyph == usize::from(VERTICAL_COMMA.0) {
+            return Some(VERTICAL_COMMA.1);
+        }
+        DECOYS
+            .iter()
+            .any(|decoy| usize::from(*decoy) == glyph)
+            .then_some(WHOLE_EM)
+    };
+    let mut glyf = Vec::new();
+    let mut loca = Vec::with_capacity((glyph_count + 1) * 4);
+    for glyph in 0..glyph_count {
+        loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+        if let Some(at) = shape(glyph) {
+            glyf.extend_from_slice(&box_glyph(at));
+        }
+    }
+    loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+
+    let mut head = vec![0u8; 54];
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+    head[50..52].copy_from_slice(&1i16.to_be_bytes()); // long loca
+
+    let mut tables: Vec<(&[u8; 4], Vec<u8>)> =
+        vec![(b"head", head), (b"loca", loca), (b"glyf", glyf)];
+    if with_cmap {
+        tables.push((b"cmap", fallback_cmap()));
+    }
+    if with_vert {
+        tables.push((b"GSUB", vertical_gsub()));
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    let mut offset = 12 + tables.len() * 16;
+    let mut body = Vec::new();
+    for (tag, data) in &tables {
+        out.extend_from_slice(*tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        offset += data.len();
+        body.extend_from_slice(data);
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+/// [`fallback_face`]'s `cmap`: one `(3,1)` format-4 subtable, a segment a
+/// character mapped by its delta, and the terminating segment at `0xFFFF`.
+fn fallback_cmap() -> Vec<u8> {
+    let mut mapped: Vec<(u16, u16)> = FALLBACK_CHARACTERS
+        .iter()
+        .map(|(c, glyph, _)| (*c as u16, *glyph))
+        .collect();
+    mapped.sort_unstable();
+    mapped.push((0xFFFF, 0));
+    let segments = mapped.len() as u16;
+    // The largest power of two at most `segments`.
+    let power = 1u16 << (15 - segments.leading_zeros());
+    let search_range = power * 2;
+    let entry_selector = power.trailing_zeros() as u16;
+    let length = 16 + 8 * segments;
+    let mut sub = Vec::new();
+    for value in [
+        4,
+        length,
+        0,
+        segments * 2,
+        search_range,
+        entry_selector,
+        segments * 2 - search_range,
+    ] {
+        sub.extend_from_slice(&value.to_be_bytes());
+    }
+    for (code, _) in &mapped {
+        sub.extend_from_slice(&code.to_be_bytes()); // endCode
+    }
+    sub.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+    for (code, _) in &mapped {
+        sub.extend_from_slice(&code.to_be_bytes()); // startCode
+    }
+    for (code, glyph) in &mapped {
+        // The terminating segment maps 0xFFFF to glyph 0 by a delta of one.
+        let delta = if *code == 0xFFFF {
+            1
+        } else {
+            glyph.wrapping_sub(*code)
+        };
+        sub.extend_from_slice(&delta.to_be_bytes()); // idDelta
+    }
+    for _ in &mapped {
+        sub.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset
+    }
+    let mut cmap = Vec::new();
+    for value in [0u16, 1, 3, 1] {
+        cmap.extend_from_slice(&value.to_be_bytes());
+    }
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend_from_slice(&sub);
+    cmap
+}
+
+/// [`fallback_face`]'s `GSUB`: the `DFLT` script's default language system
+/// with one feature, `vert`, whose one lookup is a format-1 single
+/// substitution from glyph 5 to glyph 6 (OpenType's `GSUB` LookupType 1).
+fn vertical_gsub() -> Vec<u8> {
+    let tag = |bytes: &[u8; 4]| {
+        (
+            u16::from_be_bytes([bytes[0], bytes[1]]),
+            u16::from_be_bytes([bytes[2], bytes[3]]),
+        )
+    };
+    let (dflt_high, dflt_low) = tag(b"DFLT");
+    let (vert_high, vert_low) = tag(b"vert");
+    let words: [u16; 34] = [
+        // The header: version 1.0, ScriptList at 10, FeatureList at 30,
+        // LookupList at 44.
+        1, 0, 10, 30, 44, // ScriptList: one record, `DFLT`, its Script 8 bytes in.
+        1, dflt_high, dflt_low, 8, // Script: its default LangSys 4 bytes in, and no other.
+        4, 0, // LangSys: no lookup order, no required feature, feature 0.
+        0, 0xFFFF, 1, 0, // FeatureList: one record, `vert`, its Feature 8 bytes in.
+        1, vert_high, vert_low, 8, // Feature: no parameters, one lookup, lookup 0.
+        0, 1, 0, // LookupList: one lookup, 4 bytes in.
+        1, 4, // Lookup: single substitution, no flags, one subtable 8 bytes in.
+        1, 0, 1, 8, // SingleSubst format 1: its Coverage 6 bytes in, a delta of one.
+        1, 6, 1, // Coverage format 1: one glyph, glyph 5.
+        1, 1, 5,
+    ];
+    words.iter().flat_map(|word| word.to_be_bytes()).collect()
+}
+
+/// One font of [`composite_fonts_page`]: its resource name, its `/Encoding`,
+/// its descendant's `/Subtype` and `/CIDSystemInfo` (written verbatim, so it
+/// may be empty), and its `/ToUnicode` CMap's body where it has one.
+pub struct UnembeddedFont<'a> {
+    pub name: &'a str,
+    pub encoding: &'a str,
+    pub subtype: &'a str,
+    pub info: &'a str,
+    pub to_unicode: Option<&'a str>,
+}
+
+/// A `width` by `height` page showing `content` in `fonts`, each a Type 0
+/// font over a descendant whose descriptor embeds no program — symbolic, as
+/// a CJK font's descriptor says it is — with `/DW 1000`.
+pub fn composite_fonts_page(
+    width: f64,
+    height: f64,
+    fonts: &[UnembeddedFont<'_>],
+    content: &str,
+) -> Vec<u8> {
+    let mut objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        Vec::new(),
+        raw_stream("", content.as_bytes()),
+    ];
+    let mut resources = String::new();
+    for font in fonts {
+        let at = objects.len() + 1;
+        resources.push_str(&format!("/{} {at} 0 R ", font.name));
+        let to_unicode = font
+            .to_unicode
+            .map(|_| format!(" /ToUnicode {} 0 R", at + 3))
+            .unwrap_or_default();
+        objects.push(
+            format!(
+                "<< /Type /Font /Subtype /Type0 /BaseFont /Fallback-{name} \
+                 /Encoding {encoding} /DescendantFonts [{descendant} 0 R]{to_unicode} >>",
+                name = font.name,
+                encoding = font.encoding,
+                descendant = at + 1,
+            )
+            .into_bytes(),
+        );
+        objects.push(
+            format!(
+                "<< /Type /Font /Subtype /{subtype} /BaseFont /Fallback-{name} {info} \
+                 /FontDescriptor {descriptor} 0 R /DW 1000 >>",
+                subtype = font.subtype,
+                name = font.name,
+                info = font.info,
+                descriptor = at + 2,
+            )
+            .into_bytes(),
+        );
+        objects.push(
+            format!(
+                "<< /Type /FontDescriptor /FontName /Fallback-{} /Flags 4 \
+                 /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 \
+                 /CapHeight 740 /StemV 80 >>",
+                font.name
+            )
+            .into_bytes(),
+        );
+        if let Some(body) = font.to_unicode {
+            objects.push(raw_stream("", body.as_bytes()));
+        }
+    }
+    objects[2] = format!(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] \
+         /Resources << /Font << {resources}>> >> /Contents 4 0 R >>"
+    )
+    .into_bytes();
+    raw_pdf(&objects)
+}
+
+/// A `/ToUnicode` CMap mapping each two-byte code of `pairs` to its
+/// character (9.10.3).
+pub fn to_unicode_body(pairs: &[(u16, char)]) -> String {
+    let mut out = String::from(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CMapName /Fallback-UCS def /CMapType 2 def\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n",
+    );
+    out.push_str(&format!("{} beginbfchar\n", pairs.len()));
+    for (code, c) in pairs {
+        out.push_str(&format!("<{code:04X}> <{:04X}>\n", u32::from(*c)));
+    }
+    out.push_str("endbfchar\nendcmap CMapName currentdict /CMap defineresource pop end end\n");
+    out
+}
+
+/// Adobe-Japan1's `/CIDSystemInfo`, at supplement 6.
+pub const JAPAN1: &str = "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >>";
+
+/// The font size [`substituted_cjk_page`] shows its characters at, and where
+/// the pen stands for each: `日本語A` along a baseline at `y = 20`, a
+/// character every 90 points from `x = 20`, and `、` in a vertical font at
+/// `(430, 100)`.
+pub const CJK_SIZE: f64 = 80.0;
+/// See [`CJK_SIZE`].
+pub const CJK_PENS: [(f64, f64); 4] = [(20.0, 20.0), (110.0, 20.0), (200.0, 20.0), (290.0, 20.0)];
+/// See [`CJK_SIZE`].
+pub const CJK_VERTICAL_PEN: (f64, f64) = (430.0, 100.0);
+
+/// The page `determinism.rs` fingerprints as `substituted_cjk` and
+/// `substitute_fonts.rs` reads: `日本語A` in an unembedded Adobe-Japan1 font
+/// under `UniJIS-UTF16-H`, and `、` in one under `UniJIS-UTF16-V`, at
+/// [`CJK_SIZE`] on a 480 by 120 page, which [`fallback_face`] with its `cmap`
+/// and its `vert` draws by character (`docs/design/fallback-faces.md`).
+pub fn substituted_cjk_page() -> Vec<u8> {
+    let mut content = String::new();
+    for ((x, y), code) in CJK_PENS.iter().zip(["65E5", "672C", "8A9E", "0041"]) {
+        content.push_str(&format!("BT /H {CJK_SIZE} Tf {x} {y} Td <{code}> Tj ET\n"));
+    }
+    let (x, y) = CJK_VERTICAL_PEN;
+    content.push_str(&format!("BT /V {CJK_SIZE} Tf {x} {y} Td <3001> Tj ET\n"));
+    composite_fonts_page(
+        480.0,
+        120.0,
+        &[
+            UnembeddedFont {
+                name: "H",
+                encoding: "/UniJIS-UTF16-H",
+                subtype: "CIDFontType0",
+                info: JAPAN1,
+                to_unicode: None,
+            },
+            UnembeddedFont {
+                name: "V",
+                encoding: "/UniJIS-UTF16-V",
+                subtype: "CIDFontType0",
+                info: JAPAN1,
+                to_unicode: None,
+            },
+        ],
+        &content,
+    )
 }

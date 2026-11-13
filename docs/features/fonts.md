@@ -163,6 +163,31 @@ simple font's request, and one whose descendant names no collection
 readably, carries `None`; `SimpleFontProvider` ignores the field.
 `CharacterCollection` is re-exported from the facade.
 
+**A substituted face is read by character** (`docs/design/fallback-faces.md`).
+A face a provider substitutes numbers its glyphs in an order of its own, so
+the facade keeps whether a font's program was embedded or substituted, and a
+substituted one is never read by the document's glyph numbers. A composite
+font's code reaches a glyph only through the CID its encoding CMap maps it
+to — a code the CMap maps to none, or a build without the predefined tables,
+reaches nothing — by the first of four routes that reaches one: the face's
+own charset, where the face is a CID-keyed CFF whose `ROS` is the font's
+collection (`Cff::registry_ordering`); the collection's `Uni*-UTF32` CMaps
+inverted once a process per collection and writing mode
+(`tinker_pdf_font::cmap::collection_character`), to a character and the
+face's `cmap`, a radical or a compatibility ideograph tried after the other
+characters reaching the same CID, and in the face's `vrt2` or `vert` form
+where the font writes vertically or the CID is a vertical variant;
+`/ToUnicode`, where it names one character (`Font::to_unicode_text`); and
+otherwise `.notdef` with `UnreadableFont`. So an `Adobe-Identity` font with
+no `/ToUnicode` draws `.notdef` and reports even where the host's face is the
+document's own (ruling 23). A simple font's code takes the face's `cmap` by
+its character and by the code, symbolic fonts code first, and a code neither
+reaches draws `.notdef` and reports; a CFF-flavoured face is read by the names
+the encoding gives, as an embedded CFF is. A face with no `cmap` and no `ROS`
+— the synthetic face the corpus measures with, the test faces — has no
+characters to be read by and keeps the reading an embedded program gets.
+Subsetting asks about embedded programs only.
+
 **Writing** (9.9). `DocumentBuilder::add_embedded_font` and `add_cid_font`
 embed a TrueType, an `OpenType/CFF` face or a bare CFF program, with widths
 taken from the program's own `hmtx` — or, for a bare CFF, from its charstrings
@@ -1076,7 +1101,17 @@ corpora already vendored here. So every name stays on the list.
   font's request carrying its character collection
   (`the_provider_is_told_the_character_collection`), which
   `crates/tinker-pdf-cos/tests/fonts.rs`'s
-  `a_composite_fonts_character_collection_is_read` reads leniently.
+  `a_composite_fonts_character_collection_is_read` reads leniently; and a
+  substituted face read by character over a face whose glyph at each CID's
+  number is a decoy — `a_substituted_face_draws_a_composite_font_by_character_not_by_cid`,
+  `an_unreached_cid_draws_notdef_and_reports`,
+  `a_vertical_font_draws_the_faces_vertical_form`,
+  `a_face_with_no_cmap_keeps_the_index_reading`,
+  `a_simple_font_takes_only_the_readings_a_cmap_admits` and, without the
+  tables, `without_the_tables_unembedded_cjk_text_is_reported`; the inverted
+  tables in `tinker-pdf-font`'s `predefined.rs`, read from the vendored CMap
+  text, inverted once (`the_collection_is_inverted_once`), and reached by
+  nothing without `cmap-predefined`.
 - Fuzzing: the `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1` and
   `woff` targets exercise this feature (ruling 1).
 - Determinism: the `text` render fingerprint in

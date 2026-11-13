@@ -590,6 +590,34 @@ impl Font {
         self.to_unicode.is_some()
     }
 
+    /// The text this font's `/ToUnicode` gives a code, where it gives any:
+    /// `None` for a font with none, and for a code it maps to nothing.
+    ///
+    /// Unlike [`Font::text_of`], nothing falls back to the encoding: a
+    /// composite font's one-byte code read through a simple font's base
+    /// encoding is no statement of the producer's, and a reader drawing a
+    /// substituted face by character (`docs/design/fallback-faces.md`) must
+    /// not take it for one.
+    #[must_use]
+    pub fn to_unicode_text(&self, code: u32) -> Option<String> {
+        self.to_unicode
+            .as_ref()?
+            .to_unicode_string(code)
+            .filter(|text| !text.is_empty())
+    }
+
+    /// The CID the encoding CMap gives a code, where it gives one (9.7.5):
+    /// `None` for a code it does not map, for a composite font with no
+    /// encoding CMap that read, and for a simple font.
+    ///
+    /// [`Font::cid_of`] answers those with the code itself, a reading of last
+    /// resort for the advance; this is the CID the document named, which is
+    /// what a substituted face is addressed through.
+    #[must_use]
+    pub fn mapped_cid(&self, code: u32) -> Option<u32> {
+        self.encoding_cmap.as_ref()?.cid(code)
+    }
+
     /// The lowest code that the font's `/ToUnicode` reads as exactly `c`
     /// ([`CMap::code_for_unicode`]: read backwards,
     /// checked forwards).

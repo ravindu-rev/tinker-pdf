@@ -1370,6 +1370,51 @@ fn is_delimiter(c: u8) -> bool {
     )
 }
 
+/// What a CID of one of the registry's CJK collections stands for
+/// ([`collection_character`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectionCharacter {
+    /// The characters that reach the CID through the collection's
+    /// `Uni*-UTF32` CMaps, the better first: a radical or a compatibility
+    /// ideograph after every other character, and the lower code first
+    /// otherwise. At least the first is present.
+    pub characters: [Option<char>; 2],
+    /// Whether the CID is to be drawn in a face's vertical form: in a font
+    /// that writes vertically, and for a vertical variant, which only the
+    /// `-V` CMaps reach.
+    pub vertical: bool,
+}
+
+/// The character a CID of one of the registry's CJK collections stands for,
+/// through the collection's `Uni*-UTF32` CMaps inverted once a process for
+/// each writing mode (`docs/design/fallback-faces.md`): what a face that
+/// addresses its glyphs by character, rather than by the collection's CIDs,
+/// draws the CID by.
+///
+/// `registry` and `ordering` are a CIDFont's `/CIDSystemInfo`'s — Adobe's
+/// Japan1, GB1, CNS1, Korea1 and KR — and `vertical` the font's writing mode.
+/// `None` for any other collection, `Identity` among them; for a CID no CMap
+/// of the collection reaches, CID 0 among them; and for every CID in a build
+/// without `cmap-predefined`, which holds no tables to invert and so reaches
+/// nothing rather than guessing.
+#[must_use]
+pub fn collection_character(
+    registry: &str,
+    ordering: &str,
+    vertical: bool,
+    cid: u32,
+) -> Option<CollectionCharacter> {
+    if registry != "Adobe" {
+        return None;
+    }
+    crate::predefined::collection_characters(ordering, vertical, cid).map(|found| {
+        CollectionCharacter {
+            characters: found.characters,
+            vertical: found.vertical,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

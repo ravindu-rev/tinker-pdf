@@ -67,8 +67,9 @@ use tinker_pdf::{
 
 mod render_support;
 use render_support::{
-    axial_page, bilevel_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink,
-    intents_page, jpeg_minified_page, jpx_minified_page, pen_page, radial_page,
+    axial_page, bilevel_page, blend_grid_page, curvy_font, fallback_face,
+    image_page as analytic_image_page, ink, intents_page, jpeg_minified_page, jpx_minified_page,
+    pen_page, radial_page, substituted_cjk_page,
 };
 
 /// How a fixture's document is opened, and which of its pages is hashed.
@@ -94,6 +95,11 @@ enum Open {
         /// Which page is hashed.
         at: u32,
     },
+    /// `Document::open_with`, page 0, with [`fallback_face`] — built in
+    /// `render_support` byte by byte, as `curvy_font` is — as the host's
+    /// provider: a page whose composite fonts embed nothing, drawn by a
+    /// substituted face read by character (`docs/design/fallback-faces.md`).
+    Substituted,
 }
 
 /// A named page: how to build it, and the least ink it may draw.
@@ -131,6 +137,13 @@ fn book_face() -> Arc<SimpleFontProvider> {
     Arc::new(SimpleFontProvider::new(curvy_font()))
 }
 
+/// The provider [`Open::Substituted`] opens with: [`fallback_face`], with its
+/// `cmap` and its `vert`, answering symbolic requests too, as a CJK font's
+/// descriptor says it is.
+fn substitute_face() -> Arc<SimpleFontProvider> {
+    Arc::new(SimpleFontProvider::new(fallback_face(true, true)).substituting_symbolic())
+}
+
 /// A fixture's document, opened as [`Open`] says, and the page it hashes.
 fn opened(fixture: &Fixture) -> (Document, u32) {
     match fixture.open {
@@ -151,6 +164,17 @@ fn opened(fixture: &Fixture) -> (Document, u32) {
                 .expect("it opens"),
             ),
             at,
+        ),
+        Open::Substituted => (
+            converted(
+                "opened",
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::default().with_fonts(substitute_face()),
+                )
+                .expect("it opens"),
+            ),
+            0,
         ),
     }
 }
@@ -2571,6 +2595,21 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 4_800,
     },
+    // Unembedded Adobe-Japan1 fonts drawn by a substituted face, read by
+    // character (FT-01.3): `日本語A` under `UniJIS-UTF16-H` through the
+    // collection's inverted `UniJIS-UTF32-H`, each its own quarter of the em
+    // where the CID read as a glyph number would fill it, and `、` under
+    // `UniJIS-UTF16-V` through `UniJIS-UTF32-V` and the face's `vert`
+    // (`render_support::substituted_cjk_page`). The five boxes cover about
+    // 2 200 pixels and the floor is under half: a character drawn as
+    // `.notdef` paints a ninth to a quarter of its box, which the floor may
+    // miss, and one read by CID fills its em, both the hash's.
+    Fixture {
+        name: "substituted_cjk",
+        build: substituted_cjk_page,
+        open: Open::Substituted,
+        least_ink: 1_000,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2818,6 +2857,10 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // each of the four intents: each intent's table, and absolute
     // colorimetric's scaling by the media white, on every target.
     ("intents", ""),
+    // A substituted face drawing unembedded Adobe-Japan1 text by character:
+    // the inverted `Uni*-UTF32` tables, the face's `cmap` and its `vert`, on
+    // every target.
+    ("substituted_cjk", ""),
 ];
 
 #[test]
@@ -3204,6 +3247,7 @@ fn svg_output_is_stable_across_targets() {
         ("jpeg_minified", ""),
         ("jpx_minified", ""),
         ("intents", ""),
+        ("substituted_cjk", ""),
     ];
     assert_eq!(
         expected.len(),
@@ -3590,6 +3634,7 @@ const MARK_BOXES: &[(&str, &str)] = &[
     ("jpeg_minified", ""),
     ("jpx_minified", ""),
     ("intents", ""),
+    ("substituted_cjk", ""),
 ];
 
 /// **The page analysis's box is the same number on every target.** The box is
@@ -3829,6 +3874,19 @@ fn opened_under(fixture: &Fixture, limits: CacheLimits) -> (Document, u32) {
                 .expect("it opens"),
             ),
             at,
+        ),
+        Open::Substituted => (
+            converted(
+                "opened under a budget",
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::default()
+                        .with_fonts(substitute_face())
+                        .with_cache_limits(limits),
+                )
+                .expect("it opens"),
+            ),
+            0,
         ),
     }
 }

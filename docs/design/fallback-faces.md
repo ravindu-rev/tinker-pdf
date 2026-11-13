@@ -56,19 +56,26 @@ are Unicode scalar values and whose values are the collection's CIDs.
 | Adobe-KR | Korea | `UniAKR-UTF32-H` |
 
 **The inverted table.** For a collection and a writing mode, every CID its
-CMaps reach is mapped back to the character that reaches it: the CMaps in
-the order above, each with its `usecmap` parent (a `-V` CMap inherits its
-`-H`), and a CID that several characters reach keeps the lowest — which puts a
-unified ideograph before its compatibility form, which lies higher in the
-code space. A CID the first CMap does not reach is taken from the next, so
-Adobe-Japan1's JIS X 0213 additions are reached too. The table is built once
-per collection and writing mode, on its first use, and kept for the process
-behind a `OnceLock`, so a page of ten thousand glyphs inverts nothing twice.
-A build without `cmap-predefined` holds no CID tables, builds no inverted
-table, and reaches no CID by this route: it reports rather than guessing.
+CMaps reach is mapped back to the characters that reach it: the CMaps in the
+order above, each with its `usecmap` parent (a `-V` CMap inherits its `-H`,
+so a vertical table holds the horizontal CIDs too), and a CID the first CMap
+does not reach taken from the next, so Adobe-Japan1's JIS X 0213 additions
+are reached as well. A CID that several characters reach keeps the best two:
+a Kangxi or supplementary radical, or a CJK compatibility ideograph, after
+every other character — the radical `U+2F47` reaches Adobe-Japan1's CID for
+`日` as `U+65E5` does, and lies below it in the code space — and the lower
+code first within each class; a face lacking the first is asked for the
+second. The table is built once per collection and writing mode, on its first
+use, and kept for the process behind a `OnceLock`, so a page of ten thousand
+glyphs inverts nothing twice. A build without `cmap-predefined` holds no CID
+tables, builds an empty table, and reaches no CID by this route: it reports
+rather than guessing.
 
-**The routes, in order.** For each CID a composite font shows, a substituted
-face is read by the first route that reaches a glyph in it:
+**The routes, in order.** A code reaches a CID only through the font's
+encoding CMap: a code it maps to none, which the advance reads as the code
+itself, names no CID here and draws `.notdef`, reported. For each CID a
+composite font shows, a substituted face is read by the first route that
+reaches a glyph in it:
 
 1. **The face's own charset**, where the face is CID-keyed — a CFF program
    with a `ROS` — in the font's registry and ordering. Its charset maps the
@@ -112,10 +119,12 @@ no third: the code's character — `/ToUnicode`'s, or else its encoding's glyph
 name through the glyph list — through the `cmap`; and the code itself as the
 `cmap` reads a code, which for a `(3,0)` symbol subtable is the `F0xx`
 block. A symbolic font asks its code first and a non-symbolic one its
-character first, as today. A code neither reaches draws `.notdef` and
-reports; the code as a glyph index is a reading only of a face with no
-`cmap`. `PageResources::selection` keeps answering an embedded program alone,
-which is what `subset.rs` keeps glyphs of.
+character first, as an embedded program's codes are asked. A code neither
+reaches draws `.notdef` and reports; the code as a glyph index is a reading
+only of a face with no `cmap`. A CFF-flavoured face is read by the name the
+code's encoding gives, in its charset, as an embedded CFF is: a name stands
+for its character. `PageResources::selection` answers an embedded program
+alone, which is what `subset.rs` keeps glyphs of.
 
 **The character collection at the seam.** `tinker-pdf-cos`'s `Font` reads the
 descendant's `/CIDSystemInfo` leniently, as rendering reads a font rather than
@@ -250,7 +259,7 @@ something reported, which is the figure FT-01's exit falls from.
 | --- | --- |
 | A page a host face drew by CID index, correctly because the face was the document's own, now draws `.notdef` | Ruling 23 takes that price: the reading by index is right only by coincidence, and the report says the glyphs are missing rather than drawing a guess |
 | Pages a bundled Latin face drew as wrong glyphs now report instead | That is the point; FT-01.7's counts are taken after FT-01.3 so the figure the face must lower is the honest one |
-| Several characters reach one CID, and the lowest is not the form a face draws best | The lowest is a unified ideograph before its compatibility form; a face draws the unified form, which is the one the collection's CID stands for |
+| Several characters reach one CID, a radical or a compatibility ideograph among them, and a face draws that one in another form or not at all | Radicals and compatibility ideographs rank after every other character, and the two best are kept, so a face lacking the first is asked for the second |
 | A face's `vert` substitutes a form that differs from the collection's vertical variant | The vertical variant's character is drawn in the face's vertical form, which is that face's statement of the same glyph; a face with no `vert` draws it upright and the line still advances by `/W2` |
 | A build without `cmap-predefined` has no tables to invert | It reaches no CID by route 2 and reports; nothing is guessed |
 | The faces pass crates.io's package ceiling | A data crate of their own, and a crate a region where one face passes it alone |

@@ -20,6 +20,8 @@
 //! blindly is a decoder that panics when someone reaches for `include_bytes!`
 //! with a stale `OUT_DIR`, and ruling 1 is cheaper to keep than to restore.
 
+use std::sync::OnceLock;
+
 /// Names, writing modes, parents and codespaces. Always present.
 static NAMES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmap_names.bin"));
 
@@ -137,6 +139,201 @@ pub(crate) fn ranges(_index: u16) -> Option<Vec<(u32, u32, u32)>> {
     None
 }
 
+/// The registry's CJK collections a substituted face is read through
+/// (`docs/design/fallback-faces.md`), by `/Ordering`, each with the
+/// `Uni*-UTF32` CMaps that say which character each of its CIDs stands for:
+/// the horizontal ones, then the vertical ones, the CMap named after the
+/// collection first and the others filling what it does not reach.
+/// Adobe-KR has no `-V` CMap, so its vertical table is its horizontal one.
+const COLLECTIONS: [(&str, [&[&str]; 2]); 5] = [
+    (
+        "Japan1",
+        [
+            &[
+                "UniJIS-UTF32-H",
+                "UniJIS2004-UTF32-H",
+                "UniJISX0213-UTF32-H",
+                "UniJISX02132004-UTF32-H",
+            ],
+            &[
+                "UniJIS-UTF32-V",
+                "UniJIS2004-UTF32-V",
+                "UniJISX0213-UTF32-V",
+                "UniJISX02132004-UTF32-V",
+            ],
+        ],
+    ),
+    ("GB1", [&["UniGB-UTF32-H"], &["UniGB-UTF32-V"]]),
+    ("CNS1", [&["UniCNS-UTF32-H"], &["UniCNS-UTF32-V"]]),
+    ("Korea1", [&["UniKS-UTF32-H"], &["UniKS-UTF32-V"]]),
+    ("KR", [&["UniAKR-UTF32-H"], &["UniAKR-UTF32-H"]]),
+];
+
+/// The highest CID an inverted table holds. Every vendored collection's CIDs
+/// lie far below it; a range past it in a re-vendored registry is cut there
+/// rather than allocated.
+const MAX_CID: usize = 0xFFFF;
+
+/// The deepest `usecmap` chain an inversion follows. The vendored registry
+/// nests two deep at most; this guards a re-vendoring, as
+/// `CMap::from_registry`'s bound does.
+const MAX_CHAIN: usize = 8;
+
+/// Each collection's two inverted tables, horizontal then vertical, built on
+/// first use and kept for the process: the CID's best two characters, `0`
+/// where it has none.
+static INVERTED: [OnceLock<Vec<[u32; 2]>>; 10] = [const { OnceLock::new() }; 10];
+
+/// How many times each of [`INVERTED`]'s tables was built, which a test holds
+/// to once.
+#[cfg(test)]
+static INVERSIONS: [std::sync::atomic::AtomicU32; 10] =
+    [const { std::sync::atomic::AtomicU32::new(0) }; 10];
+
+/// What a CID of a registry collection stands for, through
+/// [`collection_characters`]: up to two characters, the better first, and
+/// whether the CID is to be drawn in a face's vertical form.
+pub(crate) struct Reached {
+    pub characters: [Option<char>; 2],
+    pub vertical: bool,
+}
+
+/// The characters CID `cid` of the collection `ordering` stands for, in a
+/// font that writes vertically or not.
+///
+/// A horizontal font reads the horizontal table, and a CID only the vertical
+/// CMaps reach — a vertical variant — from the vertical one, to be drawn in
+/// its vertical form; a vertical font reads the vertical table, which holds
+/// the horizontal mappings too through each `-V` CMap's `-H` parent, and draws
+/// every glyph in its vertical form. `None` for an ordering this does not
+/// hold, a CID no CMap of the collection reaches, and every CID in a build
+/// without `cmap-predefined`, whose tables are empty.
+pub(crate) fn collection_characters(ordering: &str, vertical: bool, cid: u32) -> Option<Reached> {
+    let slot = COLLECTIONS.iter().position(|(name, _)| *name == ordering)?;
+    let read = |mode: usize| -> Option<[Option<char>; 2]> {
+        let table = INVERTED.get(slot * 2 + mode)?.get_or_init(|| {
+            #[cfg(test)]
+            if let Some(count) = INVERSIONS.get(slot * 2 + mode) {
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let names: &[&str] = COLLECTIONS
+                .get(slot)
+                .and_then(|(_, modes)| modes.get(mode).copied())
+                .unwrap_or(&[]);
+            invert(names)
+        });
+        let pair = table.get(usize::try_from(cid).ok()?)?;
+        let characters = pair.map(|code| char::from_u32(code).filter(|_| code != 0));
+        characters[0].is_some().then_some(characters)
+    };
+    if vertical {
+        return read(1).map(|characters| Reached {
+            characters,
+            vertical: true,
+        });
+    }
+    read(0)
+        .map(|characters| Reached {
+            characters,
+            vertical: false,
+        })
+        .or_else(|| {
+            read(1).map(|characters| Reached {
+                characters,
+                vertical: true,
+            })
+        })
+}
+
+/// A list of CMaps inverted into one table: each CMap with its parents, and
+/// a CID the first does not reach taken from the next.
+fn invert(names: &[&str]) -> Vec<[u32; 2]> {
+    let mut table: Vec<[u32; 2]> = Vec::new();
+    for name in names {
+        let own = invert_one(name);
+        if table.len() < own.len() {
+            table.resize(own.len(), [0, 0]);
+        }
+        for (slot, found) in table.iter_mut().zip(own) {
+            if slot[0] == 0 {
+                *slot = found;
+            }
+        }
+    }
+    table
+}
+
+/// One CMap and its `usecmap` parents inverted: each CID's two best codes
+/// ([`ranked`]), every pair the chain states counted — a vertical CMap's own
+/// and the horizontal ones it inherits alike, so a vertical table holds the
+/// horizontal CIDs too.
+fn invert_one(name: &str) -> Vec<[u32; 2]> {
+    let mut table: Vec<[u32; 2]> = Vec::new();
+    let mut next = entry(name.as_bytes()).map(|found| (found.index, found.parent));
+    let mut depth = 0;
+    while let Some((index, parent)) = next {
+        if depth > MAX_CHAIN {
+            break;
+        }
+        depth += 1;
+        for (low, high, first) in ranges(index).unwrap_or_default() {
+            for code in low..=high {
+                let Some(cid) = first.checked_add(code - low) else {
+                    break;
+                };
+                let Ok(at) = usize::try_from(cid) else {
+                    break;
+                };
+                if at > MAX_CID {
+                    break;
+                }
+                // A UTF-32 CMap's codes are Unicode scalar values; anything
+                // else names no character.
+                if char::from_u32(code).is_none() {
+                    continue;
+                }
+                if table.len() <= at {
+                    table.resize(at + 1, [0, 0]);
+                }
+                if let Some(slot) = table.get_mut(at) {
+                    keep(slot, code);
+                }
+            }
+        }
+        next = parent
+            .and_then(entry_at)
+            .map(|found| (found.index, found.parent));
+    }
+    table
+}
+
+/// Puts `code` among a CID's two best codes, by [`ranked`].
+fn keep(slot: &mut [u32; 2], code: u32) {
+    if slot.contains(&code) {
+        return;
+    }
+    let better = |a: u32, b: u32| b == 0 || ranked(a) < ranked(b);
+    if better(code, slot[0]) {
+        slot[1] = slot[0];
+        slot[0] = code;
+    } else if better(code, slot[1]) {
+        slot[1] = code;
+    }
+}
+
+/// How good a character is to draw a CID by: the lower the better. A Kangxi
+/// or supplementary radical, or a CJK compatibility ideograph, comes after
+/// every other character that reaches the same CID — the radical `U+2F47`
+/// reaches Adobe-Japan1's CID for `日` as `U+65E5` does, and lies below it in
+/// the code space — and within each class the lower code wins.
+fn ranked(code: u32) -> (u8, u32) {
+    let deferred = matches!(
+        code,
+        0x2E80..=0x2EFF | 0x2F00..=0x2FDF | 0xF900..=0xFAFF | 0x2F800..=0x2FA1F
+    );
+    (u8::from(deferred), code)
+}
+
 #[cfg(feature = "cmap-predefined")]
 fn unzigzag(v: u64) -> i64 {
     ((v >> 1) as i64) ^ -((v & 1) as i64)
@@ -235,6 +432,149 @@ mod tests {
                 assert!(entry_at(parent).is_some(), "{index} names a lost parent");
             }
         }
+    }
+
+    /// The characters a CID reaches, as [`collection_characters`] answers.
+    fn reached(ordering: &str, vertical: bool, cid: u32) -> Option<(Vec<char>, bool)> {
+        collection_characters(ordering, vertical, cid).map(|found| {
+            (
+                found.characters.into_iter().flatten().collect(),
+                found.vertical,
+            )
+        })
+    }
+
+    /// **Each collection's CIDs reach their characters**, every answer read
+    /// from the vendored CMap text: Adobe-Japan1's `A`, `日` before the radical
+    /// `⽇` that reaches the same CID, `本`, `語` and the space before the
+    /// no-break space; Adobe-GB1's and Adobe-CNS1's `中` and `文` before the
+    /// radical `⽂`; Adobe-Korea1's and Adobe-KR's `가` and `한`.
+    #[cfg(feature = "cmap-predefined")]
+    #[test]
+    fn each_collection_reaches_its_characters() {
+        let cases: [(&str, u32, &[char]); 16] = [
+            ("Japan1", 34, &['A']),
+            ("Japan1", 3284, &['\u{65e5}', '\u{2f47}']),
+            ("Japan1", 3722, &['\u{672c}']),
+            ("Japan1", 1952, &['\u{8a9e}']),
+            ("Japan1", 1, &[' ', '\u{a0}']),
+            ("GB1", 34, &['A']),
+            ("GB1", 4559, &['\u{4e2d}']),
+            ("GB1", 3795, &['\u{6587}', '\u{2f42}']),
+            ("CNS1", 661, &['\u{4e2d}']),
+            ("CNS1", 726, &['\u{6587}', '\u{2f42}']),
+            ("Korea1", 34, &['A']),
+            ("Korea1", 1086, &['\u{ac00}']),
+            ("Korea1", 3296, &['\u{d55c}']),
+            ("KR", 34, &['A']),
+            ("KR", 221, &['\u{ac00}']),
+            ("KR", 2835, &['\u{d55c}']),
+        ];
+        for (ordering, cid, want) in cases {
+            assert_eq!(
+                reached(ordering, false, cid),
+                Some((want.to_vec(), false)),
+                "{ordering} CID {cid}"
+            );
+        }
+    }
+
+    /// **A vertical variant reaches its character through `-V`.** Adobe-Japan1's
+    /// CID 7887, the vertical ideographic comma: a horizontal font reaches it
+    /// through `UniJIS-UTF32-H` as the presentation form `U+FE11`; a vertical
+    /// font through `UniJIS-UTF32-V` as `、`, to be drawn in its vertical
+    /// form, the presentation form after it. A vertical font draws every
+    /// glyph in its vertical form, `A` included, and Adobe-KR, which has no
+    /// `-V` CMap, reads its horizontal one for it.
+    #[cfg(feature = "cmap-predefined")]
+    #[test]
+    fn a_vertical_variant_reaches_its_character_through_v() {
+        assert_eq!(
+            reached("Japan1", false, 7887),
+            Some((vec!['\u{fe11}'], false))
+        );
+        assert_eq!(
+            reached("Japan1", true, 7887),
+            Some((vec!['\u{3001}', '\u{fe11}'], true))
+        );
+        assert_eq!(reached("Japan1", true, 34), Some((vec!['A'], true)));
+        assert_eq!(reached("KR", true, 221), Some((vec!['\u{ac00}'], true)));
+        assert_eq!(
+            reached("Korea1", true, 1086),
+            Some((vec!['\u{ac00}'], true))
+        );
+    }
+
+    /// **What no CMap reaches is nothing**: CID 0, which is `.notdef` by
+    /// definition; a CID past every collection's last; an ordering the
+    /// registry holds no `Uni*-UTF32` CMap for, `Identity` among them, and
+    /// Adobe-Manga1, outside the five.
+    #[test]
+    fn what_no_cmap_reaches_is_nothing() {
+        for vertical in [false, true] {
+            assert!(reached("Japan1", vertical, 0).is_none());
+            assert!(reached("Japan1", vertical, 60_000).is_none());
+            assert!(reached("Japan1", vertical, u32::MAX).is_none());
+            for ordering in ["Identity", "Manga1", "japan1", ""] {
+                assert!(reached(ordering, vertical, 34).is_none(), "{ordering}");
+            }
+        }
+    }
+
+    /// **Without the tables nothing is reached**: a build without
+    /// `cmap-predefined` holds no CID ranges, inverts nothing, and answers no
+    /// CID of any collection — reported by the caller, never guessed.
+    #[cfg(not(feature = "cmap-predefined"))]
+    #[test]
+    fn without_the_tables_nothing_is_reached() {
+        for (ordering, _) in COLLECTIONS {
+            for vertical in [false, true] {
+                for cid in [1u32, 34, 1086, 3284, 7887] {
+                    assert!(
+                        reached(ordering, vertical, cid).is_none(),
+                        "{ordering} {cid}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The collection is inverted once** (a `cfg(test)` count): ten
+    /// thousand lookups across Adobe-GB1's CIDs, both writing modes, build
+    /// each of its two tables once for the process, however many tests ask
+    /// at once.
+    #[test]
+    fn the_collection_is_inverted_once() {
+        let slot = COLLECTIONS
+            .iter()
+            .position(|(name, _)| *name == "GB1")
+            .expect("GB1 is one of the five");
+        for cid in 0..5_000u32 {
+            let _ = collection_characters("GB1", false, cid);
+            let _ = collection_characters("GB1", true, cid);
+        }
+        for mode in 0..2 {
+            let built = INVERSIONS[slot * 2 + mode].load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(built, 1, "GB1's table {mode} was built {built} times");
+        }
+    }
+
+    /// Ranking puts radicals and compatibility ideographs after every other
+    /// character, and the lower code first within a class.
+    #[test]
+    fn radicals_and_compatibility_ideographs_rank_last() {
+        assert!(ranked(0x65E5) < ranked(0x2F47), "a Kangxi radical");
+        assert!(ranked(0x9F9F) < ranked(0x2E80), "a supplementary radical");
+        assert!(ranked(0x8C48) < ranked(0xF900), "a compatibility ideograph");
+        assert!(ranked(0x2A6D6) < ranked(0x2F800), "a supplementary one");
+        assert!(ranked(0x20) < ranked(0xA0), "within a class, the lower");
+        let mut slot = [0u32; 2];
+        for code in [0x2F47, 0x65E5, 0x9999] {
+            keep(&mut slot, code);
+        }
+        assert_eq!(slot, [0x65E5, 0x9999], "the best two of three");
+        keep(&mut slot, 0x65E5);
+        assert_eq!(slot, [0x65E5, 0x9999], "a code kept once");
     }
 
     /// A short, truncated or absent blob must answer `None`, not panic. This
