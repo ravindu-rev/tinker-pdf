@@ -2,10 +2,16 @@
 //! 10.8; `docs/design/overprint-separations.md`).
 //!
 //! Every expectation here is read off the fixture as it is written — which
-//! space names which colorant, in which scope — and never off the code that
-//! reads it.
+//! space names which colorant, in which scope, at which tint — and never off
+//! the code that reads it.
 
-use tinker_pdf::{Document, Page};
+mod render_support;
+
+use render_support::{spot_page, SpotPage, SpotSpaces, SPOT_TINTS};
+use tinker_pdf::{
+    Document, Page, PixelRegion, PlateKind, PlateUse, RenderOptions, RenderWarning,
+    SeparationOptions, Separations,
+};
 
 /// A document whose objects are `objects`, numbered from 1 and written with a
 /// cross-reference table, so that nothing about opening it is repaired and
@@ -435,4 +441,501 @@ fn each_page_lists_its_own_spots() {
     let doc = document(&objects);
     assert_eq!(names(&doc.page(0).expect("page one")), ["First", "Shared"]);
     assert_eq!(names(&doc.page(1).expect("page two")), ["Second", "Shared"]);
+}
+
+// ---- plates (RC-04.10) ------------------------------------------------------
+
+/// A tint as a plate holds it, `round(255 × t)`.
+fn byte(tint: f64) -> u8 {
+    (tint.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// `page`'s separations under `render`, each colorant `plates` names as it
+/// says.
+fn separations(page: &Page, render: &RenderOptions, plates: &[(&str, PlateUse)]) -> Separations {
+    page.separations(&SeparationOptions {
+        render: render.clone(),
+        plates: plates
+            .iter()
+            .map(|(name, behaviour)| (name.as_bytes().to_vec(), *behaviour))
+            .collect(),
+    })
+}
+
+/// The plates' names, in the order they come back.
+fn plate_names(separations: &Separations) -> Vec<String> {
+    separations
+        .plates
+        .iter()
+        .map(|plate| String::from_utf8_lossy(&plate.name).into_owned())
+        .collect()
+}
+
+/// The plate of colorant `name`.
+fn plate<'a>(separations: &'a Separations, name: &str) -> Option<&'a tinker_pdf::Plate> {
+    separations
+        .plates
+        .iter()
+        .find(|plate| plate.name == name.as_bytes())
+}
+
+/// The tint the plate of colorant `name` holds at pixel `(x, y)`.
+#[track_caller]
+fn tint_at(separations: &Separations, name: &str, x: u32, y: u32) -> u8 {
+    let plate = plate(separations, name).unwrap_or_else(|| panic!("a plate of {name}"));
+    plate.tints[(y * separations.width + x) as usize]
+}
+
+/// The process colorants, in their plates' order.
+const PROCESS: [&str; 4] = ["Cyan", "Magenta", "Yellow", "Black"];
+
+/// A drawing of every pixel whole or empty, which the plates' sum is exact
+/// over (the design's "The plates' sum").
+fn whole_pixels() -> RenderOptions {
+    RenderOptions {
+        antialias: false,
+        ..RenderOptions::default()
+    }
+}
+
+/// A 10-point page whose resources are `resources`, whose page dictionary's
+/// other keys are `keys` and whose content is `content`; `extra`'s objects
+/// are numbered from 5.
+fn painted(resources: &str, keys: &str, content: &str, extra: &[String]) -> Document {
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_string(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] /Resources << {resources} >> \
+             /Contents 4 0 R {keys} >>"
+        ),
+        stream("", content),
+    ];
+    objects.extend_from_slice(extra);
+    document(&objects)
+}
+
+/// `/Gold`, a `/Separation` whose tint transform is linear onto cyan.
+const GOLD: &str = "[/Separation /Gold /DeviceCMYK \
+    << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>]";
+
+/// **N spots render N + 4 plates whose sums reproduce the composite**
+/// (RC-04.10; the design's "The plates' sum").
+///
+/// For one, two and eight spots, painted in `/Separation` spaces and in
+/// `/DeviceN` ones — beside a process backdrop, a spot over a spot, process
+/// ink over both, and text in an embedded face in process ink and in a spot —
+/// each pixel drawn whole or empty: the page's separations are the four
+/// process plates and a plate for each spot of its inventory, in its order,
+/// the kinds said, each spot's plate holding its tint where its square stands
+/// alone; and each spot's plate folded through its tint transform — linear
+/// from no ink into DeviceCMYK, so its tint lands on each ink its transform
+/// reaches at a tint of 1 — and added to the process plates is, byte for
+/// byte, the page drawn with every spot composite.
+#[test]
+fn n_spots_render_n_plus_four_plates_whose_sums_reproduce_the_composite() {
+    let render = whole_pixels();
+    for spaces in [SpotSpaces::Separation, SpotSpaces::DeviceN] {
+        for count in [1usize, 2, 8] {
+            let SpotPage { bytes, spots } = spot_page(count, spaces);
+            let what = format!("{count} spots in {spaces:?} spaces");
+            let doc = Document::open(bytes).expect("it opens");
+            let page = doc.page(0).expect("a page");
+            let spot_names: Vec<String> = spots.iter().map(|(name, _)| name.clone()).collect();
+            assert_eq!(names(&page), spot_names, "{what}: the inventory");
+
+            let plates = separations(&page, &render, &[]);
+            assert!(plates.warnings.is_empty(), "{what}: {:?}", plates.warnings);
+            assert_eq!((plates.width, plates.height), (60, 40), "{what}");
+            let mut expected: Vec<String> = PROCESS.iter().map(|name| name.to_string()).collect();
+            expected.extend(spot_names.iter().cloned());
+            assert_eq!(
+                plate_names(&plates),
+                expected,
+                "{what}: the plates, in order"
+            );
+            for (index, plate) in plates.plates.iter().enumerate() {
+                let kind = if index < 4 {
+                    PlateKind::Process
+                } else {
+                    PlateKind::Spot
+                };
+                assert_eq!(plate.kind, kind, "{what}: plate {index}'s kind");
+                assert_eq!(plate.tints.len(), 60 * 40, "{what}: plate {index}'s size");
+            }
+            for (i, name) in spot_names.iter().enumerate() {
+                assert_eq!(
+                    tint_at(&plates, name, 3 + 7 * i as u32, 35),
+                    byte(SPOT_TINTS[i % SPOT_TINTS.len()]),
+                    "{what}: {name} where its square stands alone"
+                );
+            }
+            assert!(
+                plates.plates[4].tints.contains(&byte(0.8)),
+                "{what}: the spot's text reached its plate"
+            );
+            assert!(
+                plates.plates[1].tints.contains(&byte(0.6)),
+                "{what}: the process text reached magenta"
+            );
+
+            let every: Vec<(&str, PlateUse)> = spot_names
+                .iter()
+                .map(|name| (name.as_str(), PlateUse::Composite))
+                .collect();
+            let composite = separations(&page, &render, &every);
+            assert_eq!(
+                plate_names(&composite),
+                PROCESS,
+                "{what}: every spot composite"
+            );
+            for at in 0..60 * 40 {
+                for ink in 0..4 {
+                    let folded: u32 = spots
+                        .iter()
+                        .enumerate()
+                        .map(|(s, (_, inks))| {
+                            u32::from(inks[ink]) * u32::from(plates.plates[4 + s].tints[at])
+                        })
+                        .sum();
+                    let sum = u32::from(plates.plates[ink].tints[at]) + folded;
+                    assert_eq!(
+                        sum,
+                        u32::from(composite.plates[ink].tints[at]),
+                        "{what}: {} at pixel ({}, {})",
+                        PROCESS[ink],
+                        at % 60,
+                        at / 60
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// **Each plate behaviour paints as it says** (RC-04.10; the design's "The
+/// plate plan"): a spot asked to be `Composite` hands back no plate and lands
+/// through its alternate on the process plates, every other plate as it was;
+/// a `Disabled` one is drawn on its plate — knocking out and knocked out as
+/// any spot is — and left out of what comes back, so every plate handed back
+/// is the default render's; `Composite` asked of a process colorant is its
+/// plate still, and a disabled process plate is left out; `Spot` asked by
+/// name is the default, a name the page has no colorant of is passed over,
+/// and a name's first entry decides.
+#[test]
+fn each_plate_behaviour_paints_as_it_says() {
+    let SpotPage { bytes, .. } = spot_page(2, SpotSpaces::Separation);
+    let doc = Document::open(bytes).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let render = whole_pixels();
+    let spot = separations(&page, &render, &[]);
+    assert_eq!(
+        plate_names(&spot),
+        ["Cyan", "Magenta", "Yellow", "Black", "Gold", "Silver"]
+    );
+    // Gold's square alone: x 2 to 8, rows 30 to 36, at 0.2.
+    assert_eq!(tint_at(&spot, "Gold", 3, 35), byte(0.2));
+    assert_eq!(
+        tint_at(&spot, "Cyan", 3, 35),
+        0,
+        "Gold knocks the process out"
+    );
+
+    let composite = separations(&page, &render, &[("Gold", PlateUse::Composite)]);
+    assert_eq!(
+        plate_names(&composite),
+        ["Cyan", "Magenta", "Yellow", "Black", "Silver"]
+    );
+    assert_eq!(
+        tint_at(&composite, "Cyan", 3, 35),
+        byte(0.2),
+        "Gold through its alternate, onto cyan"
+    );
+    for name in ["Magenta", "Yellow", "Black", "Silver"] {
+        assert_eq!(tint_at(&composite, name, 3, 35), 0, "{name} under Gold");
+    }
+    assert_eq!(
+        plate(&composite, "Silver"),
+        plate(&spot, "Silver"),
+        "the other spot's plate"
+    );
+
+    let disabled = separations(&page, &render, &[("Gold", PlateUse::Disabled)]);
+    assert_eq!(
+        plate_names(&disabled),
+        ["Cyan", "Magenta", "Yellow", "Black", "Silver"]
+    );
+    for name in ["Cyan", "Magenta", "Yellow", "Black", "Silver"] {
+        assert_eq!(
+            plate(&disabled, name),
+            plate(&spot, name),
+            "{name}: a disabled plate still knocks out"
+        );
+    }
+
+    let cyan = separations(&page, &render, &[("Cyan", PlateUse::Composite)]);
+    assert_eq!(
+        cyan.plates, spot.plates,
+        "a process plate is never composite"
+    );
+
+    let no_cyan = separations(&page, &render, &[("Cyan", PlateUse::Disabled)]);
+    assert_eq!(
+        plate_names(&no_cyan),
+        ["Magenta", "Yellow", "Black", "Gold", "Silver"]
+    );
+    for name in ["Magenta", "Yellow", "Black", "Gold", "Silver"] {
+        assert_eq!(plate(&no_cyan, name), plate(&spot, name), "{name}");
+    }
+
+    let named = separations(
+        &page,
+        &render,
+        &[
+            ("Gold", PlateUse::Spot),
+            ("Teal", PlateUse::Composite),
+            ("All", PlateUse::Disabled),
+        ],
+    );
+    assert_eq!(
+        named.plates, spot.plates,
+        "Spot by name, and names not here"
+    );
+    let first = separations(
+        &page,
+        &render,
+        &[("Gold", PlateUse::Composite), ("Gold", PlateUse::Disabled)],
+    );
+    assert_eq!(first.plates, composite.plates, "the first entry decides");
+}
+
+/// **A page group's space decides where spots land** (RC-04.10; 11.4.7,
+/// 11.7.3): a page whose transparency group declares DeviceRGB composites in
+/// it, so a spot is its alternate's light there, which comes back as ink on
+/// the process plates and no ink on its own; one declaring DeviceCMYK, or no
+/// space, is drawn on its plates, the spot on its own.
+#[test]
+fn a_page_group_of_another_space_draws_its_spots_through_their_alternates() {
+    // Gold at 0.6 through its alternate is cyan 0.6, whose light is red
+    // 0.4 and white's green and blue, which is cyan 0.6 in ink again.
+    for (group, gold, cyan) in [
+        ("/Group << /S /Transparency /CS /DeviceRGB >>", 0, byte(0.6)),
+        (
+            "/Group << /S /Transparency /CS /DeviceCMYK >>",
+            byte(0.6),
+            0,
+        ),
+        ("/Group << /S /Transparency >>", byte(0.6), 0),
+        ("", byte(0.6), 0),
+    ] {
+        let doc = painted(
+            &format!("/ColorSpace << /G {GOLD} >>"),
+            group,
+            "/G cs 0.6 scn 0 0 10 10 re f",
+            &[],
+        );
+        let page = doc.page(0).expect("a page");
+        let plates = separations(&page, &RenderOptions::default(), &[]);
+        assert_eq!(
+            plate_names(&plates),
+            ["Cyan", "Magenta", "Yellow", "Black", "Gold"],
+            "{group}"
+        );
+        assert_eq!(tint_at(&plates, "Gold", 5, 5), gold, "{group}: Gold");
+        assert_eq!(tint_at(&plates, "Cyan", 5, 5), cyan, "{group}: cyan");
+        for name in ["Magenta", "Yellow", "Black"] {
+            assert_eq!(tint_at(&plates, name, 5, 5), 0, "{group}: {name}");
+        }
+    }
+}
+
+/// **Separations take the render's options as `Page::render` does**
+/// (RC-04.10; ruling 5): a region's plates are the page's plates under it,
+/// and one past the page's edge is trimmed and named; a scale gives the
+/// page's pixel size at it; transparency brings the page's alpha back beside
+/// the plates, none where nothing is painted; annotations are drawn on their
+/// plates and left out on request, as content is; counting is handed back
+/// where asked; and a cancelled render says so.
+#[test]
+fn separations_take_the_render_s_options() {
+    let SpotPage { bytes, .. } = spot_page(2, SpotSpaces::Separation);
+    let doc = Document::open(bytes).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let whole = separations(&page, &RenderOptions::default(), &[]);
+    assert!(whole.alpha.is_none(), "no alpha unless asked");
+    assert!(whole.stats.is_none(), "no counting unless asked");
+
+    let region = PixelRegion::new(7, 5, 20, 30);
+    let tile = separations(
+        &page,
+        &RenderOptions {
+            region: Some(region),
+            ..RenderOptions::default()
+        },
+        &[],
+    );
+    assert_eq!((tile.width, tile.height), (20, 30));
+    assert!(tile.warnings.is_empty(), "{:?}", tile.warnings);
+    for (part, all) in tile.plates.iter().zip(&whole.plates) {
+        assert_eq!(part.name, all.name);
+        for y in 0..30 {
+            for x in 0..20 {
+                assert_eq!(
+                    part.tints[(y * 20 + x) as usize],
+                    all.tints[((y + 5) * 60 + x + 7) as usize],
+                    "{} at ({x}, {y}) of the region",
+                    String::from_utf8_lossy(&part.name)
+                );
+            }
+        }
+    }
+
+    let asked = PixelRegion::new(50, 30, 20, 20);
+    let past = separations(
+        &page,
+        &RenderOptions {
+            region: Some(asked),
+            ..RenderOptions::default()
+        },
+        &[],
+    );
+    assert_eq!((past.width, past.height), (10, 10));
+    assert!(
+        past.warnings.contains(&RenderWarning::RegionClamped {
+            requested: asked,
+            applied: PixelRegion::new(50, 30, 10, 10),
+        }),
+        "{:?}",
+        past.warnings
+    );
+
+    let doubled = RenderOptions {
+        scale: 2.0,
+        ..RenderOptions::default()
+    };
+    let double = separations(&page, &doubled, &[]);
+    assert_eq!((double.width, double.height), page.pixel_size(&doubled));
+    assert_eq!((double.width, double.height), (120, 80));
+
+    let counted = separations(
+        &page,
+        &RenderOptions {
+            stats: true,
+            ..RenderOptions::default()
+        },
+        &[],
+    );
+    assert!(counted.stats.is_some(), "counted where asked");
+    assert_eq!(counted.plates, whole.plates, "counting draws alike");
+
+    let cancel = tinker_pdf::CancelToken::new();
+    cancel.cancel();
+    let cancelled = separations(
+        &page,
+        &RenderOptions {
+            cancel: Some(cancel),
+            ..RenderOptions::default()
+        },
+        &[],
+    );
+    assert!(
+        cancelled.warnings.contains(&RenderWarning::Cancelled),
+        "{:?}",
+        cancelled.warnings
+    );
+
+    let doc = painted(
+        &format!("/ColorSpace << /G {GOLD} >>"),
+        "",
+        "/G cs 0.6 scn 0 0 5 5 re f",
+        &[],
+    );
+    let page = doc.page(0).expect("a page");
+    let transparent = separations(
+        &page,
+        &RenderOptions {
+            transparent: true,
+            ..RenderOptions::default()
+        },
+        &[],
+    );
+    let alpha = transparent
+        .alpha
+        .as_ref()
+        .expect("an alpha beside the plates");
+    assert_eq!(alpha.len(), 100);
+    assert_eq!(alpha[9 * 10 + 2], 255, "painted, whole");
+    assert_eq!(alpha[9], 0, "unpainted, nothing");
+    assert_eq!(tint_at(&transparent, "Gold", 2, 9), byte(0.6));
+    assert_eq!(tint_at(&transparent, "Gold", 9, 0), 0);
+
+    let doc = painted(
+        "",
+        "/Annots [5 0 R]",
+        "",
+        &[
+            "<< /Type /Annot /Subtype /Square /Rect [0 0 10 10] /AP << /N 6 0 R >> >>".to_string(),
+            stream(
+                &format!(
+                    "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                     /Resources << /ColorSpace << /G {GOLD} >> >>"
+                ),
+                "/G cs 1 scn 0 0 10 10 re f",
+            ),
+        ],
+    );
+    let page = doc.page(0).expect("a page");
+    assert_eq!(
+        names(&page),
+        ["Gold"],
+        "the appearance's spot is the page's"
+    );
+    let drawn = separations(&page, &RenderOptions::default(), &[]);
+    assert_eq!(
+        tint_at(&drawn, "Gold", 5, 5),
+        255,
+        "the annotation on its plate"
+    );
+    for options in [
+        RenderOptions {
+            annotations: false,
+            ..RenderOptions::default()
+        },
+        RenderOptions {
+            annotations: false,
+            content: false,
+            ..RenderOptions::default()
+        },
+    ] {
+        let left = separations(&page, &options, &[]);
+        assert!(
+            left.plates
+                .iter()
+                .all(|plate| plate.tints.iter().all(|tint| *tint == 0)),
+            "nothing drawn, no ink"
+        );
+    }
+}
+
+/// **A page naming no spot has its four process plates**, and a region that
+/// misses the page has plates of no pixels.
+#[test]
+fn a_page_with_no_spots_has_its_process_plates() {
+    let doc = painted("", "", "0.2 0.4 0.6 0.8 k 0 0 10 10 re f", &[]);
+    let page = doc.page(0).expect("a page");
+    let plates = separations(&page, &RenderOptions::default(), &[]);
+    assert_eq!(plate_names(&plates), PROCESS);
+    for (name, tint) in PROCESS.iter().zip([0.2, 0.4, 0.6, 0.8]) {
+        assert_eq!(tint_at(&plates, name, 5, 5), byte(tint), "{name}");
+    }
+    let off = separations(
+        &page,
+        &RenderOptions {
+            region: Some(PixelRegion::new(40, 40, 5, 5)),
+            ..RenderOptions::default()
+        },
+        &[],
+    );
+    assert_eq!((off.width, off.height), (0, 0));
+    assert!(off.plates.iter().all(|plate| plate.tints.is_empty()));
 }

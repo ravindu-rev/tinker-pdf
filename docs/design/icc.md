@@ -53,11 +53,15 @@ open of this design — the refused profiles — is listed in the
   rendered for, and a caller's profile in its place, are
   [Soft proofing](#soft-proofing-rc-05) below; without one, every render
   converts for the screen, to sRGB.
-- **N-channel output, overprint and spot-ink simulation.** `Separation` /
-  `DeviceN` keep flowing through their tint transforms (8.6.6.4, 8.6.6.5);
-  simulating ink interaction is a different renderer. Overprint simulation and
-  separations are [ROADMAP](../ROADMAP.md) rows RC-03 and RC-04, designed in
-  [overprint-separations.md](overprint-separations.md).
+- **N-channel output, overprint and spot-ink simulation.** A light render's
+  `Separation` and `DeviceN` colours keep flowing through their tint
+  transforms (8.6.6.4, 8.6.6.5) into the CMM. N-channel output is not the
+  CMM's: a page's separations — the four process plates and a plate for each
+  spot colorant it names — are drawn by the renderer on its plates format,
+  outside any profile (`Page::separations`,
+  [rendering](../features/rendering.md), designed in
+  [overprint-separations.md](overprint-separations.md)). Overprint simulation
+  is [ROADMAP](../ROADMAP.md) row RC-03.
 - **Black point compensation, gamut mapping beyond intent selection,
   iccMAX/v5 profiles, named-colour tags.** Refused by name, per ruling 2;
   [ROADMAP](../ROADMAP.md) rows RC-02 and RC-20, the second designed in

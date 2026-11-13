@@ -79,6 +79,13 @@ fuzz_target!(|data: &[u8]| {
     // boxes, and the interesting failures are in the operators rather than in
     // how many pixels they cover.
     let _ = page.render(&RenderOptions::at_dpi(12.0));
+    // The page's separations: a plate for every spot the inventory names,
+    // every colour asked what it paints by colorant, every group, cell and
+    // mask on plates, under the byte bound the input's page box sizes.
+    let _ = page.separations(&tinker_pdf::SeparationOptions {
+        render: RenderOptions::at_dpi(12.0),
+        ..tinker_pdf::SeparationOptions::default()
+    });
     // Every optional-content configuration the input lists (8.11.4.3), and
     // the first index past them, which renders as `/D`: each entry's
     // `/BaseState`, `/ON`, `/OFF`, `/AS` and `/Intent` the input shapes.

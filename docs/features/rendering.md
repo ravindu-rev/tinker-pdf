@@ -915,6 +915,46 @@ plates the page carries
 inside the bound: eleven at `MAX_PAGE_PIXELS`, sixteen bytes a pixel, and the
 cap's sixty-four on an A4 page at 300 dpi.
 
+**A page's separations** (the design's "Plates handed out").
+`Page::separations(&SeparationOptions)` draws the page through the pipeline
+`Page::render` draws through — `draw_canvas`, the drawing half of
+`draw_sheet`, so the region, the scale and its clamp, the rotation, the crop
+box, the antialiasing, the annotations and the warnings are that render's —
+on plates, and hands back `Separations`: each plate as a `Plate`, its
+colorant's name, its `PlateKind` (`Process` or `Spot`) and its tints, a byte a
+pixel, 0 no ink and 255 solid, row by row at the render's size; with
+`RenderOptions::transparent` the page's alpha beside them; the warnings; and
+the counts where `RenderOptions::stats` asked. The plan is the four process
+plates and the page's inventory (`Page::spot_colorants`), in its order, each
+colorant `PlateUse::Spot` unless `SeparationOptions::plates` names it —
+`Composite` draws a spot through its alternate on the process plates and hands
+back no plate for it, `Disabled` draws its plate and leaves it out of what
+comes back, a name's first entry decides, a process colorant is never
+composite, and a name the page has no colorant of is passed over. A page whose
+transparency group's `/CS` is a four-component subtractive space, or that has
+none, is drawn on plates; one of another space composites in it, every spot
+through its alternate (11.7.3), and its plates are that light turned into ink.
+The plan keeps at most `MAX_SPOT_PLATES` spot plates and as many as keep the
+whole page's plates inside `MAX_PLATE_BYTES` (`spots_within_bytes` of the
+page's pixels, whatever region is asked, so a tile keeps the page's plates);
+the spots past either, in inventory order, are drawn as composites and the
+render carries `RenderWarning::PlatesCapped { named, kept }`. A plate is not a
+`Bitmap`, whose single channel reads as grey light. The format, `allow_cmyk`,
+premultiplication and forced colours say how light comes back and are not
+read, and the page is drawn on the caller's thread whatever `parallelism`
+asks. With every pixel whole or empty, opaque paints, whole-level tints and
+tint transforms linear from no ink into DeviceCMYK, each spot's plate folded
+through its transform and added to the process plates is, byte for byte, the
+page drawn with every spot composite
+(`n_spots_render_n_plus_four_plates_whose_sums_reproduce_the_composite`, for
+one, two and eight spots in `/Separation` and `/DeviceN` spaces);
+`each_plate_behaviour_paints_as_it_says`,
+`a_page_group_of_another_space_draws_its_spots_through_their_alternates` and
+`separations_take_the_render_s_options` hold the rest, and
+`render_regions.rs`'s `separation_tiles_are_the_page_s_plates` holds every
+tile's plates byte-equal to the page's, turned, cropped and at 2x. The
+`render_page` fuzz target draws a page's separations.
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and
@@ -2246,6 +2286,13 @@ through the same pipeline, over the part's own rectangle unless
 nothing — a caller who asked for one part is owed the reason rather than a
 white rectangle.
 
+`Page::separations(&SeparationOptions)` returns the page's plates through the
+same pipeline: `SeparationOptions` carries the `RenderOptions` and each
+colorant's `PlateUse` by name, and `Separations` carries `width`, `height`,
+`plates` (each a `Plate`: `name`, `kind`, a `PlateKind`, and `tints`, a byte a
+pixel), `alpha` (with `transparent`), `warnings` and `stats` ("A page's
+separations", above).
+
 `Bitmap::to_png` writes the page out as a PNG file (ISO/IEC 15948), eight bits
 a component, through `tinker_pdf_filters::png_encode` — where the zlib
 stream, the chunk CRC-32 and 9.2's row filters a PNG is made of live — its
@@ -2437,7 +2484,7 @@ under it, so the copy holds every canvas the walk closes onto.
 | A form, a soft mask's group or a Type 3 glyph procedure that names itself while it runs, directly or through the others, drawn once | `RenderWarning::RecursiveContent`, and `SvgWarning::Render` of it from `to_svg` | A cycle has no last run; refused at its first repeat by the stream's identity, the page is what every reader can draw, where the depth cap ended a branching cycle only after two or more runs to the sixteenth | [content and text](content-and-text.md) |
 | Nested runs past the interpreter's budget for nested content — 4 MiB, and 4 096 bytes for every byte of content the page reaches — past which no stream that has already run is run again | `RenderWarning::NestedBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group; every stream the page holds still runs once, so what is passed over is repeats of content already drawn | [content and text](content-and-text.md) |
 | More than 2 000 transparency-group buffers on one page, or more than 2 000 groups and soft masks' groups run in one stream, past which the interpreter runs no more of either | `RenderWarning::GroupBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A budget, not a depth: branching group and soft-mask recursion stays inside any depth cap, and every reading of the page — text, images, SVG — is bounded by the same walk | [rulings](../rulings.md) |
-| A render on plates whose plates would pass a cap: a group or a coloured tiling cell whose plates buffer would take the plates live at once past `MAX_PLATE_BYTES` (1 GiB) | `RenderWarning::PlatesCapped { named, kept }`, once a render, `kept` 0 of the `named` spot plates the page carries | Drawn in ink, its spots through their alternates on the process plates, rather than refused (ruling 2), and named, since a spot drawn on the process plates looks like process ink (ruling 10) | [design/overprint-separations.md](../design/overprint-separations.md) |
+| A render on plates whose plates would pass a cap: a page naming more spots than `MAX_SPOT_PLATES` (64), or more than its plates keep inside `MAX_PLATE_BYTES` (1 GiB) at its size; a group or a coloured tiling cell whose plates buffer would take the plates live at once past `MAX_PLATE_BYTES` | `RenderWarning::PlatesCapped { named, kept }`, once a render: for the page, `named` spots asked for a plate and the first `kept` in inventory order kept one; for a group or a cell, `kept` 0 of the `named` spot plates the page carries | The spots past the cap are drawn as composites, through their alternates on the process plates, rather than refused (ruling 2), and named, since a spot drawn on the process plates looks like process ink (ruling 10) | [design/overprint-separations.md](../design/overprint-separations.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | A `RenderOptions::region` reaching past the page edge | `RenderWarning::RegionClamped` | The part on the page is rendered rather than refused (ruling 2), and a bitmap smaller than the rectangle asked for is named rather than left to arithmetic (ruling 10). A region that misses the page entirely trims to no pixels | [rulings](../rulings.md) |

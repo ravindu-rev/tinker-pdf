@@ -10,9 +10,10 @@
 //! It also builds the pages two files must agree on byte for byte: the analytic
 //! pages `determinism.rs` fingerprints and `render_analytic.rs` evaluates, the
 //! pen, bilevel, minified JPEG and minified JPEG 2000 pages `determinism.rs`
-//! fingerprints and `render_regions.rs` tiles, and the substituted CJK page and
+//! fingerprints and `render_regions.rs` tiles, the substituted CJK page and
 //! the face that draws it, which `determinism.rs` fingerprints and
-//! `substitute_fonts.rs` reads.
+//! `substitute_fonts.rs` reads, and the separations pages `separations.rs`
+//! sums and `render_regions.rs` tiles.
 //!
 //! Only the helpers those four need live here. The twenty-odd other test
 //! binaries that open a document and look at a pixel keep their own copies
@@ -2242,4 +2243,233 @@ pub fn symbols_page() -> Vec<u8> {
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Symbol >>".to_vec(),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>".to_vec(),
     ])
+}
+
+// ---- separations (RC-04) ----------------------------------------------------
+
+/// The spot colorants the separations pages name, in the order their
+/// resources name them.
+pub const SPOT_NAMES: [&str; 8] = [
+    "Gold", "Silver", "Teal", "Plum", "Rust", "Sage", "Navy", "Coral",
+];
+
+/// The tints a separations page paints its spots at: whole levels of 255, so
+/// a plate's byte and a composite's are one rounding of one number (the
+/// design's "The plates' sum").
+pub const SPOT_TINTS: [f64; 5] = [0.2, 0.4, 0.6, 0.8, 1.0];
+
+/// A separations page's size in points, a pixel each at 72 dpi.
+pub const SPOT_PAGE: (f64, f64) = (60.0, 40.0);
+
+/// The process inks spot `i`'s `/Separation` tint transform paints at a tint
+/// of 1, each 0 or 1 — one ink for the first four spots, two for the rest — so
+/// every transform is linear from no ink into DeviceCMYK.
+pub fn separation_inks(i: usize) -> [u8; 4] {
+    match i % 8 {
+        0 => [1, 0, 0, 0],
+        1 => [0, 1, 0, 0],
+        2 => [0, 0, 1, 0],
+        3 => [0, 0, 0, 1],
+        4 => [1, 1, 0, 0],
+        5 => [0, 1, 1, 0],
+        6 => [0, 0, 1, 1],
+        _ => [1, 0, 0, 1],
+    }
+}
+
+/// How a separations page paints its spots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpotSpaces {
+    /// Each spot a `/Separation` of its own, its tint transform a type 2
+    /// function onto [`separation_inks`].
+    Separation,
+    /// The spots four to a `/DeviceN`, the space's `j`th onto process ink
+    /// `j`, by a type 4 function.
+    DeviceN,
+}
+
+/// A separations page: its bytes, and each spot's name with the process inks
+/// its tint transform paints at a tint of 1, all others at 0 — what a test
+/// folds the spot's plate through.
+pub struct SpotPage {
+    /// The document.
+    pub bytes: Vec<u8>,
+    /// Each spot, in the order the page's resources name it.
+    pub spots: Vec<(String, [u8; 4])>,
+}
+
+/// The colour `cs` and `scn` set for spot `i` of a page in `spaces` at
+/// `tint`, every other spot of its `/DeviceN` at 0.
+pub fn spot_colour(spaces: SpotSpaces, i: usize, tint: f64) -> String {
+    match spaces {
+        SpotSpaces::Separation => format!("/S{i} cs {tint} scn"),
+        SpotSpaces::DeviceN => {
+            let tints: Vec<String> = (0..4)
+                .map(|j| {
+                    if j == i % 4 {
+                        tint.to_string()
+                    } else {
+                        "0".to_string()
+                    }
+                })
+                .collect();
+            format!("/D{} cs {} scn", i / 4, tints.join(" "))
+        }
+    }
+}
+
+/// The objects a page draws its text with: `/F0`, a TrueType font, objects
+/// 5 to 7 — the font, its descriptor and its program, [`curvy_font`],
+/// embedded, so the text draws alike in every build, `bundled-fonts` or not.
+pub fn curvy_font_objects() -> Vec<Vec<u8>> {
+    let widths: Vec<&str> = (32..=126)
+        .map(|code| if code == 32 { "320" } else { "640" })
+        .collect();
+    let font = format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Curvy /Encoding /WinAnsiEncoding \
+         /FirstChar 32 /LastChar 126 /Widths [{}] /FontDescriptor 6 0 R >>",
+        widths.join(" ")
+    );
+    let descriptor = "<< /Type /FontDescriptor /FontName /Curvy /Flags 32 \
+                      /FontBBox [-500 -300 1500 1000] /ItalicAngle 0 /Ascent 750 \
+                      /Descent -250 /CapHeight 700 /StemV 80 /FontFile2 7 0 R >>";
+    let program = curvy_font();
+    vec![
+        font.into_bytes(),
+        descriptor.as_bytes().to_vec(),
+        raw_stream(&format!("/Length1 {}", program.len()), &program),
+    ]
+}
+
+/// A separations page of `count` spots, at most eight, of [`SPOT_NAMES`],
+/// painted in `spaces` beside process fills and text, on a page of
+/// [`SPOT_PAGE`], every edge on a whole point:
+///
+/// - a process backdrop, two DeviceCMYK fills, one over the other's
+///   lower-left quarter;
+/// - spot `i`'s square of 6 points at `(2 + 7i, 4)`, at
+///   `SPOT_TINTS[i % 5]`, and, on a `/DeviceN` page, each space's spots all
+///   at once over a square 8 points above its first spot's;
+/// - with two spots or more, a band of the second spot over the first's
+///   square and its own, and a band of process ink over both;
+/// - two glyphs in process ink and two in the first spot, at 10 points, in
+///   the embedded face of [`curvy_font_objects`];
+/// - and `extra`, drawn last, its resources `resources` and its objects
+///   `objects`, numbered from [`spot_page_next_object`] — what a page of an
+///   image, a shading or a mesh adds.
+pub fn spot_page_with(
+    count: usize,
+    spaces: SpotSpaces,
+    extra: &str,
+    resources: &str,
+    objects: &[Vec<u8>],
+) -> SpotPage {
+    let count = count.min(SPOT_NAMES.len());
+    let (width, height) = SPOT_PAGE;
+    let mut content = String::from("0.1 0.2 0 0 k 0 0 60 40 re f\n0 0 0.3 0.1 k 0 0 30 20 re f\n");
+    for i in 0..count {
+        let tint = SPOT_TINTS[i % SPOT_TINTS.len()];
+        content.push_str(&format!(
+            "{} {} 4 6 6 re f\n",
+            spot_colour(spaces, i, tint),
+            2 + 7 * i
+        ));
+    }
+    let mut spaces_dict = String::new();
+    let mut functions = Vec::new();
+    let mut spots = Vec::new();
+    // The page's own objects end at 7, and the type 4 functions follow.
+    let first_function = 8;
+    match spaces {
+        SpotSpaces::Separation => {
+            for (i, name) in SPOT_NAMES.iter().take(count).enumerate() {
+                let inks = separation_inks(i);
+                spaces_dict.push_str(&format!(
+                    "/S{i} [/Separation /{name} /DeviceCMYK << /FunctionType 2 /Domain [0 1] \
+                     /C0 [0 0 0 0] /C1 [{} {} {} {}] /N 1 >>] ",
+                    inks[0], inks[1], inks[2], inks[3]
+                ));
+                spots.push(((*name).to_string(), inks));
+            }
+        }
+        SpotSpaces::DeviceN => {
+            for (group, names) in SPOT_NAMES[..count].chunks(4).enumerate() {
+                // The names onto the first inks, the rest padded with none.
+                let padding = match names.len() {
+                    4 => "0 add".to_string(),
+                    n => vec!["0"; 4 - n].join(" "),
+                };
+                let domain = vec!["0 1"; names.len()].join(" ");
+                functions.push(raw_stream(
+                    &format!("/FunctionType 4 /Domain [{domain}] /Range [0 1 0 1 0 1 0 1]"),
+                    format!("{{ {padding} }}").as_bytes(),
+                ));
+                let listed: Vec<String> = names.iter().map(|name| format!("/{name}")).collect();
+                spaces_dict.push_str(&format!(
+                    "/D{group} [/DeviceN [{}] /DeviceCMYK {} 0 R] ",
+                    listed.join(" "),
+                    first_function + group
+                ));
+                for (j, name) in names.iter().enumerate() {
+                    let mut inks = [0; 4];
+                    inks[j] = 1;
+                    spots.push(((*name).to_string(), inks));
+                }
+                let all: Vec<String> = (0..names.len())
+                    .map(|j| SPOT_TINTS[(group * 4 + j) % SPOT_TINTS.len()].to_string())
+                    .collect();
+                content.push_str(&format!(
+                    "/D{group} cs {} scn {} 12 6 6 re f\n",
+                    all.join(" "),
+                    2 + 28 * group
+                ));
+            }
+        }
+    }
+    if count >= 2 {
+        content.push_str(&format!("{} 4 6 10 2 re f\n", spot_colour(spaces, 1, 0.4)));
+        content.push_str("0.5 0 0 0.2 k 6 8 6 1 re f\n");
+    }
+    content.push_str("BT /F0 10 Tf 0 0.6 0.4 0 k 2 26 Td (AB) Tj ET\n");
+    if count >= 1 {
+        content.push_str(&format!(
+            "BT /F0 10 Tf {} 30 26 Td (CD) Tj ET\n",
+            spot_colour(spaces, 0, 0.8)
+        ));
+    }
+    content.push_str(extra);
+    let mut all = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] \
+             /Resources << /ColorSpace << {spaces_dict} >> /Font << /F0 5 0 R >> {resources} >> \
+             /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        raw_stream("", content.as_bytes()),
+    ];
+    all.extend(curvy_font_objects());
+    all.extend(functions);
+    all.extend_from_slice(objects);
+    SpotPage {
+        bytes: raw_pdf(&all),
+        spots,
+    }
+}
+
+/// [`spot_page_with`] with nothing more drawn.
+pub fn spot_page(count: usize, spaces: SpotSpaces) -> SpotPage {
+    spot_page_with(count, spaces, "", "", &[])
+}
+
+/// The number the first of `extra`'s objects takes in [`spot_page_with`] for
+/// a page of `count` spots in `spaces`: after the page's own seven and its
+/// type 4 functions.
+pub fn spot_page_next_object(count: usize, spaces: SpotSpaces) -> usize {
+    let functions = match spaces {
+        SpotSpaces::Separation => 0,
+        SpotSpaces::DeviceN => count.min(SPOT_NAMES.len()).div_ceil(4),
+    };
+    8 + functions
 }

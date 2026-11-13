@@ -1,5 +1,6 @@
 //! A page's spot colorants (8.6.6.4, 8.6.6.5), behind
-//! [`Page::spot_colorants`](crate::Page::spot_colorants).
+//! [`Page::spot_colorants`](crate::Page::spot_colorants), and its plates,
+//! behind [`Page::separations`](crate::Page::separations).
 //!
 //! Feature documentation: `docs/features/rendering.md`, "Separations"; the
 //! design is `docs/design/overprint-separations.md`.
@@ -49,9 +50,11 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tinker_pdf_cos::{pages as cos_pages, CosDocument, Dict, Name, ObjRef, Object};
+use tinker_pdf_render::{PlatePlan, PlateUse};
 
 use crate::fontlist::{self, ScopeVisitor};
 use crate::resources::{device_n_attributes, device_n_names, separation_name};
+use crate::{PixelFormat, RenderOptions, RenderWarning, Stats};
 
 /// The colorant names 8.6.6.4 reserves for the process colorants of a CMYK
 /// device: a `/Separation` or `/DeviceN` naming one paints a process plate,
@@ -106,6 +109,237 @@ impl crate::Page {
     #[must_use]
     pub fn spot_colorants(&self) -> Vec<SpotColorant> {
         of_page(&self.doc, &self.inner)
+    }
+
+    /// The page's separations: an image of ink for each colorant
+    /// (`docs/design/overprint-separations.md`, "Plates handed out") — the
+    /// four process plates of a CMYK device, cyan, magenta, yellow and
+    /// black, then a plate for each spot colorant the page's inventory names
+    /// ([`crate::Page::spot_colorants`]), in its order.
+    ///
+    /// Each colorant is [`PlateUse::Spot`], its own plate, unless
+    /// [`SeparationOptions::plates`] says otherwise. [`PlateUse::Composite`]
+    /// draws a spot through its alternate on the process plates, as a page
+    /// without the colorant draws it, and hands back no plate for it;
+    /// [`PlateUse::Disabled`] keeps its plate while the page is drawn — so it
+    /// knocks out, and is knocked out by, every other paint exactly as a spot
+    /// plate is — and leaves it out of what is handed back. A process
+    /// colorant asked to be composite is a plate still: the process plates
+    /// are what a composite lands on.
+    ///
+    /// Drawn through the pipeline [`crate::Page::render`] draws through
+    /// (ruling 5): the region, the scale and its clamp, the rotation, the
+    /// crop box, the antialiasing and the warnings are that render's, so a
+    /// region's plates are the rectangle of the page's plates under it, byte
+    /// for byte. Every paint knocks out the plates it names no ink for, as
+    /// 8.6.7 has a paint do with overprint off. A page whose transparency
+    /// group declares a space other than a four-component subtractive one
+    /// composites in that space, every spot through its alternate (11.7.3),
+    /// and its plates are that light turned into ink.
+    ///
+    /// At most [`crate::MAX_SPOT_PLATES`] spot plates, and at most as many as
+    /// keep the page's plates — every channel and the alpha, a byte each, at
+    /// each pixel of the whole page — inside [`crate::MAX_PLATE_BYTES`]: the
+    /// spots past either, in inventory order, are drawn as composites, and
+    /// the render says so ([`RenderWarning::PlatesCapped`]).
+    #[must_use]
+    pub fn separations(&self, options: &SeparationOptions) -> Separations {
+        let render = &options.render;
+        // The page's plates, whatever region is asked for, so a tile keeps
+        // the plates the page keeps (ruling 5).
+        let (width, height) = self.pixel_size(render);
+        let planned = plan(
+            &self.spot_colorants(),
+            &options.plates,
+            u64::from(width) * u64::from(height),
+        );
+        let op = self.render_operation(render, render.usage);
+        let content = if render.content {
+            crate::stats::content(&self.doc, &self.inner, op.work())
+        } else {
+            Vec::new()
+        };
+        let resources = crate::resources::PageResources::new_in(
+            &self.doc,
+            &self.inner,
+            self.fonts.as_ref(),
+            op,
+        );
+        let crate::Sheeted { canvas, met, .. } = self.draw_plates(
+            render,
+            &resources,
+            Arc::clone(&planned.plan),
+            |renderer, resources| self.paint_page(render, &content, renderer, resources),
+        );
+        // A page group of another space composited in it: its light, turned
+        // into ink on the process plates, every spot at no ink.
+        let format = PixelFormat::Plates {
+            spots: planned.plan.spots(),
+        };
+        let canvas = if canvas.format == format {
+            canvas
+        } else {
+            canvas.extract(canvas.origin(), canvas.width, canvas.height, format)
+        };
+        let plates = planned
+            .plan
+            .channels()
+            .enumerate()
+            .filter(|(_, (_, behaviour))| *behaviour != PlateUse::Disabled)
+            .map(|(channel, (name, _))| Plate {
+                name: name.to_vec(),
+                kind: if channel < 4 {
+                    PlateKind::Process
+                } else {
+                    PlateKind::Spot
+                },
+                tints: canvas.channel(channel).unwrap_or_default(),
+            })
+            .collect();
+        let alpha = render.transparent.then(|| {
+            let components = canvas.format.components();
+            canvas
+                .data
+                .chunks_exact(components)
+                .map(|pixel| pixel.last().copied().unwrap_or(255))
+                .collect()
+        });
+        let mut warnings = met.warnings();
+        if planned.kept < planned.named {
+            let capped = RenderWarning::PlatesCapped {
+                named: planned.named,
+                kept: planned.kept,
+            };
+            if !warnings.contains(&capped) {
+                warnings.push(capped);
+            }
+        }
+        Separations {
+            width: canvas.width,
+            height: canvas.height,
+            plates,
+            alpha,
+            warnings,
+            stats: resources.work().map(|work| work.stats()),
+        }
+    }
+}
+
+/// How [`Page::separations`](crate::Page::separations) draws a page's
+/// plates.
+#[derive(Clone, Debug, Default)]
+pub struct SeparationOptions {
+    /// The render, as [`crate::Page::render`] takes it: the region, the scale,
+    /// the antialiasing, the levels and the thinnest line, the transparency,
+    /// the cancel token, what is drawn, the optional-content states and the
+    /// counting. Its `format`, `allow_cmyk`, `premultiplied` and
+    /// `forced_colours` say how light comes back and are not read, since
+    /// plates are tints; the page is drawn on the caller's thread whatever its
+    /// `parallelism` asks.
+    pub render: RenderOptions,
+    /// What each colorant's plate does, by name — a process colorant
+    /// (`Cyan`, `Magenta`, `Yellow`, `Black`) or a spot of the page's
+    /// inventory — a name's first entry deciding. A colorant it does not name
+    /// is [`PlateUse::Spot`], and a name the page has no colorant of is passed
+    /// over.
+    pub plates: Vec<(Vec<u8>, PlateUse)>,
+}
+
+/// What kind of colorant a [`Plate`] carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PlateKind {
+    /// One of the four process colorants of a CMYK device, which 8.6.6.4
+    /// reserves the names `Cyan`, `Magenta`, `Yellow` and `Black` for.
+    Process,
+    /// A spot colorant a `/Separation` or `/DeviceN` space names.
+    Spot,
+}
+
+/// One plate of a page's separations: an image of one colorant's ink, a
+/// byte a pixel.
+///
+/// Not a [`crate::Bitmap`]: a one-channel bitmap reads as grey, which is
+/// light, and a plate read as grey is its own negative.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Plate {
+    /// The colorant's name, as the page's spaces write it, `#` escapes
+    /// decoded (7.3.5).
+    pub name: Vec<u8>,
+    /// Whether the colorant is a process one or a spot.
+    pub kind: PlateKind,
+    /// The colorant's tint at each pixel, row by row from the top, the
+    /// separations' width by their height: 0 no ink, 255 solid.
+    pub tints: Vec<u8>,
+}
+
+/// A page's separations, behind [`Page::separations`](crate::Page::separations).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Separations {
+    /// Width in pixels: the page's at the render's scale, or the region's.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Each plate the plan keeps: the process plates, then the spots in
+    /// inventory order, a disabled one left out.
+    pub plates: Vec<Plate>,
+    /// With `RenderOptions::transparent`, how much of each pixel the page
+    /// covered, row by row, 255 wholly; `None` otherwise, where the plates
+    /// stand on paper and every pixel is whole.
+    pub alpha: Option<Vec<u8>>,
+    /// What the render met, as [`crate::Bitmap::warnings`] says it, and
+    /// [`RenderWarning::PlatesCapped`] where spots past a cap were drawn as
+    /// composites.
+    pub warnings: Vec<RenderWarning>,
+    /// What the render did, where `RenderOptions::stats` asked
+    /// ([`crate::Bitmap::stats`]).
+    pub stats: Option<Stats>,
+}
+
+/// The plate plan a separations render draws by, and what its caps left:
+/// how many spots asked for a plate, and how many kept one.
+struct Planned {
+    plan: Arc<PlatePlan>,
+    named: usize,
+    kept: usize,
+}
+
+/// The plan for a page of `inventory` and `pixels` pixels, each colorant's
+/// use `asked`'s first entry for its name or [`PlateUse::Spot`]: the four
+/// process plates, then each spot of the inventory, in its order, that asks
+/// for a plate — Spot or Disabled — while fewer than
+/// [`tinker_pdf_render::spots_within_bytes`] allows have one, the rest drawn as
+/// composites.
+fn plan(inventory: &[SpotColorant], asked: &[(Vec<u8>, PlateUse)], pixels: u64) -> Planned {
+    let behaviour = |name: &[u8]| {
+        asked
+            .iter()
+            .find(|(named, _)| named.as_slice() == name)
+            .map_or(PlateUse::Spot, |(_, behaviour)| *behaviour)
+    };
+    let cap = tinker_pdf_render::spots_within_bytes(pixels);
+    let mut colorants: Vec<(Vec<u8>, PlateUse)> = PROCESS_COLORANTS
+        .iter()
+        .map(|name| (name.to_vec(), behaviour(name)))
+        .collect();
+    let (mut named, mut kept) = (0, 0);
+    for spot in inventory {
+        let mut behaviour = behaviour(&spot.name);
+        if behaviour != PlateUse::Composite {
+            named += 1;
+            if kept < cap {
+                kept += 1;
+            } else {
+                behaviour = PlateUse::Composite;
+            }
+        }
+        colorants.push((spot.name.clone(), behaviour));
+    }
+    Planned {
+        plan: Arc::new(PlatePlan::new(colorants)),
+        named,
+        kept,
     }
 }
 
@@ -516,6 +750,106 @@ trailer\n<< /Size 60 /Root 1 0 R >>\n%%EOF\n"
         );
         let expected: Vec<String> = (0..=depth).map(|level| format!("L{level}")).collect();
         assert_eq!(names(&page), expected);
+    }
+
+    /// An inventory of `count` spots, `Spot0` onward.
+    fn inventory(count: usize) -> Vec<SpotColorant> {
+        (0..count)
+            .map(|i| SpotColorant {
+                name: format!("Spot{i}").into_bytes(),
+            })
+            .collect()
+    }
+
+    /// The plan's plates, by name and use.
+    fn channels(planned: &Planned) -> Vec<(String, PlateUse)> {
+        planned
+            .plan
+            .channels()
+            .map(|(name, behaviour)| (String::from_utf8_lossy(name).into_owned(), behaviour))
+            .collect()
+    }
+
+    /// **The plan is the process plates, then each spot asking for a plate
+    /// in inventory order**: every spot is a plate by default; one asked to
+    /// be composite has none and is neither named nor kept; a disabled one
+    /// keeps its plate, which comes back marked; a process colorant asked to
+    /// be composite is a plate still, and one asked to be disabled is marked;
+    /// a name's first entry decides, and a name the inventory lacks adds
+    /// nothing.
+    #[test]
+    fn the_plan_lays_out_the_inventory_by_the_callers_uses() {
+        let asked: Vec<(Vec<u8>, PlateUse)> = vec![
+            (b"Spot1".to_vec(), PlateUse::Composite),
+            (b"Spot2".to_vec(), PlateUse::Disabled),
+            (b"Spot2".to_vec(), PlateUse::Spot),
+            (b"Cyan".to_vec(), PlateUse::Composite),
+            (b"Black".to_vec(), PlateUse::Disabled),
+            (b"Elsewhere".to_vec(), PlateUse::Spot),
+        ];
+        let planned = plan(&inventory(4), &asked, 100);
+        assert_eq!((planned.named, planned.kept), (3, 3));
+        assert_eq!(
+            channels(&planned),
+            [
+                ("Cyan".to_string(), PlateUse::Spot),
+                ("Magenta".to_string(), PlateUse::Spot),
+                ("Yellow".to_string(), PlateUse::Spot),
+                ("Black".to_string(), PlateUse::Disabled),
+                ("Spot0".to_string(), PlateUse::Spot),
+                ("Spot2".to_string(), PlateUse::Disabled),
+                ("Spot3".to_string(), PlateUse::Spot),
+            ]
+        );
+        assert_eq!(
+            planned.plan.channel(b"Spot1"),
+            None,
+            "a composite spot has no plate"
+        );
+        assert_eq!(planned.plan.channel(b"Elsewhere"), None);
+    }
+
+    /// **The caps keep the spots that fit, in inventory order**: past
+    /// sixty-four spot plates, or past the bytes a page's plates may hold at
+    /// its size, the spots past the cap are drawn as composites, the plan
+    /// saying how many asked for a plate and how many kept one; a composite
+    /// spot counts toward neither.
+    #[test]
+    fn the_caps_keep_the_spots_that_fit() {
+        let many = inventory(tinker_pdf_raster::MAX_SPOT_PLATES + 6);
+        let planned = plan(&many, &[], 100);
+        assert_eq!(
+            (planned.named, planned.kept),
+            (
+                tinker_pdf_raster::MAX_SPOT_PLATES + 6,
+                tinker_pdf_raster::MAX_SPOT_PLATES
+            )
+        );
+        assert_eq!(
+            planned.plan.spots().count(),
+            tinker_pdf_raster::MAX_SPOT_PLATES
+        );
+        let last = format!("Spot{}", tinker_pdf_raster::MAX_SPOT_PLATES - 1);
+        assert!(planned.plan.channel(last.as_bytes()).is_some());
+        let past = format!("Spot{}", tinker_pdf_raster::MAX_SPOT_PLATES);
+        assert_eq!(planned.plan.channel(past.as_bytes()), None);
+
+        // A page at the pixel cap keeps sixteen bytes a pixel: eleven spots.
+        let planned = plan(&inventory(20), &[], tinker_pdf_render::MAX_PAGE_PIXELS);
+        assert_eq!((planned.named, planned.kept), (20, 11));
+        assert!(planned.plan.channel(b"Spot10").is_some());
+        assert_eq!(planned.plan.channel(b"Spot11"), None);
+
+        // A composite spot asks for nothing, so the cap reaches past it.
+        let asked = vec![(b"Spot0".to_vec(), PlateUse::Composite)];
+        let planned = plan(&inventory(20), &asked, tinker_pdf_render::MAX_PAGE_PIXELS);
+        assert_eq!((planned.named, planned.kept), (19, 11));
+        assert!(planned.plan.channel(b"Spot11").is_some());
+        assert_eq!(planned.plan.channel(b"Spot12"), None);
+
+        // Within both caps, nothing is left.
+        let planned = plan(&inventory(5), &[], 2480 * 3508);
+        assert_eq!((planned.named, planned.kept), (5, 5));
     }
 
     /// The listing stops at its bound, with what it had read.

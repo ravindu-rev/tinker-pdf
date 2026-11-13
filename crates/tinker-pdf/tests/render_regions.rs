@@ -1324,6 +1324,108 @@ fn annotations_are_tiled_with_the_page() {
     tiles_are_the_page(&page, &options, 29, "annotations");
 }
 
+/// Asserts each tile of `page`'s separations under `options`, a lattice of
+/// `tile` pixels, is the rectangle of the whole page's plates under it, plate
+/// for plate and byte for byte.
+#[track_caller]
+fn separation_tiles_are_the_page(
+    page: &Page,
+    options: &RenderOptions,
+    tile: u32,
+    what: &str,
+) -> tinker_pdf::Separations {
+    let separations = |render: RenderOptions| {
+        page.separations(&tinker_pdf::SeparationOptions {
+            render,
+            ..tinker_pdf::SeparationOptions::default()
+        })
+    };
+    let whole = separations(options.clone());
+    assert_eq!(
+        (whole.width, whole.height),
+        page.pixel_size(options),
+        "{what}: the plates are the page's size"
+    );
+    for top in (0..whole.height).step_by(tile as usize) {
+        for left in (0..whole.width).step_by(tile as usize) {
+            let asked = PixelRegion::new(left, top, tile, tile);
+            let part = separations(RenderOptions {
+                region: Some(asked),
+                ..options.clone()
+            });
+            let expected = asked.clamped_to(whole.width, whole.height);
+            assert_eq!(
+                (part.width, part.height),
+                (expected.width, expected.height),
+                "{what}: the {tile}px tile at ({left}, {top})"
+            );
+            assert_eq!(part.plates.len(), whole.plates.len(), "{what}: the plates");
+            for (mine, theirs) in part.plates.iter().zip(&whole.plates) {
+                assert_eq!(mine.name, theirs.name, "{what}: the plates' order");
+                for y in 0..part.height {
+                    for x in 0..part.width {
+                        let at = (y * part.width + x) as usize;
+                        let under = ((expected.y + y) * whole.width + expected.x + x) as usize;
+                        assert_eq!(
+                            mine.tints.get(at),
+                            theirs.tints.get(under),
+                            "{what}: the {tile}px tile at ({left}, {top}) differs on {} at \
+                             ({x}, {y}) -- ruling 5 says the plates are the page's byte for byte",
+                            String::from_utf8_lossy(&mine.name)
+                        );
+                    }
+                }
+            }
+        }
+    }
+    whole
+}
+
+/// **Separation tiles are the page's plates** (RC-04.10; ruling 5): a page of
+/// eight spots, in `/Separation` spaces and in `/DeviceN` ones, beside process
+/// fills and text in an embedded face, drawn with its edges anti-aliased,
+/// upright, a quarter turned, and three quarters turned under a crop box
+/// offset from its media box, at 1x and 2x: at tile sizes none of which
+/// divides the page, every tile's plates are the whole page's plates under
+/// it, through the one pipeline `Page::render` tiles through.
+#[test]
+fn separation_tiles_are_the_page_s_plates() {
+    let cropped = Shape {
+        rotation: 270,
+        crop: Some((5.0, 3.0, 52.0, 37.0)),
+    };
+    for spaces in [
+        render_support::SpotSpaces::Separation,
+        render_support::SpotSpaces::DeviceN,
+    ] {
+        let fixture = render_support::spot_page(8, spaces);
+        for (shape, name) in [
+            (Shape::PLAIN, "upright"),
+            (Shape::turned(90), "turned"),
+            (cropped, "turned and cropped"),
+        ] {
+            let document = Document::open(shaped(fixture.bytes.clone(), shape)).expect("it opens");
+            let page = document.page(0).expect("a page");
+            for (scale, tiles) in [(1.0, &[37u32, 23, 7][..]), (2.0, &[37, 23][..])] {
+                let options = RenderOptions {
+                    scale,
+                    ..RenderOptions::default()
+                };
+                let what = format!("{spaces:?} spots, {name}, at {scale}x");
+                for &tile in tiles {
+                    let whole = separation_tiles_are_the_page(&page, &options, tile, &what);
+                    assert!(
+                        whole.plates[4..]
+                            .iter()
+                            .all(|plate| plate.tints.iter().any(|tint| *tint != 0)),
+                        "{what}: every spot drew on its plate"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// **A `/NoZoom` page tiles as the page does** (RC-13.4): an annotation
 /// flagged `/NoZoom` and `/NoRotate` on a page turned a quarter, at
 /// magnifications 2 and 0.5, where it is drawn at half and at twice its size
