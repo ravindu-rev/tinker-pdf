@@ -205,6 +205,24 @@ exact half, where both take it — which is the property
 `hardened_shapes_sharing_an_edge_partition_its_pixels` holds, and the reason
 the threshold is a half and not anything above it.
 
+**Coverage a stripe at a time.** `fill_stripes` measures a shape for a
+liquid-crystal panel's red, green and blue stripes
+([design](../design/lcd-text.md)). A stripe is a third of a pixel wide —
+pixel `p` holds stripes `3p` to `3p + 2` of the page's frame — and a shape's
+stripes are `fill` itself, of the path mapped by `(3x, y)`, under its rule and
+tolerance, over stripe columns as though each were a pixel, so a stripe's
+coverage is the grid's. The fill covers the region widened by one pixel each
+side, and five integer taps, `[1, 2, 3, 2, 1]` divided by nine and rounded,
+filter each stripe from the two either side of it into a `StripeMask`: three
+coverages a pixel, kept red, green, blue whatever `SubpixelOrder` the panel
+has — `Rgb` reads a pixel's stripes left to right, `Bgr` right to left. The
+taps are a pixel's average taken twice, so a run of equal stripes filters to
+itself and a horizontal edge is its grey coverage in all three channels. The
+widening is geometry in the page frame, never what a canvas holds, so a
+tile's edge pixel reads the stripes the page reads for it (ruling 5). A
+region whose stripe columns would not fit the fill's coordinates holds no
+coverage.
+
 **Clipping.** A clip is a `Mask` like any other, and a clip stack composes by
 multiplication: `Mask::intersect_in_place` multiplies coverages, which is
 what keeps a clipped anti-aliased edge looking right rather than doubly
@@ -456,7 +474,8 @@ The crate root re-exports the working set: `Path`, `Verb`, `Point`,
 `stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `TwoColour`, `Transform`, `Filter`,
 `Sampling`, `Pyramid`, `image_bounds_in`; `draw_mesh`, `draw_mesh_over`,
-`MeshDraw`, `MeshBuffer`. The bridge
+`MeshDraw`, `MeshBuffer`; `fill_stripes`, `fill_stripes_with`, `StripeMask`,
+`SubpixelOrder`. The bridge
 from PDF vocabulary — `/BM` names to `BlendMode`, content-stream operators
 to paths — lives one layer up, in [rendering](rendering.md).
 
@@ -569,7 +588,17 @@ tiny pattern over a long line cannot generate millions of pieces.
   `a_shallow_edge_keeps_the_slope_the_line_states`, a parallelogram two pixels
   wide and 256 tall drifting fourteen across, whose slope is 0.875 of a 1/256
   unit per sub-scanline — a slope a whole 1/256 unit would truncate to zero
-  (above). What this tier adjudicates is the
+  (above). `stripe_coverage_is_three_times_horizontal_coverage_filtered`
+  holds stripes to it as well: rectangles at every third of a pixel against
+  the closed form for a pixel a third as wide, filtered in the test with the
+  design's taps, and a diagonal, a quadratic and an even-odd pair against
+  `fill` of the path mapped three times across, filtered there, both orders;
+  `a_stripe_mask_over_a_tile_is_the_page_s` holds every tile up to four
+  pixels wide, at every column, to the page's stripes; `stripes.rs`'s unit
+  tests hold the taps to a pixel's average taken twice, a horizontal edge to
+  its grey coverage, a vertical one at a stripe to its ninths, `Bgr` to `Rgb`
+  reversed, and a region with no stripes to fill to no coverage. What this
+  tier adjudicates is the
   implementation against the *stated sampling model*, which is this crate's
   own contract rather than ISO 32000's — named here because that is a weaker
   claim than a third-party vector and is worth not mistaking for one.

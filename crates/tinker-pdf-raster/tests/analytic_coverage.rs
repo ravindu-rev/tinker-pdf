@@ -92,7 +92,10 @@
 //! producer meant. That is the gap `verification.md` names, and no fixture here
 //! narrows it.
 
-use tinker_pdf_raster::{fill, stroke, FillRule, LineCap, LineJoin, Mask, Path, StrokeStyle};
+use tinker_pdf_raster::{
+    fill, fill_stripes, stroke, FillRule, LineCap, LineJoin, Mask, Path, StripeMask, StrokeStyle,
+    SubpixelOrder, Transform,
+};
 
 /// The region every fixture rasterises into.
 const W: u32 = 8;
@@ -627,4 +630,222 @@ fn a_miter_join_adds_the_corner_a_bevel_leaves_out() {
         (difference - corner).abs() < 0.05,
         "a miter over a bevel: {difference} against {corner}"
     );
+}
+
+// ---- stripes ----------------------------------------------------------------
+
+/// The filter's five taps and their sum, restated from
+/// `docs/design/lcd-text.md` because every stripe expectation below is
+/// written in terms of them.
+const TAPS: [i64; 5] = [1, 2, 3, 2, 1];
+const TAP_SUM: i64 = 9;
+
+/// The map a shape's stripes are measured under: three times across, about
+/// the page frame's `x = 0`.
+const THREE_ACROSS: Transform = Transform {
+    a: 3.0,
+    b: 0.0,
+    c: 0.0,
+    d: 1.0,
+    e: 0.0,
+    f: 0.0,
+};
+
+/// A row of stripes filtered here into `pixels` pixels' three coverages in
+/// `order`. `stripes` starts a whole pixel — three stripes — left of the
+/// region and ends one right of it, so the region's stripe `j` is
+/// `stripes[j + 3]` and the five it is filtered from are `stripes[j + 1]` to
+/// `stripes[j + 5]`, each weighted by its tap and the sum divided by nine,
+/// rounded half up.
+fn filtered_row(stripes: &[u8], pixels: usize, order: SubpixelOrder) -> Vec<[u8; 3]> {
+    let filter = |j: usize| -> u8 {
+        let sum: i64 = TAPS
+            .iter()
+            .enumerate()
+            .map(|(t, tap)| tap * i64::from(stripes[j + 1 + t]))
+            .sum();
+        u8::try_from((sum + TAP_SUM / 2) / TAP_SUM).unwrap_or(255)
+    };
+    (0..pixels)
+        .map(|p| {
+            let [left, middle, right] = [filter(3 * p), filter(3 * p + 1), filter(3 * p + 2)];
+            match order {
+                SubpixelOrder::Rgb => [left, middle, right],
+                SubpixelOrder::Bgr => [right, middle, left],
+            }
+        })
+        .collect()
+}
+
+/// A mask's row, a pixel's three coverages at a time.
+fn stripe_row(mask: &StripeMask, row: u32) -> Vec<[u8; 3]> {
+    (0..mask.width)
+        .map(|x| mask.at(mask.x0 + x as i32, mask.y0 + row as i32))
+        .collect()
+}
+
+/// **Stripe coverage is three times the horizontal coverage, filtered**
+/// (RC-10.2).
+///
+/// Rectangles whose left edges stand at every third of a pixel from one
+/// pixel to three, of every width in thirds from a third to two pixels, over
+/// whole rows, over rows a sixteenth apart, and between the sub-scanlines:
+/// each stripe's coverage is the grid's closed form for a pixel a third as
+/// wide — sixteen sub-scanlines, the span to the nearest 1/256 of a stripe,
+/// computed here from the rectangle's corners mapped three times across —
+/// and the pixel's three coverages are those stripes filtered here with the
+/// design's taps, in both orders. A rectangle at thirds covers a stripe whole
+/// or not at all across, so these stripes are 0 or the row's vertical share,
+/// and what the filter makes of an edge is the whole of the difference.
+///
+/// A diagonal, a quadratic outline and an even-odd pair of rectangles are
+/// held to `fill` of the path mapped three times across, its stripes
+/// filtered here: the same fill a shape's stripes are defined by, so these
+/// hold the mapping, the region's widening, the filter and the order to the
+/// design rather than the grid to itself.
+#[test]
+fn stripe_coverage_is_three_times_horizontal_coverage_filtered() {
+    const WIDE: u32 = 8;
+    let orders = [SubpixelOrder::Rgb, SubpixelOrder::Bgr];
+
+    for left in 3..=9u32 {
+        for span in 1..=6u32 {
+            for (y0, height) in [(2.0, 3.0), (1.25, 3.25), (2.0 + 1.0 / 32.0, 0.94)] {
+                let x0 = f64::from(left) / 3.0;
+                let width = f64::from(span) / 3.0;
+                let mut path = Path::new();
+                path.rect(x0, y0, width, height);
+                // `rect` writes its far corners as these sums.
+                let (x1, y1) = (x0 + width, y0 + height);
+                for order in orders {
+                    let mask =
+                        fill_stripes(&path, FillRule::NonZero, 0, 0, WIDE, H, 0.1, order, None);
+                    for row in 0..H {
+                        let down = sub_scanlines(row, y0, y1);
+                        let stripes: Vec<u8> = (-3..3 * i64::from(WIDE) + 3)
+                            .map(|k| match u32::try_from(k) {
+                                Ok(k) => quantised(down, units(k, 3.0 * x0, 3.0 * x1)),
+                                Err(_) => 0,
+                            })
+                            .collect();
+                        assert_eq!(
+                            stripe_row(&mask, row),
+                            filtered_row(&stripes, WIDE as usize, order),
+                            "a rectangle from {left}/3 across {span}/3, {y0} down {height}, row {row}, {order:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let mut diagonal = Path::new();
+    diagonal.move_to(1.0, 0.5);
+    diagonal.line_to(6.5, 7.5);
+    diagonal.line_to(1.0, 7.5);
+    diagonal.close();
+    let mut curve = Path::new();
+    curve.move_to(1.2, 6.8);
+    curve.quad_to(4.0, -2.0, 6.9, 6.8);
+    curve.close();
+    let mut pair = Path::new();
+    pair.rect(1.3, 1.0, 4.0, 4.0);
+    pair.rect(3.6, 2.5, 4.0, 4.0);
+    for (name, path, rule) in [
+        ("the diagonal", &diagonal, FillRule::NonZero),
+        ("the quadratic", &curve, FillRule::NonZero),
+        ("the even-odd pair", &pair, FillRule::EvenOdd),
+    ] {
+        let tripled = fill(
+            &path.mapped(&THREE_ACROSS),
+            rule,
+            -3,
+            0,
+            3 * WIDE + 6,
+            H,
+            0.1,
+            None,
+        );
+        assert!(
+            tripled.data.iter().any(|&c| c > 0 && c < 255),
+            "{name} has partial stripes"
+        );
+        for order in orders {
+            let mask = fill_stripes(path, rule, 0, 0, WIDE, H, 0.1, order, None);
+            for row in 0..H {
+                let span = tripled.width as usize;
+                let line = &tripled.data[row as usize * span..(row as usize + 1) * span];
+                assert_eq!(
+                    stripe_row(&mask, row),
+                    filtered_row(line, WIDE as usize, order),
+                    "{name}, row {row}, {order:?}"
+                );
+            }
+        }
+    }
+}
+
+/// **A stripe mask over a tile is the page's** (ruling 5, RC-10.2).
+///
+/// A pixel's three coverages read the stripes of the pixels beside it, so a
+/// tile's edge pixel needs stripes the tile does not hold. They are geometry
+/// in the page frame: over shapes whose edges fall on and within the
+/// filter's reach of the tile edges — rectangles at thirds, one a third of a
+/// pixel wide, a diagonal and a quadratic outline — every tile of every
+/// width from one pixel to four, at every column and over two bands of rows,
+/// holds the page's three coverages at every pixel, in both orders.
+#[test]
+fn a_stripe_mask_over_a_tile_is_the_page_s() {
+    const WIDE: u32 = 12;
+    let mut shapes = Vec::new();
+    let mut thirds = Path::new();
+    thirds.rect(2.0 + 1.0 / 3.0, 1.0, 4.0 + 1.0 / 3.0, 5.5);
+    thirds.rect(9.0 + 2.0 / 3.0, 0.25, 1.0 / 3.0, 7.0);
+    shapes.push(thirds);
+    let mut diagonal = Path::new();
+    diagonal.move_to(0.4, 0.2);
+    diagonal.line_to(11.6, 7.4);
+    diagonal.line_to(0.4, 7.4);
+    diagonal.close();
+    shapes.push(diagonal);
+    let mut curve = Path::new();
+    curve.move_to(1.1, 7.6);
+    curve.quad_to(6.0, -4.0, 10.9, 7.6);
+    curve.close();
+    shapes.push(curve);
+    for (index, path) in shapes.iter().enumerate() {
+        for order in [SubpixelOrder::Rgb, SubpixelOrder::Bgr] {
+            let page = fill_stripes(path, FillRule::NonZero, 0, 0, WIDE, H, 0.1, order, None);
+            assert!(
+                page.data.iter().any(|&[r, g, b]| r != g || g != b),
+                "shape {index} has edges in stripes"
+            );
+            for x0 in 0..WIDE {
+                for width in 1..=(WIDE - x0).min(4) {
+                    for (y0, height) in [(0, H), (2, 3)] {
+                        let tile = fill_stripes(
+                            path,
+                            FillRule::NonZero,
+                            x0 as i32,
+                            y0,
+                            width,
+                            height,
+                            0.1,
+                            order,
+                            None,
+                        );
+                        for y in y0..y0 + height as i32 {
+                            for x in x0 as i32..(x0 + width) as i32 {
+                                assert_eq!(
+                                    tile.at(x, y),
+                                    page.at(x, y),
+                                    "shape {index}, {order:?}, the tile at ({x0}, {y0}) {width} wide, pixel ({x}, {y})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

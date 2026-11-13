@@ -14,6 +14,7 @@ pub mod fragments;
 pub mod geom;
 pub mod image;
 pub mod mesh;
+pub mod stripes;
 pub mod stroke;
 pub mod toolbox;
 
@@ -26,6 +27,7 @@ pub use image::{
     ImageSource, Pyramid, Sampling, Transform, TwoColour,
 };
 pub use mesh::{draw_mesh, draw_mesh_over, MeshBuffer, MeshDraw};
+pub use stripes::{fill_stripes, fill_stripes_with, StripeMask, SubpixelOrder};
 pub use stroke::{
     dash, stretches, stroke, stroke_mapped, stroke_mapped_with, stroke_with, LineCap, LineJoin,
     StrokeStyle,
