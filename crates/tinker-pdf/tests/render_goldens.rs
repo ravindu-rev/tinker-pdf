@@ -113,7 +113,12 @@ use tinker_pdf::{
     ShadingPattern, TilingPattern, TilingType, TransparencyGroup,
 };
 
+mod golden_support;
 mod render_support;
+use golden_support::{
+    assert_small_enough, disagreement, goldens_in, ppm_mismatch, read_header, reviewer_and_date,
+    to_ppm, Golden, HeaderError,
+};
 use render_support::{curvy_font, ink, render};
 
 /// The page every golden draws into, in points and in pixels alike.
@@ -554,97 +559,10 @@ fn transparency_page() -> Vec<u8> {
 }
 
 // ---- the golden file format -------------------------------------------------
-
-/// What a golden's header has to say before it counts as reviewed.
-#[derive(Debug, PartialEq)]
-struct Header {
-    family: String,
-    clause: String,
-    reviewer: String,
-    reviewed: String,
-    built_by: String,
-}
-
-/// Why a header was refused. Every variant is a field that is absent or blank,
-/// because those are the two ways a review gets recorded as having happened
-/// when it did not.
-#[derive(Debug, PartialEq)]
-enum HeaderError {
-    NotAPpm,
-    Missing(&'static str),
-    Empty(&'static str),
-}
-
-/// Reads a golden's `#` comment lines, refusing a blank field the way
-/// `pdfa_ledger.rs`'s `read_ledger` refuses a blank reason: there is no default
-/// and no way to add a golden without writing one.
-fn read_header(bytes: &[u8]) -> Result<Header, HeaderError> {
-    if !bytes.starts_with(b"P6\n") {
-        return Err(HeaderError::NotAPpm);
-    }
-    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
-    let field = |key: &'static str| -> Result<String, HeaderError> {
-        let prefix = format!("# {key}:");
-        let line = text
-            .lines()
-            .find(|line| line.starts_with(&prefix))
-            .ok_or(HeaderError::Missing(key))?;
-        let value = line[prefix.len()..].trim().to_string();
-        if value.is_empty() {
-            return Err(HeaderError::Empty(key));
-        }
-        Ok(value)
-    };
-    Ok(Header {
-        family: field("family")?,
-        clause: field("clause")?,
-        reviewer: field("reviewer")?,
-        reviewed: field("reviewed")?,
-        built_by: field("built-by")?,
-    })
-}
-
-/// A rendered page as a binary PPM, with the review recorded in its own bytes.
-fn to_ppm(bitmap: &tinker_pdf::Bitmap, family: &Family, reviewer: &str, reviewed: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"P6\n");
-    out.extend_from_slice(b"# tinker-pdf reviewed golden\n");
-    out.extend_from_slice(format!("# family: {}\n", family.name).as_bytes());
-    out.extend_from_slice(format!("# clause: {}\n", family.clause).as_bytes());
-    out.extend_from_slice(format!("# reviewer: {reviewer}\n").as_bytes());
-    out.extend_from_slice(format!("# reviewed: {reviewed}\n").as_bytes());
-    out.extend_from_slice(format!("# built-by: render_goldens.rs::{}\n", family.name).as_bytes());
-    out.extend_from_slice(format!("{} {}\n255\n", bitmap.width, bitmap.height).as_bytes());
-    for pixel in bitmap.data.chunks_exact(bitmap.components()) {
-        out.extend_from_slice(&pixel[..3]);
-    }
-    out
-}
-
-/// The samples of a PPM, past whatever header it carries.
-fn ppm_samples(bytes: &[u8]) -> &[u8] {
-    // P6, then comments and three integers, the last followed by exactly one
-    // whitespace byte (Netpbm's rule) before the raster begins.
-    let mut at = 3;
-    let mut numbers = 0;
-    while at < bytes.len() && numbers < 3 {
-        if bytes[at] == b'#' {
-            while at < bytes.len() && bytes[at] != b'\n' {
-                at += 1;
-            }
-        } else if bytes[at].is_ascii_digit() {
-            while at < bytes.len() && bytes[at].is_ascii_digit() {
-                at += 1;
-            }
-            numbers += 1;
-            continue;
-        }
-        at += 1;
-    }
-    // Netpbm: exactly one whitespace byte separates the maxval from the
-    // raster, and it belongs to the header rather than to the picture.
-    &bytes[(at + 1).min(bytes.len())..]
-}
+//
+// The header, its refusal of an absent, blank or white-space field, the PPM
+// it is written into and read out of, the byte-for-byte comparison and the
+// size ceilings are `golden_support`'s, which `surface_goldens.rs` shares.
 
 fn goldens_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -686,14 +604,8 @@ fn every_operator_family_has_a_reviewed_golden() {
 
     // The directory holds nothing the list does not name: a golden left behind
     // by a renamed family reads exactly like a reviewed one.
-    let mut found: Vec<String> = std::fs::read_dir(goldens_dir())
-        .expect("the goldens directory")
-        .filter_map(|entry| {
-            let name = entry.ok()?.file_name().to_string_lossy().into_owned();
-            name.strip_suffix(".ppm").map(str::to_string)
-        })
-        .collect();
-    found.sort();
+    assert!(goldens_dir().is_dir(), "the goldens directory");
+    let found = goldens_in(&goldens_dir(), &["ppm"]);
     let mut wanted: Vec<String> = FAMILIES.iter().map(|f| f.name.to_string()).collect();
     wanted.sort();
     assert_eq!(found, wanted, "the goldens on disk are the families listed");
@@ -714,35 +626,9 @@ fn every_golden_is_what_this_build_draws() {
             family.least_ink
         );
         let committed = std::fs::read(golden_path(family)).expect("the golden reads");
-        let samples: Vec<u8> = bitmap
-            .data
-            .chunks_exact(bitmap.components())
-            .flat_map(|pixel| pixel[..3].to_vec())
-            .collect();
-        let stored = ppm_samples(&committed);
-        if stored != samples.as_slice() {
-            let differing = stored
-                .iter()
-                .zip(samples.iter())
-                .filter(|(a, b)| a != b)
-                .count();
-            wrong.push(format!(
-                "{}: {differing} of {} bytes differ (stored {} bytes, drew {})",
-                family.name,
-                samples.len(),
-                stored.len(),
-                samples.len()
-            ));
-        }
+        wrong.extend(ppm_mismatch(family.name, &committed, &bitmap));
     }
-    assert!(
-        wrong.is_empty(),
-        "the goldens and this build disagree. If the change is deliberate, \
-         re-run the writer with --ignored and have the new pictures reviewed \
-         again -- a golden replaced without a second reading is a regression \
-         test that agreed with whatever arrived:\n{}",
-        wrong.join("\n")
-    );
+    assert!(wrong.is_empty(), "{}", disagreement(&wrong));
 }
 
 /// A header with a field absent, blank, or whitespace is refused.
@@ -787,22 +673,11 @@ fn a_golden_stays_small_enough_to_review() {
     const PER_GOLDEN: u64 = 16 * 1024;
     const ALTOGETHER: u64 = 96 * 1024;
 
-    let mut total = 0;
-    for family in &FAMILIES {
-        let size = std::fs::metadata(golden_path(family))
-            .expect("the golden is there")
-            .len();
-        assert!(
-            size <= PER_GOLDEN,
-            "{} is {size} bytes, past the {PER_GOLDEN} a reviewer is asked for",
-            family.name
-        );
-        total += size;
-    }
-    assert!(
-        total <= ALTOGETHER,
-        "the goldens are {total} bytes altogether, past {ALTOGETHER}"
-    );
+    let goldens: Vec<(String, PathBuf)> = FAMILIES
+        .iter()
+        .map(|family| (family.name.to_string(), golden_path(family)))
+        .collect();
+    assert_small_enough(&goldens, PER_GOLDEN, ALTOGETHER);
 }
 
 /// Writes the goldens. Run with `--ignored` when a picture is meant to change,
@@ -813,12 +688,17 @@ fn a_golden_stays_small_enough_to_review() {
 #[test]
 #[ignore = "writes the committed goldens"]
 fn write_the_goldens() {
-    let reviewer = std::env::var("TINKER_GOLDEN_REVIEWER").unwrap_or_else(|_| "unreviewed".into());
-    let reviewed = std::env::var("TINKER_GOLDEN_DATE").unwrap_or_else(|_| "unreviewed".into());
+    let (reviewer, reviewed) = reviewer_and_date();
     std::fs::create_dir_all(goldens_dir()).expect("the goldens directory");
     for family in &FAMILIES {
         let bitmap = render((family.build)());
-        let bytes = to_ppm(&bitmap, family, &reviewer, &reviewed);
+        let built_by = format!("render_goldens.rs::{}", family.name);
+        let golden = Golden {
+            family: family.name,
+            clause: family.clause,
+            built_by: &built_by,
+        };
+        let bytes = to_ppm(&bitmap, golden, &reviewer, &reviewed);
         std::fs::write(golden_path(family), &bytes).expect("the golden writes");
         println!(
             "  wrote {} ({} bytes, {} pixels of ink)",

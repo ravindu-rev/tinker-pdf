@@ -152,6 +152,17 @@ the clause recorded in the fixture's header
 entirely on the review actually having happened, so the record of the
 review is part of the fixture rather than part of a commit message.
 
+The surfaces the engine synthesises — the appearances it draws, the pages it
+makes from other formats, the SVG it writes — have goldens of their own by the
+same mechanism (`crates/tinker-pdf/tests/surface_goldens.rs`, the goldens in
+`goldens/surfaces/`), each surface listed in its `UNREVIEWED` until a person
+reads it, under ceilings of their own so the operator families' do not move.
+The header, its refusal of a field absent, blank or white space, the
+byte-for-byte comparison, the size ceilings and the writer are
+`crates/tinker-pdf/tests/golden_support/`'s, shared by both files; an SVG
+golden is the writer's output with its header in an XML comment after the XML
+declaration, and is compared past that comment.
+
 They catch gross misreadings at review time and every regression afterwards.
 They do not catch what the reviewer's reading shares with the implementer's,
 which here is everything, because they are the same people.
