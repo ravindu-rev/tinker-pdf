@@ -9,8 +9,8 @@ use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
 use xtask::{
-    bench, corpus, count, determinism, diff, fetch, footprint, fuzzaudit, fuzzservice, names,
-    parity, peaks, release, repo_root, split, version, written,
+    bench, corpus, count, coverage, determinism, diff, fetch, footprint, fuzzaudit, fuzzservice,
+    names, parity, peaks, release, repo_root, split, version, written,
 };
 
 const USAGE: &str = "\
@@ -53,7 +53,14 @@ usage:
   cargo xtask profiles  check that bindings/js and bindings/python, each a
                         workspace root of its own, declare the root's
                         `[profile.release]`, key for key
-  cargo xtask check     all fourteen of the above
+  cargo xtask bindings-coverage
+                        list every public facade item with its standing on
+                        the C ABI and each binding (ruling 11), then the
+                        problems: an item a surface lacks that
+                        docs/features/bindings.md neither refuses by name nor
+                        owes to a step of SU-12, or a ledger that has drifted
+                        from the tree. `check` runs it without the listing
+  cargo xtask check     all fifteen of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -288,6 +295,7 @@ fn main() -> ExitCode {
         "written" => report("written", written::check(&repo_root())),
         "tables" => report("tables", check_tables()),
         "profiles" => report("profiles", check_profiles()),
+        "bindings-coverage" => report("bindings-coverage", coverage::run(&repo_root())),
         "footprint" if rest.is_empty() => report("footprint", footprint::check(&repo_root())),
         "footprint" => one("footprint", footprint::run(&repo_root(), rest)),
         "check" => {
@@ -305,6 +313,7 @@ fn main() -> ExitCode {
             let writers = written::check(&repo_root());
             let tables = check_tables();
             let profiles = check_profiles();
+            let projected = coverage::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
@@ -319,6 +328,13 @@ fn main() -> ExitCode {
             problems.extend(writers.err().unwrap_or_default());
             problems.extend(tables.err().unwrap_or_default());
             problems.extend(profiles.err().unwrap_or_default());
+            problems.extend(
+                projected
+                    .err()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|problem| format!("bindings-coverage: {problem}")),
+            );
             report(
                 "check",
                 if problems.is_empty() {

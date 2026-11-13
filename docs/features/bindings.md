@@ -992,22 +992,102 @@ packaging commands; the Go, Ruby, Java and Swift bindings carry theirs in
 their sources' opening comments and in the section above. None of the four is
 packaged.
 
+## Coverage
+
+`cargo xtask bindings-coverage` lists every public facade item against the C
+ABI and each binding, and `cargo xtask check` runs it with the other checks,
+so a facade item that lands with no projection, no owed row and no refusal
+fails the gates (`xtask/src/coverage.rs`). An item is a public type, function,
+constant or static, or a public inherent method of a public struct, enum or
+union, named by its path from the facade's root (`Document::open`,
+`pdfa::Profile`): the check walks `crates/tinker-pdf/src/lib.rs` and its public
+modules and follows each `pub use` into the facade's own modules and the
+engine crates it re-exports from, to the definition, whose `impl` blocks in
+that crate give its methods; an item reached by two paths is one, under the
+shorter. A variant or a field crosses with its type, and a row below may name
+one. The surfaces are read from their sources: the C ABI's `tpdf_*` functions
+and `Tpdf*` types from the header, each function with the types its
+declaration names; the functions each of .NET, Go, Ruby and Java calls —
+`Native.tpdf_*`, or `C.tpdf_*` in Go — outside the declarations each
+transcribes; Python's `#[pyclass]` classes by their Python names, their
+`#[pymethods]` and the `#[pyfunction]`s; JavaScript's `#[wasm_bindgen]` classes,
+methods and functions.
+
+The join is by name where the names agree and by the **Projections** table
+where they do not. On the C ABI a method `T::m` is `tpdf_<t>_m`, `<t>` the
+type's name in snake case or the prefix its row gives (`DocumentEditor`
+crosses as `TpdfEditor`, its methods as `tpdf_editor_*`), a function `f` is
+`tpdf_f`, and a type is its `Tpdf` type or its methods; a wrapper has an item
+when it calls every function the C ABI crosses it by — any one, for a type —
+or, for a type the C ABI crosses alone, a function whose declaration names it.
+Python and JavaScript have a method when the class of its type's name has it
+— `Pdf` and the name on JavaScript, or the classes a row gives — and a
+function when the module exports it. A row's cell overrides the join on its
+surface: the names it lists must all be there, an empty cell keeps the join,
+and `—` says the item is not on that surface.
+
+An item a surface lacks passes when the **Owed** table owes it there to a
+step of SU-12 still in [roadmap/SU.md](../roadmap/SU.md), or when a
+backticked name in the What column of **Refused by name** matches it; a name
+matches exactly, and `T::*` matches `T` and everything under it. Anything else
+fails, with the surfaces that lack it, and so does a ledger that has drifted:
+a row naming no item, a projection naming what its surface lacks, an owed row
+whose step has left the roadmap, and an owed name none of whose items is still
+missing where it is owed. A step of SU-12 that projects its area takes its
+owed rows off in the commit that lands it. The listing is one line an item,
+its standing on each surface — `yes`, `owed SU-12.n`, `refused` or `MISSING` —
+then the tally:
+
+```sh
+cargo xtask bindings-coverage
+```
+
+## Projections
+
+| Facade | C ABI | Python | JavaScript |
+| --- | --- | --- | --- |
+| `DocumentEditor` | `TpdfEditor` | `Editor` | `PdfEditor` |
+| `DocumentBuilder` | `TpdfBuilder` | `DocumentBuilder` | `PdfBuilder` |
+| `Document::open` | `tpdf_document_open` | `Document.new` | `PdfDocument.new` |
+| `Page::render` | `tpdf_page_render` | `Document.render` | `PdfDocument.render_page` |
+| `Page::text` | `tpdf_page_text` | `Document.page_text` | `PdfDocument.page_text` |
+| `Page::size` | `tpdf_page_size` | `Document.page_size` | `PdfDocument.page_width`, `PdfDocument.page_height` |
+
+## Owed
+
+| Step | Items | Surfaces | Why not yet |
+| --- | --- | --- | --- |
+| SU-12.3 | `PageBuilder::glyphs`, `PageBuilder::text_pieces`, `DocumentBuilder::add_cid_font`, `DocumentBuilder::glyph_run` | every | `glyphs` and `glyph_run` draw `Glyph`s through a composite font `add_cid_font` registers from a font program, and `text_pieces` takes them beside a simple font's codes in `TextPiece`s; `tpdf_page_builder_raw` reaches them meanwhile |
+| SU-12.4 | `PageBuilder::shading`, `DocumentBuilder::add_shading`, `DocumentBuilder::add_shading_pattern`, `DocumentBuilder::add_icc_color_space`, `PageBuilder::set_fill_icc`, `PageBuilder::set_stroke_icc`, `ImageColorSpace::Icc`, `CieSpace::*`, `DocumentBuilder::add_cie_color_space`, `PageBuilder::set_fill_cie`, `PageBuilder::set_stroke_cie`, `ImageColorSpace::Cie`, `ImageColorSpace::Lab` | every | `add_shading` takes a `Shading` built on a `Function`, recursive with a calculator arm; `CieSpace`'s three arms each carry their own parameters, which a C enum has no room for; the setters take a component slice the registered space sizes, and the image arms are `ImageData::Compressed`'s colour spaces |
+| SU-12.5 | `DocumentBuilder::associate_file`, `PageBuilder::associate_file`, `DocumentBuilder::add_form_with_files`, `DocumentBuilder::associate_file_with_structure`, `PageBuilder::associate_file_with_link`, `PageBuilder::with_associated_files`, `Document::associated_files_of`, `Document::structure_associated_files`, `Page::annotation_associated_files`, `Page::marked_content_associated_files`, `PageBuilder::output_intent`, `PageBuilder::link_for` | every | each takes or returns a `NewAssociatedFile`, an `AssociatedFile` list or a `NewOutputIntent`, a shape of its own |
+| SU-12.6 | `DocumentBuilder::finish_reporting`, `EmbeddedWhole::*`, `DocumentBuilder::dangling_destinations`, `DocumentBuilder::archival`, `DocumentBuilder::profile`, `DocumentBuilder::refusals`, `DocumentBuilder::finish_archival` | every | the archival builder takes an `ArchivalProfile` and refuses with `ArchivalRefusal`s, and the reporting finish hands back a list of `EmbeddedWhole`s |
+| SU-12.7 | `DocumentEditor::import_page`, `DocumentEditor::keep_pages`, `DocumentEditor::flatten_annotations`, `DocumentEditor::add_annotation`, `Page::annotation_list`, `AnnotationList::*`, `AnnotationPayload::*` | every | a second document, a slice of indices, an annotation `Dict`, and the payload of every 12.5.6 family |
+| SU-12.8 | `DocumentEditor::reset_form`, `DocumentEditor::set_field_values`, `DocumentEditor::set_calculated_values` | every | each takes or returns a list of values or skipped widgets |
+| SU-12.9 | `DocumentEditor::check_save`, `DocumentEditor::check_decrypt`, `SaveRefusal::*`, `DocumentEditor::set_viewer_preferences`, `WriteOptions::deduplicate_streams` | every | each is a question asked before a write, answered by an enum one arm of which carries a `Permissions`; a save through the C ABI or a binding writes what it is asked to meanwhile |
+| SU-12.10 | `Target::Named`, `DocumentBuilder::add_named_destination`, `DocumentEditor::add_named_destination`, `DocumentBuilder::add_layer`, `PageBuilder::optional`, `DocumentEditor::set_layer_visible`, `LayerId::*` | every | a `LayerId` handle a builder issues, and `optional` takes a closure, so it needs a closure-free pair on the page handle as `tagged` has |
+| SU-12.11 | `DocumentBuilder::add_separation_color_space`, `DocumentBuilder::add_device_n_color_space`, `Function::Calculator`, `DeviceNAttributes::*`, `PageBuilder::set_fill_tint`, `PageBuilder::set_stroke_tint`, `ImageColorSpace::Tint` | every | a calculator program and `DeviceNAttributes`, and setters taking a slice the registered space sizes |
+| SU-12.12 | `DocumentEditor::stamp`, `DocumentEditor::add_resource`, `DocumentEditor::add_form`, `DocumentEditor::import_page_as_form`, `StampPlacement::*`, `Page::images`, `PageImage::*` | every | a `StampPlacement` and a form reference, and a `PageImage` with its samples, masks and placements |
+| SU-12.13 | `Tag::table`, `Tag::namespace`, `Tag::associated_file`, `PageBuilder::continue_at`, `DocumentBuilder::map_role_in`, `DocumentBuilder::add_namespace`, `DocumentBuilder::duplicate_element_ids` | every | `TableAttributes` with its header lists and spans, a `NamespaceId` handle, a `NewAssociatedFile`, a list of identifiers (`PageBuilder::tagged` **is** projected, as the `open_tag` and `close_tag` pair) |
+| SU-12.14 | `Signature::contents`, `Signature::signed_at`, `Signature::contact`, `Signature::filter`, `Signature::warnings` | C ABI, .NET, Go, Ruby, Java | raw bytes, a date and a list of warnings rather than another string or enum; Python and JavaScript carry them |
+| SU-12.14 | `Signature::modifications` | every | a list of changed objects |
+| SU-12.15 | `DocumentEditor::save_timestamped`, `Timestamper::*`, `TimestampRequest::*`, `DocumentEditor::add_validation_data`, `ValidationData::*`, `Document::security_store`, `SecurityStore::*`, `SecurityStoreWarning::*`, `TimestampVerdict::*`, `Signature::validation_key` | every | `Timestamper` is a host callback, which SG-09.4's machinery carries; the rest are lists of DER blobs, a store of references and a per-token verdict |
+| SU-12.16 | `Document::authenticate_with_recipient`, `PublicKeyEncryption::*`, `EntropySource::*`, `DocumentEditor::save_sealed` | every | the recipient callback SU-12.2 designs, and the entropy callback SG-09.4's machinery carries |
+| SU-12.17 | `SigningTarget::NewVisibleField`, `SignatureAppearance::*` | every | over SG-09's signing routes |
+| SU-12.18 | `Document::open_with`, `Document::sniff`, `FromHtml::*`, `Document::open_markdown`, `fb2::*` | every | each opener takes options or a host of its own |
+| SU-12.19 | `Page::to_svg`, `DisplayList::to_svg`, `SvgOptions::*`, `Svg::*`, `SvgWarning::*`, `Rasterised::*`, `Page::display_list`, `DisplayList::*`, `ImageRecoding::*`, `ImageCoding::*` | every | an SVG with its warnings, a retained page as a handle, and the recoding policy's codecs |
+| SU-12.20 | `Document::validate_pdfa`, `Document::validate_pdfua`, `Document::validate_pdfx`, `PdfAVerdict::*`, `PdfACoverage::*`, `PdfARuleGroup::*`, `PdfUaVerdict::*`, `PdfUaCoverage::*`, `PdfUaAbstention::*`, `PdfUaAbstentionClass::*`, `PdfUaGap::*`, `PdfUaPart::*`, `PdfXVerdict::*`, `PdfXCoverage::*`, `PdfXAbstention::*`, `PdfXAbstentionClass::*`, `PdfXClaim::*`, `PdfXFlavour::*`, `PdfXGap::*`, `ConformanceFinding::*`, `pdfa::*`, `pdfua::*`, `pdfx::*` | every | a verdict with its findings and abstentions, each with enums of its own |
+| SU-12.21 | `redact::*`, `TextPage::search`, `TextPage::search_with`, `SearchOptions::*` | every | redaction's areas and report, and search's options and quads |
+| SU-12.22 | `StructureTree::*`, `StructElement::*`, `StructuredText::*`, `StructuredNode::*`, `ReadingOrder::*`, `InferredOrder::*`, `InferredPages::*`, `PageTables::*`, `InferredTables::*`, `TextFormat::*`, `TextWriter::*`, `Document::fonts`, `DocumentFont::*` | every | trees, orders and tables of structs, the structured-text writers and the font listing |
+| SU-12.23 | `Page::render_form`, `Page::render_annotation`, `RenderPartError::*`, `NotDrawn::*`, `Document::layers`, `OptionalGroup::*`, `SubsetReport::*` | every | the part renders' refusals, the layer listing and the subset report |
+
 ## Refused by name
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
 | `ImageData::Compressed` | `TpdfImageKind` has `Jpeg`, `Rgb8` and `Gray8` and no fourth arm | it carries a `CompressedImage` whose colour space holds a palette slice and whose filter holds its own parameters, so projecting it is a sub-surface rather than a struct. It exists for the CBZ synthesiser, which must not decode 200 pages at open — an engine-internal path with no host at the other end. A host holding already-compressed bytes has `Jpeg`, which is the same idea for the one codec hosts actually hold bytes in | [creation](creation.md) |
-| A tag's `table`, `namespace` and `associated_file`; `PageBuilder::continue_at`; `DocumentBuilder`'s `map_role_in`, `add_namespace` and `duplicate_element_ids` | not projected (`PageBuilder::tagged` **is**, as the `open_tag`/`close_tag` pair, with a tag's text properties, identifier, key and keep-empty flag, `set_language` and `map_role`) | owed rather than refused: each takes or returns a shape of its own — `TableAttributes` with its header lists and spans, a `NamespaceId` handle a builder issues, a `NewAssociatedFile`, a list of identifiers | [creation](creation.md) |
-| The rest of `PageBuilder` — `glyphs`, `text_pieces`, `shading` — and `DocumentBuilder`'s `add_cid_font`, `glyph_run`, `add_shading`, `add_shading_pattern` | not projected (the graphics states, forms, tiling patterns, named fonts, encoded text, bleed box, version and `clear_image_resources` **are**) | owed rather than refused: `glyphs` and `glyph_run` draw `Glyph`s through a composite font (and `text_pieces` takes them beside a simple font's codes, in `TextPiece`s), which `add_cid_font` registers from a font program, and `add_shading` takes a `Shading` built on a `Function` — recursive, with a PostScript calculator arm — a sub-surface of its own. `tpdf_page_builder_raw` is the escape hatch that keeps them reachable in the meantime | [ROADMAP.md](../ROADMAP.md) |
-| `DocumentEditor`'s `import_page`, `keep_pages`, `flatten_annotations`, `add_annotation`, `reset_form`, `set_field_values`, `set_calculated_values` | not projected (`recalculate` **is** projected, as `tpdf_editor_recalculate`) | the same: owed, each with a shape of its own — a second document, a slice of indices, a `Dict`, a `Recalculation` | [ROADMAP.md](../ROADMAP.md) |
-| The graphics-writing surface: `Target::Named` and both `add_named_destination`s; `DocumentBuilder::add_layer`, `PageBuilder::optional` and `DocumentEditor::set_layer_visible`; `add_separation_color_space`, `add_device_n_color_space`, `set_fill_tint` / `set_stroke_tint` and `ImageColorSpace::Tint`; `DocumentEditor`'s `stamp`, `add_resource`, `add_form` and `import_page_as_form`; `Page::images` | not projected | owed rather than refused: each takes or returns a shape of its own — a `LayerId` handle, a `Function::Calculator` program, `DeviceNAttributes`, a `StampPlacement` and a form reference, a `PageImage` with its samples, masks and placements — and `optional` takes a closure, so it needs a closure-free pair on the page handle as `tagged` does. Ruling 11 makes each a debt | [ROADMAP.md](../ROADMAP.md) |
-| The device-independent colour writers: `add_icc_color_space` with `set_fill_icc` / `set_stroke_icc` and `ImageColorSpace::Icc`, and the CIE writer — `CieSpace`, `DocumentBuilder::add_cie_color_space`, `PageBuilder::set_fill_cie` / `set_stroke_cie`, `ImageColorSpace::Cie` and `ImageColorSpace::Lab` | not projected | owed rather than refused: `CieSpace` is an enum whose three arms each carry their own parameters — a white and a black point, one gamma or three, a column-by-column matrix, an `a*`/`b*` range — which a C enum has no room for, so it needs a struct of its own; the setters take a component slice whose length the registered space decides, as `set_fill_tint` does; and the image arms are colour spaces of `ImageData::Compressed`, as `ImageColorSpace::Tint` is. Ruling 11 makes each a debt | [ROADMAP.md](../ROADMAP.md) |
-| Signing: `save_signed`, `Signer` | no `tpdf_*` entry point takes a callback | a signer is a host callback; in-engine keys, deferred two-phase signing and a signing callback are a roadmap row | [ROADMAP](../ROADMAP.md) SG-09 (design/bindings-write.md) |
+| Signing: `DocumentEditor::save_signed`, `Signer` | no `tpdf_*` entry point takes a callback | a signer is a host callback; in-engine keys, deferred two-phase signing and a signing callback are a roadmap row | [ROADMAP](../ROADMAP.md) SG-09 (design/bindings-write.md) |
 | The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
-| A signature's `/Contents` blob, `/M`, `/ContactInfo`, `/Filter` and its lenient-read warnings on the C ABI (Python and JavaScript carry them), and `Signature::modifications` everywhere | not projected | owed rather than refused: each is a shape of its own — raw bytes, a date, a list of changed objects — rather than another string or enum | [signatures](../design/signatures.md) |
-| The signature and public-key surface: `DocumentEditor::save_timestamped` with `Timestamper` and `TimestampRequest`; `add_validation_data` with `ValidationData`; `Document::security_store` with `SecurityStore` and `SecurityStoreWarning`; `PublicKeyEncryption::seal` and `DocumentEditor::save_sealed`; `Verdict::timestamps` with `TimestampVerdict`; `Signature::validation_key` | not projected | owed rather than refused. `Timestamper` is a host callback, which the write design keeps off the C ABI as it keeps `Signer`, and `seal` takes an `EntropySource`, which is another; the rest take or return shapes of their own — lists of DER blobs, a store of object references, a per-token verdict with its own enums. Ruling 11 makes each a debt | [ROADMAP.md](../ROADMAP.md) |
-| Counted work: `RenderOptions::stats`, `Bitmap::stats` and `Stats`; `Document::page_counted`, `Page::text_counted`, `Page::images_counted`, `SaveOptions::stats`, `Saved::stats`, `DocumentEditor::count_work`, `Document::inferred_orders_counted`, `Bitmap::to_png_counted`, and `validate_pdfa_counted`, `validate_pdfua_counted` and `validate_pdfx_counted` | not projected; `tpdf_page_render`, every binding's render, text, save and validation count nothing and hand back no stats | owed rather than refused: the C ABI's render takes a scale and a format rather than the options, so asking needs an entry point of its own, as each counted sibling does, and `Stats` is `#[non_exhaustive]` and gains a counter with each row that counts one, so a struct carrying it across needs a layout that can grow. Ruling 11 makes it a debt | [performance](../design/performance.md) |
-| `DocumentEditor::check_save` and `check_decrypt` with `SaveRefusal` | not projected; a save through the C ABI or a binding writes what it is asked to, so a rewrite of an encrypted input asking for no encryption writes it decrypted, as the facade's own `save` does | owed rather than refused: each is a question asked before a write, answered by an enum one arm of which carries a `Permissions`. Whether the save doors themselves refuse is an open question on the ROADMAP; if they do, every surface that saves through them refuses with them | [encryption](encryption.md) |
+| Counted work: `RenderOptions::stats`, `Bitmap::stats` and `Stats`; `Document::page_counted`, `Page::text_counted`, `Page::images_counted`, `SaveOptions::stats`, `Saved::stats`, `DocumentEditor::count_work`, `Document::inferred_orders_counted`, `Bitmap::to_png_counted`, and `Document::validate_pdfa_counted`, `Document::validate_pdfua_counted` and `Document::validate_pdfx_counted` | not projected; `tpdf_page_render`, every binding's render, text, save and validation count nothing and hand back no stats | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so asking needs an entry point of its own, as each counted sibling does, and `Stats` is `#[non_exhaustive]` and gains a counter with each row that counts one, so a struct carrying it across needs a layout that can grow. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [performance](../design/performance.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge; a CommonJS entry that re-exports the one ESM build cannot | [ROADMAP](../ROADMAP.md) SU-14 |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
