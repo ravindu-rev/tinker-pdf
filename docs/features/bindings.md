@@ -637,9 +637,10 @@ the gzipped `.wasm` at 2.5 MiB, with every predefined CMap in; `cmap-predefined`
 off is the switch for a host that renders no CJK. Between releases the
 footprint is local proof: the same `.wasm` is built as the release builds it,
 `wasm-pack build --release --target web --out-dir pkg bindings/js` under the
-release's `RUSTFLAGS=-D warnings`, once per build profile — the default, and
-`bundled-fonts`, which the crate forwards to the facade as it forwards
-`cmap-predefined` and the command takes as `-- --features bundled-fonts` —
+release's `RUSTFLAGS=-D warnings`, once per build profile — the default,
+`bundled-fonts`, and `cjk-fonts`, the four CJK fallback faces without the
+Liberation set, each of which the crate forwards to the facade as it
+forwards `cmap-predefined` and the command takes as `-- --features <name>` —
 and each is measured with the release's `gzip -9` and handed to
 `cargo xtask footprint --profile <p> --gzipped <bytes> --run <revision>@<host>
 --date <day>`, which holds it to the profile's figure in

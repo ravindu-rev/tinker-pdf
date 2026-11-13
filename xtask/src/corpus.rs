@@ -482,7 +482,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     };
 
     // **The child's faces and the run's setting must agree.** A `tpdf` built
-    // with `bundled-fonts` measures every file with twelve Liberation faces
+    // with `bundled-fonts` measures every file with the bundled faces
     // whether or not anybody asked, so a plain run against that binary
     // produces the bundled numbers and would record them as the no-faces bar —
     // a silent 52 % improvement that is not one. The child says which it is,
@@ -497,7 +497,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     if carried != asked {
         return Err(if carried {
             format!(
-                "the child was built with `bundled-fonts`, so every file was measured with twelve faces, and this run is recorded as `{}`. Rebuild `tpdf` without the feature, or run with `--fonts bundled`.",
+                "the child was built with `bundled-fonts`, so every file was measured with the bundled faces, and this run is recorded as `{}`. Rebuild `tpdf` without the feature, or run with `--fonts bundled`.",
                 run.settings.fonts
             )
         } else {

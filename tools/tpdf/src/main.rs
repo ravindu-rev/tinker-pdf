@@ -2713,7 +2713,8 @@ const PROBE_VERSION: u32 = 7;
 /// The `--fonts` value meaning "whatever faces this build carries".
 const BUNDLED: &str = "bundled";
 
-/// Whether this build carries the twelve Liberation faces.
+/// Whether this build carries the bundled faces: the twelve Liberation
+/// faces and the four CJK ones.
 ///
 /// Written into the record so a run cannot claim to have measured faces a
 /// child did not have. It is a `cfg`, so it is the compiler's answer rather

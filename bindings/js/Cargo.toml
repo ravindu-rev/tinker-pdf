@@ -27,6 +27,11 @@ cmap-predefined = ["tinker-pdf/cmap-predefined"]
 # Forwarded for the same reason: it is a footprint profile, and the wasm this
 # crate builds is the one whose size `cargo xtask footprint` holds.
 bundled-fonts = ["tinker-pdf/bundled-fonts"]
+# The CJK profile (ruling 19): the four CJK fallback faces, which a host that
+# renders CJK and has no faces of its own takes without the Liberation set.
+# `bundled-fonts` carries them too, so this profile is that one less the
+# twelve Latin faces, and the default carries neither.
+cjk-fonts = ["tinker-pdf/cjk-fonts"]
 
 [dependencies]
 tinker-pdf = { path = "../../crates/tinker-pdf", default-features = false }
