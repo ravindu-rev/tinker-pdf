@@ -28,8 +28,10 @@ pub use fill::{
 pub use fragments::Fragments;
 pub use geom::{flatten, FillRule, Path, Point, Verb};
 pub use image::{
-    accumulate_image, draw_image, image_bounds, image_bounds_in, image_coverage, resample, Filter,
-    ImageDraw, ImageSource, Pyramid, Sampling, SourceWindow, Transform, TwoColour,
+    accumulate_image, accumulate_plate_image, draw_image, draw_plate_image, image_bounds,
+    image_bounds_in, image_coverage, resample, sampling_for_size, Filter, ImageDraw, ImageSource,
+    PlatePyramid, PlateSource, Pyramid, Sampling, SourceWindow, Transform, TwoColour,
+    MAX_PLATE_CHANNELS,
 };
 pub use mesh::{draw_mesh, draw_mesh_over, MeshBuffer, MeshDraw};
 pub use stripes::{fill_stripes, fill_stripes_with, StripeMask, SubpixelOrder};

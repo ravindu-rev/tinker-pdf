@@ -599,6 +599,28 @@ decided where it is known. A stencil's colour is `ImageDraw::tint`
 (8.9.6.2): the image says where, the caller says what — and `ImageDraw::ink`
 what that colour is in ink, which only a `CmykA8` canvas reads.
 
+*Images of tints, onto plates.* `draw_plate_image` draws a `PlateSource` —
+`channels` tints a sample, each a colour channel of a `Plates` canvas by its
+index, beside a byte of coverage, at most `MAX_PLATE_CHANNELS` — by the same
+policy, read off the same draw: `ImageDraw` places and composites it, and
+`sampling_for_size`, the plan, the unit square's coverage and the clip are the
+light draw's, every one a function of the draw's geometry and the image's size
+and never of its samples. Each tint is summed by itself with the weights a
+one-component image of that tint alone is summed with — the area filter's,
+bilinear's, the nearest tap's — and `PlatePyramid` halves each tint as `Pyramid`
+halves each channel of light, so every plate is the draw of its tint alone as a
+grey image of light, over nothing and, complemented, over paper
+(`each_plate_of_an_image_samples_as_its_one_component_image`, at 1:1, 2:1,
+3.7:1, 4x up with and without `/Interpolate`, turned, and past 128:1). A run
+of them accumulates in a `Fragments` made with a channel for each tint
+(`Fragments::with_channels`, `accumulate_plate_image`), each premultiplied
+and added as a run of light adds a colour, and composites each tint backed out
+of premultiplication (`Fragments::composite_region_plates`), so abutting plate
+images leave no seam (`a_run_of_abutting_plate_images_leaves_no_seam`). On a
+canvas that is not plates the first four tints paint as the DeviceCMYK colour
+they are. The light sampler, its levels and its run's four bytes a pixel are
+as they were.
+
 The trade is written down in [design/image-edges.md](../design/image-edges.md).
 
 **Meshes.** `draw_mesh` rasterizes a whole Gouraud-shaded triangle mesh into

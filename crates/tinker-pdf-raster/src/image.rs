@@ -92,40 +92,93 @@ pub struct TwoColour<'a> {
     pub colours: [[u8; 4]; 2],
 }
 
+/// The most tints a sample of a [`PlateSource`] carries: one for each colour
+/// channel a [`crate::PixelFormat::Plates`] canvas can have, the four process
+/// channels and [`crate::MAX_SPOT_PLATES`] spots.
+pub const MAX_PLATE_CHANNELS: usize = 4 + crate::canvas::MAX_SPOT_PLATES;
+
+/// An image's samples as tints of colorants, for a draw onto plates
+/// ([`draw_plate_image`]): `channels` tints a sample, each a colour channel
+/// of the [`crate::PixelFormat::Plates`] canvas it is drawn on by its index —
+/// cyan 0 to black 3, spot `i` at `4 + i` — 0 no ink and 255 solid, beside a
+/// byte of coverage. A channel means nothing here beyond its index (ruling
+/// 8); which colorant it is, is the caller's plan.
+#[derive(Clone, Copy, Debug)]
+pub struct PlateSource<'a> {
+    /// Samples across.
+    pub width: u32,
+    /// Samples down.
+    pub height: u32,
+    /// `channels` bytes a sample, row-major from the **top** row.
+    pub tints: &'a [u8],
+    /// Tints a sample, at most [`MAX_PLATE_CHANNELS`].
+    pub channels: usize,
+    /// One byte of coverage a sample; empty means every sample is opaque.
+    pub alpha: &'a [u8],
+    /// The rectangle of the image the buffers hold, where they hold less
+    /// than all of it, read as [`ImageSource::window`] is.
+    pub window: Option<SourceWindow>,
+}
+
+impl PlateSource<'_> {
+    /// The tints and the coverage of sample `(x, y)`, or `None` off the image
+    /// or where the buffer stops short.
+    fn texel(&self, x: u32, y: u32) -> Option<(&[u8], u8)> {
+        let index = sample_index(self.width, self.height, self.window, x, y)?;
+        let start = index.checked_mul(self.channels)?;
+        let tints = self.tints.get(start..start.checked_add(self.channels)?)?;
+        let alpha = self.alpha.get(index).copied().unwrap_or(255);
+        Some((tints, alpha))
+    }
+}
+
+/// Where sample `(x, y)` of an image `width` by `height` samples, whose
+/// buffers hold `window` of it, sits in a buffer of one entry a sample, or
+/// `None` off the image.
+///
+/// Every index is checked rather than saturated. `usize` is 32 bits on wasm32
+/// and 64 on the other three targets, and a sample count that fits one and not
+/// the other is exactly the divergence ruling 4 exists to catch: a wrapping
+/// multiply would read a different sample on one target and the same document
+/// would render differently there.
+///
+/// A windowed source answers for every sample of the image: one inside the
+/// window from its own buffers, one outside from the nearest inside
+/// ([`ImageSource::window`]); an empty window holds nothing.
+fn sample_index(
+    width: u32,
+    height: u32,
+    window: Option<SourceWindow>,
+    x: u32,
+    y: u32,
+) -> Option<usize> {
+    if x >= width || y >= height {
+        return None;
+    }
+    let Some(window) = window else {
+        return (y as usize)
+            .checked_mul(width as usize)?
+            .checked_add(x as usize);
+    };
+    if window.width == 0 || window.height == 0 {
+        return None;
+    }
+    let clamp = |at: u32, start: u32, size: u32| {
+        let last = u64::from(start) + u64::from(size) - 1;
+        // In `u64`, since a corner plus a size may pass `u32`; the result is
+        // at most `at`, which fits.
+        u64::from(at).clamp(u64::from(start), last.max(u64::from(start))) - u64::from(start)
+    };
+    let column = usize::try_from(clamp(x, window.x, window.width)).ok()?;
+    let row = usize::try_from(clamp(y, window.y, window.height)).ok()?;
+    row.checked_mul(window.width as usize)?.checked_add(column)
+}
+
 impl ImageSource<'_> {
     /// Where sample `(x, y)` sits in a buffer of one entry a sample, or `None`
-    /// off the image.
-    ///
-    /// Every index is checked rather than saturated. `usize` is 32 bits on
-    /// wasm32 and 64 on the other three targets, and a sample count that fits
-    /// one and not the other is exactly the divergence ruling 4 exists to
-    /// catch: a wrapping multiply would read a different sample on one target
-    /// and the same document would render differently there.
-    ///
-    /// A windowed source answers for every sample of the image: one inside
-    /// the window from its own buffers, one outside from the nearest inside
-    /// ([`Self::window`]); an empty window holds nothing.
+    /// off the image ([`sample_index`]).
     fn index(&self, x: u32, y: u32) -> Option<usize> {
-        if x >= self.width || y >= self.height {
-            return None;
-        }
-        let Some(window) = self.window else {
-            return (y as usize)
-                .checked_mul(self.width as usize)?
-                .checked_add(x as usize);
-        };
-        if window.width == 0 || window.height == 0 {
-            return None;
-        }
-        let clamp = |at: u32, start: u32, size: u32| {
-            let last = u64::from(start) + u64::from(size) - 1;
-            // In `u64`, since a corner plus a size may pass `u32`; the result
-            // is at most `at`, which fits.
-            u64::from(at).clamp(u64::from(start), last.max(u64::from(start))) - u64::from(start)
-        };
-        let column = usize::try_from(clamp(x, window.x, window.width)).ok()?;
-        let row = usize::try_from(clamp(y, window.y, window.height)).ok()?;
-        row.checked_mul(window.width as usize)?.checked_add(column)
+        sample_index(self.width, self.height, self.window, x, y)
     }
 
     /// The sample at `(x, y)`, or `None` where the buffer stops short: for a
@@ -319,12 +372,12 @@ const PYRAMID_TARGET: u64 = 4;
 /// that diverges. Gap 13 rejected the plan's recursive flattener for the
 /// mirror image of this: a float termination test that changes the *number* of
 /// segments rather than their positions.
-fn sample_ratios(image: &ImageSource<'_>, t: &Transform) -> (u64, u64) {
+fn sample_ratios((width, height): (u32, u32), t: &Transform) -> (u64, u64) {
     let across = (t.a * t.a + t.b * t.b).sqrt();
     let down = (t.c * t.c + t.d * t.d).sqrt();
     (
-        fixed_ratio(f64::from(image.width), across),
-        fixed_ratio(f64::from(image.height), down),
+        fixed_ratio(f64::from(width), across),
+        fixed_ratio(f64::from(height), down),
     )
 }
 
@@ -372,7 +425,19 @@ fn fixed_ratio(samples: f64, device: f64) -> u64 {
 /// other renderer rather than a matter of taste.
 #[must_use]
 pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -> Sampling {
-    let (across, down) = sample_ratios(image, t);
+    sampling_for_size((image.width, image.height), t, interpolate)
+}
+
+/// [`sampling_for`] for an image of `(width, height)` samples, whatever they
+/// hold: the policy reads the image's size and its transform, never its
+/// samples, so a draw of light and a draw of tints take the same decision.
+#[must_use]
+pub fn sampling_for_size(
+    (width, height): (u32, u32),
+    t: &Transform,
+    interpolate: bool,
+) -> Sampling {
+    let (across, down) = sample_ratios((width, height), t);
     // At or above 1:1 on both axes.
     if across <= ONE && down <= ONE {
         return Sampling {
@@ -385,7 +450,7 @@ pub fn sampling_for(image: &ImageSource<'_>, t: &Transform, interpolate: bool) -
             footprint: (across.max(1), down.max(1)),
         };
     }
-    let halvings = (halvings(across, image.width), halvings(down, image.height));
+    let halvings = (halvings(across, width), halvings(down, height));
     Sampling {
         filter: Filter::Area,
         halvings,
@@ -834,6 +899,453 @@ pub fn accumulate_image(
     );
 }
 
+/// Draws an image of tints onto plates: [`draw_image`]'s policy over
+/// `source`'s samples of `source.channels` tints each
+/// (`docs/design/overprint-separations.md`, "Images on plates").
+///
+/// `draw` places and composites the image exactly as [`draw_image`] takes
+/// it — its transform and cut, the unit square's coverage through the path
+/// filler at its edge bits and rule, `/Interpolate`, the alpha, the blend
+/// mode, the clip and the stop — and the samples come from `source`, whose
+/// size the policy reads: `Area` and `Bilinear` by the ratio, with integer
+/// weights (ruling 4), and the pyramid past 128:1 halving each tint as a
+/// sample of light halves each channel. `draw.image`, `tint`, `ink` and
+/// `plates` are not read. Each tint is summed by itself, with the weights a
+/// one-component image of that tint alone would be summed with, so every
+/// plate is the draw of its tint alone. On a [`crate::PixelFormat::Plates`]
+/// canvas each colour channel takes the sample's tint of the same index, a
+/// channel past the source's taking no ink; any other canvas is painted the
+/// process tints as the DeviceCMYK colour they are. A source of more than
+/// [`MAX_PLATE_CHANNELS`] tints a sample, or of none, draws nothing.
+///
+/// `pyramid` is as [`draw_image`]'s, its levels of tints.
+pub fn draw_plate_image(
+    canvas: &mut Canvas,
+    draw: &ImageDraw<'_>,
+    source: &PlateSource<'_>,
+    pyramid: &mut PlatePyramid,
+    scratch: &mut FillScratch,
+) {
+    let opacity = Opacity::new(draw.alpha);
+    let rect = canvas.device_rect();
+    walk_plates(
+        draw,
+        source,
+        pyramid,
+        scratch,
+        rect,
+        |px, py, tints, covered, own| {
+            let clip = draw.clip.map_or(255, |mask| mask.at(px, py));
+            if clip == 0 {
+                return;
+            }
+            let Some((x, y)) = canvas.local(px, py) else {
+                return;
+            };
+            let level = opacity.level_three(covered, own, clip);
+            canvas.blend_tints_level(x, y, tints, 255, level, draw.blend);
+        },
+    );
+}
+
+/// Adds an image of tints to a run of plate images instead of compositing
+/// it: [`accumulate_image`] for [`draw_plate_image`]'s samples, into
+/// `fragments` made with a channel for every tint
+/// ([`Fragments::with_channels`]), each tint premultiplied by its coverage
+/// and added as a light run adds each colour, so abutting plate images leave
+/// no seam. `canvas`, `pyramid` and `scratch` are as [`accumulate_image`]'s.
+pub fn accumulate_plate_image(
+    fragments: &mut Fragments,
+    draw: &ImageDraw<'_>,
+    source: &PlateSource<'_>,
+    pyramid: &mut PlatePyramid,
+    canvas: (i32, i32, u32, u32),
+    scratch: &mut FillScratch,
+) {
+    walk_plates(
+        draw,
+        source,
+        pyramid,
+        scratch,
+        canvas,
+        |px, py, tints, covered, own| {
+            fragments.add_tints(
+                px,
+                py,
+                tints,
+                mul255(u32::from(covered), u32::from(own)) as u8,
+            );
+        },
+    );
+}
+
+/// One reduced copy of an image of tints: [`Level`] for a [`PlateSource`].
+#[derive(Clone, Debug)]
+struct PlateLevel {
+    halvings: (u32, u32),
+    width: u32,
+    height: u32,
+    channels: usize,
+    tints: Vec<u8>,
+    /// Always present, as a light level's is.
+    alpha: Vec<u8>,
+    window: Option<SourceWindow>,
+}
+
+impl PlateLevel {
+    fn source(&self) -> PlateSource<'_> {
+        PlateSource {
+            width: self.width,
+            height: self.height,
+            tints: &self.tints,
+            channels: self.channels,
+            alpha: &self.alpha,
+            window: self.window,
+        }
+    }
+}
+
+/// Halved copies of an image of tints, held by whoever asked for the draw:
+/// [`Pyramid`] for [`draw_plate_image`], built and reused by the same rule —
+/// every halving of x, then every halving of y, a pyramid handed an image of
+/// other dimensions, another window or another number of tints rebuilding.
+#[derive(Clone, Debug, Default)]
+pub struct PlatePyramid {
+    source: (u32, u32),
+    window: Option<SourceWindow>,
+    channels: usize,
+    levels: Vec<PlateLevel>,
+}
+
+impl PlatePyramid {
+    /// An empty pyramid.
+    #[must_use]
+    pub fn new() -> PlatePyramid {
+        PlatePyramid::default()
+    }
+
+    /// How many reduced copies are held.
+    #[must_use]
+    pub fn levels(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// Builds whatever is missing to reach `halvings`, and answers with the
+    /// image to sample: [`Pyramid::reduce`]'s canonical path.
+    fn reduce<'a>(&'a mut self, source: &PlateSource<'a>, halvings: (u32, u32)) -> PlateSource<'a> {
+        if self.source != (source.width, source.height)
+            || self.window != source.window
+            || self.channels != source.channels
+        {
+            self.levels.clear();
+            self.source = (source.width, source.height);
+            self.window = source.window;
+            self.channels = source.channels;
+        }
+        let wanted: Vec<(u32, u32)> = (1..=halvings.0)
+            .map(|x| (x, 0))
+            .chain((1..=halvings.1).map(|y| (halvings.0, y)))
+            .collect();
+        let keep = self
+            .levels
+            .iter()
+            .zip(wanted.iter())
+            .take_while(|(held, want)| held.halvings == **want)
+            .count();
+        self.levels.truncate(keep);
+        for (index, step) in wanted.iter().enumerate().skip(keep) {
+            let level = {
+                let previous = if index == 0 {
+                    *source
+                } else {
+                    self.levels[index - 1].source()
+                };
+                halve_plates(&previous, *step)
+            };
+            self.levels.push(level);
+        }
+        self.levels.last().map_or(*source, PlateLevel::source)
+    }
+}
+
+/// [`halve`] over an image of tints: each tint and the coverage of a pair
+/// averaged, round half up, a sample the buffer lacks averaging as its
+/// partner, and a window halved into the level's window, as a light level's
+/// channels are.
+fn halve_plates(source: &PlateSource<'_>, halvings: (u32, u32)) -> PlateLevel {
+    let horizontal = halvings.1 == 0;
+    let width = if horizontal {
+        source.width.div_ceil(2).max(1)
+    } else {
+        source.width
+    };
+    let height = if horizontal {
+        source.height
+    } else {
+        source.height.div_ceil(2).max(1)
+    };
+    let window = source.window.map(|held| {
+        if held.width == 0 || held.height == 0 {
+            return SourceWindow::default();
+        }
+        let halved = |start: u32, size: u32, extent: u32| {
+            let first = start / 2;
+            let end = (u64::from(start) + u64::from(size))
+                .div_ceil(2)
+                .min(u64::from(extent));
+            (first, (end as u32).saturating_sub(first))
+        };
+        if horizontal {
+            let (x, width) = halved(held.x, held.width, width);
+            SourceWindow { x, width, ..held }
+        } else {
+            let (y, height) = halved(held.y, held.height, height);
+            SourceWindow { y, height, ..held }
+        }
+    });
+    let (x0, y0, columns, rows) = window.map_or((0, 0, width, height), |held| {
+        (held.x, held.y, held.width, held.height)
+    });
+    let channels = source.channels;
+    let samples = (columns as usize).saturating_mul(rows as usize);
+    let mut tints = Vec::with_capacity(samples.saturating_mul(channels));
+    let mut alpha = Vec::with_capacity(samples);
+    let none = [0u8; MAX_PLATE_CHANNELS];
+    let none = none.get(..channels).unwrap_or(&[]);
+    let mean = |p: u8, q: u8| (u16::from(p) + u16::from(q)).div_ceil(2) as u8;
+    for y in (0..rows).map(|row| y0 + row) {
+        for x in (0..columns).map(|column| x0 + column) {
+            let (first, second) = if horizontal {
+                ((x * 2, y), (x * 2 + 1, y))
+            } else {
+                ((x, y * 2), (x, y * 2 + 1))
+            };
+            let pair = (
+                source.texel(first.0, first.1),
+                source.texel(second.0, second.1),
+            );
+            let (a, b) = match pair {
+                (Some(a), Some(b)) => (a, b),
+                (Some(a), None) => (a, a),
+                (None, Some(b)) => (b, b),
+                (None, None) => ((none, 0), (none, 0)),
+            };
+            tints.extend(a.0.iter().zip(b.0).map(|(p, q)| mean(*p, *q)));
+            alpha.push(mean(a.1, b.1));
+        }
+    }
+    PlateLevel {
+        halvings,
+        width,
+        height,
+        channels,
+        tints,
+        alpha,
+        window,
+    }
+}
+
+/// [`walk`] over an image of tints: the same square, coverage, policy,
+/// pyramid and plan — each read off the draw's geometry and the source's
+/// size alone — and each pixel's sample summed tint by tint, handed to `emit`
+/// as its tints, the share of the pixel the square covers and the sample's
+/// own alpha.
+fn walk_plates(
+    draw: &ImageDraw<'_>,
+    source: &PlateSource<'_>,
+    pyramid: &mut PlatePyramid,
+    scratch: &mut FillScratch,
+    rect: (i32, i32, u32, u32),
+    mut emit: impl FnMut(i32, i32, &[u8], u8, u8),
+) {
+    let channels = source.channels;
+    if source.width == 0 || source.height == 0 || channels == 0 || channels > MAX_PLATE_CHANNELS {
+        return;
+    }
+    let Some(inverse) = draw.unit_to_device.invert() else {
+        return;
+    };
+    let cut = draw.cut.as_ref().unwrap_or(&draw.unit_to_device);
+    let Some((x0, x1, y0, y1)) = device_bounds(cut, rect) else {
+        return;
+    };
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let shape = edge_shape(draw, scratch, (x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)));
+    let sampling = sampling_for_size(
+        (source.width, source.height),
+        &draw.unit_to_device,
+        draw.interpolate,
+    );
+    let source = &pyramid.reduce(source, sampling.halvings);
+    let plan = Plan::new(
+        (source.width, source.height),
+        &inverse,
+        sampling,
+        (x0, x1),
+        (y0, y1),
+    );
+    let mut lines = (Vec::new(), Vec::new());
+    // The tints and the coverage last, on the stack: once a pixel.
+    let mut sample = [0u8; MAX_PLATE_CHANNELS + 1];
+    for py in y0..y1 {
+        if draw.stop.is_some_and(|stop| stop()) {
+            return;
+        }
+        let row = py.abs_diff(y0) as usize;
+        for px in x0..x1 {
+            let covered = shape.at(px, py);
+            if covered == 0 {
+                continue;
+            }
+            let column = px.abs_diff(x0) as usize;
+            let found = match &plan {
+                Plan::Area { columns, rows } => {
+                    plate_area_taps(source, columns.line(column), rows.line(row), &mut sample)
+                }
+                Plan::Bilinear { columns, rows } => match (columns.get(column), rows.get(row)) {
+                    (Some(across), Some(down)) => {
+                        plate_bilinear_taps(source, *across, *down, &mut sample)
+                    }
+                    _ => false,
+                },
+                Plan::PerPixel => {
+                    let (u, v) = centre(&inverse, px, py);
+                    match sampling.filter {
+                        Filter::Nearest => plate_nearest(source, u, v, &mut sample),
+                        Filter::Bilinear => plate_bilinear_taps(
+                            source,
+                            pair(u * f64::from(source.width) - 0.5, source.width),
+                            pair((1.0 - v) * f64::from(source.height) - 0.5, source.height),
+                            &mut sample,
+                        ),
+                        Filter::Area => {
+                            let cx = area_centre(u, source.width);
+                            let cy = area_centre(1.0 - v, source.height);
+                            let (hx, hy) = half_footprint(sampling.footprint);
+                            let (columns, rows) = &mut lines;
+                            columns.clear();
+                            rows.clear();
+                            area_line(
+                                cx.saturating_sub(hx),
+                                cx.saturating_add(hx),
+                                source.width,
+                                columns,
+                            );
+                            area_line(
+                                cy.saturating_sub(hy),
+                                cy.saturating_add(hy),
+                                source.height,
+                                rows,
+                            );
+                            plate_area_taps(source, columns, rows, &mut sample)
+                        }
+                    }
+                }
+            };
+            if !found {
+                continue;
+            }
+            let own = sample[channels];
+            if own == 0 {
+                continue;
+            }
+            emit(px, py, &sample[..channels], covered, own);
+        }
+    }
+}
+
+/// [`nearest`] over an image of tints, into `out`: its tints, then its
+/// coverage. `false` where the buffer stops short.
+fn plate_nearest(source: &PlateSource<'_>, u: f64, v: f64, out: &mut [u8]) -> bool {
+    let sx = ((u * f64::from(source.width)) as u32).min(source.width - 1);
+    let sy = (((1.0 - v) * f64::from(source.height)) as u32).min(source.height - 1);
+    let Some((tints, alpha)) = source.texel(sx, sy) else {
+        return false;
+    };
+    for (slot, tint) in out.iter_mut().zip(tints) {
+        *slot = *tint;
+    }
+    if let Some(slot) = out.get_mut(source.channels) {
+        *slot = alpha;
+    }
+    true
+}
+
+/// [`bilinear_taps`] over an image of tints, into `out`: each tint and the
+/// coverage mixed by the same four weights, a tap past a short buffer taking
+/// the anchor's sample. `false` where the anchor is off the buffer.
+fn plate_bilinear_taps(source: &PlateSource<'_>, x: Pair, y: Pair, out: &mut [u8]) -> bool {
+    let Some(anchor) = source.texel(x.near, y.near) else {
+        return false;
+    };
+    let t10 = source.texel(x.far, y.near).unwrap_or(anchor);
+    let t01 = source.texel(x.near, y.far).unwrap_or(anchor);
+    let t11 = source.texel(x.far, y.far).unwrap_or(anchor);
+    let (w00, w10, w01, w11) = bilinear_weights(x, y);
+    let mix = |a: u8, b: u8, c: u8, d: u8| {
+        let total =
+            u32::from(a) * w00 + u32::from(b) * w10 + u32::from(c) * w01 + u32::from(d) * w11;
+        ((total + 32768) >> 16) as u8
+    };
+    let channels = source.channels;
+    for (channel, slot) in out.iter_mut().enumerate().take(channels) {
+        let at = |texel: (&[u8], u8)| texel.0.get(channel).copied().unwrap_or(0);
+        *slot = mix(at(anchor), at(t10), at(t01), at(t11));
+    }
+    if let Some(slot) = out.get_mut(channels) {
+        *slot = mix(anchor.1, t10.1, t01.1, t11.1);
+    }
+    true
+}
+
+/// [`area_taps`] over an image of tints, into `out`: every sample present
+/// weighted by the product of its two overlaps, each tint and the coverage
+/// summed by itself in integers and rounded half up. `false` where no sample
+/// is present.
+fn plate_area_taps(
+    source: &PlateSource<'_>,
+    columns: &[Tap],
+    rows: &[Tap],
+    out: &mut [u8],
+) -> bool {
+    let channels = source.channels;
+    // Each tint, then the coverage; `channels` is at most the cap.
+    let mut sum = [0u64; MAX_PLATE_CHANNELS + 1];
+    let mut weight = 0u64;
+    for &(ty, oy) in rows {
+        let mut line = [0u64; MAX_PLATE_CHANNELS + 1];
+        let mut line_weight = 0u64;
+        for &(tx, ox) in columns {
+            let Some((tints, alpha)) = source.texel(tx, ty) else {
+                continue;
+            };
+            let ox = u64::from(ox);
+            line_weight += ox;
+            for (slot, tint) in line.iter_mut().zip(tints) {
+                *slot += ox * u64::from(*tint);
+            }
+            if let Some(slot) = line.get_mut(channels) {
+                *slot += ox * u64::from(alpha);
+            }
+        }
+        let oy = u64::from(oy);
+        weight += oy * line_weight;
+        for (total, part) in sum.iter_mut().zip(line).take(channels + 1) {
+            *total += oy * part;
+        }
+    }
+    if weight == 0 {
+        return false;
+    }
+    let half = weight / 2;
+    for (slot, total) in out.iter_mut().zip(sum).take(channels + 1) {
+        *slot = ((total + half) / weight) as u8;
+    }
+    true
+}
+
 /// The image resampled onto a grid of `width` by `height` pixels that it
 /// covers exactly, each pixel handed to `emit` as its column, its row and the
 /// area filter's colour and alpha for it — the bitmap toolbox's scale
@@ -1011,7 +1523,13 @@ fn walk(
     // one channel only here, where nothing was reduced; its levels are RGB
     // (`halve`).
     let image = &pyramid.reduce(image, sampling.halvings);
-    let plan = Plan::new(image, &inverse, sampling, (x0, x1), (y0, y1));
+    let plan = Plan::new(
+        (image.width, image.height),
+        &inverse,
+        sampling,
+        (x0, x1),
+        (y0, y1),
+    );
     // The per-pixel area filter's two lines of taps, reused by every pixel of
     // a draw that is not planned rather than allocated by each.
     let mut scratch = (Vec::new(), Vec::new());
@@ -1147,9 +1665,11 @@ enum Plan {
 
 impl Plan {
     /// The plan for a draw over columns `x0..x1` and rows `y0..y1` of the
-    /// page frame, sampling `image`: the level, where the pyramid reduced.
+    /// page frame, sampling an image of `(width, height)` samples: the
+    /// level's, where the pyramid reduced. Its samples are not read, so a
+    /// draw of light and one of tints plan alike.
     fn new(
-        image: &ImageSource<'_>,
+        (width, height): (u32, u32),
         inverse: &Transform,
         sampling: Sampling,
         (x0, x1): (i32, i32),
@@ -1162,7 +1682,6 @@ impl Plan {
         // `v`; the first of each is as good as every other.
         let across = |px: i32| centre(inverse, px, y0).0;
         let down = |py: i32| centre(inverse, x0, py).1;
-        let (width, height) = (image.width, image.height);
         match sampling.filter {
             Filter::Area => {
                 let (hx, hy) = half_footprint(sampling.footprint);
@@ -4652,5 +5171,603 @@ mod tests {
             }
         }
         assert!(compared > 10_000, "{compared} pixels compared");
+    }
+
+    // ---- images of tints on plates (RC-04.11) -------------------------------
+
+    /// The plates canvas the plate tests draw on: six colour channels, the
+    /// four process ones and two spots.
+    const PLATE_SPOTS: usize = 2;
+
+    /// A plate image of `width` by `height` samples, `channels` noisy tints
+    /// each and a noisy coverage, a quarter of it transparent.
+    fn tinted(width: u32, height: u32, channels: usize, seed: u32) -> (Vec<u8>, Vec<u8>) {
+        let samples = (width * height) as usize;
+        let tints = noise(samples * channels, seed);
+        let alpha = noise(samples, seed.wrapping_add(7))
+            .into_iter()
+            .map(|a| if a < 64 { 0 } else { a })
+            .collect();
+        (tints, alpha)
+    }
+
+    /// Tint `channel` of every sample, as a grey image's three equal bytes,
+    /// or, `inverted`, as the grey of no ink at 255.
+    fn one_component(tints: &[u8], channels: usize, channel: usize, inverted: bool) -> Vec<u8> {
+        tints
+            .chunks_exact(channels)
+            .flat_map(|sample| {
+                let tint = sample[channel];
+                let grey = if inverted { 255 - tint } else { tint };
+                [grey; 3]
+            })
+            .collect()
+    }
+
+    /// The placements the plate tests draw at, as a transform of an image
+    /// `width` by `height` samples, its name and whether it interpolates.
+    fn placements(width: u32, height: u32) -> Vec<(&'static str, Transform, bool)> {
+        let (w, h) = (f64::from(width), f64::from(height));
+        let scaled = |factor: f64, e: f64, f: f64| Transform {
+            a: w * factor,
+            b: 0.0,
+            c: 0.0,
+            d: -h * factor,
+            e,
+            f: f + h * factor,
+        };
+        vec![
+            ("1:1", scaled(1.0, 1.25, 0.5), false),
+            ("2:1 down", scaled(0.5, 0.6, 1.3), false),
+            ("3.7:1 down", scaled(1.0 / 3.7, 2.2, 0.4), false),
+            ("4x up", scaled(4.0, 0.3, 0.7), false),
+            ("4x up, interpolated", scaled(4.0, 0.3, 0.7), true),
+            (
+                "turned and 1.5:1 down",
+                Transform {
+                    a: w * 0.4,
+                    b: h * 0.45,
+                    c: -w * 0.45,
+                    d: h * 0.4,
+                    e: 30.0,
+                    f: 2.0,
+                },
+                false,
+            ),
+        ]
+    }
+
+    /// **Each plate of an image samples as its one-component image**
+    /// (RC-04.11; the design's "Images on plates").
+    ///
+    /// An image of six tints a sample and a coverage, at 1:1, 2:1 and 3.7:1
+    /// down, 4x up with and without `/Interpolate`, turned, and past 128:1
+    /// where the pyramid reduces it: drawn onto plates, every plate is,
+    /// byte for byte, the draw of that tint alone as a grey image of light —
+    /// over nothing, the grey itself, and over paper, the complement of the
+    /// grey of no ink drawn over white — and the alpha is that draw's alpha.
+    /// So the policy, the plan, the pyramid and the weights are the light
+    /// sampler's, tint by tint.
+    #[test]
+    fn each_plate_of_an_image_samples_as_its_one_component_image() {
+        let channels = 4 + PLATE_SPOTS;
+        let mut cases: Vec<(String, u32, u32, Transform, bool)> = Vec::new();
+        for (name, t, interpolate) in placements(13, 9) {
+            cases.push((name.to_string(), 13, 9, t, interpolate));
+        }
+        // 520 samples into four pixels: 130 a pixel, past the pyramid's
+        // threshold.
+        cases.push((
+            "past 128:1".to_string(),
+            520,
+            390,
+            Transform {
+                a: 4.0,
+                b: 0.0,
+                c: 0.0,
+                d: -3.0,
+                e: 5.5,
+                f: 8.25,
+            },
+            false,
+        ));
+        for (name, width, height, t, interpolate) in cases {
+            let (tints, alpha) = tinted(width, height, channels, width + height);
+            let source = PlateSource {
+                width,
+                height,
+                tints: &tints,
+                channels,
+                alpha: &alpha,
+                window: None,
+            };
+            let sampling = sampling_for_size((width, height), &t, interpolate);
+            if name == "past 128:1" {
+                assert_ne!(sampling.halvings, (0, 0), "{name}: the pyramid engages");
+            }
+            for paper in [false, true] {
+                let background = if paper {
+                    Color::WHITE
+                } else {
+                    Color::TRANSPARENT
+                };
+                let mut plates =
+                    Canvas::plates(48, 40, PLATE_SPOTS, background).expect("under the cap");
+                if !paper {
+                    // Nothing at all, no ink and no alpha, as the transparent
+                    // light canvas is no light and no alpha.
+                    plates.data.fill(0);
+                }
+                let mut draw = ImageDraw::new(
+                    ImageSource {
+                        width,
+                        height,
+                        rgb: &[],
+                        alpha: &[],
+                        two_colour: None,
+                        window: None,
+                    },
+                    t,
+                );
+                draw.interpolate = interpolate;
+                let mut pyramid = PlatePyramid::new();
+                draw_plate_image(
+                    &mut plates,
+                    &draw,
+                    &source,
+                    &mut pyramid,
+                    &mut FillScratch::new(),
+                );
+                for channel in 0..channels {
+                    let grey = one_component(&tints, channels, channel, paper);
+                    let mut light = Canvas::new(48, 40, PixelFormat::Rgba8, background);
+                    let mut one = ImageDraw::new(
+                        ImageSource {
+                            width,
+                            height,
+                            rgb: &grey,
+                            alpha: &alpha,
+                            two_colour: None,
+                            window: None,
+                        },
+                        t,
+                    );
+                    one.interpolate = interpolate;
+                    draw_image(
+                        &mut light,
+                        &one,
+                        &mut Pyramid::new(),
+                        &mut FillScratch::new(),
+                    );
+                    let plate = plates.channel(channel).expect("a plate");
+                    let red = light.channel(0).expect("red");
+                    let expected: Vec<u8> = if paper {
+                        red.iter().map(|grey| 255 - grey).collect()
+                    } else {
+                        red
+                    };
+                    assert_eq!(
+                        plate,
+                        expected,
+                        "{name}, over {}: plate {channel}",
+                        if paper { "paper" } else { "nothing" }
+                    );
+                    if channel == 0 {
+                        let alpha_of = |canvas: &Canvas| -> Vec<u8> {
+                            let components = canvas.format.components();
+                            canvas
+                                .data
+                                .chunks_exact(components)
+                                .map(|pixel| pixel[components - 1])
+                                .collect()
+                        };
+                        assert_eq!(alpha_of(&plates), alpha_of(&light), "{name}: the alpha");
+                    }
+                }
+                assert!(
+                    plates
+                        .channel(5)
+                        .expect("a spot")
+                        .iter()
+                        .any(|tint| *tint != 0),
+                    "{name}: the last spot drew"
+                );
+            }
+        }
+    }
+
+    /// One solid strip of tints over the device rectangle `[x0, x1] × [y0,
+    /// y1]`: `tint` on the first spot, no ink elsewhere.
+    fn tint_strip(tint: u8, x0: f64, y0: f64, x1: f64, y1: f64) -> (Vec<u8>, Transform) {
+        let channels = 4 + PLATE_SPOTS;
+        let mut tints = vec![0u8; 4 * channels];
+        for sample in tints.chunks_exact_mut(channels) {
+            sample[4] = tint;
+        }
+        (
+            tints,
+            Transform {
+                a: x1 - x0,
+                b: 0.0,
+                c: 0.0,
+                d: -(y1 - y0),
+                e: x0,
+                f: y1,
+            },
+        )
+    }
+
+    /// Draws two abutting strips of tints onto a plates canvas of no ink,
+    /// either as two composites or as one run, and hands back the first
+    /// spot's plate.
+    fn two_tint_strips(a: u8, b: u8, as_a_run: bool) -> Vec<u8> {
+        let channels = 4 + PLATE_SPOTS;
+        let (left, lt) = tint_strip(a, 1.0, 1.0, 2.5, 6.0);
+        let (right, rt) = tint_strip(b, 2.5, 1.0, 4.0, 6.0);
+        fn source(tints: &[u8]) -> PlateSource<'_> {
+            PlateSource {
+                width: 2,
+                height: 2,
+                tints,
+                channels: 4 + PLATE_SPOTS,
+                alpha: &[],
+                window: None,
+            }
+        }
+        let light = ImageSource {
+            width: 2,
+            height: 2,
+            rgb: &[],
+            alpha: &[],
+            two_colour: None,
+            window: None,
+        };
+        let mut canvas = Canvas::plates(8, 8, PLATE_SPOTS, Color::WHITE).expect("under the cap");
+        if as_a_run {
+            let mut run = Fragments::with_channels(0, 0, 8, 8, channels);
+            for (tints, t) in [(&left, lt), (&right, rt)] {
+                accumulate_plate_image(
+                    &mut run,
+                    &ImageDraw::new(light, t),
+                    &source(tints),
+                    &mut PlatePyramid::new(),
+                    (0, 0, 8, 8),
+                    &mut FillScratch::new(),
+                );
+            }
+            run.composite(&mut canvas, 1.0, BlendMode::Normal, None, None);
+        } else {
+            for (tints, t) in [(&left, lt), (&right, rt)] {
+                draw_plate_image(
+                    &mut canvas,
+                    &ImageDraw::new(light, t),
+                    &source(tints),
+                    &mut PlatePyramid::new(),
+                    &mut FillScratch::new(),
+                );
+            }
+        }
+        canvas.channel(4).expect("the first spot")
+    }
+
+    /// **A run of abutting plate images leaves no seam** (RC-04.11): two
+    /// strips of solid spot ink meeting at half a pixel each cover the
+    /// boundary pixel half. Composited one after the other over no ink they
+    /// leave a seam — the first puts on half the ink, the second half of what
+    /// is left, 192 rather than 255 — as two strips of light leave one of
+    /// paper; accumulated as one run, the two halves are one whole pixel of
+    /// ink, the strips themselves are solid either way, and solid ink meeting
+    /// none at the boundary is the average of the two.
+    #[test]
+    fn a_run_of_abutting_plate_images_leaves_no_seam() {
+        let at = |x: usize, y: usize| y * 8 + x;
+        let composited = two_tint_strips(255, 255, false);
+        assert_eq!(
+            composited[at(2, 3)],
+            192,
+            "compositing each strip in turn leaves a seam of no ink"
+        );
+        let run = two_tint_strips(255, 255, true);
+        assert_eq!(
+            run[at(2, 3)],
+            255,
+            "as one run, two halves are a whole pixel"
+        );
+        assert_eq!(run[at(1, 3)], 255, "inside the left strip");
+        assert_eq!(run[at(3, 3)], 255, "inside the right strip");
+
+        let shared = two_tint_strips(255, 0, true)[at(2, 3)];
+        assert!(
+            (127..=128).contains(&shared),
+            "solid ink and none meeting at a half pixel average to {shared}"
+        );
+    }
+
+    /// **A run of plate images holds a tint a channel and composites them**:
+    /// a run made for six channels is seven bytes a pixel, adds tints
+    /// premultiplied with their coverage held to a whole pixel, composites
+    /// each tint backed out of premultiplication under the run's alpha and
+    /// clip, and takes no colour of light; a run of light takes no tints, and
+    /// composites as it always has.
+    #[test]
+    fn a_run_of_plate_images_holds_a_tint_a_channel() {
+        let mut run = Fragments::with_channels(0, 0, 2, 1, 6);
+        assert_eq!(run.channels(), 6);
+        assert!(run.is_empty());
+        run.add(0, 0, Color::BLACK, 255);
+        assert!(run.is_empty(), "a plates run takes no light");
+        run.add_tints(0, 0, &[10, 20, 30, 40, 200, 100], 128);
+        run.add_tints(0, 0, &[10, 20, 30, 40, 200, 100], 200);
+        run.add_tints(5, 5, &[255; 6], 255);
+        let mut canvas = Canvas::plates(2, 1, 2, Color::TRANSPARENT).expect("under the cap");
+        let untouched = canvas.data[7..].to_vec();
+        run.composite(&mut canvas, 1.0, BlendMode::Normal, None, None);
+        assert_eq!(
+            &canvas.data[..7],
+            &[10, 20, 30, 40, 200, 100, 255],
+            "the tints at a whole pixel"
+        );
+        assert_eq!(
+            canvas.data[7..],
+            untouched,
+            "nothing where nothing was added"
+        );
+        let mut halved = Canvas::plates(2, 1, 2, Color::WHITE).expect("under the cap");
+        let clip = Mask {
+            x0: 0,
+            y0: 0,
+            width: 1,
+            height: 1,
+            data: vec![255],
+            outside: 0,
+        };
+        run.composite(&mut halved, 0.5, BlendMode::Normal, Some(&clip), None);
+        assert_eq!(
+            halved.data[4],
+            mul255(200, 128) as u8,
+            "the run's alpha applies to the whole run"
+        );
+
+        let mut light = Fragments::new(0, 0, 1, 1);
+        assert_eq!(light.channels(), 3);
+        light.add_tints(0, 0, &[255; 6], 255);
+        assert!(light.is_empty(), "a run of light takes no tints");
+        light.add(0, 0, Color::rgb(255, 0, 0), 255);
+        let mut canvas = Canvas::new(1, 1, PixelFormat::Rgb8, Color::WHITE);
+        light.composite(&mut canvas, 1.0, BlendMode::Normal, None, None);
+        assert_eq!(canvas.data, [255, 0, 0]);
+    }
+
+    /// **A plate image draws as a light one does in every other respect**: a
+    /// plate pyramid is kept and reused as a light one is, and rebuilt for
+    /// another size or number of tints; a source of no tints, or of more than
+    /// a plates canvas has, a degenerate transform and a stop each draw
+    /// nothing; a buffer shorter than its size skips the pixels it lacks; a
+    /// windowed source reads its own samples; and on a canvas that is not
+    /// plates the process tints paint as the DeviceCMYK colour they are.
+    #[test]
+    fn a_plate_image_draws_as_a_light_one_does_in_every_other_respect() {
+        let channels = 4 + PLATE_SPOTS;
+        let (tints, alpha) = tinted(520, 390, channels, 3);
+        let source = PlateSource {
+            width: 520,
+            height: 390,
+            tints: &tints,
+            channels,
+            alpha: &alpha,
+            window: None,
+        };
+        let light = ImageSource {
+            width: 520,
+            height: 390,
+            rgb: &[],
+            alpha: &[],
+            two_colour: None,
+            window: None,
+        };
+        let t = Transform {
+            a: 4.0,
+            b: 0.0,
+            c: 0.0,
+            d: -3.0,
+            e: 1.0,
+            f: 4.0,
+        };
+        let mut pyramid = PlatePyramid::new();
+        let mut canvas = Canvas::plates(8, 8, PLATE_SPOTS, Color::WHITE).expect("under the cap");
+        draw_plate_image(
+            &mut canvas,
+            &ImageDraw::new(light, t),
+            &source,
+            &mut pyramid,
+            &mut FillScratch::new(),
+        );
+        let held = pyramid.levels();
+        assert!(held > 0, "past 128:1 the pyramid reduces");
+        let first = canvas.data.clone();
+        let mut again = Canvas::plates(8, 8, PLATE_SPOTS, Color::WHITE).expect("under the cap");
+        draw_plate_image(
+            &mut again,
+            &ImageDraw::new(light, t),
+            &source,
+            &mut pyramid,
+            &mut FillScratch::new(),
+        );
+        assert_eq!(pyramid.levels(), held, "its levels reused");
+        assert_eq!(again.data, first, "and drawn alike");
+        let fewer = PlateSource {
+            channels: 4,
+            tints: &tints[..520 * 390 * 4],
+            ..source
+        };
+        let mut reused = Canvas::plates(8, 8, PLATE_SPOTS, Color::WHITE).expect("under the cap");
+        draw_plate_image(
+            &mut reused,
+            &ImageDraw::new(light, t),
+            &fewer,
+            &mut pyramid,
+            &mut FillScratch::new(),
+        );
+        let mut fresh = Canvas::plates(8, 8, PLATE_SPOTS, Color::WHITE).expect("under the cap");
+        draw_plate_image(
+            &mut fresh,
+            &ImageDraw::new(light, t),
+            &fewer,
+            &mut PlatePyramid::new(),
+            &mut FillScratch::new(),
+        );
+        assert_eq!(
+            reused.data, fresh.data,
+            "rebuilt for four tints, not read stale"
+        );
+
+        let small = PlateSource {
+            width: 2,
+            height: 2,
+            tints: &tints[..4 * channels],
+            alpha: &[],
+            ..source
+        };
+        let unit = Transform {
+            a: 6.0,
+            b: 0.0,
+            c: 0.0,
+            d: -6.0,
+            e: 1.0,
+            f: 7.0,
+        };
+        let blank = || Canvas::plates(8, 8, PLATE_SPOTS, Color::WHITE).expect("under the cap");
+        let untouched = blank().data;
+        for (what, source, t) in [
+            (
+                "no tints",
+                PlateSource {
+                    channels: 0,
+                    ..small
+                },
+                unit,
+            ),
+            (
+                "more tints than a canvas has",
+                PlateSource {
+                    channels: MAX_PLATE_CHANNELS + 1,
+                    ..small
+                },
+                unit,
+            ),
+            (
+                "a degenerate transform",
+                small,
+                Transform {
+                    a: 0.0,
+                    d: 0.0,
+                    ..unit
+                },
+            ),
+        ] {
+            let mut canvas = blank();
+            draw_plate_image(
+                &mut canvas,
+                &ImageDraw::new(light, t),
+                &source,
+                &mut PlatePyramid::new(),
+                &mut FillScratch::new(),
+            );
+            assert_eq!(canvas.data, untouched, "{what} draws nothing");
+        }
+        let stop = || true;
+        let mut stopped = ImageDraw::new(light, unit);
+        stopped.stop = Some(&stop);
+        let mut canvas = blank();
+        draw_plate_image(
+            &mut canvas,
+            &stopped,
+            &small,
+            &mut PlatePyramid::new(),
+            &mut FillScratch::new(),
+        );
+        assert_eq!(canvas.data, untouched, "a stop draws nothing");
+
+        let short = PlateSource {
+            tints: &tints[..3 * channels],
+            ..small
+        };
+        let mut canvas = blank();
+        draw_plate_image(
+            &mut canvas,
+            &ImageDraw::new(light, unit),
+            &short,
+            &mut PlatePyramid::new(),
+            &mut FillScratch::new(),
+        );
+        let mut whole = blank();
+        draw_plate_image(
+            &mut whole,
+            &ImageDraw::new(light, unit),
+            &small,
+            &mut PlatePyramid::new(),
+            &mut FillScratch::new(),
+        );
+        // The fourth sample, the bottom-right, is missing.
+        let px = |canvas: &Canvas, x: u32, y: u32| {
+            let components = canvas.format.components();
+            let at = (y as usize) * canvas.stride + (x as usize) * components;
+            canvas.data[at..at + components].to_vec()
+        };
+        assert_eq!(
+            px(&canvas, 6, 6),
+            px(&blank(), 6, 6),
+            "the sample it lacks is skipped"
+        );
+        assert_eq!(
+            px(&canvas, 2, 2),
+            px(&whole, 2, 2),
+            "the samples it holds are drawn"
+        );
+
+        // A window of the right half holds those samples, read as the whole
+        // image's.
+        let mut right = Vec::new();
+        for row in 0..2 {
+            let start = (row * 2 + 1) * channels;
+            right.extend_from_slice(&tints[start..start + channels]);
+        }
+        let windowed = PlateSource {
+            tints: &right,
+            window: Some(SourceWindow {
+                x: 1,
+                y: 0,
+                width: 1,
+                height: 2,
+            }),
+            ..small
+        };
+        let mut canvas = blank();
+        draw_plate_image(
+            &mut canvas,
+            &ImageDraw::new(light, unit),
+            &windowed,
+            &mut PlatePyramid::new(),
+            &mut FillScratch::new(),
+        );
+        assert_eq!(px(&canvas, 5, 3), px(&whole, 5, 3), "its own sample");
+        assert_eq!(px(&canvas, 5, 5), px(&whole, 5, 5));
+
+        // On an ink canvas, the process tints as their DeviceCMYK colour.
+        let solid: Vec<u8> = [30u8, 60, 90, 120, 255, 255].repeat(4);
+        let inked = PlateSource {
+            tints: &solid,
+            ..small
+        };
+        let mut ink = Canvas::new(8, 8, PixelFormat::CmykA8, Color::WHITE);
+        draw_plate_image(
+            &mut ink,
+            &ImageDraw::new(light, unit),
+            &inked,
+            &mut PlatePyramid::new(),
+            &mut FillScratch::new(),
+        );
+        let at = 3 * ink.stride + 3 * 5;
+        assert_eq!(&ink.data[at..at + 5], &[30, 60, 90, 120, 255]);
     }
 }

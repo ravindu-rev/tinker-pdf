@@ -23,7 +23,9 @@
 //! draw. It cannot overflow a byte: coverage totals are held to 255, so the
 //! sum of `colour x coverage / 255` over a pixel's fragments is at most 255 as
 //! well. Four bytes a pixel, integers throughout, no float on the path —
-//! ruling 4.
+//! ruling 4. A run of images of tints, for a plates canvas, holds a byte for
+//! each tint and one of coverage a pixel by the same argument
+//! ([`Fragments::with_channels`]).
 //!
 //! # What it deliberately does not do
 //!
@@ -47,24 +49,46 @@ pub struct Fragments {
     width: u32,
     /// Height in pixels.
     height: u32,
-    /// Premultiplied RGBA, four bytes a pixel, row-major.
+    /// The colour channels a pixel holds before its coverage: three, red,
+    /// green and blue, for a run of light, and a tint a channel for a run of
+    /// plate images.
+    channels: usize,
+    /// Premultiplied colour then coverage, `channels + 1` bytes a pixel,
+    /// row-major.
     data: Vec<u8>,
 }
 
 impl Fragments {
-    /// An empty run over a device rectangle.
+    /// An empty run of light over a device rectangle: premultiplied RGBA, four
+    /// bytes a pixel.
     #[must_use]
     pub fn new(x0: i32, y0: i32, width: u32, height: u32) -> Fragments {
+        Fragments::with_channels(x0, y0, width, height, 3)
+    }
+
+    /// An empty run over a device rectangle holding `channels` colour
+    /// channels a pixel beside its coverage: for any count but three, a run
+    /// of plate images ([`crate::image::accumulate_plate_image`]), a tint a
+    /// colour channel of the plates canvas it reaches.
+    #[must_use]
+    pub fn with_channels(x0: i32, y0: i32, width: u32, height: u32, channels: usize) -> Fragments {
         let len = (width as usize)
             .saturating_mul(height as usize)
-            .saturating_mul(4);
+            .saturating_mul(channels.saturating_add(1));
         Fragments {
             x0,
             y0,
             width,
             height,
+            channels,
             data: vec![0; len],
         }
+    }
+
+    /// The colour channels a pixel holds beside its coverage.
+    #[must_use]
+    pub fn channels(&self) -> usize {
+        self.channels
     }
 
     /// How many pixels the run is holding, which is what a budget counts.
@@ -94,7 +118,7 @@ impl Fragments {
         }
         usize::try_from(row * i64::from(self.width) + col)
             .ok()?
-            .checked_mul(4)
+            .checked_mul(self.channels.checked_add(1)?)
     }
 
     /// Whether a draw covering `shape` would land on coverage already here.
@@ -129,7 +153,7 @@ impl Fragments {
                 let Some(index) = self.at(x, y) else {
                     continue;
                 };
-                let held = u32::from(self.data.get(index + 3).copied().unwrap_or(0));
+                let held = u32::from(self.data.get(index + self.channels).copied().unwrap_or(0));
                 if held + covered > 255 + SLACK {
                     return true;
                 }
@@ -141,6 +165,9 @@ impl Fragments {
     /// Adds one fragment at device pixel `(x, y)`: `color` covering
     /// `coverage` of the pixel.
     pub fn add(&mut self, x: i32, y: i32, color: Color, coverage: u8) {
+        if self.channels != 3 {
+            return;
+        }
         let Some(index) = self.at(x, y) else {
             return;
         };
@@ -161,6 +188,33 @@ impl Fragments {
             slot[channel] = (u32::from(slot[channel]) + added).min(255) as u8;
         }
         slot[3] = (u32::from(slot[3]) + taken).min(255) as u8;
+    }
+
+    /// Adds one fragment of tints at device pixel `(x, y)` to a run of plate
+    /// images: `tints` covering `coverage` of the pixel, each premultiplied
+    /// and added as [`Fragments::add`] adds a colour, a channel past `tints`
+    /// adding no ink. A run of light takes none.
+    pub fn add_tints(&mut self, x: i32, y: i32, tints: &[u8], coverage: u8) {
+        let channels = self.channels;
+        if channels == 3 {
+            return;
+        }
+        let Some(index) = self.at(x, y) else {
+            return;
+        };
+        let Some(slot) = self.data.get_mut(index..index + channels + 1) else {
+            return;
+        };
+        let room = 255 - u32::from(slot[channels]);
+        let taken = u32::from(coverage).min(room);
+        if taken == 0 {
+            return;
+        }
+        for (held, tint) in slot.iter_mut().zip(tints).take(channels) {
+            let added = mul255(taken, u32::from(*tint));
+            *held = (u32::from(*held) + added).min(255) as u8;
+        }
+        slot[channels] = (u32::from(slot[channels]) + taken).min(255) as u8;
     }
 
     /// Composites the whole run onto the canvas, once.
@@ -220,6 +274,10 @@ impl Fragments {
         ink: Option<[u8; 4]>,
         stop: Option<&dyn Fn() -> bool>,
     ) {
+        if self.channels != 3 {
+            self.composite_region_plates(canvas, region, alpha, blend, clip, stop);
+            return;
+        }
         // The run's alpha, read once: each pixel's level is it times the run's
         // coverage and the clip, made a level without a call to `round`.
         let opacity = Opacity::new(alpha);
@@ -273,6 +331,72 @@ impl Fragments {
                     continue;
                 };
                 canvas.blend_pixel_level(x, y, color, ink, level, blend);
+            }
+        }
+    }
+
+    /// [`Fragments::composite_region`] for a run of plate images: each
+    /// pixel's tints backed out of premultiplication and composited onto the
+    /// canvas at the run's coverage, the clip and `alpha`, every colour
+    /// channel the tint of the same index and one past the run's taking no
+    /// ink ([`Canvas::blend_tints_level`]), as a run of light composites its
+    /// colour. [`Fragments::composite_region`] and its inked twin come here
+    /// for such a run.
+    pub fn composite_region_plates(
+        &self,
+        canvas: &mut Canvas,
+        region: (i32, i32, i32, i32),
+        alpha: f64,
+        blend: BlendMode,
+        clip: Option<&Mask>,
+        stop: Option<&dyn Fn() -> bool>,
+    ) {
+        let opacity = Opacity::new(alpha);
+        let (rx0, ry0, rx1, ry1) = region;
+        if rx1 <= rx0 || ry1 <= ry0 {
+            return;
+        }
+        let (cx, cy, cw, ch) = canvas.device_rect();
+        let clamp = |value: i32, lo: i32, extent: u32| {
+            value.clamp(
+                lo,
+                lo.saturating_add(i32::try_from(extent).unwrap_or(i32::MAX)),
+            )
+        };
+        let x0 = clamp(rx0.max(self.x0), cx, cw);
+        let y0 = clamp(ry0.max(self.y0), cy, ch);
+        let x1 = clamp(rx1.min(self.x0.saturating_add(self.width as i32)), cx, cw);
+        let y1 = clamp(ry1.min(self.y0.saturating_add(self.height as i32)), cy, ch);
+        let channels = self.channels;
+        let mut tints = vec![0u8; channels];
+        for py in y0..y1 {
+            if stop.is_some_and(|stop| stop()) {
+                return;
+            }
+            for px in x0..x1 {
+                let Some(index) = self.at(px, py) else {
+                    continue;
+                };
+                let Some(slot) = self.data.get(index..index + channels + 1) else {
+                    continue;
+                };
+                let covered = u32::from(slot[channels]);
+                if covered == 0 {
+                    continue;
+                }
+                let clipped = clip.map_or(255, |mask| mask.at(px, py));
+                if clipped == 0 {
+                    continue;
+                }
+                // Back out of premultiplication, as a run of light does.
+                for (tint, held) in tints.iter_mut().zip(slot) {
+                    *tint = ((u32::from(*held) * 255 + covered / 2) / covered).min(255) as u8;
+                }
+                let level = opacity.level_two(slot[channels], clipped);
+                let Some((x, y)) = canvas.local(px, py) else {
+                    continue;
+                };
+                canvas.blend_tints_level(x, y, &tints, 255, level, blend);
             }
         }
     }

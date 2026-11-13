@@ -1131,8 +1131,26 @@ impl Canvas {
         level: u32,
         mode: BlendMode,
     ) {
+        self.blend_tints_level(x, y, ink.tints(), alpha, level, mode);
+    }
+
+    /// [`Canvas::blend_plates_level`] for a tint per colour channel handed as
+    /// bytes, `tints`, rather than as a [`PlateInk`]: a sampled image of tints'
+    /// pixel ([`crate::image::draw_plate_image`]), and a run of them's. A
+    /// channel past `tints` takes no ink; on a canvas of any other format the
+    /// first four are painted as the DeviceCMYK colour they are.
+    pub(crate) fn blend_tints_level(
+        &mut self,
+        x: u32,
+        y: u32,
+        tints: &[u8],
+        alpha: u8,
+        level: u32,
+        mode: BlendMode,
+    ) {
         if !matches!(self.format, PixelFormat::Plates { .. }) {
-            let [c, m, yellow, k] = ink.process_tints();
+            let at = |i: usize| tints.get(i).copied().unwrap_or(0);
+            let [c, m, yellow, k] = [at(0), at(1), at(2), at(3)];
             let (r, g, b) = cmyk_to_rgb(c, m, yellow, k);
             let color = Color { r, g, b, a: alpha };
             self.blend_pixel_level(x, y, color, Some([c, m, yellow, k]), level, mode);
@@ -1148,10 +1166,10 @@ impl Canvas {
         if mode.is_nonseparable() {
             self.approximated_blends = self.approximated_blends.saturating_add(1);
         }
-        // On the stack, as `blend_plate_pixel`'s: a sampled stencil reaches
-        // here once a pixel. A channel past the ink's own takes no ink.
+        // On the stack, as `blend_plate_pixel`'s: a sampled image reaches
+        // here once a pixel. A channel past the tints' own takes no ink.
         let mut source = [0u8; 4 + MAX_SPOT_PLATES];
-        for (slot, tint) in source.iter_mut().zip(ink.tints()) {
+        for (slot, tint) in source.iter_mut().zip(tints) {
             *slot = *tint;
         }
         let channels = color_channels(self.format);
