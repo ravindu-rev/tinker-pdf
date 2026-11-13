@@ -19,8 +19,7 @@ use tinker_pdf_render::{DisplayRecorder, Renderer};
 
 use crate::fonts::FontProvider;
 use crate::render_part::NotDrawn;
-use crate::resources::PageResources;
-use crate::stats::Work;
+use crate::resources::{Operation, PageResources};
 
 /// 12.5.3: the flags that keep an annotation off the page.
 const HIDDEN: i64 = 1 << 1;
@@ -51,17 +50,19 @@ impl AppearanceDevice for Renderer<'_, PageResources> {
     }
 }
 
-/// Draws every visible annotation of a page, counting the scopes each
-/// appearance builds into `work` when the render is counting.
+/// Draws every visible annotation of a page in `op`, the render's operation:
+/// each appearance's scopes read through its decoded streams, so an
+/// appearance two annotations share and a font two appearances draw are
+/// decoded once, and count into its tally when the render is counting.
 pub(crate) fn draw(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     provider: Option<&Arc<dyn FontProvider>>,
     device: &mut impl AppearanceDevice,
-    work: Option<&Arc<Work>>,
+    op: &Operation,
 ) {
-    each_appearance(doc, page, work, |appearance| {
-        draw_prepared(doc, appearance, provider, device, work);
+    each_appearance(doc, page, op, |appearance| {
+        draw_prepared(doc, appearance, provider, device, op);
     });
 }
 
@@ -78,22 +79,28 @@ pub(crate) struct Recorded {
 /// [`prepare`] and the same interpretation — only the device differs, and it
 /// is the `recorder` the page's content was recorded through, so the answers
 /// it gives carry on from where the content left them exactly as a renderer's
-/// do when it draws the annotations after the content.
+/// do when it draws the annotations after the content. The recording is `op`,
+/// the operation the page's content was recorded in.
 pub(crate) fn record(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     provider: Option<&Arc<dyn FontProvider>>,
     recorder: &mut DisplayRecorder,
+    op: &Operation,
 ) -> Vec<Recorded> {
     let mut out = Vec::new();
-    each_appearance(doc, page, None, |appearance| {
+    each_appearance(doc, page, op, |appearance| {
         // Two resource objects over one dictionary, as `draw_prepared` makes
-        // them: the interpreter's, used up here, and the renderer's, kept.
-        let resources = PageResources::from_dict(doc, appearance.resources.clone(), provider);
-        let scope = Arc::new(PageResources::from_dict(
+        // them: the interpreter's, used up here in the recording, and the
+        // renderer's, kept past it and handed to each replay bound to the
+        // replay's operation.
+        let resources =
+            PageResources::from_dict_in(doc, appearance.resources.clone(), provider, op.clone());
+        let scope = Arc::new(PageResources::from_dict_in(
             doc,
             appearance.resources.clone(),
             provider,
+            Operation::none(),
         ));
         interpret(
             &appearance.content,
@@ -110,11 +117,11 @@ pub(crate) fn record(
 }
 
 /// Every annotation of a page that draws, prepared, in `/Annots` order, each
-/// appearance's decode counted into `work` when the render is counting.
+/// appearance decoded once `op`, the render's operation.
 fn each_appearance(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
-    work: Option<&Arc<Work>>,
+    op: &Operation,
     mut each: impl FnMut(&Appearance),
 ) {
     let Ok(object) = doc.get(page.reference) else {
@@ -140,7 +147,7 @@ fn each_appearance(
         // Every reason `prepare` gives for drawing nothing is a reason a page
         // draws nothing there and says nothing: ruling 2, a page renders what
         // it can. `Page::render_annotation` is the caller that names them.
-        if let Some(Ok(appearance)) = annotation.map(|a| prepare(doc, &a, work)) {
+        if let Some(Ok(appearance)) = annotation.map(|a| prepare(doc, &a, op)) {
             each(&appearance);
         }
     }
@@ -169,12 +176,12 @@ impl Appearance {
 }
 
 /// Everything `draw_one` decided before drawing, with each reason it had for
-/// drawing nothing named. The appearance's decode counts into `work` when the
-/// render is counting.
+/// drawing nothing named. The appearance is decoded once `op`, the render's
+/// operation, and counted into its tally when the render is counting.
 pub(crate) fn prepare(
     doc: &Arc<CosDocument>,
     annotation: &Dict,
-    work: Option<&Arc<Work>>,
+    op: &Operation,
 ) -> Result<Appearance, NotDrawn> {
     let flags = annotation.get_int(doc.intern(b"F")).unwrap_or(0);
     if flags & HIDDEN != 0 || flags & NO_VIEW != 0 {
@@ -200,8 +207,9 @@ pub(crate) fn prepare(
         .ok_or(NotDrawn::NoRect)?;
 
     let form = normal_appearance(doc, annotation).ok_or(NotDrawn::NoAppearance)?;
-    let content =
-        crate::stats::decoded(doc, form, work).map_err(|_| NotDrawn::UnreadableAppearance)?;
+    let content = op
+        .decoded(doc, form)
+        .map_err(|_| NotDrawn::UnreadableAppearance)?;
     let object = doc.get(form).map_err(|_| NotDrawn::UnreadableAppearance)?;
     let form_dict = object.as_dict().ok_or(NotDrawn::UnreadableAppearance)?;
 
@@ -237,7 +245,7 @@ pub(crate) fn prepare(
             clipped.extend_from_slice(b"\nQ\n");
             clipped
         }
-        _ => content,
+        _ => Arc::unwrap_or_clone(content),
     };
 
     let resources = doc
@@ -254,32 +262,29 @@ pub(crate) fn prepare(
     })
 }
 
-/// Draws a prepared appearance through `device`, its two scopes counting into
-/// `work` when the render is counting.
+/// Draws a prepared appearance through `device`, its two scopes serving `op`,
+/// the render's operation: one decode between them of each stream they read,
+/// counted into its tally when the render is counting.
 pub(crate) fn draw_prepared(
     doc: &Arc<CosDocument>,
     appearance: &Appearance,
     provider: Option<&Arc<dyn FontProvider>>,
     device: &mut impl AppearanceDevice,
-    work: Option<&Arc<Work>>,
+    op: &Operation,
 ) {
-    let resources = PageResources::from_dict_counted(
-        doc,
-        appearance.resources.clone(),
-        provider,
-        work.cloned(),
-    );
+    let resources =
+        PageResources::from_dict_in(doc, appearance.resources.clone(), provider, op.clone());
 
     // 12.5.5: the appearance is a form XObject reached by reference, so there
     // is no name for the interpreter to announce and the caller announces it
     // instead. Both seams have to change: the device resolves images,
     // shadings and patterns, and an appearance that names one the page does
     // not define is the ordinary case, not the odd one.
-    device.push_scope(Arc::new(PageResources::from_dict_counted(
+    device.push_scope(Arc::new(PageResources::from_dict_in(
         doc,
         appearance.resources.clone(),
         provider,
-        work.cloned(),
+        op.clone(),
     )));
     interpret(
         &appearance.content,

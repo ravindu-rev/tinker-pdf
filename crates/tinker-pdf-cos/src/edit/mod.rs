@@ -300,6 +300,19 @@ impl DocumentEditor {
         }
     }
 
+    /// Whether this editor has written object `r` or deleted it, so that what
+    /// `r` is now is this editor's and no longer the file's.
+    ///
+    /// For a pass that keeps what it decodes until it ends: a stream this
+    /// answers `false` for is the file's, so a decode of it the pass kept —
+    /// through [`DocumentEditor::view`], whose untouched objects are the
+    /// file's — is what [`DocumentEditor::stream_bytes`] reads now, and a
+    /// stream it answers `true` for is read from the editor.
+    #[must_use]
+    pub fn has_changed(&self, r: ObjRef) -> bool {
+        self.overlay.contains_key(&r.num) || self.deleted.contains(&r.num)
+    }
+
     /// Whether anything has been changed.
     #[must_use]
     pub fn is_dirty(&self) -> bool {

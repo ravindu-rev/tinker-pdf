@@ -251,9 +251,9 @@ can refuse, and a tally is only added to.
 | The renderer | its own plain counts, handed back by `finish_counted`, `finish`'s sibling, and added by the door | built |
 | Text and image extraction | as a render: the content decode and the `PageResources` the door builds (`lib.rs:2533-2540`, `crates/tinker-pdf/src/images.rs:328-339`) | built |
 | Validation | `pdfa::validate`, `pdfua::validate` and `pdfx::validate` take it, so their page walks (`crates/tinker-pdf/src/pdfa/content.rs:90`) and their decodes count | built |
-| An editor | `DocumentEditor` holds it from `count_work` until it is dropped. Its own page and object operations count into it in cos — `page_refs`'s walk (`crates/tinker-pdf-cos/src/edit/page_ops.rs:16-24`), `import_page`'s `pages::collect(source)` (`:185`), its overlay's decodes (`edit/overlay.rs:48`) — and the facade's passes over it count into it too: a save's image and font passes (`crates/tinker-pdf/src/write.rs:337`; `subset.rs:553` builds a scope a page), a redaction. A rolled-back transaction keeps its counts: the work was done | built |
+| An editor | `DocumentEditor` holds it from `count_work` until it is dropped. Its own page and object operations count into it in cos — `page_refs`'s walk (`crates/tinker-pdf-cos/src/edit/page_ops.rs:16-24`), `import_page`'s `pages::collect(source)` (`:185`), its overlay's decodes (`edit/overlay.rs:48`) — and the facade's passes over it count into it too: a save's image and font passes (`crates/tinker-pdf/src/write.rs:337`; `subset::collect` builds a scope a page), a redaction. A rolled-back transaction keeps its counts: the work was done | built |
 | A save | the editor's tally if it is counting, and one of the save's own if not; the serializer counts into whichever the save carries | built |
-| A stream decode | `CosDocument::stream_decoded` and `stream_image_input` have siblings that take `Option<&Work>`, `stream_decoded_counted` and `stream_image_input_counted`, and the uncounted ones delegate with `None`, so no caller outside an operation changes; `pages::content_bytes_counted` and `xmp_metadata_counted` are the content's and the catalog packet's. `Counting` is the counting view — a `Resolve` over any `Resolve` and a `&Work`, whose `stream_decoded` runs the inner one's and counts it — so code written against the trait counts when handed the view, as a font's CMap reads are (`font::from_resources_in`; `read_cmap`). An editor counts its own: `stream_bytes` into its tally, `stream_bytes_counted` into the one a pass carries, and the serializer's deduplication into the save's through `save_counted`. A stream the editor holds unfiltered runs no chain and counts nothing; what a document decodes for itself, once — object streams, cross-reference streams, hint tables — is no operation's | built |
+| A stream decode | `CosDocument::stream_decoded` and `stream_image_input` have siblings that take `Option<&Work>`, `stream_decoded_counted` and `stream_image_input_counted`, and the uncounted ones delegate with `None`, so no caller outside an operation changes; `pages::content_bytes_counted` and `xmp_metadata_counted` are the content's and the catalog packet's. `Counting` is the counting view — a `Resolve` over any `Resolve` and a `&Work`, whose `stream_decoded` runs the inner one's and counts it — so code written against the trait counts when handed the view, as a font's CMap reads are (`font::read_in`; `read_cmap`), through the `Cached` view over it that decodes each once an operation (P-03). An editor counts its own: `stream_bytes` into its tally, `stream_bytes_counted` into the one a pass carries, and the serializer's deduplication into the save's through `save_counted`. A stream the editor holds unfiltered runs no chain and counts nothing; what a document decodes for itself, once — object streams, cross-reference streams, hint tables — is no operation's | built |
 
 **Threads.** One `Work` per operation, never per document. Counts sum, so an
 operation's own workers (P-15) add to one total in any order. Hits and misses
@@ -321,12 +321,18 @@ PDF/A-2b, which is the least that gives text, a render, subsetting and
 redaction glyphs, a rewrite, a rotation, a split and a merge pages, and a
 validation a claim to judge; a 5 600-glyph page of 80 distinct glyphs for A4,
 whose every glyph origin falls on a whole pixel at 72 dpi, so that its
-distinct (glyph, scale, phase) keys at that scale are its 80 glyphs; and four
+distinct (glyph, scale, phase) keys at that scale are its 80 glyphs; four
 documents of 100 pages to merge for A6, the same generator's, whose faces are
 one encoded stream and whose pages' contents all differ, so that a merge's
 deduplication meets both halves of its mechanism: the copies of the face the
 imports make, one encoding, and encodings that all differ under the dictionary
-the pages' contents share with the face. Each is written in memory, object
+the pages' contents share with the face; and, for A5, a document of 100 pages
+each drawing one embedded face with a `/ToUnicode`, which a save's every page
+reads, and a page showing one form three times and one Type 3 glyph fifty
+times, whose form names the page's face in its own resources and draws an
+image in the ICC profile an image of the page's shares, every stream deflated,
+so that a render, a text extraction and an image extraction each meet a
+stream that several of their scopes, or several draws, read. Each is written in memory, object
 by object, by the generator itself, so a tree's shape is the generator's
 statement rather than the writer's choice, and each has a test that holds it
 to its shape. Pages carry the least content that exercises their leg, with
@@ -347,7 +353,7 @@ a source with a test that runs, two that are ignored, a function that is no
 test and a name that is absent, so a reading gone blind cannot pass the
 roster. An owning row lands its entry in the commit that fixes the
 cause, flipping it from owed to landed. A guard that holds at the tip — A2's
-subset, validation and split legs (`crates/tinker-pdf/src/subset.rs:552`,
+subset, validation and split legs (`subset::collect` in `crates/tinker-pdf/src/subset.rs`,
 `crates/tinker-pdf/src/pdfa/content.rs:90`) and A10's flat entries — lands
 green. An entry a later row adds already landed, as P-18.5 adds A2's book, is
 never owed.
@@ -405,16 +411,10 @@ an operation.
 operation as the CLI runs it over a whole document — the pages counted, which
 builds the page index (P-01), then every page looked up by its index and
 read — over A2's documents of 1 000 and 4 000 pages, each written and opened
-outside the count, and prints its allocations a page at both sizes. The
-default and `bundled-fonts` builds count alike:
-
-| Allocations a page | 1 000 pages | 4 000 pages | 4 000 over 1 000 |
-| --- | ---: | ---: | ---: |
-| page lookup | 30.1 | 30.0 | 1.00 |
-| text | 350.2 | 359.1 | 1.03 |
-| render-all at 36 dpi | 709.7 | 735.7 | 1.04 |
-| text, beyond its lookup | 320.1 | 329.0 | 1.03 |
-| render-all at 36 dpi, beyond its lookup | 679.6 | 705.7 | 1.04 |
+outside the count, and prints its allocations a page at both sizes, their
+ratio, and what text and the render allocate a page beyond their lookup; the
+figures are what it prints (ruling 16), and the default and `bundled-fonts`
+builds count alike.
 
 A count a page at 4 000 pages within 1.1 times the count at 1 000 is flat,
 and A10's three guards hold each operation to it. A lookup copies one entry
@@ -478,10 +478,10 @@ lands in the step named, in
 | A2 | a 1 000-chapter book against 100 chapters, beyond the exit's nine | `a2_a_thousand_chapter_book_costs_at_most_eleven_times_a_hundred` | P-18, P-18.5, entered landed |
 | A3 | font dictionaries resolved per page ≤ distinct `/Font` entries used | `a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses` | P-02, P-02.3, landed |
 | A4 | glyph masks rasterised ≤ distinct (font, glyph, scale, phase) keys, hit ratio ≥ 98 % on a 5 600-glyph page | `a4_glyph_masks_rasterised_are_at_most_their_distinct_keys` | P-06, P-06.3 |
-| A5 | inflate calls per stream ≤ 1 per operation: a save | `a5_a_save_decodes_each_stream_at_most_once` | P-03, P-03.2 |
-| A5 | a render | `a5_a_render_decodes_each_stream_at_most_once` | P-03, P-03.2 |
-| A5 | a text extraction | `a5_text_decodes_each_stream_at_most_once` | P-03, P-03.2 |
-| A5 | image extraction, the decode door | `a5_image_extraction_decodes_each_stream_at_most_once` | P-03, P-03.2 |
+| A5 | inflate calls per stream ≤ 1 per operation: a save | `a5_a_save_decodes_each_stream_at_most_once` | P-03, P-03.2, landed |
+| A5 | a render | `a5_a_render_decodes_each_stream_at_most_once` | P-03, P-03.2, landed |
+| A5 | a text extraction | `a5_text_decodes_each_stream_at_most_once` | P-03, P-03.2, landed |
+| A5 | image extraction, the decode door | `a5_image_extraction_decodes_each_stream_at_most_once` | P-03, P-03.2, landed |
 | A5 | a merge | `a5_a_merge_decodes_each_stream_at_most_once` | P-03, P-03.4, landed |
 | A6 | merge deduplication decodes no byte-identical copy, and each differing encoding under one dictionary once a save (ruling 23) | `a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once` | P-03, P-03.6, landed |
 | A7 | IDCT output ≤ 4 × drawn pixels for a quarter-scale draw | `a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel`, in `crates/tinker-pdf/tests/images.rs` | P-09, P-09.8 |
@@ -2617,28 +2617,36 @@ count.
 
 | Stream | Where it is decoded | Operation | Decodes at the tip | Step |
 | --- | --- | --- | --- | --- |
-| A font program | `PageResources::program` keeps it per scope (`Caches::programs`, `crates/tinker-pdf/src/resources.rs`); `program_for` decodes it for each scope that draws a glyph of it | a subset save over *n* pages drawing one face; a render or text of a page whose forms draw the page's fonts | one a scope: *n* over the save's pages, and once more when the cut reads it | P-03.2 |
-| A font's CMaps (`/ToUnicode`, an embedded `/Encoding` CMap and its `usecmap` parents) | `read_cmap` (`crates/tinker-pdf-cos/src/font.rs`), for each font each scope reads | text or a render of a page whose forms use its fonts; a subset save, a scope a page | one a scope | P-03.2 |
-| A form's content | `PageResources::form_from` (`resources.rs`), on every `Do`, and for a soft mask's `/G` once for each name a scope's `gs` sets it by (`Caches::states`) | a render or text of a page showing one form *k* times | *k* | P-03.2 |
-| A Type 3 glyph procedure | `PageResources::type3_glyph` (`resources.rs`), for every glyph shown | a render of a page showing one Type 3 glyph *g* times | *g*, which P-02.4 leaves here | P-03.2 |
+| A font program | `PageResources::program` keeps it per scope (`Caches::programs`, `crates/tinker-pdf/src/resources.rs`); `program_for` decodes it for each scope that draws a glyph of it | a subset save over *n* pages drawing one face; a render or text of a page whose forms draw the page's fonts | one a scope: *n* over the save's pages, and once more when the cut reads it | P-03.2, landed |
+| A font's CMaps (`/ToUnicode`, an embedded `/Encoding` CMap and its `usecmap` parents) | `read_cmap` (`crates/tinker-pdf-cos/src/font.rs`), for each font each scope reads | text or a render of a page whose forms use its fonts; a subset save, a scope a page | one a scope | P-03.2, landed |
+| A form's content | `PageResources::form_from` (`resources.rs`), on every `Do`, and for a soft mask's `/G` once for each name a scope's `gs` sets it by (`Caches::states`) | a render or text of a page showing one form *k* times | *k* | P-03.2, landed |
+| A Type 3 glyph procedure | `PageResources::type3_glyph` (`resources.rs`), for every glyph shown | a render of a page showing one Type 3 glyph *g* times | *g*, which P-02.4 leaves here | P-03.2, landed |
 | A deduplication candidate | `dedup::deduplicate` (`crates/tinker-pdf-cos/src/dedup.rs`): once for its digest, and once more for each comparison in a bucket of two or more, every round | a rewrite with `deduplicate_streams`, which every merge is | two a round in a shared bucket | P-03.4 |
 
 #### The cache: who holds it, and its key
 
-One cache an operation, read through a `Resolve` whose `stream_decoded`
-consults it before it runs a chain and keeps what it ran. Every reader of the
-operation takes that `Resolve`: `PageResources`, its nested form and pattern
-scopes, and the font reader they call (`cos_font::from_resources_in`), so a
-CMap or a program a nested scope reads is the one the page's scope read.
+One cache an operation, `tinker_pdf_cos::DecodedStreams`, which runs a chain
+on a stream's first read and keeps what it ran, read through a `Resolve`
+whose `stream_decoded` consults it (`tinker_pdf_cos::Cached`). The facade's
+`resources::Operation` carries it with the operation's tally into every scope
+the operation reads: `PageResources`, its nested form and pattern scopes, and
+the font reader they call (`cos_font::read_in`, handed the `Cached` view over
+the counting one), so a CMap or a program a nested scope reads is the one the
+page's scope read.
 
 - **A render, a text extraction and an image extraction** hold one for their
-  page, made beside the operation's tally and dropped when the door returns.
-  A retained page's resources, shared by its renders, never hold one: two
-  renders are two operations.
+  page, made beside the operation's tally and dropped when the door returns;
+  `Page::render_form` reads the form it is asked for in the render's, and an
+  annotation's two scopes read in the render that draws it. A retained page's
+  resources, shared by its renders, never hold one: two renders are two
+  operations. A form's scope a scope's cache keeps holds none either, and is
+  handed to each asker bound to the asker's (`PageResources::bind`).
 - **A save** holds one across `subset::collect`'s pages and
-  `subset::rewrite`'s reads of the same programs, in place of the per-scope
-  `Caches::programs`, whose key is a resource name that two pages may give to
-  two fonts.
+  `subset::rewrite`'s reads of the same programs. A scope's
+  `Caches::programs` still keeps each of its fonts' programs by the id its
+  glyphs carry, so that no glyph asks again, and no other scope shares it,
+  since its key is a resource name that two pages may give to two fonts; what
+  it keeps is the operation's decode, by the stream.
 - **A merge** is imports and a save: an import copies stored bytes and
   decodes nothing, and the save's deduplication keeps its own map of what it
   decoded (P-03.4), since it reads the object set it is about to write and
@@ -2647,17 +2655,23 @@ CMap or a program a nested scope reads is the one the page's scope read.
 **The key is the stream's reference in the document the operation reads.**
 A save's passes read the editor's view, whose numbers are the editor's, so a
 stream the editor replaced is the editor's stream under its number and is
-never served from a decode of the file's. Keyed by stream, never by region
-or by page, so a tile and its page hit alike (ruling 5).
+never served from a decode of the file's. The cut reads through the editor,
+and a stream the editor has written or deleted
+(`DocumentEditor::has_changed`) — a program the cut replaced, a procedure it
+emptied — is read from the editor, never from the cache; any other is the
+file's, which is what the view's untouched objects are. Keyed by stream, never
+by region or by page, so a tile and its page hit alike (ruling 5).
 
 **What it holds**: each stream's decoded bytes, behind an `Arc` so a hit
-hands out a reference rather than a copy, and nothing else. The first decode
-raises the chain's warnings and a hit raises none, as a second read of a
-cached object raises none. An image's samples are not held: the scope's
-image cache already keeps each decoded image, and holding its samples too
-would double the image in the peak MS-05 bands. **Until when**: the
-operation's end. The bytes held are at most the decoded size of every stream
-the operation reads; a byte budget is P-16's.
+hands out a reference rather than a copy, or its chain's refusal, and nothing
+else. The first decode raises the chain's warnings and a hit raises none, as a
+second read of a cached object raises none. An image's samples are not held:
+the scope's image cache already keeps each decoded image, and holding its
+samples too would double the image in the peak MS-05 bands. Nor is a page's
+own content, which the door decodes once, before any scope exists, and which
+a save's walk would otherwise hold for every page until its end. **Until
+when**: the operation's end. The bytes held are at most the decoded size of
+every stream the operation reads; a byte budget is P-16's.
 
 #### Deduplication: the bucket key, and the confirmation
 
@@ -2731,9 +2745,12 @@ merged undecoded. Regenerate with `cargo test -p tinker-pdf-cos --lib h137 --
 A5 reads `most_decodes_of_one_stream`, the most runs of one stream's filter
 chain in the operation, from MS-01's per-stream decode counts on each door,
 and holds it to one: a save over a 100-page document drawing one embedded
-face with a `/ToUnicode` on every page; a render and a text extraction of a
-page showing one form three times and one Type 3 glyph fifty times; an image
-extraction through the decode door; and a merge's save (P-03.4). A6 reads
+face with a `/ToUnicode` on every page; a render, a text extraction and an
+image extraction through the decode door of a page showing one form three
+times and one Type 3 glyph fifty times; and a merge's save (P-03.4). Each leg
+but the merge's holds `streams_decoded` and `bytes_decoded` too, at the
+streams its input holds and their decoded lengths, derived from the
+generator. A6 reads
 `streams_decoded`, `most_decodes_of_one_stream` and `bytes_decoded` on the
 save of a merge of the guard suite's four 100-page A6 documents, whose faces
 are one encoded stream and whose pages' contents all differ, and holds them to
@@ -2784,7 +2801,7 @@ compares decoded.
 
 | Risk | Mitigation |
 | --- | --- |
-| The cache serves a stream the editor replaced | Keyed by reference in the document the operation reads, which for a save is the editor's view |
+| The cache serves a stream the editor replaced | Keyed by reference in the document the operation reads, which for a save is the editor's view; the cut reads a stream the editor has written or deleted from the editor (`DocumentEditor::has_changed`) |
 | A hit hides a warning a caller expects | The miss raises the chain's warnings, as a cached object's first read does |
 | The cache raises an operation's peak | An image's samples are not held, and the operation drops it when it returns; MS-05's bands hold the cases it touches |
 | A hash collision merges two different streams | The hash only buckets; equality is decided by bytes |

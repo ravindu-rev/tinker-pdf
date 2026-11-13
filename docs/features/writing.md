@@ -349,11 +349,13 @@ save counts its passes: the font pass's walk of the page tree, the fonts each
 page's scope reads, each glyph's font-dictionary lookup, each glyph it selects
 in the program of a font that is an object and each form's scope; the image
 pass's walk, which it makes only to find placements for `max_ppi`; and every
-stream they decode — the content each walk reads, a font's program at each
-page's first glyph and once more to cut it, and each image's samples the image
-pass weighs — and each stream the serializer decodes to compare when a
-rewrite deduplicates streams. A stream the editor holds unfiltered, an
-import's copy, is handed back as it is and runs no chain.
+stream they decode — the content each walk reads, and once the font pass each
+stream its scopes read, a font's program and CMaps at the first page that
+reads them and a form, a procedure or a cell however many pages draw it, the
+cut reading each program from the walk's decode ([editing](editing.md)), and
+each image's samples the image pass weighs — and each stream the serializer
+decodes to compare when a rewrite deduplicates streams. A stream the editor
+holds unfiltered, an import's copy, is handed back as it is and runs no chain.
 `DocumentEditor::count_work()` makes an editor hold one tally from then until
 it is dropped, which both passes count into whether or not the save was asked,
 and a save asked on that editor reports all of it — so a merge, which is pages

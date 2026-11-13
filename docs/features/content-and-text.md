@@ -558,15 +558,21 @@ fonts the page's scope reads, once for each name its content selects a font
 by, the colour spaces and graphics states it reads, once for each name its
 content selects one by, and the functions they read from objects of their
 own, once each, each form's scope the interpreter asks for, and
-the streams decoded — the content, and a form's at each `Do` — over a scope
-with no font provider, so a build's bundled faces change nothing.
+the streams decoded — the content, and each stream the page's scopes read,
+once the extraction: a form's however often it is drawn, a Type 3 glyph's
+procedure however often it is shown, a font's CMaps whichever scope reads the
+font first, since every scope of one extraction reads through the decoded
+streams the extraction keeps until it returns (as a render's do,
+[rendering](rendering.md)) — over a scope with no font provider, so a build's
+bundled faces change nothing.
 `Page::images_counted()` returns `Page::images()`'s list with the same:
 `images_decoded` is one decoder run for each entry listed, an image's masks
 part of its decode, and one for each inline image, whose data is the
 content's; a form's scope is asked for twice, by the interpreter and by the
-extraction at the form's start; and each listed image's samples, and its soft
-mask's, are decoded once. Nothing is drawn, so no glyph is shown, no outline
-is read and no program is decoded. Each is a
+extraction at the form's start; each listed image's samples, and its soft
+mask's, are decoded once; and an ICC profile or a lookup table two listed
+images share is decoded once. Nothing is drawn, so no glyph is shown, no
+outline is read and no program is decoded. Each is a
 counted sibling rather than a flag because `TextOptions` is written out whole
 by its callers and `Page::images` takes nothing to ask with; the design is in
 [performance](../design/performance.md).

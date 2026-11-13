@@ -21,7 +21,13 @@ filled and then read back returns the filled value, not the saved one);
 `put`, `put_stream` and `delete` write; `intern` turns bytes into a `Name`
 through the document's name table. `stream_bytes` reads a stream as the
 editor has it, decoded — including a stream copied in by `import_page`,
-which keeps the file's `/Filter`.
+which keeps the file's `/Filter`. `has_changed(r)` says whether the editor has
+written or deleted `r`, so that what it is now is the editor's: a pass that
+keeps what it decoded until it ends — the font pass, below — reads a stream it
+answers `true` for from the editor and any other from what it kept, through
+the operation's `DecodedStreams`, which decodes each stream once and is read
+through a `Resolve` of its own, the `Cached` view, by code written against
+the trait.
 
 **Every read of the editor's own state goes through the overlay.** The
 editor implements `Resolve` — the trait `CosDocument` implements too, with
@@ -643,6 +649,19 @@ would take the other's glyphs away, so every font that names a given stream is
 found first, their glyph sets unioned, and the stream left whole if any one of
 those fonts is one this pass will not bound.
 
+**Each stream is decoded once a pass.** The walk and the cut are one
+operation: every page's scope, and every form, cell, group and appearance
+scope under it, reads each stream through the pass's decoded streams, keyed
+by the stream's reference in the view, so a program every page draws and its
+CMaps, a form, a Type 3 procedure, a tiling cell and an appearance shared by
+many annotations are decoded by the first page that reads them, and the cut
+reads each program, and each procedure it measures, from what the walk
+decoded. A stream the editor has itself written or deleted
+(`DocumentEditor::has_changed`) — a program the cut has replaced, a procedure
+it has emptied — is read from the editor and never from what was decoded; any
+other is the file's, which is what the view's untouched objects are. The
+decoded streams go when the pass returns.
+
 ## API
 
 ```rust
@@ -666,8 +685,9 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 ```
 
 `DocumentEditor` (facade re-export of `tinker_pdf_cos::DocumentEditor`):
-`document()`, `is_dirty()`, `allocate()`, `get()`, `put()`, `put_stream()`,
-`delete()`, `intern()`, `stream_bytes()`, `catalog()`, `update_catalog()`,
+`document()`, `is_dirty()`, `has_changed()`, `allocate()`, `get()`, `put()`,
+`put_stream()`, `delete()`, `intern()`, `stream_bytes()`, `catalog()`,
+`update_catalog()`,
 `add_name_tree()`, `add_number_tree()`, `add_named_destination()`,
 `set_layer_visible()`,
 `set_trailer_entry()`, `set_info()`,

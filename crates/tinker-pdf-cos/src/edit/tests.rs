@@ -511,6 +511,43 @@ fn a_deleted_object_reads_as_null_afterwards() {
     );
 }
 
+/// An object is changed once the editor writes it or deletes it, and a page's
+/// content the editor has not touched is still the file's: what
+/// `stream_bytes` reads for it is the file's decode.
+#[test]
+fn an_object_is_changed_once_written_or_deleted() {
+    let doc = document(2);
+    let first = pages::collect(&doc)[0].clone();
+    let content = pages::contents(&doc, &first)[0];
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    assert!(!editor.has_changed(content), "nothing is written yet");
+    assert_eq!(
+        editor.stream_bytes(content),
+        doc.stream_decoded(content).ok(),
+        "an untouched stream is the file's"
+    );
+
+    let written = editor.allocate();
+    assert!(!editor.has_changed(written), "allocated, not written");
+    editor.put(written, Object::Int(5));
+    assert!(editor.has_changed(written));
+
+    editor.put_stream(
+        content,
+        StreamData {
+            dict: Dict::new(),
+            data: b"0 0 m".to_vec(),
+        },
+    );
+    assert!(editor.has_changed(content));
+    assert_eq!(editor.stream_bytes(content).as_deref(), Some(&b"0 0 m"[..]));
+
+    let other = pages::contents(&doc, &pages::collect(&doc)[1])[0];
+    editor.delete(other);
+    assert!(editor.has_changed(other), "a deletion is a change");
+    assert_eq!(editor.stream_bytes(other), None);
+}
+
 #[test]
 fn a_rewrite_carries_everything_not_only_the_changes() {
     let mut editor = DocumentEditor::new(document(2));

@@ -887,11 +887,11 @@ fn widths(doc: &Arc<CosDocument>, work: Option<&Arc<Work>>, out: &mut Vec<Raw>) 
             drawn.insert(
                 reference,
                 Drawn {
-                    scope: crate::resources::PageResources::from_dict_counted(
+                    scope: crate::resources::PageResources::from_dict_in(
                         doc,
                         resources.clone(),
                         None,
-                        work.cloned(),
+                        crate::resources::Operation::new(work.cloned()),
                     ),
                     name: name.to_vec(),
                     codes: BTreeSet::new(),

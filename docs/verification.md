@@ -1427,17 +1427,21 @@ live, and it holds what they stand on.
   `guard_support/mod.rs`, which counts each thread's allocations apart, and
   `allocations_per_page_by_operation` prints what page lookup, text and a
   render at 36 dpi allocate a page over every page of a thousand and of four
-  thousand. The table it prints is the one
-  [performance](design/performance.md) commits, and A10's roster entries
-  follow it.
+  thousand, and their ratios; the figures are what it prints, and A10's
+  roster entries follow it ([performance](design/performance.md) states the
+  rule they are held to).
 - **The generators**, each held to its shape by a test of its own: a balanced
   tree of ten thousand pages, ten kids a node over four levels; documents of
   a thousand and four thousand pages, a line of text each, for comparing one
-  operation at two sizes; a page of 5 600 glyphs of 80 distinct codes;
-  four documents of a hundred pages to merge; and two A4 pages for the PNG
-  path, seventy lines of text and one. Each is written object by
-  object in memory, and every glyph is drawn in an embedded face, so both
-  builds count alike and nothing is read from disk.
+  operation at two sizes; a page of 5 600 glyphs of 80 distinct codes; four
+  documents of a hundred pages to merge; two A4 pages for the PNG path,
+  seventy lines of text and one; a hundred pages each drawing one embedded
+  face with a `/ToUnicode`, to save; and a page showing one form three times
+  and one Type 3 glyph fifty times, whose form draws the page's face and an
+  image in the profile an image of the page's shares, to render, extract text
+  from and list the images of. Each is written object by object in memory,
+  and every glyph is drawn in an embedded face, so both builds count alike and
+  nothing is read from disk.
 - **The pins**: `the_tally_counts_the_same_on_every_target` holds a render's,
   a text extraction's, a save's and a page lookup's counts over one fixed page
   to committed values — only the counts the page decides, never how a cache

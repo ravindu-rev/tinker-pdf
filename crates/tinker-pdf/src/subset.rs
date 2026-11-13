@@ -239,7 +239,7 @@ use tinker_pdf_cos::{
     StreamData,
 };
 
-use crate::resources::PageResources;
+use crate::resources::{Operation, PageResources};
 use crate::stats::Work;
 
 /// How many objects the font sweep will look at.
@@ -470,11 +470,21 @@ impl SubsetReport {
 /// in the file where anyone scanning it finds them — the same caveat
 /// [`crate::redact`] carries, for the same reason.
 ///
+/// **Each stream is decoded once a pass.** The walk and the cut are one
+/// operation, whose decoded streams every scope of the walk reads through,
+/// keyed by the stream's reference in the view: a program every page draws,
+/// its CMaps, a form, a Type 3 procedure, a tiling cell and an appearance are
+/// decoded by the first page that reads them, and the cut reads each program
+/// the walk read from what the walk decoded. A stream the editor has itself
+/// written or deleted ([`DocumentEditor::has_changed`]) — a program this pass
+/// has cut, a procedure it has emptied — is read from the editor, never from
+/// what was decoded.
+///
 /// On an editor [`DocumentEditor::count_work`] asked to count, the pass counts
 /// into its tally: the page tree's walk, the font dictionaries and forms'
 /// scopes each page's scope reads, and every stream it decodes — the content
 /// it walks, each program its scopes read glyphs from, and each program it
-/// cuts.
+/// cuts that the walk did not read.
 pub fn apply(editor: &mut DocumentEditor) -> SubsetReport {
     let work = editor.work().cloned();
     apply_counting(editor, work.as_ref())
@@ -487,17 +497,33 @@ pub(crate) fn apply_counting(
     editor: &mut DocumentEditor,
     work: Option<&Arc<Work>>,
 ) -> SubsetReport {
+    let op = Operation::new(work.cloned());
     // Everything the walk reads, it reads from the view and nothing else: the
     // view's names are its own table's, and a name from it looked up in a
     // dictionary the editor holds would find nothing (or the wrong thing).
     // What crosses back is object numbers and glyph ids, which the view
-    // shares with the editor by construction.
+    // shares with the editor by construction — and so are the streams the
+    // walk decoded, which the view keys by the editor's numbers.
     let usage = match editor.view() {
-        Ok(view) => collect(&view, work),
+        Ok(view) => collect(&view, &op),
         Err(_) => Usage::default(),
     };
     let doc = editor.shared_document();
-    rewrite(editor, &doc, &usage, work.map(|work| &**work))
+    rewrite(editor, &doc, &usage, &op)
+}
+
+/// A stream's bytes as the editor now has them, read once the pass: one the
+/// editor has written or deleted is the editor's, read from it and never from
+/// what the walk decoded; any other is the file's, read through the pass's
+/// decoded streams, which the walk filled through the view, whose untouched
+/// objects are the file's.
+fn bytes_of(editor: &DocumentEditor, r: ObjRef, op: &Operation) -> Option<Arc<Vec<u8>>> {
+    if editor.has_changed(r) {
+        return editor
+            .stream_bytes_counted(r, op.work().map(|work| &**work))
+            .map(Arc::new);
+    }
+    op.decoded(editor.document(), r).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -563,25 +589,27 @@ impl Usage {
 /// Walks every content stream the document draws and records what it showed.
 ///
 /// `doc` is the editor's view ([`apply`]), so every page, stream and
-/// resource here is the editor's. Every scope counts into `work` when the
-/// save is counting, and so does the walk of the page tree.
-fn collect(doc: &Arc<CosDocument>, work: Option<&Arc<Work>>) -> Usage {
+/// resource here is the editor's. Every scope serves `op`, the pass: it reads
+/// each stream through the pass's decoded streams, so a stream two pages read
+/// is decoded once, and counts into its tally when the save is counting, as
+/// does the walk of the page tree.
+fn collect(doc: &Arc<CosDocument>, op: &Operation) -> Usage {
     let mut usage = Usage::default();
 
-    for page in crate::stats::pages(doc, work) {
-        let resources = Arc::new(PageResources::new_counted(doc, &page, None, work.cloned()));
-        let content = crate::stats::content(doc, &page, work);
+    for page in crate::stats::pages(doc, op.work()) {
+        let resources = Arc::new(PageResources::new_in(doc, &page, None, op.clone()));
+        let content = crate::stats::content(doc, &page, op.work());
         walk(&mut usage, doc, &content, resources);
 
         for appearance in appearances_of(doc, page.reference) {
-            let Ok(content) = crate::stats::decoded(doc, appearance.stream, work) else {
+            let Ok(content) = op.decoded(doc, appearance.stream) else {
                 continue;
             };
-            let resources = Arc::new(PageResources::from_dict_counted(
+            let resources = Arc::new(PageResources::from_dict_in(
                 doc,
                 appearance.resources,
                 None,
-                work.cloned(),
+                op.clone(),
             ));
             walk(&mut usage, doc, &content, resources);
         }
@@ -625,7 +653,7 @@ fn walk(usage: &mut Usage, doc: &CosDocument, content: &[u8], root: Arc<PageReso
         let Some((stream, scope)) = next else {
             break;
         };
-        let Ok(content) = crate::stats::decoded(doc, stream, scope.work()) else {
+        let Ok(content) = scope.decoded(stream) else {
             continue;
         };
         if let Ok(mut unrun) = unrun.lock() {
@@ -728,13 +756,15 @@ fn walk_one(
 /// One per [`walk`], and each stream is walked once per scope: a cell drawn
 /// at a thousand tiles, or painted with from a thousand forms in one scope,
 /// is one walk, and a cell that paints with itself is not walked again.
-/// Every scope a key names by address is held until the walk ends, so no
-/// address is reused for another scope while it could match.
+/// A scope is told by [`PageResources::scope_id`], which a form's kept scope
+/// shares with every binding of it the pass's `Do`s are handed; every scope a
+/// key names is held until the walk ends, so no identity is reused for
+/// another scope while it could match.
 #[derive(Default)]
 struct Unrun {
     /// Streams to walk, and the scope each is walked in.
     queue: VecDeque<(ObjRef, Arc<PageResources>)>,
-    /// What has been queued: the stream's number, and the scope's address —
+    /// What has been queued: the stream's number, and the scope's identity —
     /// or `usize::MAX` for the stream's own `/Resources`, which is one scope
     /// however often it is built.
     queued: HashSet<(u32, usize)>,
@@ -743,11 +773,7 @@ struct Unrun {
 
 impl Unrun {
     fn push(&mut self, stream: ObjRef, scope: Arc<PageResources>, own: bool) {
-        let at = if own {
-            usize::MAX
-        } else {
-            Arc::as_ptr(&scope) as usize
-        };
+        let at = if own { usize::MAX } else { scope.scope_id() };
         if self.queued.insert((stream.num, at)) {
             self.held.push(Arc::clone(&scope));
             self.queue.push_back((stream, scope));
@@ -1250,7 +1276,7 @@ fn rewrite(
     editor: &mut DocumentEditor,
     doc: &Arc<CosDocument>,
     usage: &Usage,
-    work: Option<&Work>,
+    op: &Operation,
 ) -> SubsetReport {
     let mut jobs: BTreeMap<ObjRef, Job> = BTreeMap::new();
     for site in sweep(editor, doc) {
@@ -1286,7 +1312,7 @@ fn rewrite(
                 job.refused.get_or_insert(UntouchedReason::NotAnObject);
             }
             None => {
-                let Some(bytes) = editor.stream_bytes_counted(*program, work) else {
+                let Some(bytes) = bytes_of(editor, *program, op) else {
                     continue;
                 };
                 report.untouched.push(Untouched {
@@ -1308,7 +1334,7 @@ fn rewrite(
         .collect();
 
     for (program, job) in jobs {
-        let Some(bytes) = editor.stream_bytes_counted(program, work) else {
+        let Some(bytes) = bytes_of(editor, program, op) else {
             continue;
         };
         let base_font = job
@@ -1352,10 +1378,8 @@ fn rewrite(
             glyphs: job.glyphs.len(),
         });
     }
-    report
-        .untouched
-        .extend(orphans(editor, doc, &covered, work));
-    type3(editor, doc, usage, &mut report, work);
+    report.untouched.extend(orphans(editor, doc, &covered, op));
+    type3(editor, doc, usage, &mut report, op);
 
     // Object order, as every field promises. The jobs are already in it — a
     // `BTreeMap` keyed by the program — but the directly-written fonts above
@@ -1400,7 +1424,7 @@ fn type3(
     doc: &Arc<CosDocument>,
     usage: &Usage,
     report: &mut SubsetReport,
-    work: Option<&Work>,
+    op: &Operation,
 ) {
     let numbers: Vec<u32> = doc
         .xref()
@@ -1473,10 +1497,10 @@ fn type3(
         keep.extend(streams.iter().map(|s| s.num));
     }
 
+    // A procedure the walk ran is measured from what it decoded, and one this
+    // pass has emptied from the editor, which holds it now.
     let size = |editor: &DocumentEditor, stream: ObjRef| {
-        editor
-            .stream_bytes_counted(stream, work)
-            .map_or(0, |bytes| bytes.len())
+        bytes_of(editor, stream, op).map_or(0, |bytes| bytes.len())
     };
     for face in faces {
         let before: usize = face
@@ -1677,7 +1701,7 @@ fn orphans(
     editor: &DocumentEditor,
     doc: &Arc<CosDocument>,
     covered: &BTreeSet<u32>,
-    work: Option<&Work>,
+    op: &Operation,
 ) -> Vec<Untouched> {
     let mut out: Vec<Untouched> = Vec::new();
     let mut seen: BTreeSet<u32> = BTreeSet::new();
@@ -1719,7 +1743,7 @@ fn orphans(
         if covered.contains(&program.num) || !seen.insert(program.num) {
             continue;
         }
-        let Some(bytes) = editor.stream_bytes_counted(program, work) else {
+        let Some(bytes) = bytes_of(editor, program, op) else {
             continue;
         };
         // 9.8.1: the descriptor's own `/FontName`, since there is no font

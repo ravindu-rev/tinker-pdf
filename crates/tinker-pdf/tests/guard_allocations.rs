@@ -106,8 +106,8 @@ fn a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page() {
 
 /// Prints each operation's allocations per page at 1 000 and 4 000 pages,
 /// their ratio, and what text and the render allocate a page beyond their
-/// lookup. `docs/design/performance.md` commits the table, and A10's roster
-/// entries follow it.
+/// lookup: the figures A10's roster entries follow, which live here and in
+/// no doc (ruling 16; `docs/design/performance.md` states the rule).
 #[test]
 fn allocations_per_page_by_operation() {
     // The count is this thread's: one allocation made here counts once, and

@@ -130,9 +130,14 @@ impl Observed {
     ) -> Observed {
         let content = stats::content(&page.doc, &page.inner, work);
         // `Page::text`'s own resources: no glyph outlines are needed, so no
-        // provider is consulted.
-        let resources =
-            resources::PageResources::new_counted(&page.doc, &page.inner, None, work.cloned());
+        // provider is consulted. One operation, which decodes each stream
+        // its scopes read once.
+        let resources = resources::PageResources::new_in(
+            &page.doc,
+            &page.inner,
+            None,
+            resources::Operation::new(work.cloned()),
+        );
         let mut observer = Observer::new(keep_artifacts);
         interpret(&content, Matrix::IDENTITY, &mut observer, &resources);
         for name in resources.missing_fonts() {

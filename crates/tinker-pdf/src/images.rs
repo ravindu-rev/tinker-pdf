@@ -47,7 +47,7 @@ use std::sync::Arc;
 use tinker_pdf_content::{interpret, Device, FontSource, GraphicsState, ImageRef, Matrix};
 use tinker_pdf_cos::ObjRef;
 
-use crate::resources::PageResources;
+use crate::resources::{Operation, PageResources};
 use crate::stats::{Stats, Work};
 use crate::Page;
 
@@ -393,11 +393,13 @@ impl Page {
     /// is counting.
     fn images_in(&self, work: Option<&Arc<Work>>) -> Vec<PageImage> {
         let content = crate::stats::content(&self.doc, &self.inner, work);
-        let resources = Arc::new(PageResources::new_counted(
+        // One operation, whose every scope reads a stream once: a form's
+        // content however often it is drawn, a profile two images share.
+        let resources = Arc::new(PageResources::new_in(
             &self.doc,
             &self.inner,
             None,
-            work.cloned(),
+            Operation::new(work.cloned()),
         ));
         let mut collector = Collector {
             scope: Arc::clone(&resources),

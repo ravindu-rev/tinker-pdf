@@ -363,13 +363,14 @@ impl DisplayList {
                     &page.inner,
                     page.fonts.as_ref(),
                     &mut writer,
-                    None,
+                    resources.operation(),
                 );
             }
             return writer.finish_with(&resources, width, height);
         }
         // Resources of this write's own over the list's caches, so what it
-        // reports is what it met — `DisplayList::render`'s reason exactly.
+        // reports is what it met — `DisplayList::render`'s reason exactly —
+        // and each annotation's kept scope bound to this write's operation.
         let resources = self.resources().for_one_render();
         resources.note_missing_fonts(self.interpreted_missing());
         resources.note_repaired_spaces(self.interpreted_repairs());
@@ -377,7 +378,7 @@ impl DisplayList {
         replay(self.content(), &mut writer);
         if options.annotations {
             for (scope, events) in self.annotation_layers() {
-                writer.push_resources(Arc::clone(scope));
+                writer.push_resources(resources.bind(scope));
                 replay(events, &mut writer);
                 writer.pop_resources();
             }

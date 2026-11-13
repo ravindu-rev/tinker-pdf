@@ -148,7 +148,24 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses",
     },
-    // MS-01's A5 merge leg: no stream decoded twice in a merge's save.
+    // MS-01's A5 legs: no stream decoded twice in a save, a render, a text
+    // extraction, an image extraction or a merge's save.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a5_a_save_decodes_each_stream_at_most_once",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a5_a_render_decodes_each_stream_at_most_once",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a5_text_decodes_each_stream_at_most_once",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a5_image_extraction_decodes_each_stream_at_most_once",
+    },
     Fingerprint {
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "a5_a_merge_decodes_each_stream_at_most_once",

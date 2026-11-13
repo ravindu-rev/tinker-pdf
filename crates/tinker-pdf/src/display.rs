@@ -128,6 +128,8 @@ impl Page {
     #[must_use]
     pub fn display_list(&self) -> DisplayList {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
+        // The recording is an operation of its own; the resources it reads
+        // through are kept past it, and serve none afterwards.
         let resources = PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
         let mut recorder = DisplayRecorder::new();
         interpret(&content, Matrix::IDENTITY, &mut recorder, &resources);
@@ -139,8 +141,15 @@ impl Page {
         let annotations = if recorder.overflowed() {
             Vec::new()
         } else {
-            annots::record(&self.doc, &self.inner, self.fonts.as_ref(), &mut recorder)
+            annots::record(
+                &self.doc,
+                &self.inner,
+                self.fonts.as_ref(),
+                &mut recorder,
+                resources.operation(),
+            )
         };
+        let resources = resources.kept();
         if recorder.overflowed() {
             // Everything recorded is dropped here, the content's calls too:
             // a list that kept part of a page would replay part of a page.

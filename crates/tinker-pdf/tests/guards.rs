@@ -214,34 +214,46 @@ const ROSTER: &[Guard] = &[
         "P-06",
         "P-06.3",
     ),
-    owed(
-        "A5",
-        "inflate calls per stream at most 1 per operation: a save",
-        "a5_a_save_decodes_each_stream_at_most_once",
-        "P-03",
-        "P-03.2",
-    ),
-    owed(
-        "A5",
-        "inflate calls per stream at most 1 per operation: a render",
-        "a5_a_render_decodes_each_stream_at_most_once",
-        "P-03",
-        "P-03.2",
-    ),
-    owed(
-        "A5",
-        "inflate calls per stream at most 1 per operation: a text extraction",
-        "a5_text_decodes_each_stream_at_most_once",
-        "P-03",
-        "P-03.2",
-    ),
-    owed(
-        "A5",
-        "inflate calls per stream at most 1 per operation: image extraction",
-        "a5_image_extraction_decodes_each_stream_at_most_once",
-        "P-03",
-        "P-03.2",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A5",
+            "inflate calls per stream at most 1 per operation: a save",
+            "a5_a_save_decodes_each_stream_at_most_once",
+            "P-03",
+            "P-03.2",
+        )
+    },
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A5",
+            "inflate calls per stream at most 1 per operation: a render",
+            "a5_a_render_decodes_each_stream_at_most_once",
+            "P-03",
+            "P-03.2",
+        )
+    },
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A5",
+            "inflate calls per stream at most 1 per operation: a text extraction",
+            "a5_text_decodes_each_stream_at_most_once",
+            "P-03",
+            "P-03.2",
+        )
+    },
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A5",
+            "inflate calls per stream at most 1 per operation: image extraction",
+            "a5_image_extraction_decodes_each_stream_at_most_once",
+            "P-03",
+            "P-03.2",
+        )
+    },
     Guard {
         state: State::Landed,
         ..owed(
@@ -1246,6 +1258,397 @@ fn a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses() {
             stats.font_dictionaries_resolved
         );
     }
+}
+
+// ---- A5: the documents a save, a render and two extractions read ------------
+
+/// The pages A5's save reads.
+const A5_PAGES: usize = 100;
+
+/// The embedded face's `/ToUnicode`: every code `/WinAnsiEncoding` reads it
+/// to draw, `<20>` to `<7E>`, mapped to the character of its own number, so
+/// the face's text reads as it did without one.
+const TO_UNICODE: &str = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+    /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+    /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+    1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+    1 beginbfrange\n<20> <7E> <0020>\nendbfrange\n\
+    endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
+
+/// The embedded face with its `/ToUnicode`, as four objects numbered from
+/// `at`: [`face`]'s font, descriptor and program, the font naming the CMap
+/// at `at + 3`, deflated.
+fn face_with_to_unicode(at: usize) -> [Vec<u8>; 4] {
+    let [mut font, descriptor, program] = face(at);
+    assert!(font.ends_with(b">>"), "the face's font is a dictionary");
+    font.truncate(font.len() - 2);
+    font.extend_from_slice(format!("/ToUnicode {} 0 R >>", at + 3).as_bytes());
+    [
+        font,
+        descriptor,
+        program,
+        deflated("", TO_UNICODE.as_bytes()),
+    ]
+}
+
+/// A5's save: [`A5_PAGES`] pages, each a line of text in the one embedded
+/// face from a content stream of its own, every page's resources naming the
+/// face, whose `/ToUnicode` each page's scope reads with it. 1 the catalog, 2
+/// the page tree, 3 to 6 the face and its CMap, then each page and its
+/// content from 7; every stream deflated.
+fn a5_document() -> Vec<u8> {
+    let kids: Vec<String> = (0..A5_PAGES)
+        .map(|at| format!("{} 0 R", 7 + 2 * at))
+        .collect();
+    let mut objects = vec![
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object(&format!(
+            "<< /Type /Pages /Count {A5_PAGES} /Kids [{}] >>",
+            kids.join(" ")
+        )),
+    ];
+    objects.extend(face_with_to_unicode(3));
+    for at in 0..A5_PAGES {
+        objects.push(object(&format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+             /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+            8 + 2 * at
+        )));
+        objects.push(deflated("", content(0, at).as_bytes()));
+    }
+    pdf(&objects)
+}
+
+/// Whether object `number` of `cos` is a stream whose stored bytes are not
+/// its decoded bytes: one whose decode is an inflate.
+fn inflated(cos: &tinker_pdf_cos::CosDocument, number: u32) -> bool {
+    let r = tinker_pdf_cos::ObjRef::new(number, 0);
+    let stored = cos.stream_raw(r).expect("a stream");
+    stored != cos.stream_decoded(r).expect("it decodes")
+}
+
+/// A5's save reads a hundred pages, each its own line in the one embedded
+/// face from a content stream of its own, every page's resources naming that
+/// face, which embeds its program and a `/ToUnicode`; each is deflated.
+#[test]
+fn the_a5_document_is_a_hundred_pages_drawing_one_face_with_a_to_unicode() {
+    let document = Document::open(a5_document()).expect("the A5 document opens");
+    assert_eq!(document.page_count() as usize, A5_PAGES);
+    let cos = document.cos();
+    let face = tinker_pdf_cos::ObjRef::new(3, 0);
+    let font = tinker_pdf_cos::font::at(cos, face).expect("the face reads");
+    assert!(font.has_to_unicode(), "the face has its /ToUnicode");
+    assert!(font.program().is_some(), "and embeds its program");
+    let (fonts, f1) = (cos.intern(b"Font"), cos.intern(b"F1"));
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    assert_eq!(pages.len(), A5_PAGES);
+    for (at, page) in pages.iter().enumerate() {
+        let resources = page.resources.as_ref().expect("its resources");
+        let named = cos
+            .resolve_key(resources, fonts)
+            .as_dict()
+            .and_then(|table| table.get_ref(f1));
+        assert_eq!(named, Some(face), "page {at} draws the face");
+    }
+    for at in [0, A5_PAGES / 2, A5_PAGES - 1] {
+        let page = document.page(at as u32).expect("a page");
+        assert_eq!(page.text().plain_text().trim(), line(0, at), "page {at}");
+    }
+    for number in [5, 6, 8, 8 + 2 * (A5_PAGES as u32 - 1)] {
+        assert!(inflated(cos, number), "object {number} is deflated");
+    }
+}
+
+/// How often A5's page draws its form.
+const A5_FORM_DRAWS: usize = 3;
+/// How often A5's page shows its Type 3 glyph.
+const A5_TYPE3_SHOWN: usize = 50;
+/// The line A5's page shows in the face.
+const A5_PAGE_LINE: &str = "Page";
+/// The line A5's form shows in the face at each draw.
+const A5_FORM_LINE: &str = "Form";
+/// The Type 3 glyph's procedure: a square, three quarters of its em.
+const A5_PROCEDURE: &[u8] = b"1000 0 0 0 750 750 d1\n0 0 750 750 re f";
+/// The bytes A5's images' profile holds, which no parser accepts: the
+/// profile is read, and refused, and its images drawn by their components.
+const A5_PROFILE: &[u8] = b"not an ICC profile";
+
+/// A5's page's content: its line in the face, its form three times, its
+/// Type 3 glyph fifty times in one string, and its image once.
+fn a5_page_content() -> String {
+    let mut out = format!("BT /F1 12 Tf 10 85 Td ({A5_PAGE_LINE}) Tj ET\n");
+    for at in 0..A5_FORM_DRAWS {
+        out.push_str(&format!("q 1 0 0 1 10 {} cm /Fm1 Do Q\n", 10 + 20 * at));
+    }
+    out.push_str(&format!(
+        "BT /T3 2 Tf 50 72 Td ({}) Tj ET\n",
+        "A".repeat(A5_TYPE3_SHOWN)
+    ));
+    out.push_str("q 20 0 0 20 150 10 cm /Im1 Do Q\n");
+    out
+}
+
+/// A5's form's content: its line in the face, and its image.
+fn a5_form_content() -> String {
+    format!("BT /F1 10 Tf 2 5 Td ({A5_FORM_LINE}) Tj ET\nq 10 0 0 10 60 5 cm /Im2 Do Q")
+}
+
+/// A 2 x 2 image in A5's profile, its samples deflated.
+fn a5_image() -> Vec<u8> {
+    deflated(
+        "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace [/ICCBased 14 0 R]\n\
+         /BitsPerComponent 8",
+        &SAMPLES,
+    )
+}
+
+/// A5's page: one form drawn three times, whose own resources name the
+/// page's embedded face and an image of their own, and one Type 3 glyph shown
+/// fifty times, beside a line in the face and an image whose profile the
+/// form's image shares. 1 the catalog, 2 the page tree, 3 the page, 4 its
+/// content, 5 to 8 the face and its `/ToUnicode`, 9 the Type 3 font, 10 its
+/// procedure, 11 the form, 12 the page's image, 13 the form's, 14 their
+/// profile; every stream deflated.
+fn a5_page() -> Vec<u8> {
+    let mut objects = vec![
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
+        object(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+             /Resources << /Font << /F1 5 0 R /T3 9 0 R >> /XObject << /Fm1 11 0 R /Im1 12 0 R >> >>\n\
+             /Contents 4 0 R >>",
+        ),
+        deflated("", a5_page_content().as_bytes()),
+    ];
+    objects.extend(face_with_to_unicode(5));
+    objects.push(object(
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 750 750] /FontMatrix [0.001 0 0 0.001 0 0]\n\
+         /CharProcs << /square 10 0 R >> /Encoding << /Type /Encoding /Differences [65 /square] >>\n\
+         /FirstChar 65 /LastChar 65 /Widths [1000] >>",
+    ));
+    objects.push(deflated("", A5_PROCEDURE));
+    objects.push(deflated(
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 20]\n\
+         /Resources << /Font << /F1 5 0 R >> /XObject << /Im2 13 0 R >> >>",
+        a5_form_content().as_bytes(),
+    ));
+    objects.push(a5_image());
+    objects.push(a5_image());
+    objects.push(deflated("/N 3", A5_PROFILE));
+    pdf(&objects)
+}
+
+/// A5's page draws its form three times and shows its Type 3 glyph fifty
+/// times, a procedure of its own; the page's scope and the form's both name
+/// the face, which has a `/ToUnicode`, and the form's image is drawn at each
+/// of the form's draws, in the profile the page's image is drawn in. Every
+/// stream is deflated.
+#[test]
+fn the_a5_page_shows_one_form_three_times_and_one_type3_glyph_fifty_times() {
+    let content = a5_page_content();
+    assert_eq!(content.matches("/Fm1 Do").count(), A5_FORM_DRAWS);
+    let shown = format!("({}) Tj", "A".repeat(A5_TYPE3_SHOWN));
+    assert_eq!(content.matches(&shown).count(), 1, "fifty in one string");
+
+    let document = Document::open(a5_page()).expect("the A5 page opens");
+    let cos = document.cos();
+    let type3 = tinker_pdf_cos::font::at(cos, tinker_pdf_cos::ObjRef::new(9, 0))
+        .expect("the Type 3 font reads");
+    assert_eq!(type3.kind(), tinker_pdf_cos::FontKind::Type3);
+    assert_eq!(type3.glyph_name(65), Some("square"), "the code's procedure");
+    let face =
+        tinker_pdf_cos::font::at(cos, tinker_pdf_cos::ObjRef::new(5, 0)).expect("the face reads");
+    assert!(face.has_to_unicode(), "the face has its /ToUnicode");
+
+    let page = document.page(0).expect("its page");
+    let text = page.text().plain_text();
+    assert_eq!(text.matches(A5_PAGE_LINE).count(), 1, "{text:?}");
+    assert_eq!(
+        text.matches(A5_FORM_LINE).count(),
+        A5_FORM_DRAWS,
+        "the form's line at each draw: {text:?}"
+    );
+    let images = page.images();
+    let drawn = |name: &[u8]| {
+        let image = images
+            .iter()
+            .find(|image| image.name == name)
+            .unwrap_or_else(|| panic!("{} is listed", String::from_utf8_lossy(name)));
+        let Some(tinker_pdf::ImageSpace::Icc { profile, .. }) = &image.color_space else {
+            panic!("an ICC space: {:?}", image.color_space);
+        };
+        assert_eq!(profile.as_slice(), A5_PROFILE, "the shared profile");
+        image.placements.len()
+    };
+    assert_eq!(drawn(b"Im1"), 1, "the page's image, once");
+    assert_eq!(drawn(b"Im2"), A5_FORM_DRAWS, "the form's, at each draw");
+    assert_eq!(images.len(), 2);
+    for number in [4, 7, 8, 10, 11, 12, 13, 14] {
+        assert!(inflated(cos, number), "object {number} is deflated");
+    }
+}
+
+/// The decoded lengths of A5's page's streams, by the legs that read them.
+struct A5Bytes {
+    /// What every leg reads: the content, the face's `/ToUnicode`, the Type 3
+    /// procedure and the form.
+    read: usize,
+    /// The face's program, which only a render's outlines read.
+    program: usize,
+    /// Both images' samples and their profile, which a render and an image
+    /// extraction read.
+    images: usize,
+}
+
+/// [`A5Bytes`] for the page.
+fn a5_bytes() -> A5Bytes {
+    A5Bytes {
+        read: a5_page_content().len()
+            + TO_UNICODE.len()
+            + A5_PROCEDURE.len()
+            + a5_form_content().len(),
+        program: render_support::curvy_font().len(),
+        images: 2 * SAMPLES.len() + A5_PROFILE.len(),
+    }
+}
+
+/// The glyphs A5's page shows the renderer: its line and the form's at each
+/// draw, in the face. A Type 3 glyph whose procedure runs is not shown, so
+/// this is also what says the procedure ran at every one of its fifty.
+fn a5_glyphs_shown() -> u64 {
+    (A5_PAGE_LINE.len() + A5_FORM_DRAWS * A5_FORM_LINE.len()) as u64
+}
+
+/// **A5, a save**: the default save of A5's hundred pages — the font pass's
+/// walk of every page, and its cut of the face's program — decodes no stream
+/// twice. Every page's scope reads the face, its program and its
+/// `/ToUnicode`; the first page's decodes both, every later page's is handed
+/// those decodes, and the cut reads the program from them: each page's
+/// content, the program and the CMap are decoded once each.
+#[test]
+fn a5_a_save_decodes_each_stream_at_most_once() {
+    let document = Document::open(a5_document()).expect("the A5 document opens");
+    let saved = save(
+        &mut document.editor(),
+        &SaveOptions {
+            stats: true,
+            ..SaveOptions::default()
+        },
+    );
+    let report = saved.fonts.report().expect("the font pass ran");
+    assert_eq!(
+        report.subsetted.len() + report.untouched.len(),
+        1,
+        "the face's one program went through the cut: {report:?}"
+    );
+    let stats = saved.stats.expect("asked");
+    let contents: usize = (0..A5_PAGES).map(|page| content(0, page).len()).sum();
+    assert_eq!(
+        (
+            stats.streams_decoded,
+            stats.most_decodes_of_one_stream,
+            stats.bytes_decoded,
+        ),
+        (
+            A5_PAGES as u64 + 2,
+            1,
+            (contents + render_support::curvy_font().len() + TO_UNICODE.len()) as u64
+        ),
+        "each page's content, and the face's program and /ToUnicode, once each"
+    );
+    println!(
+        "guard-a5-save: RAN {} decodes over {A5_PAGES} pages, at most {} of one stream",
+        stats.streams_decoded, stats.most_decodes_of_one_stream
+    );
+}
+
+/// **A5, a render**: a render of A5's page decodes no stream twice — the
+/// form at the first of its three draws, the Type 3 procedure at the first
+/// of its fifty glyphs, the face's program and `/ToUnicode` in whichever of
+/// the page's scope and the form's reads them first, and the profile in
+/// whichever of the two images' scopes compiles it first — and the eight
+/// streams it reads, each image's samples among them, once each.
+#[test]
+fn a5_a_render_decodes_each_stream_at_most_once() {
+    let document = Document::open(a5_page()).expect("the A5 page opens");
+    let page = document.page(0).expect("its page");
+    let stats = page
+        .render(&RenderOptions {
+            stats: true,
+            ..RenderOptions::default()
+        })
+        .stats
+        .expect("asked");
+    let bytes = a5_bytes();
+    assert_eq!(stats.glyphs_shown, a5_glyphs_shown(), "{stats:?}");
+    assert_eq!(
+        (
+            stats.streams_decoded,
+            stats.most_decodes_of_one_stream,
+            stats.bytes_decoded,
+        ),
+        (8, 1, (bytes.read + bytes.program + bytes.images) as u64),
+        "every stream the page reads, once each: {stats:?}"
+    );
+    println!(
+        "guard-a5-render: RAN {} decodes, at most {} of one stream",
+        stats.streams_decoded, stats.most_decodes_of_one_stream
+    );
+}
+
+/// **A5, a text extraction**: A5's page's text decodes no stream twice —
+/// the content, the form, the Type 3 procedure, which the interpreter runs at
+/// every glyph as a render does, and the face's `/ToUnicode`, which the
+/// page's scope and the form's both read — once each, and no program, since
+/// no outline is read.
+#[test]
+fn a5_text_decodes_each_stream_at_most_once() {
+    let document = Document::open(a5_page()).expect("the A5 page opens");
+    let page = document.page(0).expect("its page");
+    let (text, stats) = page.text_counted(&TextOptions::default());
+    assert_eq!(
+        text.plain_text().matches(A5_FORM_LINE).count(),
+        A5_FORM_DRAWS
+    );
+    assert_eq!(
+        (
+            stats.streams_decoded,
+            stats.most_decodes_of_one_stream,
+            stats.bytes_decoded,
+        ),
+        (4, 1, a5_bytes().read as u64),
+        "the content, the form, the procedure and the CMap, once each: {stats:?}"
+    );
+    println!(
+        "guard-a5-text: RAN {} decodes, at most {} of one stream",
+        stats.streams_decoded, stats.most_decodes_of_one_stream
+    );
+}
+
+/// **A5, image extraction, the decode door**: listing A5's page's images
+/// decodes no stream twice — what the text extraction decodes, as it
+/// interprets the page the same way, and each image's samples and their
+/// shared profile, which both images' descriptions read, once each.
+#[test]
+fn a5_image_extraction_decodes_each_stream_at_most_once() {
+    let document = Document::open(a5_page()).expect("the A5 page opens");
+    let page = document.page(0).expect("its page");
+    let (images, stats) = page.images_counted();
+    assert_eq!(images.len(), 2, "the page's image and the form's");
+    let bytes = a5_bytes();
+    assert_eq!(
+        (
+            stats.streams_decoded,
+            stats.most_decodes_of_one_stream,
+            stats.bytes_decoded,
+        ),
+        (7, 1, (bytes.read + bytes.images) as u64),
+        "every stream the listing reads, once each: {stats:?}"
+    );
+    println!(
+        "guard-a5-images: RAN {} decodes, at most {} of one stream",
+        stats.streams_decoded, stats.most_decodes_of_one_stream
+    );
 }
 
 // ---- A5 and A6: a merge's save ------------------------------------------------

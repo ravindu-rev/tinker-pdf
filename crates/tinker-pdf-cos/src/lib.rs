@@ -149,7 +149,7 @@ pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject
 pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use pubsec::{PubSecError, PublicKeyEncryption, Recipient, SealError};
 pub use raster_embed::RasterImageData;
-pub use resolve::{Counting, Resolve};
+pub use resolve::{Cached, Counting, DecodedStreams, Resolve};
 pub use script::{Budget, Event, Host, Outcome, ScriptError, ScriptPolicy, ScriptScope, Trigger};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{

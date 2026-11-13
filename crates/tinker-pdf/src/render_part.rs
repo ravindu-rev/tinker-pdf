@@ -45,6 +45,7 @@ use tinker_pdf_content::{interpret, FontSource, Matrix};
 use tinker_pdf_cos::Object;
 
 use crate::annotations::MAX_ANNOTS;
+use crate::resources::Operation;
 use crate::{annots, Bitmap, Page, RenderOptions};
 
 /// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
@@ -178,14 +179,15 @@ impl Page {
         options: &RenderOptions,
     ) -> Result<Bitmap, RenderPartError> {
         let text = || String::from_utf8_lossy(name).into_owned();
-        // One tally for the whole door, this scope's reading of the name
-        // included: it is work the door does before the render starts.
-        let work = crate::stats::tally(options.stats);
-        let resources = crate::resources::PageResources::new_counted(
+        // One operation for the whole door, this scope's reading of the name
+        // included: it is work the door does before the render starts, and
+        // the form it reads here is the one the render's `Do` draws.
+        let op = Operation::new(crate::stats::tally(options.stats));
+        let resources = crate::resources::PageResources::new_in(
             &self.doc,
             &self.inner,
             self.fonts.as_ref(),
-            work.clone(),
+            op.clone(),
         );
         let subtype = resources
             .xobject_subtype(name)
@@ -211,7 +213,7 @@ impl Page {
         content.extend_from_slice(&escaped(name));
         content.extend_from_slice(b" Do");
         Ok(
-            self.render_layer(options, frame, work, |renderer, resources| {
+            self.render_layer(options, frame, op, |renderer, resources| {
                 interpret(&content, Matrix::IDENTITY, renderer, resources);
             }),
         )
@@ -256,19 +258,19 @@ impl Page {
         }
         .ok_or(not_drawn(NotDrawn::NotADictionary))?;
 
-        // The tally is made before the appearance is decoded, so the decode
-        // counts too.
-        let work = crate::stats::tally(options.stats);
-        let appearance = annots::prepare(&self.doc, &dict, work.as_ref()).map_err(not_drawn)?;
+        // The operation is made before the appearance is decoded, so the
+        // decode counts too.
+        let op = Operation::new(crate::stats::tally(options.stats));
+        let appearance = annots::prepare(&self.doc, &dict, &op).map_err(not_drawn)?;
         let rect = appearance.rect();
         Ok(
-            self.render_layer(options, Some(rect), work, |renderer, resources| {
+            self.render_layer(options, Some(rect), op, |renderer, resources| {
                 annots::draw_prepared(
                     &self.doc,
                     &appearance,
                     self.fonts.as_ref(),
                     renderer,
-                    resources.work(),
+                    resources.operation(),
                 );
             }),
         )

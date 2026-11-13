@@ -4,7 +4,8 @@
 //! Feature documentation: `docs/features/editing.md`.
 
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::doc::{CosDocument, CosError};
 use crate::limits;
@@ -204,6 +205,141 @@ impl<R: Resolve + ?Sized> Resolve for Counting<'_, R> {
     }
 }
 
+/// What one decode of a stream answered: its bytes, or its chain's refusal.
+type Decode = Result<Arc<Vec<u8>>, CosError>;
+
+/// The streams one operation has decoded, each by its reference in the
+/// document the operation reads (`docs/design/performance.md`, P-03, "The
+/// cache: who holds it, and its key"): what lets an operation decode each
+/// stream once however many of its readers ask for it.
+///
+/// It keeps what a chain answered — the bytes, behind an `Arc` so that a later
+/// read is handed them rather than a copy, or the chain's refusal — and
+/// nothing else. A reference that names no stream ran no chain and is not
+/// kept. A later read runs nothing, so it raises none of the warnings the
+/// first raised, as a second read of a cached object raises none.
+///
+/// One an operation, made by the door the operation goes through and dropped
+/// when it returns: it holds every stream the operation reads until then.
+/// Behind one lock, held for one lookup or one insertion and never while a
+/// chain runs; a lock that will not open keeps nothing, and every read then
+/// decodes.
+#[derive(Debug, Default)]
+pub struct DecodedStreams {
+    streams: Mutex<HashMap<ObjRef, Decode>>,
+}
+
+impl DecodedStreams {
+    /// Streams of an operation that has decoded none yet.
+    #[must_use]
+    pub fn new() -> DecodedStreams {
+        DecodedStreams::default()
+    }
+
+    /// `r`'s bytes with its filters applied, read once an operation: what
+    /// the operation's first read of `r` answered, and on that first read
+    /// what `decode` answers, kept when a chain ran — the bytes, or the
+    /// chain's refusal ([`CosError::Filter`]).
+    ///
+    /// Two threads that read one stream at once may each run `decode`; the
+    /// answer kept first is the one every read hands out.
+    ///
+    /// # Errors
+    /// What `decode` answered, now or at the first read.
+    pub fn read(
+        &self,
+        r: ObjRef,
+        decode: impl FnOnce() -> Result<Vec<u8>, CosError>,
+    ) -> Result<Arc<Vec<u8>>, CosError> {
+        if let Some(kept) = self
+            .streams
+            .lock()
+            .ok()
+            .and_then(|streams| streams.get(&r).cloned())
+        {
+            return kept;
+        }
+        let read = decode().map(Arc::new);
+        if !matches!(read, Ok(_) | Err(CosError::Filter(_))) {
+            return read;
+        }
+        match self.streams.lock() {
+            Ok(mut streams) => streams.entry(r).or_insert(read).clone(),
+            Err(_) => read,
+        }
+    }
+}
+
+/// A view that decodes each stream once an operation: its `stream_decoded`
+/// answers from the operation's [`DecodedStreams`], and asks the view
+/// underneath only for a stream the operation has not read yet. Everything
+/// else is the view underneath's, read the way that view reads it — a
+/// [`Counting`] view's count of the keys it looks up included.
+///
+/// Code written against [`Resolve`] decodes each stream once an operation when
+/// it is handed this view: a font's CMaps and its `/CIDToGIDMap`, read again by
+/// every scope of a render, a text extraction or a save that reads the font,
+/// are decoded by the first. Over a [`Counting`] view, only the reads that run
+/// a chain count.
+pub struct Cached<'a, R: Resolve + ?Sized> {
+    inner: &'a R,
+    streams: &'a DecodedStreams,
+}
+
+impl<'a, R: Resolve + ?Sized> Cached<'a, R> {
+    /// `inner`, decoding each stream through `streams`.
+    #[must_use]
+    pub fn new(inner: &'a R, streams: &'a DecodedStreams) -> Cached<'a, R> {
+        Cached { inner, streams }
+    }
+}
+
+impl<R: Resolve + ?Sized> Resolve for Cached<'_, R> {
+    fn document(&self) -> &CosDocument {
+        self.inner.document()
+    }
+
+    fn get(&self, r: ObjRef) -> Result<Arc<Object>, CosError> {
+        self.inner.get(r)
+    }
+
+    fn trailer(&self) -> Cow<'_, Dict> {
+        self.inner.trailer()
+    }
+
+    /// The operation's read of `r`, made through the view underneath the
+    /// first time it is asked.
+    fn stream_decoded(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
+        self.streams
+            .read(r, || self.inner.stream_decoded(r))
+            .map(|bytes| bytes.as_ref().clone())
+    }
+
+    fn resolve(&self, object: &Object) -> Arc<Object> {
+        self.inner.resolve(object)
+    }
+
+    fn resolve_key(&self, dict: &Dict, key: Name) -> Arc<Object> {
+        self.inner.resolve_key(dict, key)
+    }
+
+    fn catalog(&self) -> Option<Arc<Dict>> {
+        self.inner.catalog()
+    }
+
+    fn intern(&self, bytes: &[u8]) -> Name {
+        self.inner.intern(bytes)
+    }
+
+    fn name_bytes(&self, name: Name) -> Option<Arc<[u8]>> {
+        self.inner.name_bytes(name)
+    }
+
+    fn warn(&self, kind: WarningKind) {
+        self.inner.warn(kind);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +439,107 @@ mod tests {
         assert_eq!(view.intern(b"F0"), doc.intern(b"F0"));
         assert_eq!(work.stats().keys_looked_up, 2);
         assert_eq!(work.stats().work(), 2);
+    }
+
+    /// A stream read three times through the cached view over a counting
+    /// one runs its chain once, and every read hands back what that run
+    /// decoded; another stream is another run.
+    #[test]
+    fn a_cached_view_decodes_each_stream_once_an_operation() {
+        let doc = document();
+        let work = Work::new();
+        let counting = Counting::new(&doc, &work);
+        let streams = DecodedStreams::new();
+        let view = Cached::new(&counting, &streams);
+        let stream = ObjRef::new(2, 0);
+        for _ in 0..3 {
+            assert_eq!(view.stream_decoded(stream).expect("it decodes"), PLAIN);
+        }
+        let stats = work.stats();
+        assert_eq!(stats.streams_decoded, 1, "one run for three reads");
+        assert_eq!(stats.most_decodes_of_one_stream, 1);
+        assert_eq!(stats.bytes_decoded, PLAIN.len() as u64);
+
+        // The same streams under a second view of the operation: kept already.
+        let again = Cached::new(&counting, &streams);
+        assert_eq!(again.stream_decoded(stream).expect("it decodes"), PLAIN);
+        assert_eq!(work.stats().streams_decoded, 1, "the operation's read");
+        // Everything else is the view underneath's, its count of keys too.
+        assert_eq!(view.get(stream).ok(), doc.get(stream).ok());
+        assert_eq!(view.intern(b"Font"), Name::FONT);
+        assert_eq!(work.stats().keys_looked_up, 1);
+    }
+
+    /// A chain's refusal is kept as firmly as bytes, and its warning raised
+    /// once; a reference that names no stream ran no chain, and is asked of
+    /// the view underneath at every read.
+    #[test]
+    fn a_refusal_is_kept_and_a_reference_to_no_stream_is_not() {
+        let doc = document();
+        let streams = DecodedStreams::new();
+        let refused = ObjRef::new(3, 0);
+        let mut runs = 0;
+        for _ in 0..2 {
+            let read = streams.read(refused, || {
+                runs += 1;
+                doc.stream_decoded(refused)
+            });
+            assert!(matches!(read, Err(CosError::Filter(_))), "{read:?}");
+        }
+        assert_eq!(runs, 1, "the refusal is the operation's answer");
+        let bad = doc
+            .warnings()
+            .iter()
+            .filter(|warning| warning.kind == WarningKind::FilterParamsBad)
+            .count();
+        assert_eq!(bad, 1, "the refusal's warning, raised by its one run");
+
+        let not_a_stream = ObjRef::new(4, 0);
+        let mut asked = 0;
+        for _ in 0..2 {
+            let read = streams.read(not_a_stream, || {
+                asked += 1;
+                doc.stream_decoded(not_a_stream)
+            });
+            assert!(matches!(read, Err(CosError::NotAStream(_))), "{read:?}");
+        }
+        assert_eq!(asked, 2, "nothing ran, so nothing was kept");
+    }
+
+    /// Bytes kept are handed out, never copied: two reads of one stream are
+    /// one allocation.
+    #[test]
+    fn a_kept_stream_is_handed_out_rather_than_copied() {
+        let doc = document();
+        let streams = DecodedStreams::new();
+        let stream = ObjRef::new(2, 0);
+        let first = streams
+            .read(stream, || doc.stream_decoded(stream))
+            .expect("it decodes");
+        let second = streams
+            .read(stream, || panic!("a kept stream is not decoded again"))
+            .expect("it is kept");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.as_slice(), PLAIN);
+    }
+
+    /// The streams of one operation are shared between threads.
+    #[test]
+    fn decoded_streams_are_shared_between_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<DecodedStreams>();
+        let doc = document();
+        let streams = DecodedStreams::new();
+        let stream = ObjRef::new(2, 0);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let read = streams
+                        .read(stream, || doc.stream_decoded(stream))
+                        .expect("it decodes");
+                    assert_eq!(read.as_slice(), PLAIN);
+                });
+            }
+        });
     }
 }

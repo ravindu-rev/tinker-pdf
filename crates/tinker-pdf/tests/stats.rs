@@ -46,16 +46,24 @@
 //!   wants, and stops before the next; an editor walks its own tree for its
 //!   page order until an edit first sets it, and an import walks its
 //!   source's;
-//! - a stream is decoded each time it is read: a page's content once an
+//! - a stream the scopes of one operation read — a render, a text or an
+//!   image extraction, a save's font pass — is decoded once that operation,
+//!   by the first scope that reads it, and every later read is handed that
+//!   decode: a form's content however often it is drawn, `render_form`'s
+//!   reading of the form it is asked for included; a Type 3 glyph's procedure
+//!   however often it is shown; a tiling pattern's cell; an appearance; an ICC
+//!   profile, when a scope first compiles its transform; and a font's program
+//!   and CMaps, when a scope first reads them, which the font pass's cut reads
+//!   again from the pass's decode. Nothing decoded is kept from one operation
+//!   to the next;
+//! - a page's content is decoded by the door that interprets it, once an
 //!   interpretation, which a save's passes and a validator's rules each make
-//!   of their own; a form's content at each `Do`, and once more when
-//!   `render_form` reads the form it is asked for; a tiling pattern's cell
-//!   once a fill; an appearance once a render of it; an image's samples, and
-//!   its soft mask's, at the decode the image cache or the extraction makes;
-//!   an ICC profile when its transform is compiled; and a font's program when
-//!   a scope first reads it, the font pass's cut of it, and each validator
-//!   rule that reads it. A stream the editor holds unfiltered, an import's
-//!   copy, is handed back as it is and runs no chain.
+//!   of their own, and before any scope exists, so outside what the scopes
+//!   share; an image's samples, and its soft mask's, at the decode the image
+//!   cache or the extraction makes; and a font's program by each validator
+//!   rule that reads it, each over a scope of its own. A stream the editor
+//!   holds unfiltered, an import's copy, is handed back as it is and runs no
+//!   chain.
 
 mod render_support;
 
@@ -437,7 +445,7 @@ fn render_stats_count_what_a_generated_page_draws() {
 
 /// A form invoked three times builds its scope once, and what runs inside it
 /// counts into the page's tally through the scope the cache keeps. Its content
-/// is decoded at each `Do`.
+/// is decoded at the first `Do`, and the other two are handed that decode.
 #[test]
 fn a_form_shown_three_times_builds_its_scope_once() {
     let (document, index) = first_page(form_page());
@@ -448,7 +456,7 @@ fn a_form_shown_three_times_builds_its_scope_once() {
         Stats::default(),
         &[
             (4, 1, FORM_PAGE_CONTENT.len()),
-            (8, 3, form_content(FORM_TEXT).len()),
+            (8, 1, form_content(FORM_TEXT).len()),
             (7, 1, program_len()),
         ],
     );
@@ -504,8 +512,9 @@ fn form_content(text: &str) -> String {
 
 /// `render_form` reads the form's name in a scope of its own before it
 /// renders, and that scope's fonts are the door's work too — and so is its
-/// decode of the form it reads there, which the render's `Do` decodes again.
-/// The page's content is not read.
+/// decode of the form it reads there, the door's one: the scope reads in the
+/// render's operation, so the render's `Do` is handed that decode. The page's
+/// content is not read.
 #[test]
 fn render_form_counts_the_scope_it_reads_the_name_in() {
     let (document, index) = first_page(form_page());
@@ -519,7 +528,7 @@ fn render_form_counts_the_scope_it_reads_the_name_in() {
     let distinct = 3;
     let mut expected = decoding(
         Stats::default(),
-        &[(8, 2, form_content(FORM_TEXT).len()), (7, 1, program_len())],
+        &[(8, 1, form_content(FORM_TEXT).len()), (7, 1, program_len())],
     );
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
@@ -664,11 +673,14 @@ fn the_shape_that_stalled_a_page_renders_in_work_linear_in_it() {
 ///   pixels does, so they run the page's content and `/Knock` once each, and
 ///   ask for `/Knock` three times.
 ///
-/// The stream decodes follow from the list above: the page's content once,
-/// the mask's group once at the graphics state that names it, and `/Knock`
-/// at each `Do`, the refused ones included, since a form's identity comes
-/// with its content. `/Grp` names no form, so each copy draws it as an image,
-/// decoded at the first and kept.
+/// The stream decodes follow from the list above: `/Knock` once, at its first
+/// `Do`, every later one, the refused ones included, handed that decode,
+/// since a form's identity comes with its content; and the page's content
+/// twice — once by the door, which reads it before any scope exists and so
+/// outside the decodes the scopes share, and once as the mask's group, at the
+/// graphics state that names it, which every later reading of the group is
+/// handed. `/Grp` names no form, so each copy draws it as an image, decoded
+/// at the first and kept.
 #[test]
 fn a_form_that_draws_itself_renders_in_work_its_page_bounds() {
     let bytes = include_bytes!(
@@ -676,19 +688,16 @@ fn a_form_that_draws_itself_renders_in_work_its_page_bounds() {
     );
     let document = Document::open(bytes.to_vec()).expect("it opens, damaged as it is");
     let page = document.page(0).expect("a page");
+    let content = Some(ObjRef { num: 4, gen: 0 });
 
     let bitmap = page.render(&RenderOptions {
         stats: true,
         ..RenderOptions::at_dpi(12.0)
     });
     let stats = bitmap.stats.expect("asked");
-    assert_eq!(stats.streams_decoded, 1 + 1 + 8, "{stats:?}");
-    assert_eq!(
-        stats.most_decoded_stream,
-        Some(ObjRef { num: 6, gen: 0 }),
-        "{stats:?}"
-    );
-    assert_eq!(stats.most_decodes_of_one_stream, 8, "{stats:?}");
+    assert_eq!(stats.streams_decoded, 2 + 1, "{stats:?}");
+    assert_eq!(stats.most_decoded_stream, content, "{stats:?}");
+    assert_eq!(stats.most_decodes_of_one_stream, 2, "{stats:?}");
     assert_eq!((stats.image_misses, stats.image_hits), (1, 7), "{stats:?}");
     assert!(
         bitmap
@@ -702,8 +711,9 @@ fn a_form_that_draws_itself_renders_in_work_its_page_bounds() {
         ("text", page.text_counted(&TextOptions::default()).1),
         ("images", page.images_counted().1),
     ] {
-        assert_eq!(stats.streams_decoded, 1 + 1 + 3, "{what}: {stats:?}");
-        assert_eq!(stats.most_decodes_of_one_stream, 3, "{what}: {stats:?}");
+        assert_eq!(stats.streams_decoded, 2 + 1, "{what}: {stats:?}");
+        assert_eq!(stats.most_decoded_stream, content, "{what}: {stats:?}");
+        assert_eq!(stats.most_decodes_of_one_stream, 2, "{what}: {stats:?}");
     }
 }
 
@@ -1066,7 +1076,7 @@ fn text_of(page: &tinker_pdf::TextPage) -> String {
 
 /// Text extraction counts what its scope reads: each font the page's content
 /// selects, once, each form's scope the interpreter asks for, and the
-/// content and every form's decoded. Nothing is
+/// content and every form's decoded, each once. Nothing is
 /// drawn, so nothing else counts. The text is the uncounted text, in either
 /// order.
 #[test]
@@ -1098,12 +1108,13 @@ fn text_stats_count_font_resolutions() {
     let page = document.page(index).expect("a page");
     let (text, stats) = page.text_counted(&TextOptions::default());
     assert_eq!(text_of(&text), text_of(&page.text()));
-    // The content, and the form's at each of its three `Do`s.
+    // The content, and the form's at the first of its three `Do`s, which the
+    // other two are handed.
     let mut expected = decoding(
         Stats::default(),
         &[
             (4, 1, FORM_PAGE_CONTENT.len()),
-            (8, 3, form_content(FORM_TEXT).len()),
+            (8, 1, form_content(FORM_TEXT).len()),
         ],
     );
     // The form's scope reads its one font once; the page's names one nothing
@@ -1247,13 +1258,14 @@ fn save_stats_are_none_unless_asked() {
         let counted = save(&mut document.editor(), &asked);
         same_save(&counted, &plain, what);
         // The font pass decodes the content and `F1`'s program, at its first
-        // glyph, and the program again to cut it; an image pass that walks
-        // decodes the content again, and the image's samples to weigh them.
+        // glyph, and its cut reads the program from that decode; an image
+        // pass that walks decodes the content again, and the image's samples
+        // to weigh them.
         let mut expected = decoding(
             Stats::default(),
             &[
                 (4, 1 + image_walks, glyphs_and_an_image_content().len()),
-                (7, 2, program_len()),
+                (7, 1, program_len()),
                 (8, image_walks, SAMPLES.len()),
             ],
         );
@@ -1849,11 +1861,12 @@ fn deflated_page() -> Vec<u8> {
 
 /// Decodes are counted for the operation that makes them, stream by stream:
 /// a render of a page whose form is shown three times decodes the content
-/// once, the form at each `Do` and the program at the form's first outline,
-/// and the bytes counted are what each inflate returned; a second render
-/// counts the same again, and a text extraction counts its own. A save that
-/// cuts a font reads the program at every page's first glyph and once more
-/// to cut it.
+/// once, the form once, at the first of its `Do`s, and the program at the
+/// form's first outline, and the bytes counted are what each inflate
+/// returned; a second render decodes them all again, since nothing decoded
+/// outlives its operation, and a text extraction counts its own. A save that
+/// cuts a font reads the program once, at the first page's first glyph: every
+/// other page's scope, and the cut, are handed that decode.
 #[test]
 fn decodes_are_counted_per_stream_and_operation() {
     let (document, index) = first_page(deflated_page());
@@ -1862,24 +1875,24 @@ fn decodes_are_counted_per_stream_and_operation() {
     let stored = |data: &[u8]| tinker_pdf_filters::zlib_compress(data).len();
 
     let render = counted(&page);
-    // The content once, the form at each of its three `Do`s, and the program
-    // at the form's first outline.
+    // The content once, the form at the first of its three `Do`s, and the
+    // program at the form's first outline.
     assert_eq!(
         render.streams_decoded,
-        1 + 3 + 1,
+        1 + 1 + 1,
         "bundled faces: {BUNDLED}"
     );
     assert_eq!(
-        render.most_decodes_of_one_stream, 3,
-        "the form, once a `Do`"
+        render.most_decodes_of_one_stream, 1,
+        "the form, once the render"
     );
     assert_eq!(
         render.bytes_decoded,
-        (content + 3 * form + program_len()) as u64,
+        (content + form + program_len()) as u64,
         "the inflated lengths"
     );
     let stored_runs = stored(DEFLATED_CONTENT.as_bytes())
-        + 3 * stored(form_content(FORM_TEXT).as_bytes())
+        + stored(form_content(FORM_TEXT).as_bytes())
         + stored(&render_support::curvy_font());
     assert_ne!(
         render.bytes_decoded, stored_runs as u64,
@@ -1889,8 +1902,8 @@ fn decodes_are_counted_per_stream_and_operation() {
     // operation's.
     assert_eq!(counted(&page), render, "a second render");
 
-    // Text extraction decodes the content and the form at each `Do`; no
-    // outline reads the program.
+    // Text extraction decodes the content and the form once; no outline
+    // reads the program.
     let (_, text) = page.text_counted(&TextOptions::default());
     assert_eq!(
         (
@@ -1898,13 +1911,13 @@ fn decodes_are_counted_per_stream_and_operation() {
             text.most_decodes_of_one_stream,
             text.bytes_decoded
         ),
-        (1 + 3, 3, (content + 3 * form) as u64),
+        (1 + 1, 1, (content + form) as u64),
         "text extraction"
     );
 
     // A subset-on-save of ten pages that share one face: the font pass
-    // decodes each page's content and reads the program at each page's first
-    // glyph, a scope a page, and reads it once more to cut it.
+    // decodes each page's content, and the program at the first page's first
+    // glyph, which every other page's scope and the cut are handed.
     let document = Document::open(part(0)).expect("the part opens");
     let saved = save(
         &mut document.editor(),
@@ -1918,16 +1931,12 @@ fn decodes_are_counted_per_stream_and_operation() {
     let contents: usize = (0..PART_PAGES)
         .map(|page| part_content(0, page).len())
         .sum();
-    assert_eq!(stats.streams_decoded, pages + pages + 1, "a subset-on-save");
+    assert_eq!(stats.streams_decoded, pages + 1, "a subset-on-save");
     assert_eq!(
-        stats.most_decodes_of_one_stream,
-        pages + 1,
-        "the program, a page and the cut"
+        stats.most_decodes_of_one_stream, 1,
+        "the program, once the pass"
     );
-    assert_eq!(
-        stats.bytes_decoded,
-        (contents + (PART_PAGES + 1) * program_len()) as u64
-    );
+    assert_eq!(stats.bytes_decoded, (contents + program_len()) as u64);
 }
 
 /// A save that deduplicates streams decodes, to compare them, the streams

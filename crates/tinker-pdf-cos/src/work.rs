@@ -180,10 +180,12 @@ pub struct Stats {
     ///
     /// Counted by the facade's reading-order inference.
     pub pages_interpreted: u64,
-    /// Runs of a stream's filter chain: each time an operation read a
-    /// stream's bytes decoded, whatever the chain returned — a refusal, and
-    /// output stopped at the decode ceiling, included. A stream read twice is
-    /// two runs; a reference that names no stream is none.
+    /// Runs of a stream's filter chain: each time an operation ran one to
+    /// read a stream's bytes decoded, whatever the chain returned — a
+    /// refusal, and output stopped at the decode ceiling, included. A stream
+    /// decoded twice is two runs; a read the operation's decoded streams
+    /// answer ([`crate::DecodedStreams`]) runs none, and a reference that
+    /// names no stream is none.
     ///
     /// Counted by this crate where the chain is applied: the two decoding
     /// entry points' counted siblings,

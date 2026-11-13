@@ -2376,11 +2376,11 @@ impl Page {
     /// those pixels, and then the bitmap is that rectangle's size.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
-        // The tally is made before the content is decoded, so the decode
+        // The operation is made before the content is decoded, so the decode
         // counts too.
-        let work = stats::tally(options.stats);
-        let content = stats::content(&self.doc, &self.inner, work.as_ref());
-        self.render_layer(options, None, work, |renderer, resources| {
+        let op = resources::Operation::new(stats::tally(options.stats));
+        let content = stats::content(&self.doc, &self.inner, op.work());
+        self.render_layer(options, None, op, |renderer, resources| {
             interpret(&content, Matrix::IDENTITY, renderer, resources);
             if options.annotations {
                 // After the content, because an annotation sits on top of the
@@ -2390,7 +2390,7 @@ impl Page {
                     &self.inner,
                     self.fonts.as_ref(),
                     renderer,
-                    resources.work(),
+                    resources.operation(),
                 );
             }
         })
@@ -2407,27 +2407,24 @@ impl Page {
     /// it cannot disagree about the scale clamp, the view transform, the canvas,
     /// the warnings or the conversion at the end.
     ///
-    /// It counts into `work`, the tally the door made when
-    /// [`RenderOptions::stats`] asked for one — made by the door rather than
-    /// here, because each door counts work of its own before the render: the
-    /// page's content decoded, the scope [`Page::render_form`] reads the
-    /// form's name in, the appearance [`Page::render_annotation`] decodes.
+    /// It serves `op`, the operation the door made: the streams it decodes
+    /// once, and the tally [`RenderOptions::stats`] asked for — made by the
+    /// door rather than here, because each door reads and counts work of its
+    /// own before the render: the page's content decoded, the scope
+    /// [`Page::render_form`] reads the form's name in, the appearance
+    /// [`Page::render_annotation`] decodes.
     pub(crate) fn render_layer(
         &self,
         options: &RenderOptions,
         frame: Option<(f64, f64, f64, f64)>,
-        work: Option<Arc<stats::Work>>,
+        op: resources::Operation,
         paint: impl FnOnce(
             &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
             &resources::PageResources,
         ),
     ) -> Bitmap {
-        let resources = resources::PageResources::new_counted(
-            &self.doc,
-            &self.inner,
-            self.fonts.as_ref(),
-            work,
-        );
+        let resources =
+            resources::PageResources::new_in(&self.doc, &self.inner, self.fonts.as_ref(), op);
         self.render_layer_with(options, frame, &resources, paint)
     }
 
@@ -2724,9 +2721,15 @@ impl Page {
     fn text_in_content_order(&self, work: Option<&Arc<stats::Work>>) -> TextPage {
         let content = stats::content(&self.doc, &self.inner, work);
         // Text extraction needs no glyph outlines — the widths come from the
-        // font dictionary — so no provider is consulted here.
-        let resources =
-            resources::PageResources::new_counted(&self.doc, &self.inner, None, work.cloned());
+        // font dictionary — so no provider is consulted here. One operation,
+        // so a form drawn three times, a Type 3 glyph shown fifty and a font
+        // the page and its forms both read are each decoded once.
+        let resources = resources::PageResources::new_in(
+            &self.doc,
+            &self.inner,
+            None,
+            resources::Operation::new(work.cloned()),
+        );
 
         let mut device = TextDevice::new();
         // Text is reported in PDF user space, y upward, which is the space the

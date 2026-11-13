@@ -395,6 +395,27 @@ the caller did not name; one that misses entirely comes back with no pixels.
 Both trims are reported as `RenderWarning::RegionClamped`. Ruling 5's
 byte-equality guard and its fixtures are in [rulings](../rulings.md).
 
+**Each stream once a render.** A render is one operation, and every resource
+scope it opens — the page's, each form's, a tiling pattern cell's, an
+annotation appearance's two — reads every stream through the operation's
+decoded streams, keyed by the stream's reference
+(`tinker_pdf_cos::DecodedStreams`; the font reader reads a font's CMaps
+through the `Cached` view over them): a form drawn three times, a Type 3
+glyph's procedure shown fifty times, a tiling cell drawn at every fill, a soft
+mask's group two scopes set, an appearance two annotations share, and a font's
+program and CMaps the page and its forms both read are each decoded by the
+first scope that reads them and handed to every later one behind an `Arc`,
+with no filter warning raised again. A chain's refusal is kept as firmly. The
+page's own content is read once, by the door, before any scope exists. An
+image's samples are not held there, since a scope's image cache keeps the
+decoded image. The key is the stream, never a rectangle, so a region decodes
+what the page does (ruling 5). The decoded streams are the render's and go
+when it returns: a form's kept scope, and a retained page's resources, hold
+none, and each render is handed them bound to its own. `Page::render_form`
+reads the form it is asked for in the render's operation, so its name's scope
+and the render's `Do` share the one decode, and `Page::render_annotation`
+decodes the appearance it draws once.
+
 **A retained page.** `Page::display_list` interprets a page once and keeps
 what it drew: every call the interpreter made, with the graphics state it saw,
 in the space the interpreter runs in — nothing recorded is a pixel — and the
@@ -664,9 +685,11 @@ at; `graphics_states_read`, each graphics state a scope reads out of
 `/ExtGState`, at the first `gs` of its name; `pages_interpreted`, each page a
 reading-order inference interprets, which no render does
 ([content and text](content-and-text.md)); and
-`streams_decoded`, each run of a stream's filter chain — the page's content, a
-form's at each `Do`, a tiling pattern's cell, an appearance, an image's
-samples and its soft mask's, a font's program and its CMaps, an ICC profile —
+`streams_decoded`, each run of a stream's filter chain — the page's content;
+once a render, each stream its scopes read: a form's, a Type 3 glyph's
+procedure, a tiling pattern's cell, an appearance, a font's program and its
+CMaps, an ICC profile, a function's; and an image's samples and its soft
+mask's at each decode the image cache makes —
 with `most_decodes_of_one_stream`, the most runs any one stream had,
 `most_decoded_stream`, the reference of the stream that had them (the lowest
 of several that tie), and `bytes_decoded`, the bytes the runs returned

@@ -12,8 +12,8 @@ use tinker_pdf_content::{
     Device, DeviceDefaults, FontSource, Layer, MarkedProps, Matrix, PathSegment, Rgb,
 };
 use tinker_pdf_cos::{
-    decode_text_string, font as cos_font, limits, pages as cos_pages, CosDocument, Counting, Dict,
-    Name, ObjRef, Object,
+    decode_text_string, font as cos_font, limits, pages as cos_pages, Cached, CosDocument,
+    CosError, Counting, DecodedStreams, Dict, Name, ObjRef, Object,
 };
 use tinker_pdf_filters::{
     ccitt_decode, jbig2_decode, jpeg_decode, CcittParams, Jbig2Params, JpegColor,
@@ -76,6 +76,13 @@ struct Caches {
     ///
     /// `None` is cached as firmly as a hit: a font with no embedded program
     /// must not be looked up again on every glyph.
+    ///
+    /// Keyed by the id, which is a resource name and means nothing outside
+    /// this scope, so no other scope shares it; the program is read through
+    /// the operation's decoded streams ([`Operation`]), keyed by the stream,
+    /// so a program the scopes of one operation draw — a page's and its
+    /// forms', or every page's of a save — is decoded once between them, and
+    /// the entry here is the operation's bytes, not a copy of them.
     programs: Mutex<HashMap<u64, Option<Arc<Vec<u8>>>>>,
     /// Decoded images, kept because a page may draw one many times.
     images: Mutex<HashMap<Vec<u8>, CachedImage>>,
@@ -434,13 +441,103 @@ impl Selection {
     }
 }
 
+/// What one operation — a render, a text or an image extraction, a save's
+/// font pass — carries into every resource scope it reads
+/// (`docs/design/performance.md`, P-03, "The cache: who holds it, and its
+/// key"): the streams it has decoded, so that it decodes each once however
+/// many of its scopes read it, and its tally, when it is counting.
+///
+/// Made by the door the operation goes through and cloned into every scope it
+/// builds; a scope a scope makes inherits its maker's. A scope a cache keeps
+/// outlives the operation that built it and holds none
+/// ([`Operation::none`]); each asker is handed it bound to the asker's
+/// ([`PageResources::bind`]), so no operation's streams outlive it.
+#[derive(Clone)]
+pub(crate) struct Operation {
+    /// Every stream the operation's scopes read — a form's content, a Type 3
+    /// glyph's procedure, a tiling pattern's cell, an appearance, a font's
+    /// program and CMaps, a function's, a mesh's, an ICC profile, a lookup
+    /// table, a JBIG2 image's globals — by its reference. `None` holds
+    /// nothing: every read decodes. An image's samples are never here: the
+    /// scope's image cache keeps the image.
+    streams: Option<Arc<DecodedStreams>>,
+    /// The tally, when the operation is counting.
+    work: Option<Arc<Work>>,
+}
+
+impl Operation {
+    /// A new operation, which has decoded nothing yet, counting into `work`
+    /// when it is counting.
+    pub(crate) fn new(work: Option<Arc<Work>>) -> Operation {
+        Operation {
+            streams: Some(Arc::new(DecodedStreams::new())),
+            work,
+        }
+    }
+
+    /// No operation: what a scope a cache keeps holds between the operations
+    /// that ask for it. Nothing counts, and every stream is decoded as it is
+    /// read.
+    pub(crate) fn none() -> Operation {
+        Operation {
+            streams: None,
+            work: None,
+        }
+    }
+
+    /// The tally, when the operation is counting.
+    pub(crate) fn work(&self) -> Option<&Arc<Work>> {
+        self.work.as_ref()
+    }
+
+    /// Whether this is [`Operation::none`].
+    fn is_none(&self) -> bool {
+        self.streams.is_none() && self.work.is_none()
+    }
+
+    /// `r`'s bytes through its filter chain, once an operation: the
+    /// operation's first read of `r` runs the chain, counted into the tally
+    /// when there is one, and every later read is handed what it decoded,
+    /// with nothing run, counted or warned again.
+    pub(crate) fn decoded(&self, doc: &CosDocument, r: ObjRef) -> Result<Arc<Vec<u8>>, CosError> {
+        let decode = || doc.stream_decoded_counted(r, self.work.as_deref());
+        match &self.streams {
+            Some(streams) => streams.read(r, decode),
+            None => decode().map(Arc::new),
+        }
+    }
+
+    /// The font `dict` describes, read as `cos_font::read_in` reads it,
+    /// through `doc`: its CMaps and `/CIDToGIDMap` decoded once an
+    /// operation, and counted, with every key the font spells out, when the
+    /// operation counts.
+    fn read_font(&self, doc: &CosDocument, dict: &Dict) -> cos_font::Font {
+        // An operation of none still reads the font through the view, over
+        // streams of the read's own, so that one reader serves both.
+        let own;
+        let streams = match &self.streams {
+            Some(streams) => &**streams,
+            None => {
+                own = DecodedStreams::new();
+                &own
+            }
+        };
+        match self.work.as_deref() {
+            Some(work) => cos_font::read_in(&Cached::new(&Counting::new(doc, work), streams), dict),
+            None => cos_font::read_in(&Cached::new(doc, streams), dict),
+        }
+    }
+}
+
 /// Everything one page's rendering needs from its resources.
 pub struct PageResources {
     doc: Arc<CosDocument>,
     /// The resource dictionary every name here is read in. Its fonts are read
     /// on the first question about each (`Caches::fonts`), not when the scope
-    /// is built.
-    resources: Option<Dict>,
+    /// is built. Shared, so that the scope a cache keeps is handed to an
+    /// asker over the same dictionary rather than a copy of it
+    /// ([`PageResources::bind`]).
+    resources: Option<Arc<Dict>>,
     /// Everything worked out once and reusable by every render: fonts,
     /// programs, images, ICC transforms, outlines, form scopes. Shared, so
     /// [`PageResources::for_one_render`] can hand a render its own lists of
@@ -486,16 +583,18 @@ pub struct PageResources {
     /// page that marks every drawing operator would otherwise walk
     /// `/OCProperties` thousands of times for one constant.
     optional: Arc<OptionalContent>,
-    /// The tally of the operation these resources serve, when it is counting
-    /// (`docs/design/performance.md`): the fonts this scope resolves, the
-    /// image decoders it runs and every lookup in its caches count into it.
+    /// The operation these resources serve: the streams it has decoded,
+    /// which every stream this scope reads is read through, and its tally
+    /// when it is counting (`docs/design/performance.md`) — the fonts this
+    /// scope resolves, the image decoders it runs and every lookup in its
+    /// caches count into it.
     ///
-    /// `None` for every operation nobody asked about, and then every counting
-    /// site below tests it and does nothing else. A scope this one makes
-    /// inherits it; a scope a cache keeps does not, because the cache outlives
-    /// the operation, and is handed to each asker bound to the asker's
-    /// ([`PageResources::bind`]).
-    work: Option<Arc<Work>>,
+    /// Its tally is `None` for every operation nobody asked about, and then
+    /// every counting site below tests it and does nothing else. A scope
+    /// this one makes inherits it; a scope a cache keeps holds none, because
+    /// the cache outlives the operation, and is handed to each asker bound to
+    /// the asker's ([`PageResources::bind`]).
+    op: Operation,
 }
 
 /// Applies `/Decode [1 0]` to already-decoded samples.
@@ -892,7 +991,7 @@ impl PageResources {
         name: &[u8],
         read: impl FnOnce(&Dict) -> R,
     ) -> Option<R> {
-        let resources = self.resources.as_ref()?;
+        let resources = self.resources.as_deref()?;
         let table = resources.get(Name::PROPERTIES)?;
         read_resolved(&self.doc, table, |table| {
             let entry = table.as_dict()?.get(self.name(name))?;
@@ -955,12 +1054,19 @@ impl PageResources {
     }
 
     /// [`PageResources::for_one_render`], counting into `work`: a counted
-    /// render's resources over a retained page's caches, and a kept scope
-    /// handed to a counting asker ([`PageResources::bind`]). Building it reads
-    /// nothing — its fonts are the kept scope's table, shared — so it counts
-    /// nothing itself.
+    /// render's resources over a retained page's caches. A render is an
+    /// operation of its own, so it reads what it decodes into streams of its
+    /// own, dropped with it. Building it reads nothing — its fonts are the
+    /// kept scope's table, shared — so it counts nothing itself.
     #[must_use]
     pub(crate) fn for_one_render_counted(&self, work: Option<Arc<Work>>) -> PageResources {
+        self.serving(Operation::new(work))
+    }
+
+    /// These resources over the same dictionary and caches, serving `op`:
+    /// nothing tolerated yet, and every stream read through `op`'s and every
+    /// step counted into its tally.
+    fn serving(&self, op: Operation) -> PageResources {
         PageResources {
             doc: Arc::clone(&self.doc),
             resources: self.resources.clone(),
@@ -972,31 +1078,59 @@ impl PageResources {
             unresolved: Mutex::new(None),
             provider: self.provider.clone(),
             optional: Arc::clone(&self.optional),
-            work,
+            op,
         }
     }
 
-    /// A scope a cache keeps, for an asker in this scope's operation: the kept
-    /// scope itself when the operation is not counting, which is what every
-    /// uncounted render gets, and when it is, the kept scope over its own
-    /// caches counting into this one's tally — so a hit stays a hit, and two
-    /// renders holding one kept scope at once count into their own tallies.
+    /// A scope a cache keeps, for an asker in this scope's operation: the
+    /// kept scope over its own caches, serving the asker's operation —
+    /// reading every stream through the operation's decoded streams and
+    /// counting into its tally — so a hit stays a hit, a stream the
+    /// operation's other scopes decoded is not decoded again, and two renders
+    /// holding one kept scope at once read and count apart. The kept scope
+    /// itself for an asker that serves no operation.
     pub(crate) fn bind(&self, kept: &Arc<PageResources>) -> Arc<PageResources> {
-        match &self.work {
-            None => Arc::clone(kept),
-            Some(work) => Arc::new(kept.for_one_render_counted(Some(Arc::clone(work)))),
+        if self.op.is_none() {
+            return Arc::clone(kept);
         }
+        Arc::new(kept.serving(self.op.clone()))
+    }
+
+    /// These resources, kept past the operation they served — a retained
+    /// page's: they serve none from here, so the streams that operation
+    /// decoded go with it, and each later operation is handed them bound to
+    /// its own ([`PageResources::bind`], [`PageResources::for_one_render`]).
+    #[must_use]
+    pub(crate) fn kept(mut self) -> PageResources {
+        self.op = Operation::none();
+        self
     }
 
     /// The tally these resources count into, when their operation is
     /// counting.
     pub(crate) fn work(&self) -> Option<&Arc<Work>> {
-        self.work.as_ref()
+        self.op.work()
+    }
+
+    /// The operation these resources serve, for a scope built beside them in
+    /// the same operation: an annotation's appearance, drawn by the page's
+    /// render.
+    pub(crate) fn operation(&self) -> &Operation {
+        &self.op
+    }
+
+    /// What tells this scope from another: the address of its caches, which
+    /// a kept scope shares with every binding of it ([`PageResources::bind`])
+    /// and a retained page with every render of it, whatever operation each
+    /// serves. Two scopes alive at once are one scope exactly when this is
+    /// equal.
+    pub(crate) fn scope_id(&self) -> usize {
+        Arc::as_ptr(&self.caches) as usize
     }
 
     /// Counts one step of `counter` into the tally, when there is one.
     fn count(&self, counter: Counter) {
-        stats::count(self.work.as_deref(), counter);
+        stats::count(self.op.work.as_deref(), counter);
     }
 
     /// The symbol for `bytes` in the document's name table: every name this
@@ -1013,16 +1147,27 @@ impl PageResources {
         name
     }
 
-    /// `r`'s bytes through its filter chain, the run counted into the tally
-    /// when there is one.
-    fn decoded(&self, r: ObjRef) -> Result<Vec<u8>, tinker_pdf_cos::CosError> {
-        self.doc.stream_decoded_counted(r, self.work.as_deref())
+    /// `r`'s bytes through its filter chain, once the operation: the first
+    /// read runs the chain, counted into the tally when there is one, and a
+    /// later read in any scope of the operation is handed what it decoded
+    /// ([`Operation::decoded`]).
+    pub(crate) fn decoded(&self, r: ObjRef) -> Result<Arc<Vec<u8>>, CosError> {
+        self.op.decoded(&self.doc, r)
     }
 
-    /// `r`'s bytes as an image codec takes them, counted as
-    /// [`PageResources::decoded`] counts.
-    fn image_input(&self, r: ObjRef) -> Result<Vec<u8>, tinker_pdf_cos::CosError> {
-        self.doc.stream_image_input_counted(r, self.work.as_deref())
+    /// An image's samples through its filter chain, read at each decode of
+    /// the image and never kept beside it: the scope's image cache keeps the
+    /// decoded image, and holding its samples too would hold the image twice.
+    /// The run counted as [`PageResources::decoded`] counts one.
+    fn samples(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
+        self.doc.stream_decoded_counted(r, self.op.work.as_deref())
+    }
+
+    /// `r`'s bytes as an image codec takes them, an image's samples too, and
+    /// counted as [`PageResources::samples`] counts.
+    fn image_input(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
+        self.doc
+            .stream_image_input_counted(r, self.op.work.as_deref())
     }
 
     /// Adds fonts some other pass over the same content could not resolve —
@@ -1034,28 +1179,39 @@ impl PageResources {
         }
     }
 
-    /// Reads a page's resource dictionary.
+    /// Reads a page's resource dictionary, for an operation of its own.
     #[must_use]
     pub fn new(
         doc: &Arc<CosDocument>,
         page: &cos_pages::Page,
         provider: Option<&Arc<dyn FontProvider>>,
     ) -> PageResources {
-        PageResources::new_counted(doc, page, provider, None)
+        PageResources::new_in(doc, page, provider, Operation::new(None))
     }
 
-    /// [`PageResources::new`] for an operation counting into `work`: each
-    /// font the scope reads counts, and the scope carries the tally.
+    /// [`PageResources::new`] for `op`: every stream the scope reads is read
+    /// through the operation's decoded streams, each font the scope reads
+    /// counts when the operation counts, and the scope carries both.
     #[must_use]
-    pub(crate) fn new_counted(
+    pub(crate) fn new_in(
         doc: &Arc<CosDocument>,
         page: &cos_pages::Page,
         provider: Option<&Arc<dyn FontProvider>>,
-        work: Option<Arc<Work>>,
+        op: Operation,
+    ) -> PageResources {
+        PageResources::over(doc, page.resources.clone().map(Arc::new), provider, op)
+    }
+
+    /// Resources over `resources`, with nothing read and nothing kept yet.
+    fn over(
+        doc: &Arc<CosDocument>,
+        resources: Option<Arc<Dict>>,
+        provider: Option<&Arc<dyn FontProvider>>,
+        op: Operation,
     ) -> PageResources {
         PageResources {
             doc: doc.clone(),
-            resources: page.resources.clone(),
+            resources,
             caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
@@ -1064,7 +1220,7 @@ impl PageResources {
             unresolved: Mutex::new(None),
             provider: provider.cloned(),
             optional: Arc::new(OptionalContent::bind(doc)),
-            work,
+            op,
         }
     }
 
@@ -1134,42 +1290,20 @@ impl PageResources {
         self.parse_space(&cs, 0, b"Group").map(group_space)
     }
 
-    /// Reads a resource dictionary that is not a page's.
+    /// Reads a resource dictionary that is not a page's, for `op`, as
+    /// [`PageResources::new_in`] reads a page's.
     ///
     /// An annotation's appearance stream carries its own resources, and
     /// resolving its fonts against the page's would find the wrong ones or
     /// none at all.
     #[must_use]
-    pub fn from_dict(
+    pub(crate) fn from_dict_in(
         doc: &Arc<CosDocument>,
         dict: Dict,
         provider: Option<&Arc<dyn FontProvider>>,
+        op: Operation,
     ) -> PageResources {
-        PageResources::from_dict_counted(doc, dict, provider, None)
-    }
-
-    /// [`PageResources::from_dict`] for an operation counting into `work`, as
-    /// [`PageResources::new_counted`] is for a page's.
-    #[must_use]
-    pub(crate) fn from_dict_counted(
-        doc: &Arc<CosDocument>,
-        dict: Dict,
-        provider: Option<&Arc<dyn FontProvider>>,
-        work: Option<Arc<Work>>,
-    ) -> PageResources {
-        PageResources {
-            doc: doc.clone(),
-            resources: Some(dict),
-            caches: Arc::default(),
-            missing_fonts: Mutex::new(Vec::new()),
-            damaged_images: Mutex::new(Vec::new()),
-            repaired_spaces: Mutex::new(Vec::new()),
-            image_capture: Mutex::new(None),
-            unresolved: Mutex::new(None),
-            provider: provider.cloned(),
-            optional: Arc::new(OptionalContent::bind(doc)),
-            work,
-        }
+        PageResources::over(doc, Some(Arc::new(dict)), provider, op)
     }
 
     /// A pattern resource: its dictionary, and the object it lives in when it
@@ -1181,7 +1315,7 @@ impl PageResources {
     /// back, and both routes read the dictionary through the same lookup:
     /// `/PatternType` deciding the kind is the one thing they must agree on.
     fn pattern_entry(&self, name: &[u8]) -> Option<(Dict, Option<ObjRef>)> {
-        let resources = self.resources.as_ref()?;
+        let resources = self.resources.as_deref()?;
         let table = self.doc.resolve_key(resources, Name::PATTERN);
         let table = table.as_dict()?;
         let key = self.name(name);
@@ -1207,9 +1341,9 @@ impl PageResources {
     }
 
     /// The scope a stream's own `/Resources` makes: a tiling pattern's, a
-    /// mask group's or a form's, built as [`PageResources::from_dict`]
-    /// builds any and counting into this scope's tally. `None` when the
-    /// stream has none, and its names resolve where it was painted (8.7.3.2,
+    /// mask group's or a form's, built as [`PageResources::from_dict_in`]
+    /// builds any and serving this scope's operation. `None` when the stream
+    /// has none, and its names resolve where it was painted (8.7.3.2,
     /// 8.10.1).
     pub(crate) fn own_scope(&self, stream: ObjRef) -> Option<PageResources> {
         let object = self.doc.get(stream).ok()?;
@@ -1218,11 +1352,11 @@ impl PageResources {
             .resolve_key(object.as_dict()?, Name::RESOURCES)
             .as_dict()?
             .clone();
-        Some(PageResources::from_dict_counted(
+        Some(PageResources::from_dict_in(
             &self.doc,
             own,
             self.provider.as_ref(),
-            self.work.clone(),
+            self.op.clone(),
         ))
     }
 
@@ -1347,16 +1481,14 @@ impl PageResources {
             .resolve_key(dict, Name::RESOURCES)
             .as_dict()
             .cloned()?;
-        // The scope is kept without a tally: the cache outlives this
-        // operation, and each asker's reads count into its own.
-        let mut kept = PageResources::from_dict_counted(
+        // The scope is kept serving no operation: the cache outlives this
+        // one, and each asker reads and counts through its own.
+        Some(Arc::new(PageResources::from_dict_in(
             &self.doc,
             own,
             self.provider.as_ref(),
-            self.work.clone(),
-        );
-        kept.work = None;
-        Some(Arc::new(kept))
+            Operation::none(),
+        )))
     }
 
     /// Whether this scope's `/XObject` dictionary names `name` and, if it
@@ -1378,7 +1510,7 @@ impl PageResources {
     }
 
     pub(crate) fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
-        let resources = self.resources.as_ref()?;
+        let resources = self.resources.as_deref()?;
         let value = self.doc.resolve_key(resources, Name::XOBJECT);
         let dict = value.as_dict()?;
         let reference = dict.get_ref(self.name(name))?;
@@ -1468,7 +1600,7 @@ impl PageResources {
         // scope's, once, as it always was, and not kept beside a space.
         let as_painted = self.painted();
         let before = self.repaired_spaces().len();
-        let entry = self.resources.as_ref().and_then(|resources| {
+        let entry = self.resources.as_deref().and_then(|resources| {
             let table = resources.get(Name::COLOR_SPACE)?;
             read_resolved(&self.doc, table, |table| {
                 let entry = table.as_dict()?.get(self.name(name))?;
@@ -1540,7 +1672,7 @@ impl PageResources {
     /// asked for, and saying so, is ruling 2's answer.
     fn read_defaults(&self) -> Defaults {
         let mut defaults = Defaults::default();
-        let Some(resources) = self.resources.as_ref() else {
+        let Some(resources) = self.resources.as_deref() else {
             return defaults;
         };
         let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
@@ -1626,7 +1758,7 @@ impl PageResources {
                 // Until October 2026 the name fell through to DeviceGray
                 // while `Page::images` listed the space it names.
                 resource if how.inline => {
-                    let entry = self.resources.as_ref().and_then(|resources| {
+                    let entry = self.resources.as_deref().and_then(|resources| {
                         let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
                         table.as_dict()?.get(self.name(resource)).cloned()
                     })?;
@@ -1683,6 +1815,7 @@ impl PageResources {
                             .get(3)
                             .and_then(Object::as_objref)
                             .and_then(|r| self.decoded(r).ok())
+                            .map(Arc::unwrap_or_clone)
                             .unwrap_or_default(),
                     },
                     None => Vec::new(),
@@ -2007,16 +2140,18 @@ impl PageResources {
 /// would change how a correctly embedded document looks.
 ///
 /// Both read the dictionary the scope's table holds for the font, so asking
-/// for a substitute reads no font dictionary a second time.
+/// for a substitute reads no font dictionary a second time; the embedded one
+/// is read through the operation's decoded streams, so every scope of the
+/// operation that draws it is handed the one decode.
 fn program_for(
     doc: &CosDocument,
     font: &ScopeFont,
     provider: Option<&dyn FontProvider>,
-    work: Option<&Work>,
+    op: &Operation,
 ) -> Option<Arc<Vec<u8>>> {
     let dict = font.dict.as_dict()?;
-    if let Some(embedded) = embedded_program(doc, dict, work) {
-        return Some(Arc::new(embedded));
+    if let Some(embedded) = embedded_program(doc, dict, op) {
+        return Some(embedded);
     }
 
     let provider = provider?;
@@ -2026,7 +2161,7 @@ fn program_for(
     provider.substitute(&FontRequest::read(doc, dict))
 }
 
-fn embedded_program(doc: &CosDocument, font: &Dict, work: Option<&Work>) -> Option<Vec<u8>> {
+fn embedded_program(doc: &CosDocument, font: &Dict, op: &Operation) -> Option<Arc<Vec<u8>>> {
     // A composite font keeps its program on the descendant.
     let descendants = doc.resolve_key(font, Name::DESCENDANT_FONTS);
     let descendant = descendants
@@ -2043,7 +2178,7 @@ fn embedded_program(doc: &CosDocument, font: &Dict, work: Option<&Work>) -> Opti
 
     for key in [Name::FONT_FILE2, Name::FONT_FILE3, Name::FONT_FILE] {
         if let Some(reference) = descriptor.get_ref(key) {
-            if let Ok(bytes) = doc.stream_decoded_counted(reference, work) {
+            if let Ok(bytes) = op.decoded(doc, reference) {
                 if !bytes.is_empty() {
                     return Some(bytes);
                 }
@@ -2126,7 +2261,8 @@ impl FontSource for PageResources {
         // get one is the /Encoding /Differences array — there is no built-in
         // encoding for a font whose glyphs the document invented. Read once
         // a scope, on the font's first glyph; a glyph is then one probe of
-        // the codes and one lookup in /CharProcs.
+        // the codes and one lookup in /CharProcs, and its procedure the
+        // operation's one decode of it.
         let procedures = found.procedures.get_or_init(|| self.read_type3(dict));
         let name = *procedures.names.get(&code)?;
         let reference = procedures.procs.as_dict()?.get_ref(name)?;
@@ -2134,7 +2270,7 @@ impl FontSource for PageResources {
         let matrix = procedures.matrix?;
 
         Some(tinker_pdf_content::Type3Glyph {
-            content,
+            content: Arc::unwrap_or_clone(content),
             matrix,
             // The procedure's identity, packed as a form's is, which is what
             // tells a procedure that shows its own glyph from one that shows
@@ -2262,7 +2398,7 @@ impl FontSource for PageResources {
         // an ordinary property list and hides nothing.
         // The table and the entry are read where they lie, as
         // `with_property_list` reads them: every `/OC` `BDC` asks.
-        let resources = self.resources.as_ref()?;
+        let resources = self.resources.as_deref()?;
         let table = resources.get(Name::PROPERTIES)?;
         read_resolved(&self.doc, table, |table| {
             let entry = table.as_dict()?.get(self.name(name))?;
@@ -2387,7 +2523,7 @@ impl PageResources {
         };
         let reference = font.as_objref()?;
         let size = read_resolved(&self.doc, size, Object::as_number).filter(|v| v.is_finite())?;
-        let name = match self.resources.as_ref() {
+        let name = match self.resources.as_deref() {
             Some(resources) => fonts::state_font(&*self.doc, resources, reference),
             None => fonts::reserved_name(reference),
         };
@@ -2624,7 +2760,7 @@ impl PageResources {
     /// once each, with no copy of a table written inline. Counted as a
     /// graphics state read when the entry is a dictionary.
     fn read_ext_g_state(&self, name: &[u8]) -> Option<Arc<tinker_pdf_content::StateParameters>> {
-        let resources = self.resources.as_ref()?;
+        let resources = self.resources.as_deref()?;
         let table = resources.get(Name::EXT_G_STATE)?;
         read_resolved(&self.doc, table, |table| {
             let entry = table.as_dict()?.get(self.name(name))?;
@@ -2792,7 +2928,7 @@ impl GlyphSource for PageResources {
     }
 
     fn shading(&self, name: &[u8]) -> Result<Option<Shading>, i64> {
-        let Some(resources) = self.resources.as_ref() else {
+        let Some(resources) = self.resources.as_deref() else {
             return Ok(None);
         };
         let table = self.doc.resolve_key(resources, Name::SHADING);
@@ -2870,11 +3006,11 @@ impl GlyphSource for PageResources {
         let nested;
         let resources: &PageResources = match own {
             Some(dict) => {
-                nested = PageResources::from_dict_counted(
+                nested = PageResources::from_dict_in(
                     &self.doc,
                     dict,
                     self.provider.as_ref(),
-                    self.work.clone(),
+                    self.op.clone(),
                 );
                 &nested
             }
@@ -2916,7 +3052,7 @@ impl GlyphSource for PageResources {
         tinker_pdf_content::interpret(&content, Matrix::IDENTITY, &mut renderer, resources);
         let (mut canvas, warnings, counts) = renderer.finish_counted();
         // The cell's renderer is one of this render's own, so what it drew is.
-        stats::add_render(self.work.as_deref(), counts);
+        stats::add_render(self.op.work.as_deref(), counts);
 
         // 8.7.3.3: `PaintType 2`. The cell is a shape and the colour comes
         // from the `SCN` operands, so whatever the content stream said about
@@ -3167,7 +3303,9 @@ impl PageResources {
             });
 
         Some(tinker_pdf_content::Form {
-            content,
+            // The operation's one decode of the form, however often it is
+            // drawn: the interpreter takes the content as its own.
+            content: Arc::unwrap_or_clone(content),
             matrix,
             bbox,
             group,
@@ -3355,7 +3493,7 @@ impl PageResources {
                         .unwrap_or(8) as u32,
                     encode: pairs(&numbers(b"Encode")),
                     decode: pairs(&numbers(b"Decode")),
-                    samples: data,
+                    samples: Arc::unwrap_or_clone(data),
                 })
             }
             _ => None,
@@ -3409,7 +3547,8 @@ impl PageResources {
         }
     }
 
-    /// The embedded font program behind a font id, decoded once.
+    /// The font program behind a font id, read once a scope and decoded once
+    /// an operation.
     fn program(&self, font_id: u64) -> Option<Arc<Vec<u8>>> {
         if let Ok(cache) = self.caches.programs.lock() {
             if let Some(hit) = cache.get(&font_id) {
@@ -3418,14 +3557,9 @@ impl PageResources {
             }
         }
         self.count(Counter::FontProgramMisses);
-        let built = self.font_by_id(font_id).and_then(|found| {
-            program_for(
-                &self.doc,
-                &found,
-                self.provider.as_deref(),
-                self.work.as_deref(),
-            )
-        });
+        let built = self
+            .font_by_id(font_id)
+            .and_then(|found| program_for(&self.doc, &found, self.provider.as_deref(), &self.op));
         if let Ok(mut cache) = self.caches.programs.lock() {
             cache.insert(font_id, built.clone());
         }
@@ -3470,7 +3604,7 @@ impl PageResources {
     /// differently, and a reserved name's object after. Counted as a font
     /// dictionary resolved when a dictionary is read.
     fn read_scope_font(&self, name: &[u8]) -> Option<ScopeFont> {
-        let bound = self.resources.as_ref().and_then(|resources| {
+        let bound = self.resources.as_deref().and_then(|resources| {
             let table = resources.get(Name::FONT)?;
             read_resolved(&self.doc, table, |table| {
                 let key = self.name(name);
@@ -3491,12 +3625,10 @@ impl PageResources {
         };
         let font_dict = dict.as_dict()?;
         self.count(Counter::FontDictionariesResolved);
-        // Through the counting view when the operation counts, so the CMaps
-        // reading the font decodes, and any key it spells out, count too.
-        let font = match self.work.as_deref() {
-            Some(work) => cos_font::read_in(&Counting::new(&*self.doc, work), font_dict),
-            None => cos_font::read_in(&*self.doc, font_dict),
-        };
+        // Through the operation's view: the CMaps reading the font decodes
+        // are decoded once the operation, whichever of its scopes reads the
+        // font first, and counted, with any key it spells out, when it counts.
+        let font = self.op.read_font(&self.doc, font_dict);
         let type3 = font_dict
             .get_name(Name::SUBTYPE)
             .and_then(|n| self.doc.name_bytes(n))
@@ -3583,7 +3715,7 @@ impl PageResources {
 
     /// The name in this scope's `/Font` whose id is `font_id`.
     fn font_name_of(&self, font_id: u64) -> Option<Vec<u8>> {
-        let table = self.resources.as_ref()?.get(Name::FONT)?;
+        let table = self.resources.as_deref()?.get(Name::FONT)?;
         read_resolved(&self.doc, table, |table| {
             let (key, _) = table
                 .as_dict()?
@@ -3595,7 +3727,7 @@ impl PageResources {
 
     /// This scope's `/Font` subdictionary (7.8.3).
     fn font_table(&self) -> Option<Dict> {
-        let resources = self.resources.as_ref()?;
+        let resources = self.resources.as_deref()?;
         self.doc
             .resolve_key(resources, Name::FONT)
             .as_dict()
@@ -3642,7 +3774,7 @@ impl PageResources {
         // 8.4.5: a graphics state names a font by reference (`/Font [font
         // size]`), which this scope's content may select as `Tf` selects one
         // `/Font` names.
-        if let Some(resources) = self.resources.as_ref() {
+        if let Some(resources) = self.resources.as_deref() {
             let states = self.doc.resolve_key(resources, Name::EXT_G_STATE);
             for (_, entry) in states.as_dict().into_iter().flat_map(Dict::iter) {
                 let state = self.doc.resolve(entry);
@@ -4078,7 +4210,8 @@ impl PageResources {
         // `/DecodeParms`, holding the segments shared by every image that
         // names it. It is the ordinary shape for the symbol dictionary of a
         // scanned book, so a build that ignored it would refuse a file whose
-        // whole payload is in one place and say nothing about why.
+        // whole payload is in one place and say nothing about why. It is no
+        // image's samples, so the operation decodes it once for them all.
         let globals = self
             .decode_parms(dict)
             .and_then(|parms| match parms.get(self.name(b"JBIG2Globals")) {
@@ -4427,7 +4560,7 @@ impl PageResources {
             self.ccitt_samples(dict, &raw, width, height, name)
         } else {
             // Everything else decodes to raw samples.
-            self.decoded(reference)
+            self.samples(reference)
                 .map_err(|_| "undecodable".to_string())?
         };
         // 7.4.6 and 7.4.7: both bilevel codecs produce one bit per pixel,
@@ -5320,7 +5453,7 @@ impl PageResources {
             ColorSpace::DeviceCmyk => b"DefaultCMYK",
             _ => return None,
         };
-        let resources = self.resources.as_ref()?;
+        let resources = self.resources.as_deref()?;
         let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
         table.as_dict()?.get(self.name(key)).cloned()
     }
@@ -5385,7 +5518,7 @@ impl PageResources {
             }
             return match bytes.as_ref() {
                 other if inline => {
-                    let entry = self.resources.as_ref().and_then(|resources| {
+                    let entry = self.resources.as_deref().and_then(|resources| {
                         let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
                         table.as_dict()?.get(self.name(other)).cloned()
                     });
@@ -5434,6 +5567,7 @@ impl PageResources {
                     .map(|a| Box::new(self.describe(a, inline, depth + 1, None)));
                 let profile = stream
                     .and_then(|r| self.decoded(r).ok())
+                    .map(Arc::unwrap_or_clone)
                     .unwrap_or_default();
                 ImageSpace::Icc {
                     components,
@@ -5458,6 +5592,7 @@ impl PageResources {
                             .get(3)
                             .and_then(Object::as_objref)
                             .and_then(|r| self.decoded(r).ok())
+                            .map(Arc::unwrap_or_clone)
                             .unwrap_or_default(),
                     },
                     None => Vec::new(),
