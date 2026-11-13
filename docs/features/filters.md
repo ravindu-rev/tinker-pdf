@@ -83,8 +83,15 @@ to eight on the way out with `JpegPrecisionNarrowed` recorded, because every
 `PixelFormat` this engine rasters into is eight bits deep and a wider sample
 path is a change to the raster rather than to this codec. `JpegImage::precision`
 says what the frame declared. Every mode
-fills the same per-component coefficient buffer and is rendered once by a
-single dequantise-and-transform pass with an integer separable IDCT.
+fills the same per-component coefficient buffer, which is then rendered a
+strip at a time: one MCU row of each component dequantised, transformed by an
+integer separable IDCT, replicated across the image's width and
+colour-converted into the strip, so no whole-image plane is held beside the
+output (`docs/design/jpeg-speed.md`). Huffman codes are read through
+two-level lookup tables over a 64-bit word of bits, and the transform makes
+each of its cosine table's products once, in `i32` lanes for every block whose
+coefficients are within its bound and in `i64` past it; both give the bytes
+the direct forms give, which the test build keeps to hold them to.
 `JpegColor` names what came out: greyscale, YCbCr already converted to RGB,
 and CMYK with the Adobe transform undone — including the inverted-CMYK
 convention, reported as its own variant.
@@ -747,7 +754,13 @@ symbol, code, field or length byte read, each byte a row unfiltered, each row,
 strip, run or reference change, and each byte returned. The steps ride the
 decode path's own context, the warnings accumulator every decoder is handed,
 or the decoder's own bit reader where it has no other; `jbig2_decode_measured`
-is JBIG2's, its `Jbig2SymbolExtent::work`. The image codecs are `jpeg_decode` (returns `JpegImage`),
+is JBIG2's, its `Jbig2SymbolExtent::work`. The image codecs are `jpeg_decode` (returns `JpegImage`)
+and `jpeg_decode_strips`, which hands a `JpegSink` the image's `JpegLayout`
+and then its strips, whole rows top to bottom, one MCU row each, and returns a
+`JpegFrame` — the layout, the warnings and `JpegHeld`, the bytes of
+coefficients, planes and strip it held — so a caller can write the image
+where it wants it without a second copy; every check is made before the first
+strip, so a decode that hands one out succeeds;
 `ccitt_decode` (takes `CcittParams`), `jbig2_decode` (takes `Jbig2Params`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
 `JpxImage`), with `jpx_header` beside it: every stage of that decode before

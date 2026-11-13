@@ -2,11 +2,12 @@
 //! hold those paths to (`docs/design/jpeg-speed.md`, "The invariant").
 //!
 //! Each is the straightforward reading of its clause — a bit at a time, every
-//! product made — and each fast path in `super` is tested against it over
-//! inputs that reach every branch of both, so that a full-size decode stays
-//! byte-identical for every stream.
+//! product made, every plane whole — and each fast path in `super` is tested
+//! against it over inputs that reach every branch of both, so that a
+//! full-size decode stays byte-identical for every stream.
 
-use super::{HuffmanTable, COS_TABLE};
+use super::{Component, HuffmanTable, JpegColor, JpegError, JpegImage, COS_TABLE, ZIGZAG};
+use crate::Warning;
 
 /// Reads bits from the entropy-coded segment a byte at a time, unstuffing as
 /// it goes: [`super::BitReader`] without its word.
@@ -171,4 +172,204 @@ pub(super) fn idct_block(input: &[i32; 64], precision: u8, out: &mut [u8; 64]) {
             }
         }
     }
+}
+/// Turns the finished coefficients into pixels: one full-resolution plane
+/// a component, upsampled as it is written, then interleaved —
+/// [`super::finish`] without its strips.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_planes(
+    components: &[Component],
+    quant: &[[u16; 64]; 4],
+    width: usize,
+    height: usize,
+    adobe_seen: bool,
+    adobe_transform: Option<u8>,
+    precision: u8,
+    max_output: usize,
+    mut warnings: Vec<Warning>,
+) -> Result<JpegImage, JpegError> {
+    if width == 0 || height == 0 || components.is_empty() {
+        return Err(JpegError::Truncated);
+    }
+
+    let color = match components.len() {
+        1 => JpegColor::Gray,
+        3 => JpegColor::Rgb,
+        4 => {
+            // Adobe transform 2 is YCCK; 0 is plain CMYK. Photoshop writes
+            // CMYK inverted, which the Adobe marker's presence signals.
+            if adobe_seen {
+                JpegColor::CmykInverted
+            } else {
+                JpegColor::Cmyk
+            }
+        }
+        _ => return Err(JpegError::UnsupportedComponents),
+    };
+
+    let needed = width
+        .saturating_mul(height)
+        .saturating_mul(components.len());
+    if needed > max_output {
+        warnings.push(Warning::OutputCapHit);
+        return Err(JpegError::Truncated);
+    }
+
+    if precision > 8 {
+        // Ruling 10: the samples handed out are narrower than the frame's, and
+        // that is a leniency rather than a decode. Recorded once.
+        warnings.push(Warning::JpegPrecisionNarrowed);
+    }
+
+    let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
+    let v_max = components.iter().map(|c| c.v).max().unwrap_or(1).max(1);
+
+    // One full-resolution plane per component, upsampled as it is written.
+    let mut planes: Vec<Vec<u8>> = components
+        .iter()
+        .map(|_| vec![128u8; width * height])
+        .collect();
+
+    let mut block = [0i32; 64];
+    let mut pixels = [0u8; 64];
+
+    for (ci, component) in components.iter().enumerate() {
+        let table = quant.get(component.quant).copied().unwrap_or([1; 64]);
+        let scale_x = h_max / component.h.max(1);
+        let scale_y = v_max / component.v.max(1);
+        let Some(plane) = planes.get_mut(ci) else {
+            continue;
+        };
+
+        for by in 0..component.blocks_y {
+            for bx in 0..component.blocks_x {
+                let Some(source) = component.block(bx, by) else {
+                    continue;
+                };
+
+                // Dequantise out of zig-zag order and into the natural one the
+                // transform expects.
+                block.fill(0);
+                for (k, &coefficient) in source.iter().enumerate() {
+                    if coefficient == 0 {
+                        continue;
+                    }
+                    let Some(&z) = ZIGZAG.get(k) else { continue };
+                    let q = i32::from(table.get(z).copied().unwrap_or(1));
+                    if let Some(slot) = block.get_mut(z) {
+                        *slot = i32::from(coefficient).saturating_mul(q);
+                    }
+                }
+                idct_block(&block, precision, &mut pixels);
+
+                let origin_x = bx * 8 * scale_x;
+                let origin_y = by * 8 * scale_y;
+                if origin_x >= width || origin_y >= height {
+                    continue;
+                }
+
+                for py in 0..8usize {
+                    for px in 0..8usize {
+                        let value = pixels.get(py * 8 + px).copied().unwrap_or(128);
+                        for ry in 0..scale_y {
+                            for rx in 0..scale_x {
+                                let x = origin_x + px * scale_x + rx;
+                                let y = origin_y + py * scale_y + ry;
+                                if x < width && y < height {
+                                    if let Some(slot) = plane.get_mut(y * width + x) {
+                                        *slot = value;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Interleave, converting colour where the model calls for it.
+    let n = components.len();
+    let mut out = vec![0u8; width * height * n];
+    for i in 0..(width * height) {
+        match color {
+            JpegColor::Gray => {
+                if let (Some(slot), Some(plane)) = (out.get_mut(i), planes.first()) {
+                    *slot = plane.get(i).copied().unwrap_or(128);
+                }
+            }
+            JpegColor::Rgb => {
+                let y = f32::from(
+                    planes
+                        .first()
+                        .and_then(|p| p.get(i))
+                        .copied()
+                        .unwrap_or(128),
+                );
+                let cb =
+                    f32::from(planes.get(1).and_then(|p| p.get(i)).copied().unwrap_or(128)) - 128.0;
+                let cr =
+                    f32::from(planes.get(2).and_then(|p| p.get(i)).copied().unwrap_or(128)) - 128.0;
+                // T.871: the JFIF YCbCr to RGB conversion.
+                let rgb = [
+                    y + 1.402 * cr,
+                    y - 0.344_136 * cb - 0.714_136 * cr,
+                    y + 1.772 * cb,
+                ];
+                for (c, value) in rgb.iter().enumerate() {
+                    if let Some(slot) = out.get_mut(i * 3 + c) {
+                        *slot = value.clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            JpegColor::Cmyk | JpegColor::CmykInverted => {
+                let transform = adobe_transform.unwrap_or(0);
+                let raw: Vec<u8> = (0..4)
+                    .map(|c| planes.get(c).and_then(|p| p.get(i)).copied().unwrap_or(0))
+                    .collect();
+
+                // Transform 2 means the first three components are YCCK and
+                // need the same conversion as YCbCr before use.
+                let values = if transform == 2 {
+                    let y = f32::from(raw.first().copied().unwrap_or(0));
+                    let cb = f32::from(raw.get(1).copied().unwrap_or(128)) - 128.0;
+                    let cr = f32::from(raw.get(2).copied().unwrap_or(128)) - 128.0;
+                    [
+                        (y + 1.402 * cr).clamp(0.0, 255.0) as u8,
+                        (y - 0.344_136 * cb - 0.714_136 * cr).clamp(0.0, 255.0) as u8,
+                        (y + 1.772 * cb).clamp(0.0, 255.0) as u8,
+                        raw.get(3).copied().unwrap_or(0),
+                    ]
+                } else {
+                    [
+                        raw.first().copied().unwrap_or(0),
+                        raw.get(1).copied().unwrap_or(0),
+                        raw.get(2).copied().unwrap_or(0),
+                        raw.get(3).copied().unwrap_or(0),
+                    ]
+                };
+
+                for (c, value) in values.iter().enumerate() {
+                    if let Some(slot) = out.get_mut(i * 4 + c) {
+                        // Adobe writes CMYK inverted; undo it so callers get
+                        // ink values that mean what they say.
+                        *slot = if color == JpegColor::CmykInverted {
+                            255 - *value
+                        } else {
+                            *value
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(JpegImage {
+        width: width as u32,
+        height: height as u32,
+        color,
+        data: out,
+        precision,
+        warnings,
+    })
 }

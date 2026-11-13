@@ -47,9 +47,11 @@
 //! G.2, checked against the document a second time, and pinned against
 //! hand-derived decision sequences. [`arith`] says what that is worth.
 //!
-//! Every mode decodes into the same per-component coefficient buffer and is
-//! then rendered once, at the end, by a single dequantise-and-transform pass.
-//! Progressive forces that shape — a coefficient is refined by later scans, so
+//! Every mode decodes into the same per-component coefficient buffer, which is
+//! rendered at the end a strip at a time — one MCU row of each component
+//! dequantised, transformed, replicated and colour-converted — and handed to a
+//! [`JpegSink`] or painted into the image ([`decode_strips`], [`decode`];
+//! `docs/design/jpeg-speed.md`). Progressive forces that shape — a coefficient is refined by later scans, so
 //! nothing can be turned into a pixel until the last scan has been read — and
 //! baseline shares it rather than keeping a second path that could drift.
 //!
@@ -65,6 +67,8 @@ mod arith;
 #[cfg(test)]
 mod direct;
 mod encode;
+#[cfg(test)]
+mod streams;
 
 pub use encode::{
     jpeg_encode, JpegEncodeError, JpegOptions, JpegQuantisation, JpegSampling, JpegSource,
@@ -111,6 +115,79 @@ pub struct JpegImage {
     pub precision: u8,
     /// What the decoder tolerated.
     pub warnings: Vec<Warning>,
+}
+
+impl JpegColor {
+    /// Samples a pixel has: one, three or four.
+    #[must_use]
+    pub fn components(self) -> usize {
+        match self {
+            JpegColor::Gray => 1,
+            JpegColor::Rgb => 3,
+            JpegColor::Cmyk | JpegColor::CmykInverted => 4,
+        }
+    }
+}
+
+/// A decoded image's geometry and colour: what a [`JpegSink`] is told before
+/// its first strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JpegLayout {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// What the components mean.
+    pub color: JpegColor,
+    /// T.81 B.2.2's `P`: the frame's sample precision, 8 or 12. The samples
+    /// are eight bits whatever it was, as [`JpegImage::data`]'s are.
+    pub precision: u8,
+}
+
+/// Where [`decode_strips`] hands a decoded image, a strip at a time.
+///
+/// A strip is one MCU row of the image — `8 · Vmax` rows, the last cut at
+/// the image's height — and the strips arrive top to bottom.
+pub trait JpegSink {
+    /// The image's geometry and colour: once, before the first strip.
+    fn begin(&mut self, layout: JpegLayout);
+    /// Rows `y` to `y + rows` of the image, whole: interleaved samples, one
+    /// byte each, as [`JpegImage::data`]'s rows hold them.
+    fn strip(&mut self, y: u32, rows: u32, data: &[u8]);
+}
+
+/// The bytes a strip decode held at once in buffers sized from the image,
+/// beside the image it handed out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JpegHeld {
+    /// Coefficients: the whole image's.
+    pub coefficients: usize,
+    /// Component samples: the block rows of each component one strip reads,
+    /// replicated across the image's width.
+    pub planes: usize,
+    /// The strip handed to the sink.
+    pub strip: usize,
+}
+
+impl JpegHeld {
+    /// All of it.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.coefficients
+            .saturating_add(self.planes)
+            .saturating_add(self.strip)
+    }
+}
+
+/// What a strip decode says of the image beside its strips.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JpegFrame {
+    /// The geometry and colour the sink was told.
+    pub layout: JpegLayout,
+    /// What the decoder tolerated, as [`JpegImage::warnings`].
+    pub warnings: Vec<Warning>,
+    /// What it held while it decoded.
+    pub held: JpegHeld,
 }
 
 /// Why a JPEG could not be decoded.
@@ -681,6 +758,55 @@ fn allocate(
 
 /// Decodes a JPEG.
 pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
+    let mut image = Collected::default();
+    let frame = finish(scan_frame(data, max_output)?, max_output, &mut image)?;
+    Ok(JpegImage {
+        width: frame.layout.width,
+        height: frame.layout.height,
+        color: frame.layout.color,
+        data: image.data,
+        precision: frame.layout.precision,
+        warnings: frame.warnings,
+    })
+}
+
+/// Decodes a JPEG a strip at a time (`docs/design/jpeg-speed.md`,
+/// "Strips"): `sink` is told the image's layout, then handed every strip, top
+/// to bottom, and the image is never held whole.
+///
+/// The strips are [`decode`]'s image, row for row, and the frame its
+/// geometry, colour and warnings. **A decode that hands out a strip
+/// succeeds**: every check is made before the first one.
+pub fn decode_strips(
+    data: &[u8],
+    max_output: usize,
+    sink: &mut dyn JpegSink,
+) -> Result<JpegFrame, JpegError> {
+    let mut forwarded = Forwarded {
+        sink,
+        strip: Vec::new(),
+        held: 0,
+    };
+    finish(scan_frame(data, max_output)?, max_output, &mut forwarded)
+}
+
+/// What the marker walk leaves for the end of a decode.
+struct Scanned {
+    components: Vec<Component>,
+    quant: [[u16; 64]; 4],
+    width: usize,
+    height: usize,
+    adobe_seen: bool,
+    adobe_transform: Option<u8>,
+    /// T.81 B.2.2's `P`.
+    precision: u8,
+    /// What the scans tolerated.
+    warnings: Vec<Warning>,
+}
+
+/// Reads every marker segment and decodes every scan into the frame's
+/// coefficients.
+fn scan_frame(data: &[u8], max_output: usize) -> Result<Scanned, JpegError> {
     if data.get(..2) != Some(&[0xFF, 0xD8]) {
         return Err(JpegError::NotJpeg);
     }
@@ -953,17 +1079,16 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
         warnings.push(Warning::TruncatedInput);
     }
 
-    finish(
-        &components,
-        &quant,
+    Ok(Scanned {
+        components,
+        quant,
         width,
         height,
         adobe_seen,
         adobe_transform,
-        sample_precision,
-        max_output,
+        precision: sample_precision,
         warnings,
-    )
+    })
 }
 
 /// Everything a scan's entropy decoding needs that is not the scan's bytes.
@@ -1478,19 +1603,98 @@ fn decode_ac_progressive(
     }
 }
 
-/// Turns the finished coefficients into pixels.
-#[allow(clippy::too_many_arguments)]
+/// Where a [`Painter`]'s rows go: straight into a whole image, or a strip at
+/// a time to a [`JpegSink`].
+trait Rows {
+    /// The image's layout, once, before the first rows are asked for.
+    fn begin(&mut self, layout: JpegLayout);
+    /// The buffer `count` rows of `row_bytes` from row `y` are painted into.
+    fn rows(&mut self, y: usize, count: usize, row_bytes: usize) -> &mut [u8];
+    /// The rows [`Rows::rows`] last handed out are painted.
+    fn painted(&mut self, y: usize, count: usize, row_bytes: usize);
+    /// Bytes held beside the image the rows go to.
+    fn held(&self) -> usize;
+}
+
+/// The rows painted into the whole image [`decode`] returns.
+#[derive(Default)]
+struct Collected {
+    data: Vec<u8>,
+}
+
+impl Rows for Collected {
+    fn begin(&mut self, layout: JpegLayout) {
+        let samples = (layout.width as usize)
+            .saturating_mul(layout.height as usize)
+            .saturating_mul(layout.color.components());
+        self.data = vec![0u8; samples];
+    }
+
+    fn rows(&mut self, y: usize, count: usize, row_bytes: usize) -> &mut [u8] {
+        let start = y.saturating_mul(row_bytes);
+        let end = start.saturating_add(count.saturating_mul(row_bytes));
+        self.data.get_mut(start..end).unwrap_or_default()
+    }
+
+    fn painted(&mut self, _: usize, _: usize, _: usize) {}
+
+    fn held(&self) -> usize {
+        0
+    }
+}
+
+/// The rows painted into one strip and handed to a sink, by
+/// [`decode_strips`].
+struct Forwarded<'s> {
+    sink: &'s mut dyn JpegSink,
+    strip: Vec<u8>,
+    /// The most bytes `strip` has held.
+    held: usize,
+}
+
+impl Rows for Forwarded<'_> {
+    fn begin(&mut self, layout: JpegLayout) {
+        self.sink.begin(layout);
+    }
+
+    fn rows(&mut self, _: usize, count: usize, row_bytes: usize) -> &mut [u8] {
+        let bytes = count.saturating_mul(row_bytes);
+        self.strip.resize(bytes, 0);
+        self.held = self.held.max(bytes);
+        &mut self.strip
+    }
+
+    fn painted(&mut self, y: usize, count: usize, row_bytes: usize) {
+        let bytes = count.saturating_mul(row_bytes);
+        let strip = self.strip.get(..bytes).unwrap_or_default();
+        self.sink.strip(y as u32, count as u32, strip);
+    }
+
+    fn held(&self) -> usize {
+        self.held
+    }
+}
+
+/// Turns the finished coefficients into pixels, one MCU row at a time
+/// (`docs/design/jpeg-speed.md`, "Strips"), into `target`.
+///
+/// Every check this makes comes before the first strip, so a target that is
+/// handed a strip is handed the whole image.
 fn finish(
-    components: &[Component],
-    quant: &[[u16; 64]; 4],
-    width: usize,
-    height: usize,
-    adobe_seen: bool,
-    adobe_transform: Option<u8>,
-    precision: u8,
+    scanned: Scanned,
     max_output: usize,
-    mut warnings: Vec<Warning>,
-) -> Result<JpegImage, JpegError> {
+    target: &mut dyn Rows,
+) -> Result<JpegFrame, JpegError> {
+    let Scanned {
+        components,
+        quant,
+        width,
+        height,
+        adobe_seen,
+        adobe_transform,
+        precision,
+        mut warnings,
+    } = scanned;
     if width == 0 || height == 0 || components.is_empty() {
         return Err(JpegError::Truncated);
     }
@@ -1524,157 +1728,347 @@ fn finish(
         warnings.push(Warning::JpegPrecisionNarrowed);
     }
 
-    let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
-    let v_max = components.iter().map(|c| c.v).max().unwrap_or(1).max(1);
-
-    // One full-resolution plane per component, upsampled as it is written.
-    let mut planes: Vec<Vec<u8>> = components
-        .iter()
-        .map(|_| vec![128u8; width * height])
-        .collect();
-
-    let mut block = [0i32; 64];
-    let mut pixels = [0u8; 64];
-
-    for (ci, component) in components.iter().enumerate() {
-        let table = quant.get(component.quant).copied().unwrap_or([1; 64]);
-        let scale_x = h_max / component.h.max(1);
-        let scale_y = v_max / component.v.max(1);
-        let Some(plane) = planes.get_mut(ci) else {
-            continue;
-        };
-
-        for by in 0..component.blocks_y {
-            for bx in 0..component.blocks_x {
-                let Some(source) = component.block(bx, by) else {
-                    continue;
-                };
-
-                // Dequantise out of zig-zag order and into the natural one the
-                // transform expects.
-                block.fill(0);
-                for (k, &coefficient) in source.iter().enumerate() {
-                    if coefficient == 0 {
-                        continue;
-                    }
-                    let Some(&z) = ZIGZAG.get(k) else { continue };
-                    let q = i32::from(table.get(z).copied().unwrap_or(1));
-                    if let Some(slot) = block.get_mut(z) {
-                        *slot = i32::from(coefficient).saturating_mul(q);
-                    }
-                }
-                idct_block(&block, precision, &mut pixels);
-
-                let origin_x = bx * 8 * scale_x;
-                let origin_y = by * 8 * scale_y;
-                if origin_x >= width || origin_y >= height {
-                    continue;
-                }
-
-                for py in 0..8usize {
-                    for px in 0..8usize {
-                        let value = pixels.get(py * 8 + px).copied().unwrap_or(128);
-                        for ry in 0..scale_y {
-                            for rx in 0..scale_x {
-                                let x = origin_x + px * scale_x + rx;
-                                let y = origin_y + py * scale_y + ry;
-                                if x < width && y < height {
-                                    if let Some(slot) = plane.get_mut(y * width + x) {
-                                        *slot = value;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Interleave, converting colour where the model calls for it.
-    let n = components.len();
-    let mut out = vec![0u8; width * height * n];
-    for i in 0..(width * height) {
-        match color {
-            JpegColor::Gray => {
-                if let (Some(slot), Some(plane)) = (out.get_mut(i), planes.first()) {
-                    *slot = plane.get(i).copied().unwrap_or(128);
-                }
-            }
-            JpegColor::Rgb => {
-                let y = f32::from(
-                    planes
-                        .first()
-                        .and_then(|p| p.get(i))
-                        .copied()
-                        .unwrap_or(128),
-                );
-                let cb =
-                    f32::from(planes.get(1).and_then(|p| p.get(i)).copied().unwrap_or(128)) - 128.0;
-                let cr =
-                    f32::from(planes.get(2).and_then(|p| p.get(i)).copied().unwrap_or(128)) - 128.0;
-                // T.871: the JFIF YCbCr to RGB conversion.
-                let rgb = [
-                    y + 1.402 * cr,
-                    y - 0.344_136 * cb - 0.714_136 * cr,
-                    y + 1.772 * cb,
-                ];
-                for (c, value) in rgb.iter().enumerate() {
-                    if let Some(slot) = out.get_mut(i * 3 + c) {
-                        *slot = value.clamp(0.0, 255.0) as u8;
-                    }
-                }
-            }
-            JpegColor::Cmyk | JpegColor::CmykInverted => {
-                let transform = adobe_transform.unwrap_or(0);
-                let raw: Vec<u8> = (0..4)
-                    .map(|c| planes.get(c).and_then(|p| p.get(i)).copied().unwrap_or(0))
-                    .collect();
-
-                // Transform 2 means the first three components are YCCK and
-                // need the same conversion as YCbCr before use.
-                let values = if transform == 2 {
-                    let y = f32::from(raw.first().copied().unwrap_or(0));
-                    let cb = f32::from(raw.get(1).copied().unwrap_or(128)) - 128.0;
-                    let cr = f32::from(raw.get(2).copied().unwrap_or(128)) - 128.0;
-                    [
-                        (y + 1.402 * cr).clamp(0.0, 255.0) as u8,
-                        (y - 0.344_136 * cb - 0.714_136 * cr).clamp(0.0, 255.0) as u8,
-                        (y + 1.772 * cb).clamp(0.0, 255.0) as u8,
-                        raw.get(3).copied().unwrap_or(0),
-                    ]
-                } else {
-                    [
-                        raw.first().copied().unwrap_or(0),
-                        raw.get(1).copied().unwrap_or(0),
-                        raw.get(2).copied().unwrap_or(0),
-                        raw.get(3).copied().unwrap_or(0),
-                    ]
-                };
-
-                for (c, value) in values.iter().enumerate() {
-                    if let Some(slot) = out.get_mut(i * 4 + c) {
-                        // Adobe writes CMYK inverted; undo it so callers get
-                        // ink values that mean what they say.
-                        *slot = if color == JpegColor::CmykInverted {
-                            255 - *value
-                        } else {
-                            *value
-                        };
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(JpegImage {
+    let layout = JpegLayout {
         width: width as u32,
         height: height as u32,
         color,
-        data: out,
         precision,
+    };
+    target.begin(layout);
+    let mut painter = Painter::new(
+        &components,
+        width,
+        height,
+        color,
+        adobe_transform.unwrap_or(0),
+        precision,
+    );
+    for strip in 0..painter.strips() {
+        painter.paint(strip, &components, &quant, target);
+    }
+
+    let coefficients = components
+        .iter()
+        .map(|component| component.coeffs.len().saturating_mul(2))
+        .fold(0, usize::saturating_add);
+    Ok(JpegFrame {
+        layout,
         warnings,
+        held: JpegHeld {
+            coefficients,
+            planes: painter.held(),
+            strip: target.held(),
+        },
     })
+}
+
+/// One component's samples for the strip being painted.
+struct Plane {
+    /// Image columns one of this component's samples covers, and image rows:
+    /// T.81 A.1.1's `Hmax / H` and `Vmax / V`, rounded down as a ratio that
+    /// does not divide leaves them.
+    sx: usize,
+    sy: usize,
+    /// The component's blocks a row, and its block rows.
+    blocks_x: usize,
+    blocks_y: usize,
+    /// The first block row the plane holds for the strip being painted, and
+    /// how many it holds.
+    first: usize,
+    held: usize,
+    /// Lines of the image's width, eight a block row the plane has room for,
+    /// each sample replicated across the image columns it covers as it is
+    /// written. A column no block covers — only a ratio that does not divide
+    /// leaves one — keeps the 128 the plane was filled with.
+    samples: Vec<u8>,
+}
+
+impl Plane {
+    /// The line image row `y` reads, or `None` when no block row of this
+    /// component covers it.
+    fn line(&self, y: usize, width: usize) -> Option<&[u8]> {
+        let row = y / self.sy;
+        let block_row = row / 8;
+        if block_row < self.first || block_row >= self.first + self.held {
+            return None;
+        }
+        let at = ((block_row - self.first) * 8 + row % 8) * width;
+        self.samples.get(at..at + width)
+    }
+}
+
+/// The block rows of a component the image rows of strip `strip` read:
+/// `first..last`, empty when none of them is a row the component has.
+fn block_rows(
+    strip: usize,
+    strip_rows: usize,
+    height: usize,
+    sy: usize,
+    blocks_y: usize,
+) -> (usize, usize) {
+    let top = strip * strip_rows;
+    let bottom = (top + strip_rows).min(height);
+    if top >= bottom {
+        return (0, 0);
+    }
+    let first = top / sy / 8;
+    let last = ((bottom - 1) / sy / 8 + 1).min(blocks_y);
+    (first, last.max(first))
+}
+
+/// Paints a frame's strips from its coefficients: each component's block
+/// rows a strip reads, dequantised, transformed and replicated into its
+/// plane, then each image row converted from the planes into the strip.
+struct Painter {
+    width: usize,
+    height: usize,
+    color: JpegColor,
+    /// The Adobe marker's transform, 2 for YCCK.
+    transform: u8,
+    precision: u8,
+    /// Image rows a strip has: one MCU row, `8 · Vmax`.
+    strip_rows: usize,
+    planes: Vec<Plane>,
+    /// A line of 128s, for an image row no block row of a component covers,
+    /// which only a ratio that does not divide leaves.
+    grey: Vec<u8>,
+}
+
+impl Painter {
+    fn new(
+        components: &[Component],
+        width: usize,
+        height: usize,
+        color: JpegColor,
+        transform: u8,
+        precision: u8,
+    ) -> Painter {
+        let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
+        let v_max = components.iter().map(|c| c.v).max().unwrap_or(1).max(1);
+        let strip_rows = 8 * v_max;
+        let strips = height.div_ceil(strip_rows);
+        let mut uncovered = false;
+        let planes = components
+            .iter()
+            .map(|component| {
+                let sy = v_max / component.v.max(1);
+                let most = (0..strips)
+                    .map(|strip| {
+                        let (first, last) =
+                            block_rows(strip, strip_rows, height, sy, component.blocks_y);
+                        last - first
+                    })
+                    .max()
+                    .unwrap_or(0);
+                uncovered |= component.blocks_y.saturating_mul(8).saturating_mul(sy) < height;
+                Plane {
+                    sx: h_max / component.h.max(1),
+                    sy,
+                    blocks_x: component.blocks_x,
+                    blocks_y: component.blocks_y,
+                    first: 0,
+                    held: 0,
+                    samples: vec![128u8; most.saturating_mul(8).saturating_mul(width)],
+                }
+            })
+            .collect();
+        Painter {
+            width,
+            height,
+            color,
+            transform,
+            precision,
+            strip_rows,
+            planes,
+            grey: if uncovered {
+                vec![128u8; width]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// How many strips the image is.
+    fn strips(&self) -> usize {
+        self.height.div_ceil(self.strip_rows)
+    }
+
+    /// Bytes of planes held.
+    fn held(&self) -> usize {
+        self.planes
+            .iter()
+            .map(|plane| plane.samples.len())
+            .fold(self.grey.len(), usize::saturating_add)
+    }
+
+    /// Paints strip `strip` into `target`.
+    fn paint(
+        &mut self,
+        strip: usize,
+        components: &[Component],
+        quant: &[[u16; 64]; 4],
+        target: &mut dyn Rows,
+    ) {
+        let top = strip * self.strip_rows;
+        let bottom = (top + self.strip_rows).min(self.height);
+        if top >= bottom {
+            return;
+        }
+        let (width, height, strip_rows) = (self.width, self.height, self.strip_rows);
+        let precision = self.precision;
+        for (plane, component) in self.planes.iter_mut().zip(components) {
+            let (first, last) = block_rows(strip, strip_rows, height, plane.sy, plane.blocks_y);
+            plane.first = first;
+            plane.held = last - first;
+            let table = quant.get(component.quant).copied().unwrap_or([1; 64]);
+            for by in first..last {
+                transform_row(plane, component, &table, by, width, precision);
+            }
+        }
+
+        let row_bytes = width * self.color.components();
+        let rows = bottom - top;
+        let out = target.rows(top, rows, row_bytes);
+        for (line, y) in out.chunks_exact_mut(row_bytes).zip(top..bottom) {
+            let mut lines: [&[u8]; 4] = [&[]; 4];
+            for (slot, plane) in lines.iter_mut().zip(&self.planes) {
+                *slot = plane.line(y, width).unwrap_or(self.grey.as_slice());
+            }
+            convert(self.color, self.transform, &lines, line);
+        }
+        target.painted(top, rows, row_bytes);
+    }
+}
+
+/// Dequantises a block out of zig-zag order and into the natural one the
+/// transform expects.
+fn dequantise(source: &[i16], table: &[u16; 64], block: &mut [i32; 64]) {
+    block.fill(0);
+    for (&coefficient, &z) in source.iter().zip(ZIGZAG.iter()) {
+        if coefficient == 0 {
+            continue;
+        }
+        let q = i32::from(table.get(z).copied().unwrap_or(1));
+        if let Some(slot) = block.get_mut(z) {
+            *slot = i32::from(coefficient).saturating_mul(q);
+        }
+    }
+}
+
+/// Transforms block row `by` of `component` into its place in `plane`.
+fn transform_row(
+    plane: &mut Plane,
+    component: &Component,
+    table: &[u16; 64],
+    by: usize,
+    width: usize,
+    precision: u8,
+) {
+    let base = (by - plane.first) * 8;
+    let mut block = [0i32; 64];
+    let mut pixels = [0u8; 64];
+    for bx in 0..plane.blocks_x {
+        let origin = bx * 8 * plane.sx;
+        if origin >= width {
+            // Every block further right is past the image too.
+            break;
+        }
+        match component.block(bx, by) {
+            Some(source) => {
+                dequantise(source, table, &mut block);
+                idct_block(&block, precision, &mut pixels);
+            }
+            // A block the buffer does not hold leaves the 128 a plane starts
+            // as.
+            None => pixels = [128; 64],
+        }
+        for (py, row) in pixels.chunks_exact(8).enumerate() {
+            let at = (base + py) * width;
+            if let Some(line) = plane.samples.get_mut(at..at + width) {
+                replicate(line, row, origin, plane.sx);
+            }
+        }
+    }
+}
+
+/// Writes one block row's eight samples into `line` from column `origin`,
+/// each across `sx` columns, as far as the image's width.
+fn replicate(line: &mut [u8], row: &[u8], origin: usize, sx: usize) {
+    if sx == 1 {
+        let end = (origin + 8).min(line.len());
+        if let (Some(target), Some(source)) = (line.get_mut(origin..end), row.get(..end - origin)) {
+            target.copy_from_slice(source);
+        }
+        return;
+    }
+    for (px, &value) in row.iter().enumerate() {
+        let start = origin + px * sx;
+        let end = (start + sx).min(line.len());
+        if start >= end {
+            break;
+        }
+        if let Some(target) = line.get_mut(start..end) {
+            target.fill(value);
+        }
+    }
+}
+
+/// T.871: the JFIF YCbCr to RGB conversion, in `f32`, each expression in its
+/// order of operations.
+fn ycc_to_rgb(y: u8, cb: u8, cr: u8) -> [u8; 3] {
+    let y = f32::from(y);
+    let cb = f32::from(cb) - 128.0;
+    let cr = f32::from(cr) - 128.0;
+    [
+        (y + 1.402 * cr).clamp(0.0, 255.0) as u8,
+        (y - 0.344_136 * cb - 0.714_136 * cr).clamp(0.0, 255.0) as u8,
+        (y + 1.772 * cb).clamp(0.0, 255.0) as u8,
+    ]
+}
+
+/// Interleaves one image row from the components' lines into `out`,
+/// converting colour where the model calls for it.
+fn convert(color: JpegColor, transform: u8, lines: &[&[u8]; 4], out: &mut [u8]) {
+    let [first, second, third, fourth] = *lines;
+    match color {
+        JpegColor::Gray => {
+            for (slot, &y) in out.iter_mut().zip(first) {
+                *slot = y;
+            }
+        }
+        JpegColor::Rgb => {
+            for (pixel, ((&y, &cb), &cr)) in out
+                .chunks_exact_mut(3)
+                .zip(first.iter().zip(second).zip(third))
+            {
+                pixel.copy_from_slice(&ycc_to_rgb(y, cb, cr));
+            }
+        }
+        JpegColor::Cmyk | JpegColor::CmykInverted => {
+            for (pixel, (((&a, &b), &c), &k)) in out
+                .chunks_exact_mut(4)
+                .zip(first.iter().zip(second).zip(third).zip(fourth))
+            {
+                // Transform 2 means the first three components are YCCK and
+                // need the same conversion as YCbCr before use.
+                let values = if transform == 2 {
+                    let [r, g, b] = ycc_to_rgb(a, b, c);
+                    [r, g, b, k]
+                } else {
+                    [a, b, c, k]
+                };
+                for (slot, value) in pixel.iter_mut().zip(values) {
+                    // Adobe writes CMYK inverted; undo it so callers get ink
+                    // values that mean what they say.
+                    *slot = if color == JpegColor::CmykInverted {
+                        255 - value
+                    } else {
+                        value
+                    };
+                }
+            }
+        }
+    }
 }
 
 /// The largest dequantised coefficient, in magnitude, whose block the
@@ -3962,22 +4356,7 @@ mod tests {
     // time, over tables and streams no encoder would write as well as ones it
     // would (`docs/design/jpeg-speed.md`, "The look-ahead Huffman reader").
 
-    /// A xorshift generator: the same numbers on every target.
-    struct Noise(u64);
-
-    impl Noise {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-
-        /// A number below `n`, which is not zero.
-        fn below(&mut self, n: u64) -> u64 {
-            self.next() % n
-        }
-    }
+    use super::streams::Noise;
 
     /// What kind of Huffman table a case draws.
     #[derive(Clone, Copy, Debug)]
@@ -4439,5 +4818,269 @@ mod tests {
             multiplies(&filled(&every, 40)) * 2 < 1024,
             "a dense block's direct sum makes 1 024"
         );
+    }
+
+    // ---- Strips -------------------------------------------------------------
+    //
+    // The strip painter against `direct::finish_planes`, the whole-image
+    // planes, over the streams `streams` writes (`docs/design/jpeg-speed.md`,
+    // "Strips").
+
+    /// The ceiling every equality test decodes under.
+    const CEILING: usize = 1 << 24;
+
+    /// [`decode`] with whole-image planes in place of the strips.
+    fn decode_through_planes(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
+        let scanned = scan_frame(data, max_output)?;
+        direct::finish_planes(
+            &scanned.components,
+            &scanned.quant,
+            scanned.width,
+            scanned.height,
+            scanned.adobe_seen,
+            scanned.adobe_transform,
+            scanned.precision,
+            max_output,
+            scanned.warnings,
+        )
+    }
+
+    /// A sink that keeps what it is handed, and holds the order it is handed
+    /// it in.
+    #[derive(Default)]
+    struct Kept {
+        layouts: Vec<JpegLayout>,
+        strips: Vec<(u32, u32)>,
+        data: Vec<u8>,
+    }
+
+    impl JpegSink for Kept {
+        fn begin(&mut self, layout: JpegLayout) {
+            assert!(self.strips.is_empty(), "the layout comes first");
+            self.layouts.push(layout);
+        }
+
+        fn strip(&mut self, y: u32, rows: u32, data: &[u8]) {
+            let next: u32 = self.strips.iter().map(|&(_, rows)| rows).sum();
+            assert_eq!(y, next, "the strips arrive in order, whole");
+            let layout = self.layouts.first().expect("the layout came first");
+            assert_eq!(
+                data.len(),
+                rows as usize * layout.width as usize * layout.color.components()
+            );
+            self.strips.push((y, rows));
+            self.data.extend_from_slice(data);
+        }
+    }
+
+    /// Two decodes of one stream that must agree: the same image, warnings
+    /// included, or the same refusal.
+    fn same(label: &str, got: &Result<JpegImage, JpegError>, want: &Result<JpegImage, JpegError>) {
+        match (got, want) {
+            (Ok(got), Ok(want)) => {
+                assert_eq!(
+                    (got.width, got.height, got.color, got.precision),
+                    (want.width, want.height, want.color, want.precision),
+                    "{label}"
+                );
+                assert_eq!(got.warnings, want.warnings, "{label}");
+                assert!(got.data == want.data, "{label}: the samples differ");
+            }
+            (Err(got), Err(want)) => assert_eq!(got, want, "{label}"),
+            _ => panic!(
+                "{label}: {:?} against {:?}",
+                got.as_ref().map(|image| image.width),
+                want.as_ref().map(|image| image.width)
+            ),
+        }
+    }
+
+    /// Every stream the equality tests run over, with the recipe of each
+    /// that has one.
+    fn every_stream(noise: &mut Noise) -> Vec<(String, Vec<u8>, Option<streams::Recipe>)> {
+        let mut out = Vec::new();
+        for _ in 0..800 {
+            let recipe = streams::random_recipe(noise);
+            let bytes = streams::stream(&recipe, noise);
+            out.push((format!("{recipe:?}"), bytes, Some(recipe)));
+        }
+        let fixed = streams::encoded()
+            .into_iter()
+            .chain(streams::seeds())
+            .chain(streams::tails(noise))
+            .chain([
+                ("tiny gray".to_string(), tiny_gray()),
+                ("one sequential block".to_string(), sequential_block()),
+                ("one progressive block".to_string(), progressive_block()),
+                ("one refined block".to_string(), progressive_refined_block()),
+            ]);
+        for (name, bytes) in fixed {
+            out.push((name, bytes, None));
+        }
+        // Cut at every length.
+        let cuttable = [
+            ("one refined block", progressive_refined_block()),
+            ("a restarting 32 x 16", huffman_flat_gray(32, 16, 144, 2)),
+        ];
+        for (name, bytes) in cuttable {
+            for cut in 0..bytes.len() {
+                out.push((format!("{name} cut at {cut}"), bytes[..cut].to_vec(), None));
+            }
+        }
+        out
+    }
+
+    /// **A strip decode gives the image the whole-image decode gives**, row
+    /// for row: through the sink and through [`decode`], against the
+    /// whole-image planes, for every frame type and both coders, 8 and 12
+    /// bits, every sampling the generator draws — 4:4:4, 4:2:2, 4:2:0, 4:1:1,
+    /// 4:4:0 and ratios that do not divide — odd sizes, Gray, YCbCr, CMYK,
+    /// YCCK and inverted CMYK, restarts and cuts, beside the encoder's
+    /// streams, the fuzz seeds and every cut of two small streams. A stream
+    /// that fails fails alike, and hands the sink nothing.
+    #[test]
+    fn a_strip_decode_is_the_whole_image_decode() {
+        let mut noise = Noise(0x5EED_0F57_1295_D00D);
+        let mut images = 0usize;
+        let mut reached = std::collections::BTreeMap::<String, usize>::new();
+        for (label, bytes, recipe) in every_stream(&mut noise) {
+            let planes = decode_through_planes(&bytes, CEILING);
+            let whole = decode(&bytes, CEILING);
+            same(&label, &whole, &planes);
+
+            let mut kept = Kept::default();
+            let frame = decode_strips(&bytes, CEILING, &mut kept);
+            match (&planes, &frame) {
+                (Ok(image), Ok(frame)) => {
+                    images += 1;
+                    assert_eq!(kept.layouts, vec![frame.layout], "{label}");
+                    assert_eq!(
+                        (
+                            frame.layout.width,
+                            frame.layout.height,
+                            frame.layout.color,
+                            frame.layout.precision
+                        ),
+                        (image.width, image.height, image.color, image.precision),
+                        "{label}"
+                    );
+                    assert_eq!(frame.warnings, image.warnings, "{label}");
+                    assert!(
+                        kept.data == image.data,
+                        "{label}: the strips are not the image"
+                    );
+                    // Every strip but the last is one MCU row.
+                    if let Some((&(_, rows), rest)) = kept.strips.split_first() {
+                        for (index, &(_, more)) in rest.iter().enumerate() {
+                            if index + 1 < rest.len() {
+                                assert_eq!(more, rows, "{label}: strip {index}");
+                            } else {
+                                assert!(more <= rows, "{label}: the last strip");
+                            }
+                        }
+                    }
+                    if let Some(recipe) = recipe {
+                        let truncated = image.warnings.contains(&Warning::TruncatedInput);
+                        for class in [
+                            format!("frame {:#04x}", recipe.frame),
+                            format!("{} bits", recipe.precision),
+                            format!("{:?}", image.color),
+                            format!("{:?}", recipe.sampling),
+                            format!("{:?}", recipe.scans),
+                            format!("divides {}", recipe.divides()),
+                            format!("restart {}", recipe.restart > 0),
+                            format!("cut {}", recipe.cut.is_some()),
+                            format!("truncated {truncated}"),
+                            format!("adobe {:?}", recipe.adobe),
+                        ] {
+                            *reached.entry(class).or_default() += 1;
+                        }
+                    }
+                }
+                (Err(want), Err(got)) => {
+                    assert_eq!(got, want, "{label}");
+                    assert!(
+                        kept.layouts.is_empty() && kept.strips.is_empty(),
+                        "{label}: a decode that failed handed out a strip"
+                    );
+                }
+                _ => panic!("{label}: the strip decode and the planes disagree on success"),
+            }
+        }
+        assert!(images > 600, "{images} streams decoded to an image");
+        for class in [
+            "frame 0xc0",
+            "frame 0xc1",
+            "frame 0xc2",
+            "frame 0xc9",
+            "frame 0xca",
+            "8 bits",
+            "12 bits",
+            "Gray",
+            "Rgb",
+            "Cmyk",
+            "CmykInverted",
+            "[(1, 1), (1, 1), (1, 1)]",
+            "[(2, 1), (1, 1), (1, 1)]",
+            "[(2, 2), (1, 1), (1, 1)]",
+            "[(4, 1), (1, 1), (1, 1)]",
+            "Interleaved",
+            "EachAlone",
+            "Split",
+            "Progressive",
+            "divides false",
+            "restart true",
+            "cut true",
+            "truncated true",
+            "truncated false",
+            "adobe Some(2)",
+        ] {
+            let count = reached.get(class).copied().unwrap_or(0);
+            assert!(count >= 10, "{class}: {count} images, {reached:?}");
+        }
+    }
+
+    /// **No decode holds a whole-image plane**: the planes a strip decode
+    /// holds are at most one MCU row of the image's bytes, and less than the
+    /// image once it is taller than two MCU rows; the strip buffer is one
+    /// strip.
+    #[test]
+    fn a_decode_holds_no_whole_image_plane() {
+        let mut noise = Noise(0x0DEC_0DE5_7219_0001);
+        let mut taller = 0usize;
+        for _ in 0..400 {
+            let mut recipe = streams::random_recipe(&mut noise);
+            recipe.cut = None;
+            let bytes = streams::stream(&recipe, &mut noise);
+            let mut kept = Kept::default();
+            let Ok(frame) = decode_strips(&bytes, CEILING, &mut kept) else {
+                continue;
+            };
+            let layout = frame.layout;
+            let row = layout.width as usize * layout.color.components();
+            let mcu_row = 8 * recipe.v_max() * row;
+            if recipe.divides() {
+                assert!(
+                    frame.held.planes <= mcu_row,
+                    "{recipe:?}: {} plane bytes, and one MCU row is {mcu_row}",
+                    frame.held.planes
+                );
+            }
+            if layout.height as usize > 2 * 8 * recipe.v_max() {
+                taller += 1;
+                assert!(
+                    frame.held.planes < layout.height as usize * row,
+                    "{recipe:?}: the planes hold the whole image"
+                );
+            }
+            let largest = kept
+                .strips
+                .iter()
+                .map(|&(_, rows)| rows as usize * row)
+                .max()
+                .unwrap_or(0);
+            assert_eq!(frame.held.strip, largest, "{recipe:?}: the strip buffer");
+        }
+        assert!(taller > 30, "{taller} images were taller than two MCU rows");
     }
 }
