@@ -492,11 +492,29 @@ followed by an `/Indexed` base or a `/Pattern` space's underlying space, a
 `/DeviceN` giving its names in array order and then its `/Colorants` keys;
 then the scopes the dictionary opens, in the walk's order, and the
 annotations last, an appearance's group before its resources. Names are read
-by the reader `Page::images` uses (`separation_name`, `device_n_names`), and
-nothing is decoded or evaluated, so listing adds nothing to
+by the readers `Page::images` and the renderer use (`separation_name`,
+`device_n_names`), and nothing is decoded or evaluated, so listing adds
+nothing to
 `Document::warnings`. A scope is walked once, the walk stops sixteen scopes
 deep and the listing at 4 096 spots, each with what it had read
 (`separations.rs`, `the_colorant_inventory_is_every_spot_its_resources_name`).
+
+**A separation keeps its colorants.** `ColorSpace::Separation` carries
+`Colorants` beside its alternate and tint transform: each component's
+`Colorant` in the space's order — a name's bytes, `/All` and `/None` told
+apart in a `/Separation`, while a `/DeviceN`, which 8.6.6.5 gives no `/All`,
+names a colorant called `All` — and a `/DeviceN`'s attributes, `/Subtype
+/NChannel`, each `/Colorants` entry that is a `/Separation` space, the
+colorant alone, and `/Process`, its space and its components' names.
+`parse_space` reads the names through the readers `Page::images` uses, so the
+two give every space the same names in the same order
+(`parse_space_and_describe_space_read_the_same_names`), and reads the spaces
+an attributes dictionary holds — and a separation's alternate — without
+attributes of their own, so a `/DeviceN` naming itself in its `/Colorants`
+reads once rather than fanning out. No conversion to light reads any of it,
+so a light render draws as it did; two spaces differing only in a name convert
+alike and compare unequal, and no comparison in the engine compares two
+separations.
 
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`

@@ -66,6 +66,11 @@ pub enum ColorSpace {
         alternate: Box<ColorSpace>,
         /// The tint transform.
         tint: Box<Function>,
+        /// The colorants the space names and a `/DeviceN`'s attributes: what
+        /// a device that composites colorants reads, and nothing a conversion
+        /// to light reads, so two spaces differing only here convert alike
+        /// and compare unequal.
+        colorants: Colorants,
     },
     /// An ICC space whose profile was read, with the transforms it compiles
     /// to, one for each rendering intent.
@@ -142,7 +147,104 @@ pub enum ColorSpace {
     },
 }
 
+/// One component of a `/Separation` or `/DeviceN` space, by what its name
+/// says (8.6.6.4, 8.6.6.5). The name's bytes, `#` escapes decoded, never a
+/// PDF object (ruling 8).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Colorant {
+    /// A colorant by its name: one of the four 8.6.6.4 reserves for a CMYK
+    /// device's process colorants — `Cyan`, `Magenta`, `Yellow`, `Black` — or
+    /// a spot. A `/DeviceN` naming `All`, which 8.6.6.5 forbids it, names a
+    /// colorant of that name here, told apart from [`Colorant::All`].
+    Named(Vec<u8>),
+    /// A `/Separation`'s `/All`: every colorant of the device at once.
+    All,
+    /// `/None`: a component that never paints.
+    None,
+}
+
+/// What a `/Separation` or `/DeviceN` space says about its colorants (8.6.6.4,
+/// 8.6.6.5, Tables 70 and 71): the name of each component, and a `/DeviceN`'s
+/// attributes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Colorants {
+    /// Each component's colorant, in the space's order: the one a
+    /// `/Separation` names, or each of a `/DeviceN`'s names. Fewer than the
+    /// space has components where its names could not all be read, which a
+    /// device compositing colorants reads as a space that reverts to its
+    /// alternate.
+    pub names: Vec<Colorant>,
+    /// Whether a `/DeviceN`'s attributes say `/Subtype /NChannel` (PDF 1.6):
+    /// each component is evaluated by itself, and `process` names the process
+    /// components.
+    pub n_channel: bool,
+    /// `/Colorants`: each colorant's own `/Separation` space, which describes
+    /// that colorant alone (8.6.6.5), by the name its key gives, in the
+    /// dictionary's order. An entry that is no `/Separation` is not kept.
+    pub separations: Vec<(Vec<u8>, ColorSpace)>,
+    /// `/Process`: the process space the space's process components are of,
+    /// and their names.
+    pub process: Option<Process>,
+}
+
+/// A `/DeviceN` space's process dictionary (Table 71).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Process {
+    /// `/ColorSpace`: the process space.
+    pub space: Box<ColorSpace>,
+    /// `/Components`: a name for each of the process space's components, in
+    /// its order, as the `/DeviceN`'s names array spells them.
+    pub components: Vec<Vec<u8>>,
+}
+
+impl Colorants {
+    /// One colorant, as a `/Separation` names it, and no attributes.
+    #[must_use]
+    pub fn single(colorant: Colorant) -> Colorants {
+        Colorants {
+            names: vec![colorant],
+            ..Colorants::default()
+        }
+    }
+
+    /// The process component `name` is under `process` — its index in
+    /// `/Components` — where the space is an `NChannel` one with a
+    /// `/Process`: 8.6.6.5 has a plain `/DeviceN` support only what it did
+    /// before PDF 1.6, so a plain one's names are never process components
+    /// here. The four names 8.6.6.4 reserves are their reader's to tell.
+    #[must_use]
+    pub fn process_component(&self, name: &[u8]) -> Option<usize> {
+        if !self.n_channel {
+            return None;
+        }
+        self.process
+            .as_ref()?
+            .components
+            .iter()
+            .position(|component| component == name)
+    }
+
+    /// The `/Separation` space `/Colorants` gives the colorant `name`.
+    #[must_use]
+    pub fn separation(&self, name: &[u8]) -> Option<&ColorSpace> {
+        self.separations
+            .iter()
+            .find(|(colorant, _)| colorant == name)
+            .map(|(_, space)| space)
+    }
+}
+
 impl ColorSpace {
+    /// The colorants a `/Separation` or `/DeviceN` space names, and `None`
+    /// for every other space — an `/Indexed` one's are its base's.
+    #[must_use]
+    pub fn colorants(&self) -> Option<&Colorants> {
+        match self {
+            ColorSpace::Separation { colorants, .. } => Some(colorants),
+            _ => None,
+        }
+    }
+
     /// How many components a colour in this space has.
     #[must_use]
     pub fn components(&self) -> usize {
@@ -591,6 +693,7 @@ mod tests {
                 c1: vec![0.0],
                 n: 1.0,
             }),
+            colorants: Colorants::default(),
         };
         assert_eq!(spot(1).initial(), vec![1.0], "/Separation");
         assert_eq!(spot(3).initial(), vec![1.0; 3], "/DeviceN");
@@ -658,6 +761,122 @@ mod tests {
         assert_eq!(space.components(), 1);
     }
 
+    /// **A separation keeps its colorant names** (RC-04.5): a `/Separation`
+    /// names one colorant, `/All` and `/None` told apart from a colorant of
+    /// either name; a `/DeviceN` names each component, `/None` among them,
+    /// with its attributes — `NChannel`, `/Colorants` and `/Process`; the
+    /// names reach no conversion to light, so spaces differing only in them
+    /// convert alike, and compare unequal, as `PartialEq` tells every field
+    /// apart.
+    #[test]
+    fn a_separation_keeps_its_colorant_names() {
+        let tint = || {
+            Box::new(Function::Exponential {
+                domain: (0.0, 1.0),
+                c0: vec![0.0, 0.0, 0.0, 0.0],
+                c1: vec![0.0, 0.9, 0.2, 0.0],
+                n: 1.0,
+            })
+        };
+        let separation = |colorant: Colorant| ColorSpace::Separation {
+            components: 1,
+            alternate: Box::new(ColorSpace::DeviceCmyk),
+            tint: tint(),
+            colorants: Colorants::single(colorant),
+        };
+        let gold = separation(Colorant::Named(b"PANTONE 131".to_vec()));
+        assert_eq!(
+            gold.colorants().map(|c| c.names.clone()),
+            Some(vec![Colorant::Named(b"PANTONE 131".to_vec())])
+        );
+        let all = separation(Colorant::All);
+        let none = separation(Colorant::None);
+        let named_all = separation(Colorant::Named(b"All".to_vec()));
+        assert_ne!(all, named_all, "/All is not a colorant called All");
+        assert_ne!(none, separation(Colorant::Named(b"None".to_vec())));
+        assert_ne!(gold, all, "two names, two spaces");
+        for space in [&all, &none, &named_all] {
+            for tint in [0.0, 0.3, 1.0] {
+                assert_eq!(
+                    space.to_rgb(&[tint]),
+                    gold.to_rgb(&[tint]),
+                    "the names convert nothing"
+                );
+            }
+        }
+
+        let red = ColorSpace::Separation {
+            components: 1,
+            alternate: Box::new(ColorSpace::DeviceRgb),
+            tint: Box::new(Function::Identity),
+            colorants: Colorants::single(Colorant::Named(b"Red".to_vec())),
+        };
+        let device_n = ColorSpace::Separation {
+            components: 4,
+            alternate: Box::new(ColorSpace::DeviceRgb),
+            tint: tint(),
+            colorants: Colorants {
+                names: vec![
+                    Colorant::Named(b"ProcessRed".to_vec()),
+                    Colorant::Named(b"ProcessGreen".to_vec()),
+                    Colorant::Named(b"ProcessBlue".to_vec()),
+                    Colorant::Named(b"Red".to_vec()),
+                ],
+                n_channel: true,
+                separations: vec![(b"Red".to_vec(), red.clone())],
+                process: Some(Process {
+                    space: Box::new(ColorSpace::DeviceRgb),
+                    components: vec![
+                        b"ProcessRed".to_vec(),
+                        b"ProcessGreen".to_vec(),
+                        b"ProcessBlue".to_vec(),
+                    ],
+                }),
+            },
+        };
+        let colorants = device_n.colorants().expect("a DeviceN's colorants");
+        assert_eq!(colorants.names.len(), device_n.components());
+        assert_eq!(colorants.process_component(b"ProcessGreen"), Some(1));
+        assert_eq!(
+            colorants.process_component(b"Red"),
+            None,
+            "a spot, not a process component"
+        );
+        assert_eq!(colorants.separation(b"Red"), Some(&red));
+        assert_eq!(colorants.separation(b"Blue"), None);
+        let plain = Colorants {
+            n_channel: false,
+            ..colorants.clone()
+        };
+        assert_eq!(
+            plain.process_component(b"ProcessGreen"),
+            None,
+            "a plain /DeviceN's /Process is not read"
+        );
+        assert_eq!(ColorSpace::DeviceCmyk.colorants(), None);
+        let indexed = ColorSpace::Indexed {
+            base: Box::new(device_n.clone()),
+            lookup: vec![0; 4],
+            high: 0,
+        };
+        assert_eq!(
+            indexed.colorants(),
+            None,
+            "an index's colorants are its base's"
+        );
+
+        let unnamed = ColorSpace::Separation {
+            components: 4,
+            alternate: Box::new(ColorSpace::DeviceRgb),
+            tint: tint(),
+            colorants: Colorants::default(),
+        };
+        assert_ne!(unnamed, device_n);
+        for components in [[0.0, 0.0, 0.0, 0.0], [0.2, 0.4, 0.6, 0.8], [1.0; 4]] {
+            assert_eq!(unnamed.to_rgb(&components), device_n.to_rgb(&components));
+        }
+    }
+
     #[test]
     fn a_separation_runs_its_tint_transform() {
         // A single ink that maps to grey through a linear function.
@@ -670,6 +889,7 @@ mod tests {
                 c1: vec![0.0],
                 n: 1.0,
             }),
+            colorants: Colorants::default(),
         };
         assert_eq!(space.to_rgb(&[0.0]), (255, 255, 255), "no ink is white");
         assert_eq!(space.to_rgb(&[1.0]), (0, 0, 0), "full ink is black");
@@ -696,6 +916,7 @@ mod tests {
                 ink(0.0, 0.0),
                 ink(0.2, 0.7),
             ])),
+            colorants: Colorants::default(),
         };
         let mut scratch = vec![0.5; 9];
         for step in 0..=20 {
@@ -773,6 +994,7 @@ mod tests {
             components: 3,
             alternate: Box::new(space.clone()),
             tint: Box::new(separation_tint()),
+            colorants: Colorants::default(),
         };
         let pattern = ColorSpace::Pattern {
             base: Some(Box::new(space.clone())),

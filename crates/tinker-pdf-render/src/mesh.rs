@@ -1291,6 +1291,7 @@ mod tests {
         let inks = ColorSpace::Separation {
             components: 2,
             alternate: Box::new(ColorSpace::DeviceRgb),
+            colorants: tinker_pdf_color::Colorants::default(),
             tint: Box::new(Function::PostScript {
                 domain: vec![(0.0, 1.0); 2],
                 range: vec![(0.0, 1.0); 3],

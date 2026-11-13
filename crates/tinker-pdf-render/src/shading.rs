@@ -953,10 +953,12 @@ mod tests {
             components: 1,
             alternate: Box::new(ColorSpace::DeviceCmyk),
             tint: Box::new(gamma(vec![0.0; 4], vec![0.1, 0.7, 0.2, 0.05], 1.8)),
+            colorants: tinker_pdf_color::Colorants::default(),
         };
         let two_inks = ColorSpace::Separation {
             components: 2,
             alternate: Box::new(ColorSpace::DeviceRgb),
+            colorants: tinker_pdf_color::Colorants::default(),
             tint: Box::new(Function::PostScript {
                 domain: vec![(0.0, 1.0); 2],
                 range: vec![(0.0, 1.0); 3],
@@ -1488,6 +1490,7 @@ mod tests {
                     components: 1,
                     alternate: Box::new(ColorSpace::DeviceCmyk),
                     tint: Box::new(gamma(vec![0.0; 4], vec![0.1, 0.7, 0.2, 0.05], 1.6)),
+                    colorants: tinker_pdf_color::Colorants::default(),
                 },
                 gamma(vec![0.0], vec![1.0], 1.0),
             ),

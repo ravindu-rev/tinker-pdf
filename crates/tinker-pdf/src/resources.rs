@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use tinker_pdf_color::{ColorSpace, Function};
+use tinker_pdf_color::{ColorSpace, Colorant, Colorants, Function, Process};
 use tinker_pdf_content::{
     Device, DeviceDefaults, FontSource, Layer, MarkedProps, Matrix, PathSegment, Rgb,
 };
@@ -542,6 +542,12 @@ struct Reading<'a> {
     /// A name that is no family resolves in this scope's `/ColorSpace`, as an
     /// inline image's may (8.9.7); everywhere else a name is a family.
     inline: bool,
+    /// Whether a `/DeviceN`'s attributes are read (Table 70): where a space is
+    /// selected, painted, or the base of an `/Indexed` or `/Pattern` space
+    /// read so, and not in a separation's alternate or in a space an
+    /// attributes dictionary holds — so a `/Colorants` entry naming its own
+    /// space ends rather than fanning out.
+    colorants: bool,
 }
 
 impl Reading<'_> {
@@ -549,6 +555,7 @@ impl Reading<'_> {
     const SELECTED: Reading<'static> = Reading {
         defaults: None,
         inline: false,
+        colorants: true,
     };
 
     /// `device`, or the default this reading paints it in (8.6.5.6).
@@ -2438,6 +2445,7 @@ impl PageResources {
         Reading {
             defaults: Some(self.defaults()),
             inline: false,
+            colorants: true,
         }
     }
 
@@ -2617,7 +2625,8 @@ impl PageResources {
                 })
             }
             b"Separation" | b"DeviceN" => {
-                let components = if family.as_ref() == b"Separation" {
+                let separation = family.as_ref() == b"Separation";
+                let components = if separation {
                     1
                 } else {
                     self.doc
@@ -2625,18 +2634,18 @@ impl PageResources {
                         .as_array()
                         .map_or(1, <[Object]>::len)
                 };
+                // The names, as `Page::images` describes them.
+                let names = colorant_names(&self.doc, separation, items);
                 // 8.6.5.6 remaps an alternate "only if the alternate colour
                 // space is actually selected", which this engine does for
                 // every named colorant, since no render paints one on a plate
                 // of its own. 8.6.6.4's `/All` and `/None` are read here as
                 // never selecting it, so their alternate is read as written.
-                let colorant = (family.as_ref() == b"Separation")
-                    .then(|| items.get(1).and_then(|o| self.doc.resolve(o).as_name()))
-                    .flatten()
-                    .and_then(|n| self.doc.name_bytes(n));
-                let selects_alternate = !matches!(colorant.as_deref(), Some(b"All" | b"None"));
+                let selects_alternate =
+                    !(separation && matches!(names.as_slice(), [Colorant::All | Colorant::None]));
                 let alternate_how = Reading {
                     defaults: how.defaults.filter(|_| selects_alternate),
+                    colorants: false,
                     ..how
                 };
                 let alternate = self.read_space(items.get(2)?, depth + 1, name, alternate_how)?;
@@ -2652,10 +2661,19 @@ impl PageResources {
                     .and_then(|o| self.parse_function(o, depth + 1))
                     .unwrap_or(Function::Identity);
 
+                let colorants = if separation || !how.colorants {
+                    Colorants {
+                        names,
+                        ..Colorants::default()
+                    }
+                } else {
+                    self.device_n_colorants(names, items, depth, name, how)
+                };
                 Some(ColorSpace::Separation {
                     components,
                     alternate: Box::new(alternate),
                     tint: Box::new(tint),
+                    colorants,
                 })
             }
             // 8.7.3.2: `[/Pattern base]` is the *uncoloured* pattern space.
@@ -2759,6 +2777,52 @@ impl PageResources {
             .filter_map(|o| self.doc.resolve(o).as_number())
             .collect();
         (values.len() >= count).then_some(values)
+    }
+
+    /// A `/DeviceN` space's colorants with its attributes (8.6.6.5, Tables 70
+    /// and 71): `names` as [`colorant_names`] read them, `/Subtype`, each
+    /// `/Colorants` entry that is a `/Separation` space, and `/Process`. The
+    /// spaces the attributes hold are read one deeper than the space, as
+    /// painted where it is, and without attributes of their own.
+    fn device_n_colorants(
+        &self,
+        names: Vec<Colorant>,
+        items: &[Object],
+        depth: u32,
+        name: &[u8],
+        how: Reading<'_>,
+    ) -> Colorants {
+        let Some(attributes) = device_n_attributes(&self.doc, items) else {
+            return Colorants {
+                names,
+                ..Colorants::default()
+            };
+        };
+        let nested = Reading {
+            colorants: false,
+            ..how
+        };
+        let separations = attributes
+            .colorants
+            .iter()
+            .filter_map(|(colorant, space)| {
+                let space = self.read_space(space, depth + 1, name, nested)?;
+                matches!(space, ColorSpace::Separation { .. }).then(|| (colorant.clone(), space))
+            })
+            .collect();
+        let process = attributes.process.as_ref().and_then(|(space, components)| {
+            let space = self.read_space(space, depth + 1, name, nested)?;
+            Some(Process {
+                space: Box::new(space),
+                components: components.clone(),
+            })
+        });
+        Colorants {
+            names,
+            n_channel: attributes.n_channel,
+            separations,
+            process,
+        }
     }
 
     /// Reads a shading dictionary, wherever it was found.
@@ -6962,6 +7026,27 @@ pub(crate) fn device_n_names(doc: &CosDocument, items: &[Object]) -> Vec<Vec<u8>
         .collect()
 }
 
+/// A `/Separation` (`separation`) or `/DeviceN` space array's colorants as
+/// the colour model keeps them (8.6.6.4, 8.6.6.5): [`separation_name`]'s one
+/// or [`device_n_names`]' each, `/None` told apart in both and a
+/// `/Separation`'s `/All` — a `/DeviceN` may not name `/All`, so a colorant of
+/// that name there is one. Empty where a `/Separation` names nothing.
+pub(crate) fn colorant_names(
+    doc: &CosDocument,
+    separation: bool,
+    items: &[Object],
+) -> Vec<Colorant> {
+    let read = |name: Vec<u8>| match name.as_slice() {
+        b"None" => Colorant::None,
+        b"All" if separation => Colorant::All,
+        _ => Colorant::Named(name),
+    };
+    if separation {
+        return separation_name(doc, items).map(read).into_iter().collect();
+    }
+    device_n_names(doc, items).into_iter().map(read).collect()
+}
+
 /// What a `/DeviceN` space array's attributes dictionary, its fifth element,
 /// says about its colorants (8.6.6.5, Tables 70 and 71), read but not
 /// evaluated: no space in it is parsed and no stream decoded.
@@ -7392,9 +7477,10 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_inline_abbreviations, Contents, PageResources, Remembered};
-    use tinker_pdf_color::ColorSpace;
+    use super::{expand_inline_abbreviations, Answer, Contents, PageResources, Remembered};
+    use tinker_pdf_color::{ColorSpace, Colorant};
     use tinker_pdf_content::FontSource;
+    use tinker_pdf_cos::{Name, ObjRef, Object};
 
     /// An image's colour is converted once however many pixels repeat it, and
     /// two colours whose samples share a slot each get their own answer — the
@@ -8072,6 +8158,174 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
         let doc = crate::Document::open(bytes.into_bytes()).expect("it opens");
         let page = doc.page(0).expect("a page");
         PageResources::new(&page.doc, &page.inner, None)
+    }
+
+    /// The names a colour space keeps, as bytes: an `/Indexed` space's its
+    /// base's, `/All` and `/None` spelled as the file spells them.
+    fn kept_names(space: &ColorSpace) -> Vec<Vec<u8>> {
+        if let ColorSpace::Indexed { base, .. } = space {
+            return kept_names(base);
+        }
+        space
+            .colorants()
+            .map(|colorants| {
+                colorants
+                    .names
+                    .iter()
+                    .map(|name| match name {
+                        Colorant::Named(name) => name.clone(),
+                        Colorant::All => b"All".to_vec(),
+                        Colorant::None => b"None".to_vec(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The names `Page::images` describes a space by.
+    fn described_names(space: &crate::ImageSpace) -> Vec<Vec<u8>> {
+        match space {
+            crate::ImageSpace::Separation { colorant, .. } => vec![colorant.clone()],
+            crate::ImageSpace::DeviceN { colorants, .. } => colorants.clone(),
+            crate::ImageSpace::Indexed { base, .. } => described_names(base),
+            _ => Vec::new(),
+        }
+    }
+
+    /// **`parse_space` and `describe_space` read the same names** (RC-04.5):
+    /// a `/Separation`, `/All`, `/None`, a `/DeviceN` with attributes — a
+    /// colorant named `All` among its names — and an `/Indexed` space over a
+    /// `/DeviceN` give the renderer's reading and `Page::images`' the same
+    /// names in the same order, as painted and as selected through the
+    /// scope's own cache too. The colour model tells `/All` and `/None` from
+    /// colorants of those names where 8.6.6.4 makes them special — in a
+    /// `/Separation` — and keeps the `/DeviceN`'s `NChannel` subtype, its
+    /// `/Colorants` as spaces and its `/Process`.
+    #[test]
+    fn parse_space_and_describe_space_read_the_same_names() {
+        let tint = "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>";
+        let res = resources_of(&format!(
+            "/Sep [/Separation /PANTONE#20131 /DeviceCMYK {tint}] \
+             /All [/Separation /All /DeviceCMYK {tint}] \
+             /None [/Separation /None /DeviceCMYK {tint}] \
+             /DN [/DeviceN [/Cyan /Orange /None /All] /DeviceCMYK {tint} \
+                 << /Subtype /NChannel \
+                    /Colorants << /Orange [/Separation /Orange /DeviceCMYK {tint}] /Bad 7 >> \
+                    /Process << /ColorSpace /DeviceCMYK \
+                       /Components [/Cyan /Magenta /Yellow /Black] >> >>] \
+             /Idx [/Indexed [/DeviceN [/Gold /Silver] /DeviceCMYK {tint}] 1 <0000FFFF>]"
+        ));
+        let resources = res.resources.as_deref().expect("the page has resources");
+        let table = res.doc.resolve_key(resources, Name::COLOR_SPACE);
+        let table = table.as_dict().expect("a /ColorSpace dictionary");
+        let expected: [(&str, &[&[u8]]); 5] = [
+            ("Sep", &[b"PANTONE 131"]),
+            ("All", &[b"All"]),
+            ("None", &[b"None"]),
+            ("DN", &[b"Cyan", b"Orange", b"None", b"All"]),
+            ("Idx", &[b"Gold", b"Silver"]),
+        ];
+        for (key, names) in expected {
+            let entry = table.get(res.doc.intern(key.as_bytes())).expect("an entry");
+            let parsed = res.parse_space(entry, 0, key.as_bytes()).expect("a space");
+            let described = res.describe_space(entry, false, 0);
+            let names: Vec<Vec<u8>> = names.iter().map(|name| name.to_vec()).collect();
+            assert_eq!(kept_names(&parsed), names, "{key}: parsed");
+            assert_eq!(described_names(&described), names, "{key}: described");
+            for answer in [Answer::Painted, Answer::Selected] {
+                let kept = res
+                    .named_space(key.as_bytes(), answer, kept_names)
+                    .expect("the scope keeps it");
+                assert_eq!(kept, names, "{key}: kept");
+            }
+        }
+
+        let colorants = |key: &str| {
+            let entry = table.get(res.doc.intern(key.as_bytes())).expect("an entry");
+            let space = res.parse_space(entry, 0, key.as_bytes()).expect("a space");
+            space
+                .colorants()
+                .cloned()
+                .expect("a separation's colorants")
+        };
+        assert_eq!(colorants("All").names, vec![Colorant::All]);
+        assert_eq!(colorants("None").names, vec![Colorant::None]);
+        let device_n = colorants("DN");
+        assert_eq!(
+            device_n.names[3],
+            Colorant::Named(b"All".to_vec()),
+            "8.6.6.5 gives a /DeviceN no /All, so this is a colorant called All"
+        );
+        assert_eq!(device_n.names[2], Colorant::None);
+        assert!(device_n.n_channel);
+        assert_eq!(
+            device_n.separations.len(),
+            1,
+            "an entry that is no space is not kept"
+        );
+        let orange = device_n.separation(b"Orange").expect("Orange alone");
+        assert_eq!(
+            orange.colorants().map(|c| c.names.clone()),
+            Some(vec![Colorant::Named(b"Orange".to_vec())])
+        );
+        let process = device_n.process.as_ref().expect("a process dictionary");
+        assert_eq!(*process.space, ColorSpace::DeviceCmyk);
+        assert_eq!(device_n.process_component(b"Cyan"), Some(0));
+        assert_eq!(device_n.process_component(b"Orange"), None);
+        assert!(
+            !colorants("Sep").n_channel,
+            "a separation has no attributes"
+        );
+    }
+
+    /// A `/DeviceN` whose `/Colorants` names its own space sixty-four times
+    /// beside sixty-four separations reads its own attributes once and no
+    /// deeper: the spaces an attributes dictionary holds are read without
+    /// attributes, so each entry naming the space is one linear read, where
+    /// reading their attributes too would fan out sixty-four ways at each of
+    /// eight levels (ruling 1). An entry that is no `/Separation` is not kept,
+    /// and a space that is its own alternate ends at the depth bound.
+    #[test]
+    fn a_device_n_naming_itself_in_its_colorants_ends() {
+        let tint = "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>";
+        let mut entries = String::new();
+        for i in 0..64 {
+            entries.push_str(&format!(
+                "/C{i} [/Separation /C{i} /DeviceGray {tint}] /S{i} 6 0 R "
+            ));
+        }
+        let bytes = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] \
+/Resources << /ColorSpace << /Loop 6 0 R >> >> >>\nendobj\n\
+6 0 obj\n[/DeviceN [/A /B] /DeviceGray {tint} << /Colorants << {entries} >> >>]\nendobj\n\
+7 0 obj\n[/DeviceN [/A /B] 7 0 R {tint}]\nendobj\n\
+trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n"
+        );
+        let doc = crate::Document::open(bytes.into_bytes()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let res = PageResources::new(&page.doc, &page.inner, None);
+        let separations = res
+            .named_space(b"Loop", Answer::Painted, |space| {
+                space
+                    .colorants()
+                    .map(|colorants| colorants.separations.len())
+            })
+            .flatten();
+        assert_eq!(
+            separations,
+            Some(64),
+            "the separations, and none of the loops"
+        );
+        let looped = Object::Ref(ObjRef { num: 6, gen: 0 });
+        assert!(res.parse_space(&looped, 0, b"Loop").is_some());
+        let own_alternate = Object::Ref(ObjRef { num: 7, gen: 0 });
+        assert!(
+            res.parse_space(&own_alternate, 0, b"Own").is_none(),
+            "no reader finishes a space that is its own alternate"
+        );
     }
 
     /// 8.7.3.2: `[/Pattern base]` is the uncoloured pattern space, and `base`
