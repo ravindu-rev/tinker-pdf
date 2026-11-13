@@ -6,6 +6,7 @@ brotli	341	9	512
 bzip2	350	9	512
 ccitt	325	3	512
 cff	619	257	512
+cff2	619	257	512
 cff_charstrings	2448	1025	512
 cff_subset	2068	1025	512
 cmap	1790	257	512
@@ -54,7 +55,7 @@ standalone	3208	1025	512
 svg	899	257	512
 tar	613	257	512
 tiff	359	9	512
-truetype	619	257	512
+truetype	625	257	512
 truetype_hinting	363	8	512
 type1	340	9	512
 type1_subset	413	33	512

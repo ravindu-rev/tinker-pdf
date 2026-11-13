@@ -1,10 +1,11 @@
-//! Eight committed font corpora, replayed on stable, measured for *reach*.
+//! Nine committed font corpora, replayed on stable, measured for *reach*.
 //!
-//! `woff_seeds.rs` does the same for `fuzz/corpus/woff`. These eight share a
-//! file because they share a shape: seven of the eight targets open with
-//! `let Some(x) = X::parse(data) else { return; }`, or `type42`'s `let
-//! Ok(…)`, so a seed that does not parse makes the whole target a no-op and
-//! the fuzzer spends its budget mutating something that was never a font.
+//! `woff_seeds.rs` does the same for `fuzz/corpus/woff`. These nine share a
+//! file because they share a shape: eight of the nine targets open by parsing
+//! their input — `let Some(x) = X::parse(data) else { return; }`, or
+//! `type42`'s `let Ok(…)` — and return at once where it does not parse, so a
+//! seed that does not parse makes the whole target a no-op and the fuzzer
+//! spends its budget mutating something that was never a font.
 //!
 //! # Why "it did not panic" is not the question here
 //!
@@ -39,9 +40,12 @@ use std::path::{Path, PathBuf};
 
 use std::collections::BTreeSet;
 
+use tinker_pdf_font::cff2::Cff2;
 use tinker_pdf_font::hint::{Error as HintError, Program, Unhinted};
+use tinker_pdf_font::variation::gvar::Gvar;
+use tinker_pdf_font::variation::{tag_value, DesignSpace, Instance, Location};
 use tinker_pdf_font::{
-    cmap, subset_type1, substitute_glyph, BuiltInEncoding, Cff, Sfnt, Type1, Type42,
+    cmap, glyf, subset_type1, substitute_glyph, BuiltInEncoding, Cff, Sfnt, Type1, Type42,
 };
 
 /// The `truetype_hinting` target's input and its run: the target's own file,
@@ -115,6 +119,79 @@ fn the_cff_seeds_reach_the_parser() {
         }
     }
     report("cff", files.len(), reached, &missed);
+}
+
+/// A committed variable face, which a seed of the same name is a copy of.
+fn committed_face(file: &str) -> Vec<u8> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("variable")
+        .join(file);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+/// The locations the variable targets read a face at, as far as a replay
+/// needs them: the default and the named instances the face resolves.
+fn default_and_named(space: &DesignSpace) -> Vec<Location> {
+    let mut out = vec![space.default_location()];
+    for index in 0..space.instances().len().min(8) {
+        if let Ok(location) = space.location(&Instance::Named(index as u16)) {
+            out.push(location);
+        }
+    }
+    out
+}
+
+#[test]
+fn the_cff2_seeds_reach_the_parser() {
+    let Some(files) = seeds("cff2") else {
+        println!("cff2-seeds: SKIPPED (no fuzz/corpus/cff2)");
+        return;
+    };
+    let (mut reached, mut missed) = (0, Vec::new());
+    for (label, data) in &files {
+        // As the target reads its input: an sfnt carrying the table, or the
+        // bare table.
+        let sfnt = Sfnt::parse(data);
+        let table = sfnt
+            .as_ref()
+            .and_then(|font| font.table(tag_value(*b"CFF2")));
+        let (bytes, space) = match (&sfnt, table) {
+            (Some(font), Some(table)) => (table, DesignSpace::read(font).unwrap_or_default()),
+            _ => (data.as_slice(), DesignSpace::default()),
+        };
+        match Cff2::parse(bytes) {
+            Ok(cff2) => {
+                reached += 1;
+                // Touching what the target touches, so a seed that parses
+                // and then draws nothing at any location is visible too.
+                let count = cff2.glyph_count().min(64) as u16;
+                let mut drawn = 0usize;
+                for location in default_and_named(&space) {
+                    for glyph in 0..count {
+                        if cff2
+                            .outline_at(glyph, &location)
+                            .is_ok_and(|outline| !outline.segments.is_empty())
+                        {
+                            drawn += 1;
+                        }
+                    }
+                }
+                assert!(drawn > 0, "{label}: parses and draws no glyph anywhere");
+            }
+            Err(_) => missed.push(label.clone()),
+        }
+    }
+    // The seed written from the committed face is that face, so the corpus
+    // starts from the table `variations.rs` describes.
+    let committed = committed_face("variable-cff2.otf");
+    assert!(
+        files
+            .iter()
+            .any(|(label, data)| label == "variable.cff2" && *data == committed),
+        "fuzz/corpus/cff2/variable.cff2 is not tests/variable/variable-cff2.otf"
+    );
+    report("cff2", files.len(), reached, &missed);
 }
 
 #[test]
@@ -248,20 +325,24 @@ fn carries_a_composite(font: &Sfnt<'_>) -> bool {
 
 /// The floor on `truetype` seeds carrying an outline table.
 ///
-/// Four is what the corpus holds, so this is a ratchet rather than a wish:
-/// the number was measured when the three written seeds landed, and a seed
-/// deleted or quietly stopped parsing takes it below the floor. It sat at
-/// **one** before that, which is the coverage gap this constant replaced —
-/// `docs/verification.md` carried the sentence and nothing enforced it.
-const TRUETYPE_OUTLINED: usize = 4;
+/// Five is what the corpus holds, so this is a ratchet rather than a wish: a
+/// seed deleted, or one that quietly stopped parsing, takes it below the
+/// floor.
+const TRUETYPE_OUTLINED: usize = 5;
 
 /// The floor on `truetype` seeds carrying a **composite** glyph.
 ///
-/// The target's own header calls composite recursion "the interesting part",
-/// and before `composite-transforms.ttf` and `composite-nested.ttf` were
-/// written the corpus reached it from a single starting point. A floor of one
-/// would let either of them go without the count moving, so it is two.
-const TRUETYPE_COMPOSITE: usize = 2;
+/// The target's own header calls composite recursion "the interesting part":
+/// `composite-transforms.ttf`, `composite-nested.ttf` and `variable.ttf` reach
+/// it from three starting points, and a lower floor would let one of them go
+/// without the count moving.
+const TRUETYPE_COMPOSITE: usize = 3;
+
+/// The floor on `truetype` seeds that vary: an `fvar` with axes and a `gvar`
+/// the crate reads, so the target's variable half — outlines, phantom points
+/// and metrics at its locations — starts from a face that reaches it.
+/// `variable.ttf` is the committed `glyf` face.
+const TRUETYPE_VARIABLE: usize = 1;
 
 #[test]
 fn the_truetype_seeds_reach_the_outlines() {
@@ -273,6 +354,7 @@ fn the_truetype_seeds_reach_the_outlines() {
     let mut outlineless: Vec<String> = Vec::new();
     let mut outlined: Vec<String> = Vec::new();
     let mut composite: Vec<String> = Vec::new();
+    let mut variable: Vec<String> = Vec::new();
     for (label, data) in &files {
         match Sfnt::parse(data) {
             Some(font) => {
@@ -290,6 +372,18 @@ fn the_truetype_seeds_reach_the_outlines() {
                         composite.push(label.clone());
                     }
                 }
+                // The variable half reaches a seed whose design space varies
+                // and whose `gvar` reads; touched as the target touches it,
+                // every glyph at the default and at each named instance.
+                let space = DesignSpace::read(&font).unwrap_or_default();
+                if let Ok(Some(gvar)) = Gvar::read(&font, &space) {
+                    variable.push(label.clone());
+                    for location in default_and_named(&space) {
+                        for glyph in 0..16u16 {
+                            let _ = glyf::outline_at(&font, glyph, Some(&gvar), &location);
+                        }
+                    }
+                }
             }
             None => missed.push(label.clone()),
         }
@@ -297,7 +391,23 @@ fn the_truetype_seeds_reach_the_outlines() {
     if !outlineless.is_empty() {
         println!("  truetype: {outlineless:?} carry no outline table, by design");
     }
-    println!("  truetype: {outlined:?} carry one, of which {composite:?} are composite");
+    println!(
+        "  truetype: {outlined:?} carry one, of which {composite:?} are composite; \
+         {variable:?} vary"
+    );
+    assert!(
+        variable.len() >= TRUETYPE_VARIABLE,
+        "fuzz/corpus/truetype: {} seeds vary, floor is {TRUETYPE_VARIABLE} — {variable:?}. \
+         The target's variable half now starts from random bytes.",
+        variable.len()
+    );
+    let committed = committed_face("variable-glyf.ttf");
+    assert!(
+        files
+            .iter()
+            .any(|(label, data)| label == "variable.ttf" && *data == committed),
+        "fuzz/corpus/truetype/variable.ttf is not tests/variable/variable-glyf.ttf"
+    );
 
     // The count, not the reach. `report` below asks whether the corpus parses
     // at all; these ask whether it reaches the half of the target that the

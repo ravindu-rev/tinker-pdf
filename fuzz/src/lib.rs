@@ -1,6 +1,7 @@
 //! The fuzz crate's library: the choice reader every structure-aware target
-//! reads its input through, and the generators more than one target builds
-//! on. `docs/design/structured-fuzzing.md` is the design.
+//! reads its input through, the generators more than one target builds on,
+//! and the locations the variable-font targets read a face at.
+//! `docs/design/structured-fuzzing.md` is the design.
 //!
 //! Dev tooling only. Nothing here ships in the engine; the targets in
 //! `fuzz_targets/` link it, and `cargo test --manifest-path fuzz/Cargo.toml
@@ -17,6 +18,7 @@ pub mod glyf;
 pub mod hinting;
 pub mod jpx;
 pub mod markup;
+pub mod variation;
 
 /// A target's input, read front to back as a sequence of decisions.
 ///

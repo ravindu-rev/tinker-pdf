@@ -127,6 +127,17 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
             ],
         );
     }
+    // An sfnt carrying the table, as the committed seed is, or the bare
+    // table, whose header opens with its major and minor versions: 2 and 0.
+    m.insert(
+        "cff2",
+        vec![
+            sig(0, b"OTTO"),
+            sig(0, b"\0\x01\0\0"),
+            sig(0, b"true"),
+            sig(0, b"\x02\x00"),
+        ],
+    );
     m
 }
 

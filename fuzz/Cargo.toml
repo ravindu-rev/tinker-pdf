@@ -119,6 +119,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "cff2"
+path = "fuzz_targets/cff2.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "cff_subset"
 path = "fuzz_targets/cff_subset.rs"
 test = false

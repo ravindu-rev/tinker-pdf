@@ -2127,9 +2127,15 @@ corpora already vendored here. So every name stays on the list.
   spellings, the same bytes twice whatever lead bytes the input chose, every
   refusal by name, and every truncation and corruption declined without a
   panic.
-- Fuzzing: the `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1`,
-  `type1_subset`, `type42` and `woff` targets exercise this feature
-  (ruling 1).
+- Fuzzing: the `cff`, `cff2`, `cff_subset`, `cmap`, `sfnt`, `truetype`,
+  `type1`, `type1_subset`, `type42` and `woff` targets exercise this feature
+  (ruling 1). `truetype` reads a variable face's outlines, phantom points,
+  `HVAR`, `VVAR`, `MVAR` and `cvt ` at its default, its first eight named
+  instances and its design space's corners, and `cff2` runs every glyph and
+  Private DICT of a CFF2 table at the same locations, a reused machine held
+  to a fresh one; each corpus holds a committed variable face, which
+  `fuzz_seeds.rs` holds to the file in `tests/variable/` and counts as
+  reaching its target.
 - Determinism: the `text` render fingerprint in
   `crates/tinker-pdf/tests/determinism.rs` embeds a synthetic six-glyph face
   built in the test itself and pins glyph rasterisation bit-for-bit across

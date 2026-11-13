@@ -752,6 +752,7 @@ const FONT_OUTLINE: &str = include_str!("../../tinker-pdf-font/src/outline.rs");
 const FONT_CFF_SUBSET: &str = include_str!("../../tinker-pdf-font/src/cff_subset.rs");
 const FONT_HINT_VM: &str = include_str!("../../tinker-pdf-font/src/hint/vm.rs");
 const FONT_TYPE1: &str = include_str!("../../tinker-pdf-font/src/type1.rs");
+const FONT_GLYF: &str = include_str!("../../tinker-pdf-font/src/glyf.rs");
 const ARCHIVE_BZIP2: &str = include_str!("../../tinker-pdf-archive/src/bzip2.rs");
 
 /// One bound, as its own ledger publishes it.
@@ -3721,6 +3722,23 @@ fn outline() -> Buffer {
 /// The text `outline` stands on.
 const OUTLINE_CAP: (&str, &str) = (FONT_OUTLINE, "const MAX_SEGMENTS: usize = 1 << 16;");
 
+/// A simple glyph's points, held to sixty-five thousand five hundred and
+/// thirty-six before its flags are read, and its four phantom points after
+/// them.
+fn glyph_points() -> Buffer {
+    buffer(
+        Held::Value((1 << 16) + 4),
+        48,
+        1,
+        "one glyph's point deltas at a location, glyphs varied one after another: each point's \
+         and phantom point's 16-byte net delta, its 8-byte decoded pair, its 12-byte listed \
+         pair, its 8-byte raw point and its flag",
+    )
+}
+
+/// The text `glyph_points` stands on.
+const GLYF_POINT_CAP: (&str, &str) = (FONT_GLYF, "if count > 1 << 16 {");
+
 /// Every target's path, one row a target.
 fn fuzz_paths() -> Vec<FuzzPath> {
     use Held::{Input, Row, Value};
@@ -3805,6 +3823,20 @@ fn fuzz_paths() -> Vec<FuzzPath> {
             "cff",
             vec![
                 buffer(Input, PARSED, 1, "the font's INDEXes and tables"),
+                outline(),
+            ],
+            vec![OUTLINE_CAP],
+        ),
+        written(
+            "cff2",
+            vec![
+                buffer(
+                    Input,
+                    PARSED,
+                    1,
+                    "the face's tables, and the CFF2 table's INDEXes, DICTs and store, \
+                     whose blend scalars at a location take one value a region",
+                ),
                 outline(),
             ],
             vec![OUTLINE_CAP],
@@ -4713,8 +4745,12 @@ fn fuzz_paths() -> Vec<FuzzPath> {
         ),
         written(
             "truetype",
-            vec![buffer(Input, PARSED, 1, "the tables read"), outline()],
-            vec![OUTLINE_CAP],
+            vec![
+                buffer(Input, PARSED, 1, "the tables read"),
+                outline(),
+                glyph_points(),
+            ],
+            vec![OUTLINE_CAP, GLYF_POINT_CAP],
         ),
         written(
             "truetype_hinting",
