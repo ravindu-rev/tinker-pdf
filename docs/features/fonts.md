@@ -602,6 +602,14 @@ What it does:
   `BookCost::shaping_plans` and `shaping_indexes` count what a book's faces
   built; and a form field's shaped appearance keeps one beside the program it
   decoded, for every line of the value.
+- **A column's runs.** `shape::itemize_vertical` cuts a vertical paragraph
+  into runs of one script, one level and one `Orientation`, by UAX #50's
+  `Vertical_Orientation` (UCD 17.0.0's `VerticalOrientation.txt`, compiled
+  with its `@missing` default): `U`, `Tu` and `Tr` stand `Upright` and `R`
+  `Sideways`, CSS Writing Modes 3 §5.1.2's rule, each grapheme cluster as its
+  first character does, or upright where it holds an enclosing mark (UAX #50
+  §3.2.1). A line's `itemize` is unchanged and every run of it is
+  `Orientation::Horizontal`.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so
@@ -912,6 +920,17 @@ What it does **not** do, each named so it is a backlog and not a mystery:
   table nothing here could adjudicate is worth less than a predicate named as
   narrow. The variation selectors are the exception and are already handled:
   `Shaper::map` *consumes* one, because a selector chooses a glyph.
+- **UAX #29 in a column.** The grapheme cluster UAX #50 orients is read as a
+  base and the characters after it that are marks (`General_Category` `Mn`,
+  `Mc`, `Me`) or of the `Inherited` script — the joiners and the variation
+  selectors among them. The rest of UAX #29 is not computed: of what that
+  leaves out, an emoji tag sequence is cut, its tag characters (`R`) standing
+  sideways after their upright base, while a Hangul syllable sequence and a
+  regional-indicator pair are upright on both sides and are not.
+- **`Tr`'s rotated fallback.** A `Tr` character whose face has no vertical
+  form stands upright with its horizontal glyph. CSS Writing Modes 3 §5.1.1
+  does not expect a layout engine to synthesize the fallback, and the itemizer
+  sees text and no face.
 
 **A `cmap` subtable in its format's order is bisected, and one out of order
 is read as written.** `glyph_for_char` chooses its subtable at a face's first

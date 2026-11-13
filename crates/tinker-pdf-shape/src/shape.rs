@@ -172,7 +172,29 @@ pub const JOINING_GSUB_STAGES: &[&[Tag]] = &[
     &[Tag::new(b"mset")],
 ];
 
-/// One stretch of text in one script at one embedding level.
+/// How a run stands: along a line, or in a column, upright or sideways.
+///
+/// `docs/design/shaping.md`, *Vertical shaping*. [`itemize`] makes every run
+/// of a line [`Orientation::Horizontal`]; [`itemize_vertical`] makes each run
+/// of a column [`Orientation::Upright`] or [`Orientation::Sideways`] by UAX
+/// #50's `Vertical_Orientation`, and a caller whose consumer draws every glyph
+/// upright sets a run's orientation itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Orientation {
+    /// Along a horizontal line, the way its level reads.
+    #[default]
+    Horizontal,
+    /// Upright in a column: the orientation the code charts show, set top to
+    /// bottom with the vertical plan and the face's vertical metrics.
+    Upright,
+    /// Sideways in a column: set along a line, by the plan and the metrics a
+    /// line takes, and turned 90° clockwise by its consumer to stand in the
+    /// column.
+    Sideways,
+}
+
+/// One stretch of text in one script at one embedding level, standing one
+/// way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
     /// The byte range of the paragraph's text this run covers.
@@ -181,6 +203,8 @@ pub struct Run {
     pub script: Script,
     /// The embedding level UAX #9 gave it.
     pub level: Level,
+    /// How it stands: along a line, or upright or sideways in a column.
+    pub orientation: Orientation,
 }
 
 impl Run {
@@ -1436,8 +1460,73 @@ const fn feature_mask(tag: Tag) -> u32 {
 /// character several scripts share, such as U+0964 DEVANAGARI DANDA between
 /// Devanagari and Bengali; every script that reaches is scheduled for
 /// milestone 5, and none of this milestone's fixtures contains one.
+///
+/// Every run is [`Orientation::Horizontal`]: this is a line's itemization.
+/// A column's is [`itemize_vertical`].
 #[must_use]
 pub fn itemize(text: &str, paragraph: &Paragraph) -> Vec<Run> {
+    cut(text, paragraph, &[])
+}
+
+/// A vertical paragraph's itemization: runs of one script at one embedding
+/// level, standing one way in the column.
+///
+/// The scripts and levels are [`itemize`]'s, and each run is cut a third way,
+/// by orientation: a character stands [`Orientation::Upright`] where its UAX
+/// #50 `Vertical_Orientation` is `U`, `Tu` or `Tr`, and
+/// [`Orientation::Sideways`] where it is `R` — CSS Writing Modes 3 §5.1.2's
+/// rule for mixed orientation (see
+/// [`crate::unicode::VerticalOrientation::is_upright`] for `Tr`).
+///
+/// # A grapheme cluster stands as one
+///
+/// UAX #50 §3.2.1 orients a cluster as a whole: as its first character
+/// stands, or upright where it holds an enclosing mark — a Latin letter in a
+/// combining circle is a symbol set upright, whatever the letter alone would
+/// be. The cluster is read from what this crate vendors: a character
+/// continues the one before it when its `General_Category` is a mark (`Mn`,
+/// `Mc`, `Me`) or its `Script` is `Inherited`, which takes in `ZWJ`, `ZWNJ`
+/// and the variation selectors. That is a base and the marks after it; the
+/// rest of UAX #29 is not computed, and `docs/features/fonts.md` names what
+/// that leaves out. A mark that opens the text has nothing to continue, and
+/// stands as its own value says.
+#[must_use]
+pub fn itemize_vertical(text: &str, paragraph: &Paragraph) -> Vec<Run> {
+    cut(text, paragraph, &column_orientations(text))
+}
+
+/// How each character of a vertical paragraph stands, by its grapheme
+/// cluster. See [`itemize_vertical`].
+fn column_orientations(text: &str) -> Vec<Orientation> {
+    let mut out: Vec<Orientation> = Vec::with_capacity(text.len());
+    let mut cluster = 0usize;
+    for c in text.chars() {
+        let mark = unicode::mark_category(c);
+        let continues =
+            !out.is_empty() && (mark.is_some() || unicode::script(c) == Script::Inherited);
+        if continues {
+            let first = out.get(cluster).copied().unwrap_or(Orientation::Sideways);
+            out.push(first);
+        } else {
+            cluster = out.len();
+            out.push(if unicode::vertical_orientation(c).is_upright() {
+                Orientation::Upright
+            } else {
+                Orientation::Sideways
+            });
+        }
+        if mark == Some(unicode::MarkCategory::Me) {
+            for slot in out.get_mut(cluster..).unwrap_or_default() {
+                *slot = Orientation::Upright;
+            }
+        }
+    }
+    out
+}
+
+/// Runs of one script, one level and one orientation; `orientations`, one
+/// per character, empty for a line, whose runs are all horizontal.
+fn cut(text: &str, paragraph: &Paragraph, orientations: &[Orientation]) -> Vec<Run> {
     let mut scripts: Vec<(usize, Script)> = Vec::new();
     for (at, c) in text.char_indices() {
         scripts.push((at, unicode::script(c)));
@@ -1466,12 +1555,20 @@ pub fn itemize(text: &str, paragraph: &Paragraph) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     for (index, (at, script)) in scripts.iter().enumerate() {
         let level = levels.get(index).copied().unwrap_or(paragraph.base_level());
+        let orientation = orientations.get(index).copied().unwrap_or_default();
         match runs.last_mut() {
-            Some(run) if run.script == *script && run.level == level => run.text.end = *at,
+            Some(run)
+                if run.script == *script
+                    && run.level == level
+                    && run.orientation == orientation =>
+            {
+                run.text.end = *at;
+            }
             _ => runs.push(Run {
                 text: *at..*at,
                 script: *script,
                 level,
+                orientation,
             }),
         }
     }
@@ -1909,6 +2006,31 @@ mod tests {
     #[test]
     fn text_with_nothing_in_it_has_no_runs() {
         assert!(runs("").is_empty());
+        let paragraph = Paragraph::new("", BaseDirection::Auto);
+        assert!(super::itemize_vertical("", &paragraph).is_empty());
+    }
+
+    /// A line's runs are all horizontal, whatever their characters would
+    /// stand as in a column, and are cut exactly where they were before runs
+    /// had an orientation: by script and level alone.
+    #[test]
+    fn a_line_is_itemized_horizontally() {
+        let text = "\u{6F22}\u{5B57}abc\u{20DD}\u{1820}\u{1823}";
+        let paragraph = Paragraph::new(text, BaseDirection::Auto);
+        let runs = itemize(text, &paragraph);
+        assert!(runs
+            .iter()
+            .all(|run| run.orientation == super::Orientation::Horizontal));
+        let cuts: Vec<(std::ops::Range<usize>, Script)> =
+            runs.into_iter().map(|run| (run.text, run.script)).collect();
+        assert_eq!(
+            cuts,
+            vec![
+                (0..6, Script::Han),
+                (6..12, Script::Latin),
+                (12..18, Script::Mongolian),
+            ]
+        );
     }
 
     #[test]

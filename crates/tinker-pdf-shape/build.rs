@@ -31,12 +31,15 @@
 //! - `Scripts.txt` is UAX #24's `Script` property, which is what itemization
 //!   splits a paragraph on.
 //! - `UnicodeData.txt` is `Canonical_Decomposition_Mapping` (field 5) and
-//!   `General_Category` (field 2), of which only `Ps` and `Pi` are kept: which
-//!   marks open something.
+//!   `General_Category` (field 2), of which `Ps` and `Pi` are kept — which
+//!   marks open something — and `Mn`, `Mc` and `Me`: which characters are
+//!   marks, so a grapheme cluster's orientation can be read.
 //! - `PropertyValueAliases.txt` supplies each script's ISO 15924 code, which
 //!   is where an OpenType script tag comes from. See
 //!   [`crate::unicode::Script::opentype_tag`] for what that derivation does
 //!   and does not cover.
+//! - `VerticalOrientation.txt` is UAX #50's `Vertical_Orientation`, which a
+//!   vertical paragraph's runs are cut into upright and sideways by.
 //!
 //! `BidiTest.txt` and `BidiCharacterTest.txt` are **not** read here. They are
 //! the conformance oracle and they are read by a test, because a table
@@ -56,6 +59,10 @@
 //!
 //! So the rule is not "always apply defaults" or "never" — it is *read the
 //! file's own header*, which is why both build scripts say which they do.
+//! `VerticalOrientation.txt` is the second file here whose header asks for
+//! it: *"all other code points, assigned and unassigned, that are not listed
+//! explicitly in the data section of this file are given the value R"*, and
+//! its one `@missing` line says the same.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -76,6 +83,7 @@ fn main() {
         "IndicSyllabicCategory.txt",
         "IndicPositionalCategory.txt",
         "UnicodeData.txt",
+        "VerticalOrientation.txt",
     ] {
         println!("cargo:rerun-if-changed=data/ucd/{file}");
     }
@@ -92,6 +100,8 @@ fn main() {
     indic(&data, &mut out);
     decomposition(&data, &mut out);
     opening_punctuation(&data, &mut out);
+    marks(&data, &mut out);
+    vertical_orientation(&data, &mut out);
 
     let target = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("ucd.rs");
     std::fs::write(&target, out).expect("the generated table could not be written");
@@ -623,6 +633,83 @@ fn opening_punctuation(data: &Path, out: &mut String) {
          pub(crate) static OPENING_PUNCTUATION: &[u32] = &[\n{body}];",
         codes.len()
     );
+}
+
+/// The characters whose `General_Category` is a mark — `Mn`, `Mc` or `Me` —
+/// from field 2 of `UnicodeData.txt`, as merged ranges.
+///
+/// UAX #50 §3.2.1 orients a grapheme cluster as a whole, and a mark is what
+/// continues one: the cluster takes its first character's orientation, or
+/// `U` where it holds an enclosing mark, which is why `Me` is kept apart from
+/// the other two. As with [`opening_punctuation`], a range row of the file
+/// that became a mark stops the build rather than being read as its two
+/// ends.
+fn marks(data: &Path, out: &mut String) {
+    let text = read(&data.join("UnicodeData.txt"));
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        let fields: Vec<&str> = line.split(';').collect();
+        let (Some(code), Some(name), Some(category)) =
+            (fields.first(), fields.get(1), fields.get(2))
+        else {
+            continue;
+        };
+        if !matches!(*category, "Mn" | "Mc" | "Me") {
+            continue;
+        }
+        assert!(
+            !name.ends_with(", First>") && !name.ends_with(", Last>"),
+            "UnicodeData.txt has a range of {category} at {code}"
+        );
+        map.insert(hex(code), (*category).to_string());
+    }
+    assert!(
+        map.values().any(|category| category == "Me"),
+        "UnicodeData.txt yielded no enclosing mark"
+    );
+    emit(out, "MARKS", "MarkCategory", &ranges(&map));
+}
+
+/// UAX #50's `Vertical_Orientation`, with the file's `@missing` default
+/// applied first, so every code point has a value.
+///
+/// The header states the default in prose as well as in its one `@missing`
+/// line — every code point the data section does not list is `R` — and the
+/// unassigned code points that default to `U` (the CJK blocks, the private
+/// use areas and the rest the header names) are listed as data rows of their
+/// own, so applying the line and then the rows is the whole property.
+fn vertical_orientation(data: &Path, out: &mut String) {
+    let path = data.join("VerticalOrientation.txt");
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    let defaults = missing(&path);
+    assert_eq!(
+        defaults,
+        vec![(0, 0x0010_FFFF, "R".to_string())],
+        "VerticalOrientation.txt's @missing line is not the one UAX #50 states"
+    );
+    for (first, last, value) in &defaults {
+        for code in *first..=*last {
+            map.insert(code, value.clone());
+        }
+    }
+    for (first, last, values) in rows(&path) {
+        for code in first..=last {
+            map.insert(code, values[0].clone());
+        }
+    }
+    let merged = ranges(&map);
+    assert_eq!(
+        merged.first().map(|r| r.0),
+        Some(0),
+        "the Vertical_Orientation table does not start at U+0000"
+    );
+    assert_eq!(
+        merged.last().map(|r| r.1),
+        Some(0x0010_FFFF),
+        "the Vertical_Orientation table does not reach U+10FFFF"
+    );
+    emit(out, "VERTICAL_ORIENTATION", "VerticalOrientation", &merged);
 }
 
 /// One character's canonical decomposition, appended to `out`.

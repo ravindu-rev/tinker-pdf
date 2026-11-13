@@ -281,6 +281,63 @@ pub enum IndicPositional {
     VisualOrderLeft,
 }
 
+/// UAX #50's `Vertical_Orientation`: how a character stands in a column.
+///
+/// The names are the UCD's own abbreviations, as [`BidiClass`]'s are, and the
+/// four meanings are UAX #50's table 1. **Three of the four are set
+/// upright**: CSS Writing Modes 3 §5.1.2 typesets a character upright in mixed
+/// orientation when its value is `U`, `Tu` or `Tr`, and sideways when it is
+/// `R` — [`VerticalOrientation::is_upright`].
+///
+/// `R` is the property's `@missing` value, so it is what every code point
+/// the file does not list has; the unassigned code points of the CJK blocks
+/// and the private use areas are listed, as `U`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum VerticalOrientation {
+    /// Rotated 90° clockwise compared to the code charts: Latin, Arabic,
+    /// Mongolian, most punctuation.
+    R,
+    /// Transformed typographically, with a rotated fallback: a face is
+    /// expected to give it a vertical form, and without one it would be
+    /// turned — parentheses, the long vowel mark.
+    Tr,
+    /// Transformed typographically, with an upright fallback — the
+    /// ideographic comma and full stop, the small kana.
+    Tu,
+    /// Upright, as the code charts show it: Han, kana, Hangul.
+    U,
+}
+
+impl VerticalOrientation {
+    /// Whether a character of this value stands upright in a column.
+    ///
+    /// `U`, `Tu` and `Tr` (CSS Writing Modes 3 §5.1.2). A `Tr` character whose
+    /// face has no vertical form still stands upright: §5.1.1 says a layout
+    /// engine "is not expected to" synthesize the rotated fallback, and an
+    /// itemizer that sees text and no face could not.
+    #[must_use]
+    pub const fn is_upright(self) -> bool {
+        !matches!(self, VerticalOrientation::R)
+    }
+}
+
+/// The three `General_Category` values of a mark.
+///
+/// What continues a grapheme cluster, for UAX #50 §3.2.1's orientation of one:
+/// a cluster stands as its first character does, or upright where it holds an
+/// enclosing mark, which is why [`MarkCategory::Me`] is told from the other
+/// two. Every character that is not a mark has no value here at all —
+/// [`mark_category`] answers `None` for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MarkCategory {
+    /// `Spacing_Mark`.
+    Mc,
+    /// `Enclosing_Mark`: a combining enclosing circle, square or keycap.
+    Me,
+    /// `Nonspacing_Mark`.
+    Mn,
+}
+
 /// UAX #24's `Script`, at Unicode 17.0's 175 values.
 ///
 /// `Katakana_Or_Hiragana` is deliberately absent: it is a union value that
@@ -772,6 +829,12 @@ include!(concat!(env!("OUT_DIR"), "/ucd.rs"));
 
 /// A code point's value in a sorted `(first, last, value)` table.
 fn lookup<T: Copy>(table: &[(u32, u32, T)], code: u32, default: T) -> T {
+    find(table, code).unwrap_or(default)
+}
+
+/// A code point's value in a sorted `(first, last, value)` table, or `None`
+/// where no range holds it.
+fn find<T: Copy>(table: &[(u32, u32, T)], code: u32) -> Option<T> {
     let mut low = 0usize;
     let mut high = table.len();
     while low < high {
@@ -782,10 +845,10 @@ fn lookup<T: Copy>(table: &[(u32, u32, T)], code: u32, default: T) -> T {
         } else if code > last {
             low = middle + 1;
         } else {
-            return value;
+            return Some(value);
         }
     }
-    default
+    None
 }
 
 /// The second column of a sorted `(key, value, extra)` table.
@@ -901,6 +964,23 @@ pub fn indic_positional(c: char) -> IndicPositional {
     lookup(INDIC_POSITIONAL, c as u32, IndicPositional::NotApplicable)
 }
 
+/// A character's UAX #50 `Vertical_Orientation`.
+///
+/// Total, as [`bidi_class`] is: `build.rs` applied the file's `@missing`
+/// default before its rows, so every code point has a value and the `R` this
+/// falls back to is never reached.
+#[must_use]
+pub fn vertical_orientation(c: char) -> VerticalOrientation {
+    lookup(VERTICAL_ORIENTATION, c as u32, VerticalOrientation::R)
+}
+
+/// A character's `General_Category` where it is a mark, from field 2 of the
+/// vendored `UnicodeData.txt`; `None` for every character that is not one.
+#[must_use]
+pub fn mark_category(c: char) -> Option<MarkCategory> {
+    find(MARKS, c as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{bidi_class, bracket, mirrored, script, BidiClass, BracketKind, Script};
@@ -1012,6 +1092,52 @@ mod tests {
     #[test]
     fn an_unlisted_code_point_is_unknown() {
         assert_eq!(script('\u{E0080}'), Script::Unknown);
+    }
+
+    /// One character of each value UAX #50's table 1 gives an example of, and
+    /// the two defaults: an unassigned code point the file lists in a CJK
+    /// block is `U`, and one it does not list anywhere is the `@missing` `R`.
+    #[test]
+    fn each_vertical_orientation_and_its_default() {
+        use super::{vertical_orientation, VerticalOrientation};
+        for (c, expected) in [
+            ('\u{6F22}', VerticalOrientation::U),   // 漢
+            ('\u{304B}', VerticalOrientation::U),   // か
+            ('\u{AC00}', VerticalOrientation::U),   // 가
+            ('a', VerticalOrientation::R),          // Latin
+            ('\u{1820}', VerticalOrientation::R),   // MONGOLIAN LETTER A
+            ('\u{0627}', VerticalOrientation::R),   // ARABIC LETTER ALEF
+            ('\u{3001}', VerticalOrientation::Tu),  // IDEOGRAPHIC COMMA
+            ('\u{3041}', VerticalOrientation::Tu),  // HIRAGANA LETTER SMALL A
+            ('\u{FF08}', VerticalOrientation::Tr),  // FULLWIDTH LEFT PARENTHESIS
+            ('\u{30FC}', VerticalOrientation::Tr),  // PROLONGED SOUND MARK
+            ('\u{E000}', VerticalOrientation::U),   // private use, listed
+            ('\u{2FFFC}', VerticalOrientation::U),  // unassigned, plane 2
+            ('\u{0378}', VerticalOrientation::R),   // unassigned, unlisted
+            ('\u{10FFFD}', VerticalOrientation::U), // the last private use
+            ('\u{10FFFF}', VerticalOrientation::R), // a noncharacter, unlisted
+        ] {
+            assert_eq!(vertical_orientation(c), expected, "{c:?}");
+        }
+        assert!(VerticalOrientation::U.is_upright());
+        assert!(VerticalOrientation::Tu.is_upright());
+        assert!(VerticalOrientation::Tr.is_upright());
+        assert!(!VerticalOrientation::R.is_upright());
+    }
+
+    /// The three mark categories, and nothing that is not a mark.
+    #[test]
+    fn marks_are_mn_mc_and_me_and_nothing_else() {
+        use super::{mark_category, MarkCategory};
+        assert_eq!(mark_category('\u{0301}'), Some(MarkCategory::Mn));
+        assert_eq!(mark_category('\u{3099}'), Some(MarkCategory::Mn));
+        assert_eq!(mark_category('\u{FE00}'), Some(MarkCategory::Mn));
+        assert_eq!(mark_category('\u{0903}'), Some(MarkCategory::Mc));
+        assert_eq!(mark_category('\u{20DD}'), Some(MarkCategory::Me));
+        assert_eq!(mark_category('\u{20E3}'), Some(MarkCategory::Me));
+        for c in ['a', '\u{200D}', '\u{200C}', '\u{6F22}', '\u{309B}', ' '] {
+            assert_eq!(mark_category(c), None, "{c:?}");
+        }
     }
 
     /// `Ps` and `Pi` from `UnicodeData.txt`: every opening bracket rule N0

@@ -217,6 +217,7 @@ fn each_tree_holds_the_files_its_algorithms_need() {
             "PropertyValueAliases.txt",
             "Scripts.txt",
             "UnicodeData.txt",
+            "VerticalOrientation.txt",
         ],
         "the shaping crate's vendored UCD changed shape"
     );
@@ -246,6 +247,37 @@ fn each_tree_holds_the_files_its_algorithms_need() {
             "emoji-data.txt",
         ],
         "the content crate's vendored UCD changed shape"
+    );
+}
+
+/// `VerticalOrientation.txt` states the release every other file in its
+/// tree does, and it is the release `THIRDPARTY.md` pins.
+///
+/// [`both_crates_vendor_the_same_unicode_version`] already compares every
+/// file's header, and this names the file the vertical itemizer is compiled
+/// from on its own, so a re-vendor that brought it from another release is a
+/// failure that says which file, rather than one line in a list of drift.
+#[test]
+fn the_vertical_orientation_file_states_the_pinned_release() {
+    let root = repo_root();
+    let path = root.join(TREES[0]).join("VerticalOrientation.txt");
+    let text = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("{} could not be read ({error})", path.display()));
+    let head = String::from_utf8_lossy(&text[..text.len().min(512)]).to_string();
+    assert_eq!(
+        head.lines().next(),
+        Some("# VerticalOrientation-17.0.0.txt"),
+        "the file's first line names another release"
+    );
+    assert_eq!(version(&head).as_deref(), Some("17.0.0"));
+    let manifest = std::fs::read_to_string(root.join("THIRDPARTY.md")).expect("THIRDPARTY.md");
+    assert!(
+        manifest.contains("version 17.0.0"),
+        "THIRDPARTY.md does not declare 17.0.0"
+    );
+    assert!(
+        manifest.contains("`VerticalOrientation.txt`"),
+        "THIRDPARTY.md does not list the file"
     );
 }
 

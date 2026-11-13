@@ -144,7 +144,8 @@ logic (12.7.4.3) operating on shaped advances.
 `emoji-data.txt`), `tinker-pdf-shape/data/ucd` vendors, at the *same pinned
 Unicode version*: `Scripts.txt`, `DerivedBidiClass.txt`, `BidiBrackets.txt`,
 `BidiMirroring.txt`, `DerivedJoiningType.txt`, `IndicSyllabicCategory.txt`,
-`IndicPositionalCategory.txt`, and the conformance files `BidiTest.txt` and
+`IndicPositionalCategory.txt`, `VerticalOrientation.txt` (*Vertical
+shaping*, below), and the conformance files `BidiTest.txt` and
 `BidiCharacterTest.txt` — run the way `LineBreakTest.txt` is in
 `tests/uax14_conformance.rs`. A version-skew test compares the vendored
 trees' file headers.

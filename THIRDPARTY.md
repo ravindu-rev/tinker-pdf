@@ -456,8 +456,9 @@ here.
 ### `crates/tinker-pdf-shape/data/ucd`
 
 The Unicode Character Database again, at the files [UAX #9](https://www.unicode.org/reports/tr9/)'s
-bidirectional algorithm and [UAX #24](https://www.unicode.org/reports/tr24/)'s
-script property need. It is a **second** tree rather than a share of
+bidirectional algorithm, [UAX #24](https://www.unicode.org/reports/tr24/)'s
+script property and [UAX #50](https://www.unicode.org/reports/tr50/)'s vertical
+orientation need. It is a **second** tree rather than a share of
 `tinker-pdf-layout`'s because ruling 8 keeps the two crates leaves: neither
 depends on the other, and a build script cannot read across a crate boundary.
 The cost of the duplication is version skew, which
@@ -474,7 +475,8 @@ to compare and is pinned another way; its row below says which.
 | `extracted/DerivedJoiningType.txt`, here as `DerivedJoiningType.txt` | `Joining_Type`, which the Arabic cursive-joining state machine is written in. The derived file rather than `ArabicShaping.txt` because it lists the 386 `Transparent` ranges outright instead of leaving them to be re-derived from `General_Category`; `build.rs` says so at length |
 | `PropertyValueAliases.txt` | Each script's ISO 15924 code, which an OpenType script tag is derived from, and the long-to-short `Bidi_Class` names the `@missing` lines use |
 | `IndicSyllabicCategory.txt`, `IndicPositionalCategory.txt` | What a Brahmic character *is* and which side of its base it is drawn on. The Universal Shaping Engine's cluster model is written in the two together, and neither is enough alone: the pair is what tells a pre-base vowel, which has to be moved in front of its consonant, from an above-base one, which does not |
-| `UnicodeData.txt` | `Canonical_Decomposition_Mapping`, field 5, which the cluster model needs before it can reorder: a two-part vowel such as `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is drawn on *both* sides of its consonant, and its left half only becomes something that can be moved once the character is `U+1B3E` and `U+1B35`. And field 2's `General_Category`, of which only `Ps` and `Pi` are kept: which marks open something, which ruling 14's comma tie-break asks of a line's rightmost mark. The UCD publishes no extracted file for the decompositions, and this is the one data file it publishes with **no version header** — so `tests/ucd_version.rs` pins it by a repertoire cross-check against `Scripts.txt` rather than by comparing headers, and says which direction of drift that catches |
+| `UnicodeData.txt` | `Canonical_Decomposition_Mapping`, field 5, which the cluster model needs before it can reorder: a two-part vowel such as `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is drawn on *both* sides of its consonant, and its left half only becomes something that can be moved once the character is `U+1B3E` and `U+1B35`. And field 2's `General_Category`, of which `Ps` and `Pi` are kept — which marks open something, which ruling 14's comma tie-break asks of a line's rightmost mark — and `Mn`, `Mc` and `Me`: which characters continue a grapheme cluster, whose orientation in a column UAX #50 §3.2.1 reads as one. The UCD publishes no extracted file for the decompositions, and this is the one data file it publishes with **no version header** — so `tests/ucd_version.rs` pins it by a repertoire cross-check against `Scripts.txt` rather than by comparing headers, and says which direction of drift that catches |
+| `VerticalOrientation.txt` | UAX #50's `Vertical_Orientation`, which `shape::itemize_vertical` cuts a column's runs into upright (`U`, `Tu`, `Tr`) and sideways (`R`) by. Its one `@missing` line — every code point the data does not list is `R` — is applied before the rows, as its header asks; the unassigned code points that default to `U` are rows of their own. SHA-256 `dcef09c3fb24d356b042569c328ec341efc5b53447700d799f2fb4834c3cd3cd` |
 | `BidiTest.txt` | **A conformance oracle.** Every combination of `Bidi_Class` values up to length four: 490 846 data lines, 770 241 resolutions |
 | `BidiCharacterTest.txt` | **The other one.** 91 707 cases of real code points, and the only one of the two that reaches bracket pairs |
 
