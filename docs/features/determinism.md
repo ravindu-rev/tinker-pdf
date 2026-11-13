@@ -305,6 +305,17 @@ the same samples drawn as `/DeviceRGB`, which is how a picture whose profile
 the parser refused would draw, and holds the page's render to `V5_PAGE`. A
 hash two targets disagree on is a determinism bug, never a table edit.
 
+**The font measurement API** is pinned by its answers:
+`font_measurements_are_stable_across_targets` hashes every answer
+`FontMetrics` gives over `LiberationSerif-Italic.ttf`, included by bytes —
+each glyph's advance, box and name both ways, in font units and at
+fractional sizes, the font's box, units and flags, every code point and its
+glyph, and the lengths of four texts at five fractional sizes, one of them
+past the face's characters — each number as its IEEE bits, so a last-place
+difference between targets is another hash ([fonts](fonts.md)). A clone,
+and a second reading of the face whose last block of glyphs is read first,
+answer the same bytes.
+
 Three fixtures carry guarantees of different kinds: one is synthesised
 rather than parsed, so it pins the writer and parser to each other; one is
 a package a third-party serialiser wrote, so it can disagree with this

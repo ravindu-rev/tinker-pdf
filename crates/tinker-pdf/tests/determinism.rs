@@ -4173,6 +4173,153 @@ fn a_v5_profiled_page_renders_the_same_on_every_target() {
     );
 }
 
+/// The committed hash of every answer the font measurement API gives over
+/// [`measured_face`], as [`font_measurements`] writes them (FT-16.5).
+///
+/// A run's output, recorded from `cargo test` on the first target it runs
+/// on, which prints the value to paste, and held there on every other.
+const FONT_MEASUREMENTS: &str = "";
+
+/// The sizes the measurement fingerprint asks each `_at` answer and each
+/// text's length at: fractions, three of them with no exact binary form.
+const MEASURED_SIZES: [f64; 5] = [0.75, 9.5, 10.3, 11.7, 1.0 / 3.0];
+
+/// The texts whose lengths the measurement fingerprint asks: Latin with and
+/// without the accents and punctuation outside ASCII, the face's Greek and
+/// Cyrillic, and characters the face has no glyph for, which take its
+/// `.notdef`.
+const MEASURED_TEXTS: [&str; 4] = [
+    "Sphinx of black quartz, judge my vow.",
+    "Ångström’s façade — naïve “quotes”, fiancée, œuvre",
+    "Ελληνικά и кириллица",
+    "\u{E000}\u{10FFFF}\u{1F600} past the face",
+];
+
+/// The face the measurement fingerprint measures: a committed Liberation
+/// face, included by bytes as this file includes its other inputs, so the
+/// test reads no file system on any target.
+fn measured_face() -> Vec<u8> {
+    include_bytes!("../../tinker-pdf-font/data/liberation/LiberationSerif-Italic.ttf").to_vec()
+}
+
+/// Every answer `metrics` gives, in one order, each number as its IEEE bits
+/// and each absent answer a zero byte: the font's format, glyph count, units
+/// per em, flags and box; each glyph's advance and box in font units and at
+/// [`MEASURED_SIZES`], its name and the glyph the name answers; every code
+/// point and its glyph; and each of [`MEASURED_TEXTS`]' lengths at each size.
+fn font_measurements(metrics: &tinker_pdf::FontMetrics) -> Vec<u8> {
+    fn number(out: &mut Vec<u8>, value: Option<f64>) {
+        match value {
+            Some(value) => {
+                out.push(1);
+                out.extend_from_slice(&value.to_bits().to_le_bytes());
+            }
+            None => out.push(0),
+        }
+    }
+    fn rect(out: &mut Vec<u8>, value: Option<tinker_pdf::Rect>) {
+        match value {
+            Some(rect) => {
+                out.push(1);
+                for edge in [rect.x0, rect.y0, rect.x1, rect.y1] {
+                    out.extend_from_slice(&edge.to_bits().to_le_bytes());
+                }
+            }
+            None => out.push(0),
+        }
+    }
+    fn glyph(out: &mut Vec<u8>, value: Option<u16>) {
+        out.extend_from_slice(&value.map_or(u32::MAX, u32::from).to_le_bytes());
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("{:?}", metrics.format()).as_bytes());
+    out.extend_from_slice(&metrics.glyph_count().to_le_bytes());
+    number(&mut out, Some(metrics.units_per_em()));
+    out.extend_from_slice(&metrics.flags().bits().to_le_bytes());
+    rect(&mut out, metrics.font_box());
+    for size in MEASURED_SIZES {
+        rect(&mut out, metrics.font_box_at(size));
+    }
+    for id in 0..metrics.glyph_count() {
+        number(&mut out, metrics.advance(id));
+        rect(&mut out, metrics.glyph_box(id));
+        for size in MEASURED_SIZES {
+            number(&mut out, metrics.advance_at(id, size));
+            rect(&mut out, metrics.glyph_box_at(id, size));
+        }
+        let name = metrics.glyph_name(id);
+        match name {
+            Some(name) => {
+                out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                out.extend_from_slice(name.as_bytes());
+            }
+            None => out.extend_from_slice(&u32::MAX.to_le_bytes()),
+        }
+        glyph(&mut out, name.and_then(|name| metrics.glyph_for_name(name)));
+    }
+    let points = metrics.code_points();
+    out.extend_from_slice(&(points.len() as u32).to_le_bytes());
+    for c in points {
+        out.extend_from_slice(&u32::from(c).to_le_bytes());
+        glyph(&mut out, metrics.glyph_for_char(c));
+    }
+    for text in MEASURED_TEXTS {
+        for size in MEASURED_SIZES {
+            number(&mut out, Some(metrics.text_length(text, size)));
+        }
+    }
+    out
+}
+
+/// **The font measurement API answers alike on every target** (FT-16.5).
+///
+/// Every answer over [`measured_face`], written by [`font_measurements`] and
+/// hashed: each glyph's advance, box and name both ways, in font units and
+/// at fractional sizes, the font's box, units and flags, every code point and
+/// its glyph, and text lengths at fractional sizes. Each number enters as its
+/// IEEE bits, so a last-place difference between targets is another hash.
+/// The answers are also the same bytes asked of a clone, which shares what
+/// was read, and of a second reading of the face whose last block is read
+/// first.
+#[test]
+fn font_measurements_are_stable_across_targets() {
+    let metrics =
+        tinker_pdf::FontMetrics::from_bytes(measured_face()).expect("the committed face measures");
+    // The face this hash is about, asserted rather than assumed: a TrueType
+    // italic of more glyphs than one block reads.
+    assert_eq!(metrics.format(), tinker_pdf::FontFormat::TrueType);
+    assert!(metrics.flags().contains(tinker_pdf::FontFlags::ITALIC));
+    assert!(metrics.glyph_count() > 256, "more glyphs than one block");
+
+    let answers = font_measurements(&metrics);
+    assert_eq!(
+        font_measurements(&metrics.clone()),
+        answers,
+        "a clone answers as the measurement it was cloned from"
+    );
+    let again =
+        tinker_pdf::FontMetrics::from_bytes(measured_face()).expect("the committed face measures");
+    let last = again.glyph_count() - 1;
+    assert_eq!(again.glyph_box(last), metrics.glyph_box(last));
+    assert_eq!(
+        font_measurements(&again),
+        answers,
+        "the order the blocks are read in changes no answer"
+    );
+
+    let hash = sha(&answers);
+    assert_eq!(
+        hash, FONT_MEASUREMENTS,
+        "the font measurement API's answers over LiberationSerif-Italic.ttf are \
+         not what they were. If two targets disagree, this is a determinism \
+         bug -- find the arithmetic that is not target-stable, do not update \
+         the pin. If an answer changed deliberately, `tests/font_metrics.rs` \
+         holds what each answer is now; then paste:\n\n\
+         const FONT_MEASUREMENTS: &str = \"{hash}\";\n"
+    );
+}
+
 /// The bytes the CBZ synthesiser hands `CosDocument::open`, hashed.
 ///
 /// *Added August 2026, with gap 29 milestone 6.* The `cbz` fingerprint above

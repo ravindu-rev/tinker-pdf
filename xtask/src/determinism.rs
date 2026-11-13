@@ -123,6 +123,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "the_rewritten_document_with_embedded_faces_is_the_same_bytes_on_every_target",
     },
+    // Every answer of the font measurement API over a committed Liberation
+    // face, text lengths at fractional sizes among them (FT-16.5).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "font_measurements_are_stable_across_targets",
+    },
     // The archival packet's hash.
     Fingerprint {
         file: "crates/tinker-pdf/tests/pdfa_writer.rs",

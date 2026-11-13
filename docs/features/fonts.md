@@ -2039,6 +2039,10 @@ corpora already vendored here. So every name stays on the list.
 - `crates/tinker-pdf-cos/src/streams.rs` — an unrecorded decode records
   nothing, takes nothing from the reads after it, and gives the bytes a
   recorded one gives.
+- `crates/tinker-pdf/tests/determinism.rs` —
+  `font_measurements_are_stable_across_targets` holds every answer over
+  `LiberationSerif-Italic.ttf`, text lengths at fractional sizes among them,
+  to one hash on every target ([determinism](determinism.md)).
 - `crates/tinker-pdf-font/src/type1.rs` — a two-axis, four-master program
   built in the test, its masters at the corners out of their order and a
   procedure naming `/WeightVector` before the definition, reads its blend

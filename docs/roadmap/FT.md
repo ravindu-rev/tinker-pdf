@@ -382,7 +382,6 @@ list, each held to first-party evidence.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FT-16.5 | test | The measurement API's determinism fingerprint: `determinism.rs` hashes every answer over a committed Liberation face, included by bytes as the file includes its other inputs, text lengths at fractional sizes among them, in a new test entered in K-07's roster. *Note:* K-07's rule: the subsystem's fingerprint lands with it. A moved hash is a finding, never an edit. | `crates/tinker-pdf/tests/determinism.rs` | `determinism.rs`'s new `font_measurements_are_stable_across_targets` holds its committed hash under `cargo test` on Linux and Windows (CI runs it on every pull request) and under `--target wasm32-wasip1` locally, recorded here; in the default and `bundled-fonts` builds. | FT-16.4, MS-11 |
 | FT-16.6 | measure | The measurement API's speed row in MS-04's fonts group: every answer for every glyph and code point of each committed Liberation face, sized into MS-04's window, with its baseline entry. *Note:* MS-04 splits `benches/` by group; the operation goes in the fonts group's file. No target is invented here; one is the owner's (H-77). | `crates/tinker-pdf/benches/fonts.rs`, `crates/tinker-pdf/benches/baseline.json` | `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree` holds the bench file and `baseline.json` to one list with the new operation in it, and `cargo bench -p tinker-pdf` reports its time. | FT-16.4, MS-04 |
 
 ## FT-17 — Extraction options parity
