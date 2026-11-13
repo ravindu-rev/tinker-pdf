@@ -428,7 +428,7 @@ impl ImageColour {
     /// The conversion the image's colours take in a draw where `state` is
     /// the intent in force: its own intent's where it names one.
     fn conversion(self, state: RenderingIntent) -> icc::Conversion {
-        conversion(self.own.unwrap_or(state))
+        self.own.unwrap_or(state).conversion()
     }
 
     /// What a decode for a draw in `state` is kept under beside its
@@ -923,27 +923,6 @@ type FunctionCache = HashMap<(ObjRef, Option<u32>), Option<Arc<Function>>>;
 /// The `None` is cached as deliberately as the `Some`: a profile that will
 /// not parse must be refused once rather than re-read at every `cs`.
 type IccCache = Flights<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transforms>>>;
-
-/// How the colour crate converts an ICC colour in `intent`, the rendering
-/// intent the graphics state holds (8.6.5.8): Table 69's four by their ICC.1
-/// names, and a name the reader does not recognise as relative colorimetric,
-/// as 8.6.5.8 has it read — so the leaf crate keeps no PDF name for an intent
-/// (`docs/design/icc.md`, "The one conversion parameter").
-pub(crate) fn conversion(
-    intent: tinker_pdf_content::RenderingIntent,
-) -> tinker_pdf_color::icc::Conversion {
-    use tinker_pdf_color::icc::Intent;
-    use tinker_pdf_content::RenderingIntent;
-    let intent = match intent {
-        RenderingIntent::Perceptual => Intent::Perceptual,
-        RenderingIntent::Saturation => Intent::Saturation,
-        RenderingIntent::AbsoluteColorimetric => Intent::AbsoluteColorimetric,
-        RenderingIntent::RelativeColorimetric | RenderingIntent::Unrecognised => {
-            Intent::RelativeColorimetric
-        }
-    };
-    tinker_pdf_color::icc::Conversion { intent }
-}
 
 /// Which glyph of an embedded program a code selects, and on whose authority.
 ///
@@ -2718,7 +2697,7 @@ impl PageResources {
         intent: tinker_pdf_content::RenderingIntent,
         convert: impl Fn(&ColorSpace, &[f64], tinker_pdf_color::icc::Conversion) -> R,
     ) -> Option<R> {
-        let conversion = conversion(intent);
+        let conversion = intent.conversion();
         let device = match space {
             b"DeviceGray" => Some(ColorSpace::DeviceGray),
             b"DeviceRGB" => Some(ColorSpace::DeviceRgb),
@@ -4596,7 +4575,7 @@ impl GlyphSource for PageResources {
         // where it names one its colours take it rather than the intent in
         // force at `EI`. Never cached, so every inline image is a decoder run
         // in the conversion it asks for.
-        let conversion = conversion(self.own_intent(dict).unwrap_or(intent));
+        let conversion = self.own_intent(dict).unwrap_or(intent).conversion();
         self.count(Counter::ImagesDecoded);
         self.decode_inline(dict, data, request, conversion)
             .map(Some)

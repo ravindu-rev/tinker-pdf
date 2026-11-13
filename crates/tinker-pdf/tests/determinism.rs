@@ -68,7 +68,7 @@ use tinker_pdf::{
 mod render_support;
 use render_support::{
     axial_page, bilevel_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink,
-    jpeg_minified_page, jpx_minified_page, pen_page, radial_page,
+    intents_page, jpeg_minified_page, jpx_minified_page, pen_page, radial_page,
 };
 
 /// How a fixture's document is opened, and which of its pages is hashed.
@@ -2557,6 +2557,20 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 550,
     },
+    // Each rendering intent's transform (8.6.5.8): in each of four columns,
+    // under one of Table 69's intents by `ri`, a fill, a 2 x 2 image and an
+    // axial shading `sh` paints, all in an `ICCBased` space over a profile
+    // carrying a table for each intent on a warm paper
+    // (`render_support::intents_page`). Every one of the page's 9 600 pixels
+    // is painted and the floor is half: a column that stops painting takes
+    // the page under it, and one painted in the wrong intent keeps its ink,
+    // which is the hash's to catch.
+    Fixture {
+        name: "intents",
+        build: intents_page,
+        open: Open::Closed,
+        least_ink: 4_800,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2800,6 +2814,10 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // turned, sheared and clipped, and a draw whose size would drop a level
     // its codestream does not have.
     ("jpx_minified", ""),
+    // A fill, an image and an axial shading through one table profile under
+    // each of the four intents: each intent's table, and absolute
+    // colorimetric's scaling by the media white, on every target.
+    ("intents", ""),
 ];
 
 #[test]
@@ -3185,6 +3203,7 @@ fn svg_output_is_stable_across_targets() {
         ("icc", ""),
         ("jpeg_minified", ""),
         ("jpx_minified", ""),
+        ("intents", ""),
     ];
     assert_eq!(
         expected.len(),
@@ -3569,6 +3588,8 @@ const MARK_BOXES: &[(&str, &str)] = &[
     ("bilevel", ""),
     ("icc", ""),
     ("jpeg_minified", ""),
+    ("jpx_minified", ""),
+    ("intents", ""),
 ];
 
 /// **The page analysis's box is the same number on every target.** The box is

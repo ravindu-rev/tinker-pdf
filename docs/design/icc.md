@@ -312,14 +312,17 @@ matrix/TRC or grey model, and `ColorSpace::to_rgb_in` converts through the
 one an `icc::Conversion`'s intent selects, by the table below. A flat colour
 converts in the intent in force at its painting operator: the interpreter
 passes the state's intent through `FontSource::resolve_color_wide`, which
-answers `resolve_color`'s bytes with their 16-bit light, and the facade maps
-it to an `icc::Conversion` (`resources::conversion`). An image converts in
-its own `/Intent`, or in the intent in force at `Do` or `EI` where it names
-none: the renderer hands the state's intent through the image seam
-(`GlyphSource::image` and `inline_image`), and the facade reads the image's
-own entry. A shading converts in relative colorimetric — through the first
-of `D2B1`, `A2B1`, `A2B0`, the model and `A2B2` the profile carries. How
-often
+answers `resolve_color`'s bytes with their 16-bit light, and the facade
+converts in the `icc::Conversion` the content crate maps it to
+(`RenderingIntent::conversion`). An image converts in its own `/Intent`, or
+in the intent in force at `Do` or `EI` where it names none: the renderer
+hands the state's intent through the image seam (`GlyphSource::image` and
+`inline_image`), and the facade reads the image's own entry. A shading
+converts in the intent in force at its painting operator — `sh`, or the fill
+or stroke that paints a shading pattern — a mesh's vertices among them: the
+renderer converts a shading's colours itself, through the `ShadingScratch`
+its sweep keeps, which carries that conversion and builds the sweep's colour
+table through it. How often
 the corpus names an intent is not measured; an ExtGState names one by
 `/RI`, the graphics state parameter dictionary having no `/RenderingIntent`
 key. This section is the design RC-01's steps build, read
@@ -544,11 +547,13 @@ the one value every site that converts an ICC colour takes,
 `ColorSpace::to_rgb_in(components, conversion)` among them, while `to_rgb`
 converts in `Conversion::default()`. A space that is not ICC-based reads it
 only to pass it to the ICC space it holds — an `Indexed` base, a
-`Separation` alternate, a pattern's base. The facade maps the content
-crate's `RenderingIntent` to `icc::Intent`, `Unrecognised` to
-`RelativeColorimetric`, so the leaf keeps no PDF name for an intent. RC-02
-adds black-point compensation to `Conversion` as a second field, and keys
-what this design keys by intent by the whole value.
+`Separation` alternate, a pattern's base. The content crate maps its
+`RenderingIntent` to an `icc::Conversion` (`RenderingIntent::conversion`),
+`Unrecognised` to `RelativeColorimetric`: the one mapping the facade's flat
+colours and images and the renderer's shadings convert through, so the leaf
+keeps no PDF name for an intent. RC-02 adds black-point compensation to
+`Conversion` as a second field, and keys what this design keys by intent by
+the whole value.
 
 #### What compiling per intent costs
 

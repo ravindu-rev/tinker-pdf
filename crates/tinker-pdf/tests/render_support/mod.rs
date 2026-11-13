@@ -1174,6 +1174,124 @@ pub fn jpx_minified_page() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// A stream object: `entries` and its `/Length`, then `data`.
+pub fn raw_stream(entries: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = format!("<< {entries} /Length {} >>\nstream\n", data.len()).into_bytes();
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\nendstream");
+    out
+}
+
+/// A document of `objects`, numbered from one, the first its catalog, with
+/// its cross-reference table.
+pub fn raw_pdf(objects: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// The four intents Table 69 names, in [`intents_page`]'s column order.
+pub const INTENT_NAMES: [&str; 4] = [
+    "Perceptual",
+    "RelativeColorimetric",
+    "Saturation",
+    "AbsoluteColorimetric",
+];
+
+/// The width of each of [`intents_page`]'s columns and the height of each of
+/// its rows, in points and in pixels alike at the default 72 dpi.
+pub const INTENTS_CELL: (f64, f64) = (40.0, 20.0);
+
+/// [`intents_page`]'s image samples, row-major from the top (8.9.5.2): three
+/// corners of the table profile's cube — nodes of the grid its table converts
+/// through — and a colour between nodes.
+pub const INTENTS_SAMPLES: [[u8; 3]; 4] =
+    [[0, 255, 0], [255, 0, 255], [255, 255, 0], [128, 64, 191]];
+
+/// [`intents_page`]'s axial shading's two ends, in the table profile's space:
+/// the colour at `t = 0` and at `t = 1`, `t` stepping by 1/32 from one
+/// column to the next so that each column's colour is a node of the table's
+/// 33-point grid (`docs/design/icc.md`, P-22).
+pub const INTENTS_AXIAL: ([f64; 3], [f64; 3]) = ([0.0, 1.0, 0.0], [1.0, 0.0, 1.0]);
+
+/// The page painting, in each of four columns one of [`INTENT_NAMES`] by `ri`,
+/// a fill, an image and an axial shading in [`intent_lut_profile`]'s space:
+/// along the top a fill of [`INTENT_PAINTS`]'s first colour, in the middle
+/// [`INTENTS_SAMPLES`] as a 2 × 2 image XObject, and along the bottom
+/// [`INTENTS_AXIAL`] painted by `sh` across the column, its axis from the
+/// column's centre of pixel 0 to that of pixel 32 and extended both ways.
+/// What `determinism.rs` fingerprints as `intents` and `rendering_intents.rs`
+/// holds to the transforms recomputed from ICC.1.
+pub fn intents_page() -> Vec<u8> {
+    let (width, height) = INTENTS_CELL;
+    let [fill, ..] = INTENT_PAINTS;
+    let mut content = String::new();
+    for (column, intent) in INTENT_NAMES.iter().enumerate() {
+        let x = width * column as f64;
+        content.push_str(&format!(
+            "q /{intent} ri\n\
+             /L cs {} {} {} scn {x} {} {width} {height} re f\n\
+             q {width} 0 0 {height} {x} {height} cm /Im0 Do Q\n\
+             q {x} 0 {width} {height} re W n 1 0 0 1 {x} 0 cm /Sh0 sh Q\n\
+             Q\n",
+            fill[0],
+            fill[1],
+            fill[2],
+            2.0 * height,
+        ));
+    }
+    let samples: Vec<u8> = INTENTS_SAMPLES.iter().flatten().copied().collect();
+    let (start, end) = INTENTS_AXIAL;
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}]\n   \
+             /Resources << /ColorSpace << /L [/ICCBased 5 0 R] >>\n     \
+             /XObject << /Im0 6 0 R >> /Shading << /Sh0 7 0 R >> >>\n   \
+             /Contents 4 0 R >>",
+            4.0 * width,
+            3.0 * height
+        )
+        .into_bytes(),
+        raw_stream("", content.as_bytes()),
+        raw_stream("/N 3", &intent_lut_profile()),
+        raw_stream(
+            "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
+             /ColorSpace [/ICCBased 5 0 R] /BitsPerComponent 8",
+            &samples,
+        ),
+        format!(
+            "<< /ShadingType 2 /ColorSpace [/ICCBased 5 0 R] /Coords [0.5 0 32.5 0]\n   \
+             /Function << /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n   \
+             /Extend [true true] >>",
+            start[0], start[1], start[2], end[0], end[1], end[2]
+        )
+        .into_bytes(),
+    ];
+    raw_pdf(&objects)
+}
+
 // ---- the face this repository writes for itself -----------------------------
 //
 // Moved here from `determinism.rs` when the goldens arrived: the text family's

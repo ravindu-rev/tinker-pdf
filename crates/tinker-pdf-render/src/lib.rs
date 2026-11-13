@@ -22,6 +22,8 @@ pub mod shading;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use tinker_pdf_color::icc::Conversion;
+
 pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
 pub use shading::{ColorTable, Shading, ShadingScratch, TABLE_ENTRIES};
@@ -3337,6 +3339,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // The shape for the plane: the fill's coverage, without the soft mask
         // where one is in force (11.6.4.3).
         let unmasked = self.unmasked(shape, set.entry);
+        // 11.7.5.3: a shading pattern's colours convert in the intent in
+        // force at the fill or stroke that paints it.
+        let conversion = state.stored_parameters().rendering_intent.conversion();
 
         // A mesh is geometry rather than a function of position, so it takes
         // the other route entirely — and it does its own knockout restore,
@@ -3354,6 +3359,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 mode,
                 &set,
                 state.stored_parameters().smoothness,
+                conversion,
             );
         }
 
@@ -3376,7 +3382,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let (ox, oy) = self.canvas.origin();
         let (x_start, y_start, x_end, y_end) =
             area.overlap_at((ox, oy), self.canvas.width, self.canvas.height);
-        let mut scratch = ShadingScratch::default();
+        let mut scratch = ShadingScratch::converting(conversion);
         // P-14.5: through a table, where the shape's rectangle on the whole
         // page asks for more colours than the table holds.
         if let Some((space, function)) = shading.parametric() {
@@ -3439,7 +3445,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ///
     /// `shape_area` is `area` without the soft mask, the region the mesh's
     /// shape is recorded over for the plane (11.6.4.3), and `set` what the
-    /// paint takes from the device-dependent state.
+    /// paint takes from the device-dependent state. The vertices' colours
+    /// convert as `conversion` says, in the intent in force at the operator
+    /// that paints the mesh.
     ///
     /// `smoothness` is the `/SM` in force (10.7.3): a patch is subdivided until
     /// its colour is within it as well as by its device length
@@ -3457,6 +3465,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         mode: RasterBlend,
         set: &DeviceSet,
         smoothness: Option<f64>,
+        conversion: Conversion,
     ) -> bool {
         let Some(tessellation) = mesh.tessellate(&to_device, smoothness) else {
             return false;
@@ -3497,8 +3506,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // cell for each pixel and put back, so the pass allocates nothing per
         // pixel; a mesh carrying a function reads it through a table over
         // the inputs its vertices span (P-14.5), decided on the mesh's
-        // rectangle on the whole page.
-        let mut kept = ShadingScratch::default();
+        // rectangle on the whole page. Its colours convert in the intent in
+        // force at the paint, the table's entries among them.
+        let mut kept = ShadingScratch::converting(conversion);
         if let (Some(function), 1) = (&mesh.function, mesh.components) {
             let (low, high) = tessellation
                 .values
@@ -5601,6 +5611,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
 
         let alpha = state.fill_alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);
+        // 11.7.5.3: the shading's colours convert in the intent in force at
+        // `sh`.
+        let conversion = state.stored_parameters().rendering_intent.conversion();
         // 8.7.4.2 again: `sh` paints the current clip, so the clip's own
         // rectangle bounds the sweep. Without one it really is the whole
         // page, which is what the operator means.
@@ -5636,6 +5649,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 mode,
                 &set,
                 state.stored_parameters().smoothness,
+                conversion,
             ) {
                 tally(&mut self.counts.drawn_shadings);
             } else {
@@ -5665,7 +5679,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 .unwrap_or_else(|| Mask::uniform(ox, oy, width, height, 255));
             self.knockout_restore(&restore);
         }
-        let mut scratch = ShadingScratch::default();
+        let mut scratch = ShadingScratch::converting(conversion);
         // P-14.5, decided on the clip's rectangle on the whole page.
         if let Some((space, function)) = shading.parametric() {
             scratch.tabulate(space, function, 0.0, 1.0, self.page_limit().area());

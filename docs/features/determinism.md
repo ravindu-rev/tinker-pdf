@@ -56,8 +56,8 @@ each page of its table — `text`, `curves`, `shading`, `pattern`, `optional`,
 `image`, `jbig2`, `jpx`, `blend`, `transparency`, `tiling`, `mesh`, `cbz`,
 `xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
 `analytic_image`, `default_spaces`, `gs_text`, `strokes`, `bilevel`, `icc`,
-`jpeg_minified`, `jpx_minified` — each a hash of rendered pixels plus the page
-dimensions and
+`jpeg_minified`, `jpx_minified`, `intents` — each a hash of rendered pixels
+plus the page dimensions and
 ink counts it is computed from. `strokes` is the stroker's whole pen: the
 three caps and the three joins
 (8.4.3.3, 8.4.3.4), a corner a miter limit bevels beside one it lets through
@@ -92,7 +92,14 @@ engine reads, each built in the test: an 8-bit CMYK image through a
 four-channel `mft2` table into Lab, the same samples as `/DeviceCMYK` beside
 it, an RGB image and a fill through one matrix/TRC profile, and a grey-profile
 image, every sample drawn ten pixels square, so each pixel is one
-conversion's colour.
+conversion's colour. `intents` paints, in each of four columns under one of
+Table 69's rendering intents by `ri` (8.6.5.8), a fill, a 2 × 2 image and an
+axial shading in an `ICCBased` space over a profile carrying a table for each
+intent and a media white other than D50, so each intent's table, and
+absolute colorimetric's scaling by the media white, are one picture on every
+target; `crates/tinker-pdf/tests/rendering_intents.rs`
+holds the same page, built by the same function in `tests/render_support/`,
+to the transforms recomputed from ICC.1.
 
 The `analytic_` pages are a different kind of fixture from the rest: their
 pixels have a **closed-form right answer**, which

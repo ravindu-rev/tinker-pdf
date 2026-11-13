@@ -3,25 +3,30 @@
 //!
 //! A flat colour in an `ICCBased` space — a fill, a stroke, a glyph — converts
 //! through the profile's transform for the intent in force at its painting
-//! operator, `ri`'s or a graphics state's `/RI`, and an image through the
-//! transform for its own `/Intent` (Table 89), or the intent in force at `Do`
-//! or `EI` where it names none. Every expected colour here is recomputed from
-//! ICC.1's own arithmetic: a table's multilinear interpolation and v2's legacy
-//! Lab encoding, a matrix/TRC profile's columns over its curves, and
-//! ICC-absolute colorimetry's scaling by the media white (6.2.3). The
-//! connection space reaches sRGB through `tinker_pdf_color::lab_to_srgb`, the
-//! engine's public conversion of it, so what is under test is which transform
-//! the intent selects and what it makes of the components.
+//! operator, `ri`'s or a graphics state's `/RI`; so does a shading, painted by
+//! `sh` or as a shading pattern's fill, a mesh's among them; and an image
+//! through the transform for its own `/Intent` (Table 89), or the intent in
+//! force at `Do` or `EI` where it names none. Every expected colour here is
+//! recomputed from ICC.1's own arithmetic: a table's multilinear
+//! interpolation and v2's legacy Lab encoding, a matrix/TRC profile's columns
+//! over its curves, and ICC-absolute colorimetry's scaling by the media white
+//! (6.2.3). The connection space reaches sRGB through
+//! `tinker_pdf_color::lab_to_srgb`, the engine's public conversion of it, so
+//! what is under test is which transform the intent selects and what it makes
+//! of the components.
 //!
-//! The flat-colour pages are `render_support`'s, which `determinism.rs`
-//! fingerprints. Nothing here depends on a font this build may or may not
-//! bundle: the glyph is the repository's own embedded face.
+//! The flat-colour pages, and the page painting a fill, an image and a shading
+//! under each intent, are `render_support`'s; the last is the page
+//! `determinism.rs` fingerprints as `intents`, held here to the transforms it
+//! paints. Nothing here depends on a font this build may or may not bundle:
+//! the glyph is the repository's own embedded face.
 
 mod render_support;
 
 use render_support::{
-    intent_lut_encoded, intent_lut_profile, intent_page, intent_spot, intent_states_page, pixel,
-    render, INTENT_PAINTS, INTENT_PAPER, INTENT_SIZE, SRGB_COLUMNS,
+    intent_lut_encoded, intent_lut_profile, intent_page, intent_spot, intent_states_page,
+    intents_page, pixel, raw_pdf, raw_stream, render, INTENTS_AXIAL, INTENTS_CELL, INTENTS_SAMPLES,
+    INTENT_NAMES, INTENT_PAINTS, INTENT_PAPER, INTENT_SIZE, SRGB_COLUMNS,
 };
 use tinker_pdf::{Bitmap, CacheLimits, Document, RenderOptions, Stats, SvgOptions};
 use tinker_pdf_color::lab_to_srgb;
@@ -346,10 +351,11 @@ fn ri_and_extgstate_ri_are_twins() {
 // being the fill colour (`docs/design/icc.md`, "Where each conversion takes its
 // intent").
 
-/// The samples every image here draws, row-major from the top (8.9.5.2):
-/// three corners of the table profile's cube — nodes of its grid, so their
-/// colour is the table's own — and a colour between nodes.
-const SAMPLES: [[u8; 3]; 4] = [[0, 255, 0], [255, 0, 255], [255, 255, 0], [128, 64, 191]];
+/// The samples every image here draws, the fingerprinted page's, row-major
+/// from the top (8.9.5.2): three corners of the table profile's cube — nodes
+/// of its grid, so their colour is the table's own — and a colour between
+/// nodes.
+const SAMPLES: [[u8; 3]; 4] = INTENTS_SAMPLES;
 
 /// [`SAMPLES`] as an image's bytes.
 fn flat_samples() -> Vec<u8> {
@@ -405,42 +411,6 @@ fn holds_samples(
         .collect()
 }
 
-/// A stream object: `entries` and its `/Length`, then `data`.
-fn stream(entries: &str, data: &[u8]) -> Vec<u8> {
-    let mut out = format!("<< {entries} /Length {} >>\nstream\n", data.len()).into_bytes();
-    out.extend_from_slice(data);
-    out.extend_from_slice(b"\nendstream");
-    out
-}
-
-/// A document of `objects`, numbered from one, with its cross-reference
-/// table.
-fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = b"%PDF-1.7\n".to_vec();
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (index, object) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
-        out.extend_from_slice(object);
-        out.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = out.len();
-    out.extend_from_slice(
-        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
-    );
-    for offset in offsets {
-        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    out.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            objects.len() + 1
-        )
-        .as_bytes(),
-    );
-    out
-}
-
 /// One image XObject of a page: its resource name, its dictionary's entries
 /// but its type and length, and its samples.
 struct Picture {
@@ -480,16 +450,16 @@ fn picture_document(
              /XObject << {xobjects}>> >>\n   /Contents 4 0 R >>"
         )
         .into_bytes(),
-        stream("", content.as_bytes()),
-        stream("/N 3", &intent_lut_profile()),
+        raw_stream("", content.as_bytes()),
+        raw_stream("/N 3", &intent_lut_profile()),
     ];
     for picture in pictures {
-        objects.push(stream(
+        objects.push(raw_stream(
             &format!("/Type /XObject /Subtype /Image {}", picture.entries),
             &picture.samples,
         ));
     }
-    pdf(&objects)
+    raw_pdf(&objects)
 }
 
 /// **An image's `/Intent` selects its transform** (Table 89). An image
@@ -813,6 +783,334 @@ fn a_kept_image_is_kept_under_its_conversion() {
                 (stats.images_decoded, stats.image_misses, stats.image_hits),
                 want,
                 "{what}, {render}: decoded, missed and met"
+            );
+        }
+    }
+}
+
+// ---- shadings ----------------------------------------------------------------
+//
+// A shading's colours convert in the intent in force at its painting operator,
+// `sh`'s or the one at the fill that paints a shading pattern (11.7.5.3), a
+// mesh's vertices among them (`docs/design/icc.md`, "Where each conversion
+// takes its intent").
+
+/// The shaded page's width and height, in points and pixels alike.
+const SHADED: (f64, f64) = (120.0, 80.0);
+
+/// The colour of a linear axial function (`/N 1`) from `start` to `end` at
+/// `t`.
+fn between(start: [f64; 3], end: [f64; 3], t: f64) -> [f64; 3] {
+    [0, 1, 2].map(|channel| start[channel] + t * (end[channel] - start[channel]))
+}
+
+/// The colour of [`INTENTS_AXIAL`] at `t`.
+fn axial_at(t: f64) -> [f64; 3] {
+    between(INTENTS_AXIAL.0, INTENTS_AXIAL.1, t)
+}
+
+/// A free-form triangle mesh's vertex stream (8.7.4.5.5, type 4): each vertex
+/// a flag of 0 in 8 bits, so that every three make a triangle of their own,
+/// its coordinates in 16 bits over the shaded page, and its colour's 8-bit
+/// inputs after them.
+fn triangles(vertices: &[((f64, f64), &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for ((x, y), values) in vertices {
+        out.push(0);
+        for (value, extent) in [(*x, SHADED.0), (*y, SHADED.1)] {
+            let raw = (value / extent * 65535.0).round() as u16;
+            out.extend_from_slice(&raw.to_be_bytes());
+        }
+        out.extend_from_slice(values);
+    }
+    out
+}
+
+/// The mesh triangles' corners: two along the left of the top row, which
+/// `sh` paints, and two along its right, which a shading pattern's fill
+/// paints, each a third of a column wide from 62 to 78 points up.
+const TRIANGLES: [[(f64, f64); 3]; 4] = [
+    [(2.0, 62.0), (38.0, 62.0), (20.0, 78.0)],
+    [(42.0, 62.0), (78.0, 62.0), (60.0, 78.0)],
+    [(82.0, 62.0), (98.0, 62.0), (90.0, 78.0)],
+    [(102.0, 62.0), (118.0, 62.0), (110.0, 78.0)],
+];
+
+/// The page-space point well inside triangle `index` of [`TRIANGLES`] the
+/// test samples at.
+fn inside_triangle(index: usize) -> (f64, f64) {
+    let [(x0, _), (x1, _), _] = TRIANGLES[index];
+    ((x0 + x1) / 2.0, 66.0)
+}
+
+/// What the shaded page paints its four triangles in: the first two by
+/// their components, the last two by a function of `t` 0 and 1.
+const TRIANGLE_COLOURS: [[f64; 3]; 4] = [
+    [0.0, 1.0, 0.0],
+    [1.0, 0.0, 1.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+];
+
+/// The shaded page, the intent in force set by `intent` — a `ri` or a `gs`
+/// operation — in the table profile's space: along the bottom
+/// [`INTENTS_AXIAL`] by `sh` across the first column and as a shading
+/// pattern's fill across the second, each column's pixel `p` at `t = p / 32`;
+/// in the middle a function-based shading of `(x, y)` to `[x, y, 1 − x]` by
+/// `sh` over a 32-point square, its pixels at multiples of 1/32; along the top
+/// [`TRIANGLES`] in [`TRIANGLE_COLOURS`], the first two a mesh carrying its
+/// components that `sh` paints, the last two one carrying a function that a
+/// shading pattern's fill paints. Every colour is a node of the 33-point grid
+/// the table converts through, so a conversion is the table's pipeline
+/// exactly (`docs/design/icc.md`, P-22).
+fn shaded_page(intent: &str) -> Vec<u8> {
+    let content = format!(
+        "{intent}\n\
+         q 0 0 40 20 re W n /Sh0 sh Q\n\
+         /Pattern cs /P0 scn 40 0 40 20 re f\n\
+         q 0 20 40 40 re W n 32 0 0 32 0.5 20.5 cm /Sh1 sh Q\n\
+         q 0 60 120 20 re W n /Sh2 sh Q\n\
+         /Pattern cs /P1 scn 80 60 40 20 re f"
+    );
+    let byte = |value: f64| (value * 255.0).round() as u8;
+    let components: Vec<[u8; 3]> = TRIANGLE_COLOURS.iter().map(|c| c.map(byte)).collect();
+    let mut direct = Vec::new();
+    let mut parametric = Vec::new();
+    for (index, corners) in TRIANGLES.iter().enumerate() {
+        for corner in corners {
+            match index {
+                0 | 1 => direct.push((*corner, components[index].to_vec())),
+                // `t` of 0 for the third triangle and 1 for the fourth.
+                _ => parametric.push((*corner, vec![if index == 2 { 0 } else { 255 }])),
+            }
+        }
+    }
+    let borrowed = |vertices: &[((f64, f64), Vec<u8>)]| {
+        triangles(
+            &vertices
+                .iter()
+                .map(|(at, values)| (*at, values.as_slice()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (start, end) = INTENTS_AXIAL;
+    let mesh = "/ShadingType 4 /ColorSpace [/ICCBased 5 0 R] /BitsPerCoordinate 16 \
+                /BitsPerComponent 8 /BitsPerFlag 8";
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}]\n   \
+             /Resources << /ColorSpace << /L [/ICCBased 5 0 R] >>\n     \
+             /Shading << /Sh0 6 0 R /Sh1 7 0 R /Sh2 9 0 R >>\n     \
+             /Pattern << /P0 10 0 R /P1 11 0 R >>\n     \
+             /ExtGState << /GSp << /RI /Perceptual >> /GSr << /RI /RelativeColorimetric >>\n       \
+             /GSs << /RI /Saturation >> /GSa << /RI /AbsoluteColorimetric >>\n       \
+             /GSx << /RI /Ultraviolet >> >> >>\n   \
+             /Contents 4 0 R >>",
+            SHADED.0, SHADED.1
+        )
+        .into_bytes(),
+        raw_stream("", content.as_bytes()),
+        raw_stream("/N 3", &intent_lut_profile()),
+        format!(
+            "<< /ShadingType 2 /ColorSpace [/ICCBased 5 0 R] /Coords [0.5 0 32.5 0]\n   \
+             /Function << /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n   \
+             /Extend [true true] >>",
+            start[0], start[1], start[2], end[0], end[1], end[2]
+        )
+        .into_bytes(),
+        b"<< /ShadingType 1 /ColorSpace [/ICCBased 5 0 R] /Domain [0 1 0 1] /Function 8 0 R >>"
+            .to_vec(),
+        raw_stream(
+            "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1]",
+            b"{ 1 index 1 exch sub }",
+        ),
+        raw_stream(
+            &format!("{mesh} /Decode [0 {} 0 {} 0 1 0 1 0 1]", SHADED.0, SHADED.1),
+            &borrowed(&direct),
+        ),
+        b"<< /PatternType 2 /Shading 6 0 R /Matrix [1 0 0 1 40 0] >>".to_vec(),
+        b"<< /PatternType 2 /Shading 12 0 R >>".to_vec(),
+        raw_stream(
+            &format!(
+                "{mesh} /Decode [0 {} 0 {} 0 1]\n   \
+                 /Function << /FunctionType 2 /Domain [0 1] /C0 [1 1 0] /C1 [0 0 1] /N 1 >>",
+                SHADED.0, SHADED.1
+            ),
+            &borrowed(&parametric),
+        ),
+    ];
+    raw_pdf(&objects)
+}
+
+/// The function-based shading's pixels the test samples, as device
+/// `(column, row)`: its corners and inside, each at whole 32nds of its
+/// domain.
+const FUNCTION_PIXELS: [(u32, u32); 5] = [(0, 59), (16, 43), (32, 27), (8, 51), (24, 35)];
+
+/// **Each intent shades its recomputed transform.** Under each of Table 69's
+/// intents, set by `ri`, an axial shading painted by `sh` and as a shading
+/// pattern's fill, a function-based shading, a mesh carrying its components
+/// that `sh` paints and one carrying a function that a pattern's fill paints,
+/// all in the table profile's space, paint the sRGB the table 8.10.2
+/// designates for the intent makes of their components, absolute colorimetric
+/// relative colorimetric's scaled by the media white. The intent set by a
+/// graphics state's `/RI` paints byte for byte as `ri`'s, the intents part
+/// where their tables do, and a name 8.6.5.8 does not list paints as relative
+/// colorimetric.
+#[test]
+fn each_intent_shades_its_recomputed_transform() {
+    let height = SHADED.1;
+    let mut axial = Vec::new();
+    for (intent, state) in Intent::ALL.into_iter().zip(["GSp", "GSr", "GSs", "GSa"]) {
+        let bitmap = render(shaded_page(&format!("/{} ri", intent.name())));
+        let by_state = render(shaded_page(&format!("/{state} gs")));
+        assert!(
+            bitmap.data == by_state.data,
+            "{intent:?}: ri and /RI shaded different pages"
+        );
+        for (base, how) in [(0.0, "sh"), (40.0, "a shading pattern's fill")] {
+            for p in [0.0, 8.0, 16.0, 24.0, 32.0] {
+                within_a_level(
+                    at(&bitmap, (base + p + 0.5, 10.0), height),
+                    table_colour(intent, axial_at(p / 32.0)),
+                    &format!("{intent:?}: the axial shading by {how}, t = {p}/32"),
+                );
+            }
+        }
+        for (column, row) in FUNCTION_PIXELS {
+            let (x, y) = (f64::from(column) / 32.0, f64::from(59 - row) / 32.0);
+            within_a_level(
+                pixel(&bitmap, column, row),
+                table_colour(intent, [x, y, 1.0 - x]),
+                &format!("{intent:?}: the function-based shading at ({x}, {y})"),
+            );
+        }
+        for (index, colour) in TRIANGLE_COLOURS.iter().enumerate() {
+            let how = if index < 2 { "sh" } else { "a pattern's fill" };
+            within_a_level(
+                at(&bitmap, inside_triangle(index), height),
+                table_colour(intent, *colour),
+                &format!("{intent:?}: mesh triangle {index}, by {how}"),
+            );
+        }
+        axial.push(at(&bitmap, (16.5, 10.0), height));
+    }
+    let (perceptual, relative, saturation, absolute) = (axial[0], axial[1], axial[2], axial[3]);
+    assert_ne!(perceptual, relative, "perceptual shades as relative");
+    assert_ne!(saturation, relative, "saturation shades as relative");
+    assert_ne!(absolute, relative, "absolute shades as relative");
+
+    // 8.6.5.8: a name the reader does not recognise is relative colorimetric,
+    // set by `ri` or by a graphics state.
+    let relative_page = render(shaded_page("/RelativeColorimetric ri"));
+    for unknown in ["/Ultraviolet ri", "/GSx gs"] {
+        assert!(
+            render(shaded_page(unknown)).data == relative_page.data,
+            "{unknown}: an unrecognised intent shades otherwise than relative colorimetric"
+        );
+    }
+}
+
+/// A page shading [`INTENT_PAINTS`]'s first colour as a constant axial
+/// shading by `sh` across its left half, and filling its right half with the
+/// same colour, under `intent`.
+fn constant_page(intent: &str) -> Vec<u8> {
+    let [c0, c1, c2] = INTENT_PAINTS[0];
+    let content = format!(
+        "/{intent} ri\n\
+         q 0 0 40 20 re W n /Sh0 sh Q\n\
+         /L cs {c0} {c1} {c2} scn 40 0 40 20 re f"
+    );
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 80 20]\n   \
+          /Resources << /ColorSpace << /L [/ICCBased 5 0 R] >> /Shading << /Sh0 6 0 R >> >>\n   \
+          /Contents 4 0 R >>"
+            .to_vec(),
+        raw_stream("", content.as_bytes()),
+        raw_stream("/N 3", &intent_lut_profile()),
+        format!(
+            "<< /ShadingType 2 /ColorSpace [/ICCBased 5 0 R] /Coords [0 0 40 0]\n   \
+             /Function << /FunctionType 2 /Domain [0 1] /C0 [{c0} {c1} {c2}] /C1 [{c0} {c1} {c2}] \
+             /N 1 >>\n   /Extend [true true] >>"
+        )
+        .into_bytes(),
+    ];
+    raw_pdf(&objects)
+}
+
+/// **A constant axial shading paints its interior as the flat fill** in the
+/// same intent, under each of Table 69's: the shading's colour converts as
+/// the fill's does, byte for byte, and both are the table the intent
+/// designates.
+#[test]
+fn a_constant_axial_shading_paints_as_the_flat_fill_in_each_intent() {
+    let mut painted = Vec::new();
+    for intent in Intent::ALL {
+        let bitmap = render(constant_page(intent.name()));
+        let fill = pixel(&bitmap, 60, 10);
+        within_a_level(
+            fill,
+            table_colour(intent, INTENT_PAINTS[0]),
+            &format!("{intent:?}: the fill"),
+        );
+        for row in 3..17 {
+            for column in 3..37 {
+                assert_eq!(
+                    pixel(&bitmap, column, row),
+                    pixel(&bitmap, column + 40, row),
+                    "{intent:?}: the shading at ({column}, {row}) and the fill beside it"
+                );
+            }
+        }
+        painted.push(fill);
+    }
+    assert_ne!(painted[0], painted[1], "perceptual paints as relative");
+    assert_ne!(painted[2], painted[1], "saturation paints as relative");
+    assert_ne!(painted[3], painted[1], "absolute paints as relative");
+}
+
+/// **The fingerprinted page paints each intent's transform.** `intents`, the
+/// page `determinism.rs` fingerprints, paints in each column, under the
+/// intent `ri` names there, its fill, its image's samples and its axial
+/// shading's pixels in the colours the table that intent designates makes of
+/// their components: a node of the table's grid within a level, the image's
+/// colour between nodes within the two levels a grid's read keeps to.
+#[test]
+fn the_fingerprinted_intents_page_paints_each_intents_transform() {
+    let bitmap = render(intents_page());
+    let (width, height) = INTENTS_CELL;
+    let page_height = 3.0 * height;
+    for (column, (intent, name)) in Intent::ALL.into_iter().zip(INTENT_NAMES).enumerate() {
+        assert_eq!(intent.name(), name, "the page's column {column}");
+        let x = width * column as f64;
+        within_a_level(
+            at(&bitmap, (x + width / 2.0, 2.5 * height), page_height),
+            table_colour(intent, INTENT_PAINTS[0]),
+            &format!("{name}: the fill"),
+        );
+        for (index, sample) in INTENTS_SAMPLES.iter().enumerate() {
+            let (row, across) = ((index / 2) as f64, (index % 2) as f64);
+            let spot = (
+                x + width / 2.0 * across + width / 4.0,
+                2.0 * height - height / 2.0 * row - height / 4.0,
+            );
+            let levels = if index == 3 { 2 } else { 1 };
+            within_levels(
+                at(&bitmap, spot, page_height),
+                table_colour(intent, sample.map(|value| f64::from(value) / 255.0)),
+                levels,
+                &format!("{name}: the image's sample {index}"),
+            );
+        }
+        for p in [0.0, 8.0, 16.0, 24.0, 32.0] {
+            within_a_level(
+                at(&bitmap, (x + p + 0.5, height / 2.0), page_height),
+                table_colour(intent, axial_at(p / 32.0)),
+                &format!("{name}: the shading at t = {p}/32"),
             );
         }
     }

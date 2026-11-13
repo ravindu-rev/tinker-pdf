@@ -75,11 +75,15 @@ under a cache budget — keeps an image's decode under the conversion its
 colours took, so an image in an ICC space, or one holding
 one, drawn under two intents decodes once in each, and an image no intent
 changes — in a device space, a mask, or one naming its own intent — decodes
-once. A shading converts in relative colorimetric, 8.6.5.8's initial
-intent. Relative colorimetric converts through the first of `D2B1`,
-`A2B1`, `A2B0`, the model and `A2B2` the profile carries. Absolute
-colorimetric converts through `D2B3` as it stands where the profile carries
-one, that tag being ICC-absolute already, and otherwise is relative
+once. A shading converts in the intent in force at its painting operator —
+`sh`, or the fill or stroke that paints a shading pattern — an axial,
+radial and function-based shading's colours, a mesh's vertices' and the
+colour table a sweep reads its function through alike; an ICC shading
+rasterised for SVG converts there as it renders. Relative colorimetric
+converts through the first of `D2B1`, `A2B1`, `A2B0`, the model and `A2B2`
+the profile carries. Absolute colorimetric converts through `D2B3` as it
+stands where the profile carries one, that tag being ICC-absolute already,
+and otherwise is relative
 colorimetric's `A2B*` table or model with the connection-space value scaled
 by the profile's media white (`wtpt`) over the PCS white, channel by channel
 (ICC.1 6.2.3): folded into the matrix for a matrix/TRC or grey profile, so a
@@ -1598,7 +1602,7 @@ compensation, overprint, flatness, smoothness, stroke adjustment, alpha
 source, text knockout, the black generation, undercolour removal and
 transfer functions, and the halftone and its origin — travel in the state as
 one shared `StoredParameters` value with the rendering intent, which flat
-colours and images apply, `None` while every one has its initial value, so a
+colours, images and shadings apply, `None` while every one has its initial value, so a
 `q` copies one word more and a copy allocates nothing. The transfer functions,
 black generation and undercolour removal, flatness, smoothness and stroke
 adjustment are applied

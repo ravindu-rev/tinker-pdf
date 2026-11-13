@@ -608,6 +608,26 @@ impl RenderingIntent {
             _ => RenderingIntent::Unrecognised,
         }
     }
+
+    /// How the colour crate converts an ICC colour in this intent (8.6.5.8):
+    /// Table 69's four by their ICC.1 names, and a name the reader does not
+    /// recognise as relative colorimetric, as 8.6.5.8 has it read — so the
+    /// leaf crate keeps no PDF name for an intent (`docs/design/icc.md`, "The
+    /// one conversion parameter"). The one mapping: the facade converts a
+    /// flat colour and an image through it, and the renderer a shading.
+    #[must_use]
+    pub fn conversion(self) -> tinker_pdf_color::icc::Conversion {
+        use tinker_pdf_color::icc::{Conversion, Intent};
+        let intent = match self {
+            RenderingIntent::Perceptual => Intent::Perceptual,
+            RenderingIntent::Saturation => Intent::Saturation,
+            RenderingIntent::AbsoluteColorimetric => Intent::AbsoluteColorimetric,
+            RenderingIntent::RelativeColorimetric | RenderingIntent::Unrecognised => {
+                Intent::RelativeColorimetric
+            }
+        };
+        Conversion { intent }
+    }
 }
 
 /// ISO 32000-2's `/UseBlackPtComp`: whether black-point compensation is used.
@@ -981,6 +1001,33 @@ mod tests {
             f: 0.0,
         };
         assert!((rot.expansion() - 1.0).abs() < 1e-12);
+    }
+
+    /// Each of Table 69's names converts in its ICC.1 intent, and a name
+    /// 8.6.5.8 does not list in relative colorimetric, the initial intent's.
+    #[test]
+    fn each_intent_converts_in_its_icc_intent() {
+        use tinker_pdf_color::icc::{Conversion, Intent};
+        for (name, intent) in [
+            (b"Perceptual".as_slice(), Intent::Perceptual),
+            (b"RelativeColorimetric", Intent::RelativeColorimetric),
+            (b"Saturation", Intent::Saturation),
+            (b"AbsoluteColorimetric", Intent::AbsoluteColorimetric),
+            (b"Ultraviolet", Intent::RelativeColorimetric),
+            (b"", Intent::RelativeColorimetric),
+        ] {
+            assert_eq!(
+                RenderingIntent::from_name(name).conversion(),
+                Conversion { intent },
+                "{}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        assert_eq!(
+            StoredParameters::INITIAL.rendering_intent.conversion(),
+            Conversion::default(),
+            "the initial intent converts as a caller naming none does"
+        );
     }
 
     #[test]

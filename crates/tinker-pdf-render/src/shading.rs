@@ -10,12 +10,15 @@
 //! A shading is evaluated once a pixel, so what an evaluation writes — the
 //! function's outputs, and a `/Separation` or `/DeviceN` space's tint — goes
 //! into a [`ShadingScratch`] the sweep keeps from one pixel to the next, and
-//! painting a shading allocates nothing per pixel.
+//! painting a shading allocates nothing per pixel. The scratch carries the
+//! conversion the sweep's colours take too: the rendering intent in force at
+//! its painting operator, which an `ICCBased` space reads (8.6.5.8).
 //!
 //! A sweep reads a device row at a time through [`Shading::row`]: an axial
 //! shading's `t` and a radial shading's quadratic terms step from column to
 //! column there instead of being evaluated afresh ([`ShadingRow`]).
 
+use tinker_pdf_color::icc::Conversion;
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::Matrix;
 
@@ -210,16 +213,40 @@ impl Shading {
 /// What evaluating a shading writes, kept by a sweep from one pixel to the
 /// next: a function's outputs and a colour space's tint transform's, the
 /// sweep's [`ColorTable`] where it reads its function through one, and how
-/// many times the function was evaluated.
+/// many times the function was evaluated — and how the sweep's colours
+/// convert, in the rendering intent in force at its painting operator.
 #[derive(Clone, Debug, Default)]
 pub struct ShadingScratch {
     outputs: Vec<f64>,
     converted: Vec<f64>,
     table: Option<ColorTable>,
     evaluations: u64,
+    /// How a colour of the shading's space converts: the intent in force at
+    /// `sh`, or at the fill a shading pattern paints (11.7.5.3), which an ICC
+    /// space reads (`docs/design/icc.md`, "Where each conversion takes its
+    /// intent"). The default is relative colorimetric, 8.6.5.8's initial
+    /// intent.
+    conversion: Conversion,
 }
 
 impl ShadingScratch {
+    /// A scratch whose colours convert as `conversion` says: the one a sweep
+    /// is handed for the intent in force at its painting operator, its table
+    /// built through it as every colour it asks for is.
+    #[must_use]
+    pub fn converting(conversion: Conversion) -> ShadingScratch {
+        ShadingScratch {
+            conversion,
+            ..ShadingScratch::default()
+        }
+    }
+
+    /// How this scratch converts its colours.
+    #[must_use]
+    pub fn conversion(&self) -> Conversion {
+        self.conversion
+    }
+
     /// `function` at `inputs`, converted from `space`.
     pub(crate) fn color(
         &mut self,
@@ -229,7 +256,7 @@ impl ShadingScratch {
     ) -> (u8, u8, u8) {
         self.evaluations = self.evaluations.saturating_add(1);
         function.eval_into(inputs, &mut self.outputs);
-        space.to_rgb_with(&self.outputs, &mut self.converted)
+        space.to_rgb_with_in(&self.outputs, &mut self.converted, self.conversion)
     }
 
     /// `function` at the one input `t`, converted from `space`: read from the
@@ -283,7 +310,7 @@ impl ShadingScratch {
 
     /// `components` of `space`, converted, with no function between.
     pub(crate) fn convert(&mut self, space: &ColorSpace, components: &[f64]) -> (u8, u8, u8) {
-        space.to_rgb_with(components, &mut self.converted)
+        space.to_rgb_with_in(components, &mut self.converted, self.conversion)
     }
 }
 
@@ -1632,6 +1659,125 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// An `s15Fixed16Number`.
+    fn s15_16(value: f64) -> [u8; 4] {
+        (((value * 65536.0).round() as i32) as u32).to_be_bytes()
+    }
+
+    /// A version 2 grey profile on a warm paper: one `kTRC`, the identity,
+    /// and a media white other than D50, so its ICC-absolute colorimetry
+    /// parts from its relative colorimetry (ICC.1 6.2.3).
+    fn warm_grey() -> ColorSpace {
+        let curve: Vec<u8> = [b"curv".as_slice(), &[0; 4], &0u32.to_be_bytes()].concat();
+        let white: Vec<u8> = [
+            b"XYZ ".as_slice(),
+            &[0; 4],
+            &s15_16(0.88),
+            &s15_16(0.91),
+            &s15_16(0.72),
+        ]
+        .concat();
+        let tags = [(*b"kTRC", curve), (*b"wtpt", white)];
+        let mut profile = vec![0u8; 128];
+        profile[8..12].copy_from_slice(&0x0200_0000u32.to_be_bytes());
+        profile[12..16].copy_from_slice(b"mntr");
+        profile[16..20].copy_from_slice(b"GRAY");
+        profile[20..24].copy_from_slice(b"XYZ ");
+        profile[36..40].copy_from_slice(b"acsp");
+        profile.extend_from_slice(&(tags.len() as u32).to_be_bytes());
+        let start = 132 + 12 * tags.len();
+        let mut body = Vec::new();
+        for (signature, data) in &tags {
+            profile.extend_from_slice(signature);
+            profile.extend_from_slice(&((start + body.len()) as u32).to_be_bytes());
+            profile.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            body.extend_from_slice(data);
+        }
+        profile.extend_from_slice(&body);
+        let size = profile.len() as u32;
+        profile[0..4].copy_from_slice(&size.to_be_bytes());
+        let parsed = tinker_pdf_color::icc::Profile::parse(&profile).expect("the profile parses");
+        let transforms = tinker_pdf_color::icc::Transforms::compile(parsed).expect("it compiles");
+        ColorSpace::Icc {
+            transforms: std::sync::Arc::new(transforms),
+            components: 1,
+        }
+    }
+
+    /// **A sweep's colours convert in its scratch's intent** (11.7.5.3). A
+    /// scratch made for absolute colorimetric converts a colour of a profile
+    /// on a warm paper — a function's, a vertex's components, a mesh's, and
+    /// its table's entries — as the space converts it in that intent, and the
+    /// default scratch as in relative colorimetric, 8.6.5.8's initial intent.
+    /// The two part on the warm paper.
+    #[test]
+    fn a_scratch_converts_in_its_intent() {
+        use crate::mesh::Mesh;
+        use tinker_pdf_color::icc::{Conversion, Intent};
+
+        let space = warm_grey();
+        let absolute = Conversion {
+            intent: Intent::AbsoluteColorimetric,
+        };
+        let ramp = Function::Exponential {
+            domain: (0.0, 1.0),
+            c0: vec![0.0],
+            c1: vec![1.0],
+            n: 1.0,
+        };
+        let mesh = |function: Option<Function>| Mesh {
+            kind: 4,
+            space: space.clone(),
+            function,
+            components: 1,
+            positions: Vec::new(),
+            values: Vec::new(),
+            triangles: Vec::new(),
+            patches: Vec::new(),
+        };
+        let (carried, components) = (mesh(Some(ramp.clone())), mesh(None));
+        assert_eq!(
+            ShadingScratch::default().conversion(),
+            Conversion::default()
+        );
+        assert_eq!(ShadingScratch::converting(absolute).conversion(), absolute);
+
+        for (conversion, what) in [(Conversion::default(), "relative"), (absolute, "absolute")] {
+            let mut scratch = ShadingScratch::converting(conversion);
+            for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let want = space.to_rgb_in(&[t], conversion);
+                assert_eq!(
+                    scratch.color(&space, &ramp, &[t]),
+                    want,
+                    "{what}: the function at {t}"
+                );
+                assert_eq!(scratch.convert(&space, &[t]), want, "{what}: {t} itself");
+                assert_eq!(
+                    carried.color(&[t], &mut scratch),
+                    want,
+                    "{what}: a mesh's function at {t}"
+                );
+                assert_eq!(
+                    components.color(&[t], &mut scratch),
+                    want,
+                    "{what}: a mesh's components {t}"
+                );
+            }
+            scratch.tabulate(&space, &ramp, 0.0, 1.0, u64::MAX);
+            let table = scratch.table.clone().expect("a table");
+            let top = Some(space.to_rgb_in(&[1.0], conversion));
+            assert_eq!(table.color(1.0), top, "{what}: the table's last entry");
+            assert_eq!(table.color(2.0), top, "{what}: past it");
+        }
+        for t in [0.5, 1.0] {
+            assert_ne!(
+                space.to_rgb_in(&[t], Conversion::default()),
+                space.to_rgb_in(&[t], absolute),
+                "the two intents part on a warm paper at {t}"
+            );
         }
     }
 }
