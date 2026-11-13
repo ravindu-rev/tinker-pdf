@@ -171,7 +171,9 @@ impl<'a> Index<'a> {
         // byte of the offset array, which shifted every item in every INDEX
         // one byte earlier and one byte shorter than it is.
         let base = offsets_at + (count + 1) * off_size;
-        let end = base + offsets.last().copied().unwrap_or(1).saturating_sub(1);
+        // Saturating: a 32-bit offset past the data reaches past `usize` on a
+        // 32-bit target, and the data is cut at its end below either way.
+        let end = base.saturating_add(offsets.last().copied().unwrap_or(1).saturating_sub(1));
 
         Some((
             Index {
@@ -2958,6 +2960,36 @@ mod tests {
         assert_eq!(index.len(), 1);
         assert_eq!(index.get(0), Some(b"abc".as_slice()));
         assert_eq!(next, raw.len(), "and the next structure begins after it");
+    }
+
+    /// A last offset near 2^32 reaches past `usize` on a 32-bit target; the
+    /// INDEX is read with its data cut at the end, in CFF's 16-bit count and
+    /// CFF2's 32-bit one alike, and the item that would run past it is none.
+    #[test]
+    fn an_index_whose_last_offset_passes_the_data_is_cut_at_its_end() {
+        let tail = [4u8, 0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xFF, b'a', b'b'];
+        let mut cff = vec![0u8, 1];
+        cff.extend_from_slice(&tail);
+        let (index, _) = Index::parse(&cff, 0).expect("an INDEX");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.get(0), None, "the item runs past the data");
+        let mut cff2 = vec![0u8, 0, 0, 1];
+        cff2.extend_from_slice(&tail);
+        let (index, _) = Index::parse_cff2(&cff2, 0).expect("an INDEX");
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.get(0), None);
+        // And a CFF2 count past the limit is refused before any offset.
+        let huge = [0u8, 1, 0, 1, 4];
+        assert_eq!(
+            Index::parse_cff2(&huge, 0).err(),
+            Some(IndexRefusal::Count(65_537))
+        );
+        assert_eq!(
+            Index::parse_cff2(&[0, 0, 0], 0).err(),
+            Some(IndexRefusal::Truncated)
+        );
+        let (empty, next) = Index::parse_cff2(&[0, 0, 0, 0], 0).expect("an empty INDEX");
+        assert_eq!((empty.len(), next), (0, 4), "four bytes long");
     }
 
     /// Nothing in this crate had ever parsed a whole CFF program — the tests
