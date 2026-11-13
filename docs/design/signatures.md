@@ -249,10 +249,13 @@ object, 7.3.10 — is `None`.
 
 ## Non-goals
 
-- **Signing keys in the engine.** No key parsing (PKCS#8, PKCS#12), no key generation, no
-  RSA/ECDSA *signing* arithmetic: the `Signer` callback returns finished CMS bytes. In-engine
-  signing with a private key is [ROADMAP](../ROADMAP.md) rows SG-01 to SG-09 and SG-23; the
-  `Signer` seam serves keys the engine never sees.
+- **Signing keys in the engine.** Signing with a private key the engine is handed is
+  [signing](signing.md)'s, under ruling 20 (H-09's answer): the constant-time path every
+  secret operand takes, entropy from the caller, zeroised key material, RSA signing, and the
+  sections ECDSA, EdDSA, key import, CMS `SignedData` and the PAdES levels add —
+  [ROADMAP](../ROADMAP.md) rows SG-01 to SG-07, with SG-09 across the bindings and SG-23 for
+  keys made here. This design's `Signer` callback, which returns finished CMS bytes, stays for
+  keys the engine never sees, beside the `RawSigner` seam SG-06 adds.
 - **Revocation fetching.** No CRL or OCSP network traffic — the engine performs no I/O.
   `Document::security_store` reads the document security store (PAdES DSS/VRI, ISO 32000-2
   12.8.4.3) back as references to its streams, with its `/VRI` entries keyed to signatures,

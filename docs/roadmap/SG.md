@@ -6,7 +6,8 @@ Signing with a private key is in the engine:
 [design/signatures.md](../design/signatures.md),
 [features/signatures.md](../features/signatures.md),
 [design/pubsec.md](../design/pubsec.md) and `SECURITY.md` point here for it,
-and the ruling that records it is the owner's (H-09). `bignum` skips
+and ruling 20 records the owner's answer (H-09); its design is
+[design/signing.md](../design/signing.md). `bignum` skips
 constant-time discipline because every value it sees is public; from SG-01
 on, every secret operand takes the constant-time path. The engine links no
 random number generator: entropy is the caller's, and ECDSA nonces are
@@ -18,11 +19,10 @@ deterministic by default.
 
 **Exit criterion.** NIST CAVP signature-generation vectors (PKCS#1 v1.5, and PSS with a fixed salt) for every SHA-2 digest they cover and the Wycheproof RSA signature vectors (Apache-2.0) committed and passing, the SHA-3 pairs once SG-04 lands; an operation-count test shows no secret-dependent branch counts; the speed is P-13's; the side-channel review is H-67
 
-**Doc:** `design/signing.md` (owed; amends [design/signatures.md](../design/signatures.md)) · **Depends on:** H-32
+**Doc:** [design/signing.md](../design/signing.md) (amends [design/signatures.md](../design/signatures.md)) · **Depends on:** H-32
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SG-01.1 | design | Create `docs/design/signing.md`, amending `docs/design/signatures.md`'s non-goals: the constant-time path for every secret operand, CRT with blinding from caller entropy, zeroisation, RSA signing, ECDSA, EdDSA, key import, CMS `SignedData`, PAdES levels, and the ruling H-09 asks the owner to add, drafted. | `docs/design/signing.md` (new), `docs/design/signatures.md` | The doc exists in the design-doc order, names this row's exit tests and the milestones SG-02, SG-03, SG-05, SG-06 and SG-07 extend. | H-32, H-09 |
 | SG-01.2 | build | The bignum's constant-time path: fixed-window Montgomery exponentiation with every table entry read, no branch or index on a secret. | `crates/tinker-pdf-crypto/src/bignum.rs` | An operation-count test (counters under `cfg(test)`) shows branch and lookup counts independent of the exponent's bits. | SG-01.1 |
 | SG-01.3 | test | The signature-generation vectors vendored with provenance: NIST CAVP's PKCS#1 v1.5 and PSS vectors and the Wycheproof RSA signature vectors (Apache-2.0), with their licence records. | `crates/tinker-pdf-crypto/tests/data/cavp/rsa_siggen15.rsp` (new), `THIRDPARTY.md`, `.gitattributes`, `crates/tinker-pdf-crypto/tests/data/cavp/rsa_siggen_pss.rsp` (new), `crates/tinker-pdf-crypto/tests/data/wycheproof` (new), `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | The vectors load in a test that prints their counts; their licence is recorded. | SG-01.1, H-92 |
 | SG-01.4 | build | The RSA private operation by CRT with blinding from caller entropy, and key material zeroised on drop. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf-crypto/src/bignum.rs` | Unit tests: the CRT result equals the plain private operation on every vector key; a blinded run equals an unblinded one; a key's limbs read zero after drop in a test harness. | SG-01.2 |
@@ -36,7 +36,7 @@ deterministic by default.
 
 **Exit criterion.** RFC 6979 Appendix A.2.5–A.2.7 signatures reproduced byte for byte for every digest the appendix lists; NIST CAVP signature-generation and Wycheproof ECDSA vectors pass on the NIST curves; Wycheproof's Brainpool vectors pass on the verify side, every deterministic Brainpool signature the signer makes over RFC 6979's messages verifies there, and the curve parameters are checked against RFC 5639; a signed document's bytes identical on four targets (K-07); **a P-256 signature ≤ 0.5 ms, P-384 ≤ 1.2 ms, P-521 ≤ 2.5 ms, Brainpool P-256 ≤ 1 ms, constant-time** (tier P, calibrated)
 
-**Doc:** `design/signing.md` (owed) · **Depends on:** SG-01, SG-04, H-33
+**Doc:** [design/signing.md](../design/signing.md) (its section owed) · **Depends on:** SG-01, SG-04, H-33
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -54,7 +54,7 @@ deterministic by default.
 
 **Exit criterion.** RFC 8032's test vectors; Wycheproof EdDSA vectors
 
-**Doc:** `design/signing.md` (owed) · **Depends on:** SG-05
+**Doc:** [design/signing.md](../design/signing.md) (its section owed) · **Depends on:** SG-05
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -84,7 +84,7 @@ deterministic by default.
 
 **Exit criterion.** RFC 6070's PBKDF2 vectors; RFC 7292 structures; key files generated once by an outside tool with known passphrases committed with provenance (bytes only, dated), each held to its certificate's public key in the test; malformed containers are typed errors under fuzzing
 
-**Doc:** `design/signing.md` (owed) · **Depends on:** H-32, H-34
+**Doc:** [design/signing.md](../design/signing.md) (its section owed) · **Depends on:** H-32, H-34
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -100,7 +100,7 @@ deterministic by default.
 
 **Exit criterion.** every signed output verifies through the engine's own verdict with the digest, signature, chain and attributes all `Ok`; the DER checked against X.690's canonical rules by the in-tree DER validator; structures transcribed from RFC 5652; the interoperability record is a dated measurement (H-68)
 
-**Doc:** `design/signing.md` (owed) · **Depends on:** SG-01, SG-02, SG-05
+**Doc:** [design/signing.md](../design/signing.md) (its section owed) · **Depends on:** SG-01, SG-02, SG-05
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -118,7 +118,7 @@ deterministic by default.
 
 **Exit criterion.** the level detector, its rules transcribed clause by clause from EN 319 142-1 (free) with a fixture and twin per rule, classifies the engine's own output at each level and the corpus's signatures
 
-**Doc:** `design/signing.md` (owed) · **Depends on:** SG-06, SG-10
+**Doc:** [design/signing.md](../design/signing.md) (its section owed) · **Depends on:** SG-06, SG-10
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
