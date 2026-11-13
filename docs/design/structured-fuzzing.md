@@ -387,22 +387,28 @@ libFuzzer instruments one native build and does not run inside
 leave corpora for `render_page`, `content_stream` and `render_rewrite`. Each
 is minimised with `cargo fuzz cmin` into a copy, and the two structured ones
 are written out as the documents their entries generate, since an entry of
-theirs is a choice sequence and not a PDF: an `#[ignore]`d test in the fuzz
-library runs each entry through the generator its target writes with,
-natively.
+theirs is a choice sequence and not a PDF: the fuzz library's `#[ignore]`d
+`write_the_documents_a_corpus_generates` (`fuzz/src/document/tests.rs`) runs
+each entry of `FUZZ_REPLAY_FROM` through the generator `FUZZ_REPLAY_TARGET`'s
+target writes with, natively — a `render_page` entry stands as it is — and
+writes it to `FUZZ_REPLAY_TO` as `<target>-<entry>.pdf`.
 
 `crates/tinker-pdf/tests/wasm_parity.rs`'s
-`print_the_render_hash_of_every_input` reads the directory an environment
-variable names, renders every page of each file at one fixed scale, and prints
-a `wasm-parity: RAN` banner with its count, then one line per file in name
-order — the name, and the SHA-256 `determinism.rs` fingerprints with
-(`tinker_pdf_crypto::sha2::sha256`) over every page's size and bytes. With no
-directory it prints `SKIPPED`. It runs natively and on `wasm32-wasip1` under
-wasmtime, which hosts the test binary, judges nothing (ruling 13) and reads
-only the directory it is granted. The two lists must be equal line for line,
-and a line that differs is a failure. Each of the three targets carries a
-coverage figure (H-136), so `render_page` runs in K-04.12's sessions beside
-the new targets.
+`print_the_render_hash_of_every_input` reads the directory `WASM_PARITY_DIR`
+names, opens each file and draws its pages, to sixteen, at the default
+options, and prints a `wasm-parity: RAN` banner with its count, then one line
+per file in name order — the name, and the SHA-256 `determinism.rs`
+fingerprints with (`tinker_pdf_crypto::sha2::sha256`) over the page count and
+every page's size and bytes, or over the refusal's text for a file that does
+not open. With no directory it prints `SKIPPED`, which `WASM_PARITY_REQUIRED`
+refuses; a directory that cannot be read or holds nothing fails, since one
+wasmtime was not granted reads as nothing. It runs natively and on
+`wasm32-wasip1` under wasmtime, which hosts the test binary, judges nothing
+(ruling 13) and reads only the directory it is granted. The native run writes
+its list with `WASM_PARITY_OUT`, and the wasm run is held to it with
+`WASM_PARITY_EXPECTED`, line for line: a line that differs is a failure. Each
+of the three targets carries a coverage figure (H-136), so `render_page` runs
+in K-04.12's sessions beside the new targets.
 
 ### Where a coverage figure comes from
 

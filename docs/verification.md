@@ -29,6 +29,7 @@ recorded in the roadmap row it closes:
 | Fuzzing, on Linux | `cargo fuzz build`, then each target's binary under its `fuzz/limits.tsv` row, `-max_total_time=20 -timeout=20`, as *Never panic, fuzz-enforced* gives it |
 | The fuzzing service's build, on Linux | `fuzz/service/Dockerfile`'s image built over `git archive HEAD`, its `compile` run, then `cargo xtask fuzz --service-out DIR` (`fuzz/README.md`) |
 | The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner |
+| Native against wasm, over fuzz corpora | `wasm_parity.rs` natively, then on `wasm32-wasip1` under wasmtime granted the same documents and held to the native list ("Native against wasm") |
 | The corpora | `cargo xtask corpus-fetch`, then `cargo xtask corpus-run --check` |
 | The benches | `cargo bench -p tinker-pdf`, then `cargo xtask bench-check --machine NAME` |
 | The benches on `wasm32-wasip1` | the set built plain and with `+simd128` and run under wasmtime beside a native run, each leg into its own tree ("The wasm legs") |
@@ -356,6 +357,50 @@ them, hashed through the same builders `render_analytic.rs` evaluates them
 with, so the page a formula adjudicates and the page a hash covers are one
 document. Details, and which targets are measured versus claimed, are in
 [features/determinism.md](features/determinism.md).
+
+### Native against wasm
+
+The fingerprints hold committed fixtures; `crates/tinker-pdf/tests/wasm_parity.rs`
+holds inputs a fuzzer found (H-136's replay form,
+[design/structured-fuzzing.md](design/structured-fuzzing.md)).
+`print_the_render_hash_of_every_input` opens every file of the directory
+`WASM_PARITY_DIR` names, draws its pages, to sixteen, at the default options,
+and prints a `wasm-parity: RAN` banner with the count and one line a file in
+name order: its name and the SHA-256 of its page count and each page's size
+and bytes, or of the refusal's text where it does not open. With no directory
+it prints `SKIPPED`, and `WASM_PARITY_REQUIRED` makes that a failure; a
+directory that cannot be read or holds nothing fails, since under wasmtime a
+directory the run was not granted reads as nothing. `WASM_PARITY_OUT` writes
+the list to a file and `WASM_PARITY_EXPECTED` holds the run to one, line for
+line, so the wasm run fails where any file draws otherwise than it does here.
+
+The documents are the minimised `render_page` corpus as it stands and the
+documents the `content_stream` and `render_rewrite` corpora generate, whose
+entries are choice sequences: the fuzz library's
+`write_the_documents_a_corpus_generates` writes them, natively, into one
+directory as `<target>-<entry>.pdf`. From the checkout's root:
+
+```sh
+mkdir -p target/wasm-parity/documents
+for t in render_page content_stream render_rewrite; do
+  FUZZ_REPLAY_TARGET=$t FUZZ_REPLAY_FROM="$PWD/target/minimised/$t" \
+    FUZZ_REPLAY_TO="$PWD/target/wasm-parity/documents" \
+    cargo test --release --manifest-path fuzz/Cargo.toml --lib \
+      write_the_documents_a_corpus_generates -- --ignored
+done
+WASM_PARITY_DIR="$PWD/target/wasm-parity/documents" \
+  WASM_PARITY_OUT="$PWD/target/wasm-parity/native.txt" WASM_PARITY_REQUIRED=1 \
+  cargo test --release -p tinker-pdf --test wasm_parity -- --nocapture
+CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run --dir ../../target/wasm-parity::/parity \
+    --env WASM_PARITY_DIR=/parity/documents --env WASM_PARITY_EXPECTED=/parity/native.txt \
+    --env WASM_PARITY_REQUIRED=1" \
+  cargo test --release -p tinker-pdf --test wasm_parity --target wasm32-wasip1 -- --nocapture
+```
+
+`target/minimised/<target>` is each session's corpus minimised into a copy with
+`cargo fuzz cmin`, which renames what it keeps. The runner's `--dir` is
+relative to `crates/tinker-pdf`, where cargo runs a test, as the wasm legs'
+grants are. wasmtime hosts the test binary and judges nothing (ruling 13).
 
 ## Corpora: fetched, pinned, never committed
 

@@ -169,3 +169,48 @@ fn write_the_fuzz_seeds() {
     }
     crate::write_seeds("render_rewrite", &seeds);
 }
+
+/// **The documents a corpus generates**, for `wasm_parity.rs`: each entry of
+/// `FUZZ_REPLAY_FROM` run through the generator the target
+/// `FUZZ_REPLAY_TARGET` names writes with — `content_stream`'s page,
+/// `render_rewrite`'s document, or a `render_page` entry as it stands, which
+/// is a document already — and written to `FUZZ_REPLAY_TO` as
+/// `<target>-<entry>.pdf`, so the three corpora's documents share one
+/// directory.
+#[test]
+#[ignore = "writes the documents a fuzz corpus generates; set FUZZ_REPLAY_TARGET, FUZZ_REPLAY_FROM and FUZZ_REPLAY_TO"]
+fn write_the_documents_a_corpus_generates() {
+    let (Ok(target), Some(from), Some(to)) = (
+        std::env::var("FUZZ_REPLAY_TARGET"),
+        std::env::var_os("FUZZ_REPLAY_FROM"),
+        std::env::var_os("FUZZ_REPLAY_TO"),
+    ) else {
+        println!("replay: SKIPPED (set FUZZ_REPLAY_TARGET, FUZZ_REPLAY_FROM and FUZZ_REPLAY_TO)");
+        return;
+    };
+    let write: fn(&[u8]) -> Vec<u8> = match target.as_str() {
+        "render_page" => |data| data.to_vec(),
+        "content_stream" => |data| content::page(&mut Choices::new(data)).bytes,
+        "render_rewrite" => |data| document(&mut Choices::new(data)).bytes,
+        other => panic!("{other} is not one of the three targets wasm_parity.rs reads"),
+    };
+    let to = std::path::PathBuf::from(to);
+    std::fs::create_dir_all(&to).unwrap_or_else(|e| panic!("{to:?}: {e}"));
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&from)
+        .unwrap_or_else(|e| panic!("{from:?}: {e}"))
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    entries.sort();
+    assert!(!entries.is_empty(), "{from:?} holds no entry");
+    for entry in &entries {
+        let data = std::fs::read(entry).unwrap_or_else(|e| panic!("{entry:?}: {e}"));
+        let name = entry
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let out = to.join(format!("{target}-{name}.pdf"));
+        std::fs::write(&out, write(&data)).unwrap_or_else(|e| panic!("{out:?}: {e}"));
+    }
+    println!("replay: RAN over {} entries of {target}", entries.len());
+}
