@@ -234,8 +234,10 @@ volume, and the corpus census counts tags and bytes.
   beside `jbig2` and `jpx`, so `corpus/report.json` counts the real files that
   carry profiles.
 - **Fingerprints:** committed fingerprints in `determinism.rs` hold ruling 4's
-  bit-identical contract across targets, a page under `ICCBased` and CIE
-  default spaces among them.
+  bit-identical contract across targets: `default_spaces`, a page under CIE and
+  `ICCBased` default spaces, and `icc`, whose pictures and fill convert through
+  an `mft2` table into Lab, a matrix/TRC profile and a grey one, beside a
+  `/DeviceCMYK` control.
 
 ### The price of an integer grid
 

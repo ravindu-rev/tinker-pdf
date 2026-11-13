@@ -1903,6 +1903,253 @@ fn default_cmyk_profile() -> Vec<u8> {
     profile
 }
 
+/// ICC conversion (8.6.5.5): every model of profile the engine reads, on one
+/// page, beside a device image as its control.
+///
+/// *Added with P-22.3*, so that reading a lookup-table transform through an
+/// integer grid (P-22.4) moves a fingerprint where it moves pixels. Five
+/// pieces, each covering its part of a 120 x 80 page whole:
+///
+/// - **an 8-bit CMYK image through a four-channel `mft2` profile over a Lab
+///   connection space** ([`icc_cmyk_lab_profile`]), the one conversion here a
+///   grid stands in for;
+/// - **the same samples as `/DeviceCMYK`**, 8.6.4.4's arithmetic and no
+///   profile: the control beside it;
+/// - **an RGB image and a fill through one matrix/TRC profile**
+///   ([`icc_rgb_profile`]), the profile object the two share, so a fill and an
+///   image pixel go through one compiled transform;
+/// - **a grey-profile image** ([`icc_grey_profile`]), one curve.
+///
+/// Each picture's samples are drawn ten by ten pixels at whole-pixel offsets,
+/// magnified without `/Interpolate`, so every pixel is one sample's converted
+/// colour and a move in the hash is a move in a conversion. No sample is
+/// unprinted paper or white, so every pixel of the page is ink.
+fn icc_page() -> Vec<u8> {
+    let content = "q 60 0 0 40 0 40 cm /Im0 Do Q\n\
+                   q 60 0 0 40 60 40 cm /Im1 Do Q\n\
+                   q 40 0 0 40 0 0 cm /Im2 Do Q\n\
+                   q 40 0 0 40 40 0 cm /Im3 Do Q\n\
+                   /CS1 cs 0.2 0.55 0.8 scn 80 0 40 40 re f";
+    // Six by four inks, each channel stepped through the byte range at its
+    // own rate, so the picture holds light and rich colours, near-black and
+    // nearly no ink; the black ink is full in one sample and absent in four.
+    let ink: Vec<u8> = (0..24u32)
+        .flat_map(|i| {
+            [
+                (i * 37 + 11) % 256,
+                (i * 91 + 40) % 256,
+                (i * 53 + 200) % 256,
+                (i * 23) % 256,
+            ]
+        })
+        .map(|v| v as u8)
+        .collect();
+    let rgb: Vec<u8> = (0..16u32)
+        .flat_map(|i| [(i * 61) % 256, (i * 29 + 90) % 256, (i * 113 + 30) % 256])
+        .map(|v| v as u8)
+        .collect();
+    let grey: Vec<u8> = (0..16u32).map(|i| (i * 15 + 5) as u8).collect();
+    let (ink, rgb, grey) = (hex(&ink), hex(&rgb), hex(&grey));
+    let image = |width: u32, height: u32, space: &str, samples: &str| {
+        format!(
+            "<< /Type /XObject /Subtype /Image /Width {width} /Height {height}\n\
+   /ColorSpace {space} /BitsPerComponent 8 /Filter /ASCIIHexDecode\n\
+   /Length {} >>\nstream\n{samples}\nendstream",
+            samples.len()
+        )
+    };
+    let mut bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80]\n\
+   /Resources << /ColorSpace << /CS1 [/ICCBased 8 0 R] >>\n\
+     /XObject << /Im0 5 0 R /Im1 6 0 R /Im2 10 0 R /Im3 11 0 R >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n{}\nendobj\n\
+6 0 obj\n{}\nendobj\n",
+        content.len(),
+        image(6, 4, "[/ICCBased 7 0 R]", &ink),
+        image(6, 4, "/DeviceCMYK", &ink),
+    )
+    .into_bytes();
+    for (number, components, profile) in [
+        (7, 4, icc_cmyk_lab_profile()),
+        (8, 3, icc_rgb_profile()),
+        (9, 1, icc_grey_profile()),
+    ] {
+        bytes.extend_from_slice(
+            format!(
+                "{number} 0 obj\n<< /N {components} /Length {} >>\nstream\n",
+                profile.len()
+            )
+            .as_bytes(),
+        );
+        bytes.extend_from_slice(&profile);
+        bytes.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+    bytes.extend_from_slice(
+        format!(
+            "10 0 obj\n{}\nendobj\n\
+11 0 obj\n{}\nendobj\n\
+trailer\n<< /Size 12 /Root 1 0 R >>\n%%EOF\n",
+            image(4, 4, "[/ICCBased 8 0 R]", &rgb),
+            image(4, 4, "[/ICCBased 9 0 R]", &grey),
+        )
+        .as_bytes(),
+    );
+    bytes
+}
+
+/// A version 2 ICC profile of `class`, data space `space` and connection space
+/// `pcs`, carrying `tags` in the order given: the header and tag table ICC.1
+/// 7.2 and 7.3 lay out, each tag's data padded to four bytes.
+fn icc_profile_bytes(
+    class: &[u8; 4],
+    space: &[u8; 4],
+    pcs: &[u8; 4],
+    tags: &[([u8; 4], Vec<u8>)],
+) -> Vec<u8> {
+    let mut profile = vec![0u8; 128];
+    profile[8..12].copy_from_slice(&0x0210_0000u32.to_be_bytes());
+    profile[12..16].copy_from_slice(class);
+    profile[16..20].copy_from_slice(space);
+    profile[20..24].copy_from_slice(pcs);
+    profile[36..40].copy_from_slice(b"acsp");
+    profile.extend_from_slice(&(tags.len() as u32).to_be_bytes());
+    let mut offset = 128 + 4 + 12 * tags.len();
+    let mut body = Vec::new();
+    for (signature, data) in tags {
+        profile.extend_from_slice(signature);
+        profile.extend_from_slice(&(offset as u32).to_be_bytes());
+        profile.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        body.extend_from_slice(data);
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+        offset = 128 + 4 + 12 * tags.len() + body.len();
+    }
+    profile.extend_from_slice(&body);
+    let size = profile.len() as u32;
+    profile[0..4].copy_from_slice(&size.to_be_bytes());
+    profile
+}
+
+/// ICC.1's `s15Fixed16Number`, big-endian.
+fn s15_16(value: f64) -> [u8; 4] {
+    (((value * 65536.0).round() as i32) as u32).to_be_bytes()
+}
+
+/// An `XYZType` tag.
+fn icc_xyz(x: f64, y: f64, z: f64) -> Vec<u8> {
+    let mut tag = b"XYZ \0\0\0\0".to_vec();
+    for value in [x, y, z] {
+        tag.extend_from_slice(&s15_16(value));
+    }
+    tag
+}
+
+/// A `curv` tag of one entry: a pure gamma, in u8Fixed8.
+fn icc_gamma(gamma: f64) -> Vec<u8> {
+    let mut tag = b"curv\0\0\0\0".to_vec();
+    tag.extend_from_slice(&1u32.to_be_bytes());
+    tag.extend_from_slice(&((gamma * 256.0).round() as u16).to_be_bytes());
+    tag
+}
+
+/// The CMYK image's profile in [`icc_page`]: a printer profile whose one
+/// `mft2` table takes four inks to v2's legacy 16-bit Lab over a grid of five
+/// points an axis, its input and output stages the identity.
+///
+/// Each node is a profile's numbers rather than a measured press: the light
+/// each ink leaves, scaled by what the black ink leaves, then a lightness and
+/// two opponent axes of it. Built from additions and products alone, which
+/// IEEE 754 rounds alike on every target, so the profile is the same bytes
+/// everywhere. Full ink of all four is lightness 1.5, near black, where sRGB's
+/// encoding is steepest.
+fn icc_cmyk_lab_profile() -> Vec<u8> {
+    const GRID: usize = 5;
+    let mut tag = b"mft2\0\0\0\0".to_vec();
+    tag.extend_from_slice(&[4, 3, GRID as u8, 0]);
+    // The matrix, which an `A2B*` tag never applies.
+    for row in 0..3 {
+        for column in 0..3 {
+            tag.extend_from_slice(&s15_16(if row == column { 1.0 } else { 0.0 }));
+        }
+    }
+    tag.extend_from_slice(&2u16.to_be_bytes());
+    tag.extend_from_slice(&2u16.to_be_bytes());
+    for _ in 0..4 {
+        tag.extend_from_slice(&0u16.to_be_bytes());
+        tag.extend_from_slice(&u16::MAX.to_be_bytes());
+    }
+    // The grid, the last ink (black) varying fastest.
+    for index in 0..GRID.pow(4) {
+        let mut ink = [0.0f64; 4];
+        let mut rest = index;
+        for slot in ink.iter_mut().rev() {
+            *slot = (rest % GRID) as f64 / (GRID - 1) as f64;
+            rest /= GRID;
+        }
+        let [c, m, y, k] = ink;
+        let black = 1.0 - 0.92 * k;
+        let red = (1.0 - 0.85 * c) * black;
+        let green = (1.0 - 0.8 * m) * black;
+        let blue = (1.0 - 0.75 * y) * black;
+        let l = 100.0 * (0.3 * red + 0.59 * green + 0.11 * blue);
+        let a = 90.0 * (red - green);
+        let b = 70.0 * (0.5 * (red + green) - blue);
+        // L* over 0..100 and a*, b* plus 128 over 0..255, each to 0..0xFF00.
+        let encode = |v: f64| (v.round().clamp(0.0, 65535.0) as u16).to_be_bytes();
+        tag.extend_from_slice(&encode(l / 100.0 * 65280.0));
+        tag.extend_from_slice(&encode((a + 128.0) / 255.0 * 65280.0));
+        tag.extend_from_slice(&encode((b + 128.0) / 255.0 * 65280.0));
+    }
+    for _ in 0..3 {
+        tag.extend_from_slice(&0u16.to_be_bytes());
+        tag.extend_from_slice(&u16::MAX.to_be_bytes());
+    }
+    icc_profile_bytes(
+        b"prtr",
+        b"CMYK",
+        b"Lab ",
+        &[(*b"A2B0", tag), (*b"wtpt", icc_xyz(0.9642, 1.0, 0.8249))],
+    )
+}
+
+/// The RGB image's and the fill's profile in [`icc_page`]: sRGB's primaries
+/// adapted to D50 as `rXYZ`, `gXYZ` and `bXYZ`, under three gammas of 2.2.
+fn icc_rgb_profile() -> Vec<u8> {
+    icc_profile_bytes(
+        b"mntr",
+        b"RGB ",
+        b"XYZ ",
+        &[
+            (*b"rXYZ", icc_xyz(0.436_065, 0.222_488, 0.013_916)),
+            (*b"gXYZ", icc_xyz(0.385_147, 0.716_873, 0.097_076)),
+            (*b"bXYZ", icc_xyz(0.143_066, 0.060_607, 0.714_096)),
+            (*b"rTRC", icc_gamma(2.2)),
+            (*b"gTRC", icc_gamma(2.2)),
+            (*b"bTRC", icc_gamma(2.2)),
+            (*b"wtpt", icc_xyz(0.9642, 1.0, 0.8249)),
+        ],
+    )
+}
+
+/// The grey image's profile in [`icc_page`]: one `kTRC` of gamma 1.8 into XYZ.
+fn icc_grey_profile() -> Vec<u8> {
+    icc_profile_bytes(
+        b"mntr",
+        b"GRAY",
+        b"XYZ ",
+        &[
+            (*b"kTRC", icc_gamma(1.8)),
+            (*b"wtpt", icc_xyz(0.9642, 1.0, 0.8249)),
+        ],
+    )
+}
+
 /// The committed fingerprints.
 ///
 /// Every entry is a claim that this page renders to these exact bytes on
@@ -2273,6 +2520,17 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 2_800,
     },
+    // Every pixel of the 9 600 is a converted sample or the fill, none of
+    // them white, and the floor is about half: a page that loses its two
+    // pictures of inks, or all three 40 x 40 pieces under them, lands under
+    // it. A picture converted as the wrong space keeps its ink, so that is
+    // the hash's.
+    Fixture {
+        name: "icc",
+        build: icc_page,
+        open: Open::Closed,
+        least_ink: 5_000,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2496,6 +2754,15 @@ const FINGERPRINTS: &[(&str, &str)] = &[
         "bilevel",
         "79a059cfb544d0b0a1b64c6aedafe7e70a64a821372a6fd245eae49327676f60",
     ),
+    // ICC conversion through every model of profile the engine reads: a CMYK
+    // image through a four-channel `mft2` into Lab, beside the same samples as
+    // `/DeviceCMYK`, an RGB image and a fill through one matrix/TRC profile
+    // and a grey-profile image. Its value is the pipeline's that converted
+    // every colour per pixel, taken at the commit that added the page, so that
+    // reading the lookup table through a grid (P-22.4) shows as a move of the
+    // CMYK picture's pixels and of nothing else; `default_spaces`, whose
+    // `/DefaultCMYK` is an `mft2` table too, is the other page it may move.
+    ("icc", ""),
 ];
 
 #[test]
@@ -2791,6 +3058,7 @@ fn svg_output_is_stable_across_targets() {
             "bilevel",
             "17704be079071402a99457f13912c81f590ee940ff3625c311ec39ee19ac9f7f",
         ),
+        ("icc", ""),
     ];
     assert_eq!(
         expected.len(),
