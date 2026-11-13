@@ -398,6 +398,7 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
                     IccError::UnsupportedSpace => "UnsupportedSpace",
                     IccError::MissingTags => "MissingTags",
                     IccError::MalformedTag => "MalformedTag",
+                    IccError::UnsupportedElement(_) => "UnsupportedElement",
                 };
                 *refused.entry(name.to_string()).or_default() += 1;
             }

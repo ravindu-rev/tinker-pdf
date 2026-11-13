@@ -35,30 +35,39 @@ curves, a grid whose axes may each carry their own point count, M curves, a
 matrix and B curves, run in that order although the header lists their
 offsets in the reverse. A grey profile whose connection space is `Lab` rather
 than `XYZ` reads as well: its one curve gives lightness instead of luminance,
-and the two differ by 8.6.5.4's cube root. A lookup table over one, three or
-four inputs converts through an integer grid of its own pipeline — 256, 33 or
-17 nodes an axis, each holding the pipeline's linear sRGB, evaluated the
-first time a conversion reaches it and kept — read linearly, tetrahedrally,
-or tetrahedrally over the first three inputs and linearly in the fourth, in
-16-bit fixed point, then encoded as the pipeline encodes: every node is the
-pipeline's colour exactly, and between them a read is within two levels of
-255 (`docs/design/icc.md`, P-22). A fill and an image sample of one colour
-read the same nodes. A table over any other input count, a matrix/TRC
-profile and a grey one convert through their pipeline. A profile carrying a
-table for more than one rendering intent keeps each, and compiles one the
-first time an intent selects it, by ICC.1 8.10.2's precedence
-(`docs/design/icc.md`). A profile may carry tables and a matrix/TRC or grey
-model both, and 8.10.2 puts the tables first: an intent converts through the
-model only where the profile carries neither the `A2B*` tag designated for
-it nor `A2B0`. Every conversion the renderer makes takes relative colorimetric,
-8.6.5.8's initial intent, through the first of `A2B1`, `A2B0`, the model and
-`A2B2` the profile carries. Absolute colorimetric is relative colorimetric's
-transform with the connection-space value scaled by the profile's media white
-(`wtpt`) over the PCS white, channel by channel (ICC.1 6.2.3): folded into the
-matrix for a matrix/TRC or grey profile, so a grey on a tinted medium draws in
-its tint, and applied in XYZ to a table's value, a stage its grid's nodes
-evaluate. A media white of D50, or none, makes it relative colorimetric's
-transform itself.
+and the two differ by 8.6.5.4's cube root. A `D2B*` tag's floating-point
+transform reads as well (`multiProcessElementsType`: curve sets of formula
+and sampled segments, matrices with offsets and grids), compiled once into
+integer stages, and converts its intent before that intent's `A2B*` table;
+a tag holding an element of another type is refused by the element's name
+and passed over. A lookup table over one, three or four inputs, and a
+`D2B*` tag's elements over as many, convert through an integer grid of
+their own pipeline — 256, 33 or 17 nodes an axis, each holding the
+pipeline's linear sRGB, evaluated the first time a conversion reaches it and
+kept — read linearly, tetrahedrally, or tetrahedrally over the first three
+inputs and linearly in the fourth, in 16-bit fixed point, then encoded as the
+pipeline encodes: every node is the pipeline's colour exactly, and between
+them a read is within two levels of 255 (`docs/design/icc.md`, P-22). A fill
+and an image sample of one colour read the same nodes. A table or a `D2B*`
+tag over any other input count, a matrix/TRC profile and a grey one convert
+through their pipeline. A table over more than six inputs — a seven- or
+eight-ink printer profile — is interpolated one axis at a time, so no weight
+overflows. A profile carrying a table for more than one rendering intent
+keeps each, and compiles one the first time an intent selects it, by ICC.1
+8.10.2's precedence (`docs/design/icc.md`). A profile may carry tables and a
+matrix/TRC or grey model both, and 8.10.2 puts the tables first: an intent
+converts through the model only where the profile carries neither the
+`A2B*` tag designated for it nor `A2B0`. Every conversion the renderer makes
+takes relative colorimetric, 8.6.5.8's initial intent, through the first of
+`D2B1`, `A2B1`, `A2B0`, the model and `A2B2` the profile carries. Absolute
+colorimetric converts through `D2B3` as it stands where the profile carries
+one, that tag being ICC-absolute already, and otherwise is relative
+colorimetric's `A2B*` table or model with the connection-space value scaled
+by the profile's media white (`wtpt`) over the PCS white, channel by channel
+(ICC.1 6.2.3): folded into the matrix for a matrix/TRC or grey profile, so a
+grey on a tinted medium draws in its tint, and applied in XYZ to a table's
+value, a stage its grid's nodes evaluate. A media white of D50, or none,
+makes it relative colorimetric's transform itself.
 
 A table that does not read is passed over to the next of those, and so is a
 model that contradicts its profile — a monitor profile whose data space is

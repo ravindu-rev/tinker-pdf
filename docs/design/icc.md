@@ -20,9 +20,10 @@ open of this design — the refused profiles — is listed in the
 - **An own CMM**, the `icc` module of `tinker-pdf-color`: profile header and
   tag table parsing (ICC.1:2010, ISO 15076-1; v2 profiles included, since PDFs
   embed them constantly), TRC curves (`curv`, `para`), matrix/TRC transforms
-  (`rXYZ`/`gXYZ`/`bXYZ`, `wtpt`), and LUT transforms (lut8 `mft1`, lut16
-  `mft2`, v4's `mAB `) read from a profile's `A2B*` tags, compiled into a
-  profile→PCS→destination pipeline. `chad` is not read (see
+  (`rXYZ`/`gXYZ`/`bXYZ`, `wtpt`), LUT transforms (lut8 `mft1`, lut16
+  `mft2`, v4's `mAB `) read from a profile's `A2B*` tags, and the
+  floating-point multi-process transforms (`mpet`) of its `D2B*` tags,
+  compiled into a profile→PCS→destination pipeline. `chad` is not read (see
   [Three decisions](#three-decisions-and-why)).
 - **Rendering intents** (8.6.5.8): the `ri` operator, an ExtGState's `/RI`
   and an image's `/Intent` select which of a profile's transforms converts a
@@ -185,7 +186,10 @@ per-channel curves sampled to 4 096-entry
 tables (`CURVE_ENTRIES`), a 3×3 matrix in s15.16 fixed point (ICC's own
 `s15Fixed16Number`, so matrix-based profiles are *natively* fixed point) that
 is the profile's columns already multiplied by XYZ-to-sRGB, and for LUT
-profiles a grid interpolated over its axes in integers. Sampling a `para`
+profiles a grid interpolated over its axes in integers: over up to six
+inputs as one weighted sum of its corners, whose 64-bit sums hold
+`256^6 × 65 535`, and over more — a seven- or eight-ink profile an XPS
+document embeds — one axis at a time. Sampling a `para`
 curve needs `pow` — that is `tinker_pdf_math::pow`, exactly as `lab_to_rgb`
 uses it, because `tinker-pdf-color` is on the `PIXEL_PATHS` list that
 `cargo xtask libm` enforces and a platform `powf` in a TRC is precisely the
@@ -371,11 +375,17 @@ profile's matrix/TRC or grey model.
   only `DToB3` for the absolute intent.
 - **A tag the engine cannot read is passed over, not refused**: a `D2B*` tag
   holding an element this build does not read is unsupported in 8.10.2 a)'s
-  sense, and the intent falls to its `A2B*` tag. Before RC-01.4 every `D2B*`
-  tag is passed over. So is an `A2B*` table that does not read, and so is a
-  model that contradicts the profile's header — colorant columns over a data
-  space that is not RGB, a `grayTRC` for one that is not grey, a connection
-  space the model cannot reach — which the next source in the row serves.
+  sense — refused by the element's name, `IccError::UnsupportedElement` — and
+  the intent falls to its `A2B*` tag. So is an `A2B*` table that does not
+  read, and so is a model that contradicts the profile's header — colorant
+  columns over a data space that is not RGB, a `grayTRC` for one that is not
+  grey, a connection space the model cannot reach — which the next source in
+  the row serves.
+- **An intent whose row finds nothing converts as relative colorimetric
+  does.** Every row holds every `A2B*` table and the model, so only a profile
+  whose one source is another intent's `D2B*` tag reaches this: its intents
+  take relative colorimetric's `D2B1`, absolute colorimetric scaling it as
+  it scales any media-relative transform.
 - **A profile is refused only where relative colorimetric finds nothing.**
   `Profile::parse` finds `RelativeColorimetric`'s source, 8.6.5.8's initial
   intent, and refuses a profile with none, by its model's reason where it
@@ -396,6 +406,44 @@ profile's matrix/TRC or grey model.
   renders through its tables, not through its model; the owner took that
   (ruling 23, the RC-01.9 row), and RC-01.9b counts the corpus profiles it
   moves (`icc_census.rs`).
+
+#### The `D2B*` tags
+
+A `D2B*` tag is a `multiProcessElementsType` (ICC.1:2010 10.14): a chain of
+processing elements in float32, read by `crates/tinker-pdf-color/src/icc/mpe.rs`
+and compiled once into integer stages, so a colour's evaluation stays
+integer arithmetic (ruling 4).
+
+- **What is read.** A curve set (`cvst`) of segmented curves (`curf`), each
+  segment a formula (`parf`, Table 57's three: `(aX + b)^γ + c`,
+  `a log10(bX^γ + c) + d` and `a b^(cX + d) + e`) or samples (`samf`), the
+  first and last a formula; a matrix with offsets (`matf`, equation 21); a
+  lookup table (`clut`), inputs held to `0..=1`; and the `bACS` and `eACS`
+  placeholders, which pass their channels through. The tag's output is the
+  connection space in its float encoding (6.3.4.2): XYZ with the PCS white's
+  `Y` at one, or `L*a*b*` as it stands.
+- **How it is compiled.** Each stage knows the interval its inputs can take,
+  starting from the device's `0..=1`: a curve is sampled at 4 096 evenly
+  spaced points over its channel's interval, its formulas evaluated with
+  `tinker_pdf_math`, and interpolated linearly between them; a matrix and a
+  grid are held in s15.16, the grid interpolated multilinearly one axis at
+  a time. A stage's outputs give the next one's intervals — a curve's
+  samples, a matrix's rows over its columns' intervals, a grid's nodes — so
+  nothing is clipped between elements (10.14.2.1) beyond s15.16's range.
+- **What is refused.** An element of another type, by its signature
+  (`IccError::UnsupportedElement`), whatever else the tag holds, since
+  10.14.1 makes such a tag unusable; a number that is not finite, a curve
+  that is not finite over the inputs it is given, a break-point that
+  decreases, a channel count that does not chain; and every count before it
+  is allocated: the element count to `icc::MAX_MPE_ELEMENTS`, channel counts
+  to sixteen, a grid to `MAX_CLUT_ENTRIES`, and the grid and curve entries a
+  tag compiles to `MAX_CLUT_ENTRIES` in all. Each refusal passes the tag
+  over, so the intent converts through its `A2B*` table.
+- **How a colour converts.** Over one, three or four inputs, through a grid
+  of the elements' light, as a table does
+  ([P-22](#p-22--colour-conversion-throughput)): each node the stages and the
+  connection space into linear sRGB, evaluated the first time a conversion
+  reaches it. Over any other count, through the stages for each colour.
 
 #### Absolute colorimetric against the engine's output
 
@@ -1213,11 +1261,11 @@ P-16.1's compiled-ICC kind, re-keyed by P-22.7:
 - **A refusal is kept** under the profile's bytes, so a profile that does not
   parse is refused once a document.
 - **The charge**, taken when the entry is inserted: the parsed profile's
-  tables — its `A2B*` elements as `Profile::parse` holds them, or a
-  matrix/TRC transform's three 4 096-entry curves — and, for each distinct
-  gridded transform its conversions can compile — a table, and absolute
-  colorimetric's scaling of it where the media white is not the PCS white —
-  a grid's whole node array at eight bytes a node, with P-16.1's 64-byte
+  tables — its `A2B*` and `D2B*` elements as `Profile::parse` holds them,
+  or a matrix/TRC transform's three 4 096-entry curves — and, for each
+  distinct gridded transform its conversions can compile — a table or a
+  `D2B*` tag's elements, and absolute colorimetric's scaling of a table where
+  the media white is not the PCS white — a grid's whole node array at eight bytes a node, with P-16.1's 64-byte
   floor. That is the most the entry can come to
   hold, charged before any node is filled, so filling never passes the
   budget. An entry the budget cannot hold is used by the request that made it
@@ -1225,12 +1273,15 @@ P-16.1's compiled-ICC kind, re-keyed by P-22.7:
 
 #### Hostile profiles (ruling 1)
 
-A grid exists only over one, three or four inputs, and a table over any other
-count converts as today. A node's evaluation is the pipeline once, whose work
-is bounded by its input count — at most sixteen corners over four inputs —
-and not by how large the profile's own table is, so a grid's whole build is
-at most 83 521 evaluations and its memory at most 668 168 bytes whatever the
-profile declares, under a third of `MAX_ICC_BYTES`, the most a profile itself
+A grid exists only over one, three or four inputs, and a table or a `D2B*`
+tag over any other count converts as today. A node's evaluation is the
+pipeline once: a table's, whose work is bounded by its input count — at most
+sixteen corners over four inputs — and not by how large the profile's own
+table is; a `D2B*` tag's, by what RC-01.4 holds a tag to compile —
+`MAX_MPE_ELEMENTS` elements, sixteen channels and `MAX_CLUT_ENTRIES` grid
+entries in all — the work each colour paid before the grid stood in for it.
+So a grid's whole build is at most 83 521 evaluations and its memory at most
+668 168 bytes whatever the profile declares, under a third of `MAX_ICC_BYTES`, the most a profile itself
 may be. The `icc_profile` fuzz target compiles and applies every intent, so a
 hostile profile builds its grid under it, and P-22.5 has it convert a row of
 every byte value through each transform it compiles.

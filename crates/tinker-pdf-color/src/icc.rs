@@ -26,6 +26,11 @@
 //! All three models together compile **2 744 of the corpus's 2 750 profiles,
 //! 99.8 %**.
 //!
+//! Beside them, a `D2B*` tag's floating-point transform reads — ICC.1's
+//! `multiProcessElementsType`, curve sets, matrices and grids chained, read
+//! by the `mpe` module and compiled into integer stages — and converts its
+//! intent before that intent's `A2B*` table, as ICC.1 8.10.2 a) puts it.
+//!
 //! The same census found the versions: v2 2 739, v4 9, v5 2. So v2 is not a
 //! legacy case to tolerate on the way to v4 — it is the case, and the two
 //! agree about everything this module reads.
@@ -65,6 +70,10 @@ use std::sync::{Arc, OnceLock};
 
 use crate::{ColorSpace, XYZ_D50_TO_SRGB};
 
+mod mpe;
+
+pub use mpe::MAX_MPE_ELEMENTS;
+
 /// A rendering intent: ICC.1's four (6.1), the ones a transform is compiled
 /// for.
 ///
@@ -97,18 +106,43 @@ impl Intent {
 
     /// The sources this intent converts through, in the order it tries them
     /// (`docs/design/icc.md`, "The table each intent compiles"): ICC.1
-    /// 8.10.2's b), the `A2B*` tag designated for the intent; c), `A2B0`;
-    /// d), the profile's matrix/TRC or grey model; then the profile's other
-    /// tables in the order the parser reads them, reached only where the
-    /// profile carries none of those, so no intent refuses a profile another
-    /// accepts.
-    const fn order(self) -> [Step; 4] {
+    /// 8.10.2's a), the `D2B*` tag designated for the intent; b), the `A2B*`
+    /// tag designated for it; c), `A2B0`; d), the profile's matrix/TRC or
+    /// grey model; then the profile's other tables in the order the parser
+    /// reads them, reached only where the profile carries none of those, so
+    /// no intent refuses a profile another accepts. `D2B0` to `D2B3` are
+    /// perceptual, media-relative colorimetric, saturation and ICC-absolute
+    /// colorimetric's (9.2), and only `D2B3` is absolute colorimetric's.
+    const fn order(self) -> [Step; 5] {
         match self {
-            Intent::Perceptual => [Step::Table(0), Step::Model, Step::Table(1), Step::Table(2)],
-            Intent::RelativeColorimetric | Intent::AbsoluteColorimetric => {
-                [Step::Table(1), Step::Table(0), Step::Model, Step::Table(2)]
-            }
-            Intent::Saturation => [Step::Table(2), Step::Table(0), Step::Model, Step::Table(1)],
+            Intent::Perceptual => [
+                Step::Pipeline(0),
+                Step::Table(0),
+                Step::Model,
+                Step::Table(1),
+                Step::Table(2),
+            ],
+            Intent::RelativeColorimetric => [
+                Step::Pipeline(1),
+                Step::Table(1),
+                Step::Table(0),
+                Step::Model,
+                Step::Table(2),
+            ],
+            Intent::Saturation => [
+                Step::Pipeline(2),
+                Step::Table(2),
+                Step::Table(0),
+                Step::Model,
+                Step::Table(1),
+            ],
+            Intent::AbsoluteColorimetric => [
+                Step::Pipeline(3),
+                Step::Table(1),
+                Step::Table(0),
+                Step::Model,
+                Step::Table(2),
+            ],
         }
     }
 }
@@ -117,6 +151,8 @@ impl Intent {
 /// lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
+    /// The `D2B*` tag of this number, `D2B0` to `D2B3`: ICC.1 8.10.2 a).
+    Pipeline(usize),
     /// The `A2B*` tag of this number: `A2B0`, `A2B1` or `A2B2`.
     Table(usize),
     /// The matrix/TRC or grey model, ICC.1 8.10.2 d).
@@ -167,6 +203,10 @@ pub enum IccError {
     MissingTags,
     /// A curve or matrix tag whose own contents do not parse.
     MalformedTag,
+    /// A multi-process element of a type this build does not read, by its
+    /// signature: ICC.1 10.14.1 makes a `multiProcessElementsType` tag
+    /// holding one unusable, and 8.10.2 a) passes such a `D2B*` tag over.
+    UnsupportedElement([u8; 4]),
 }
 
 /// The most tags a profile may declare.
@@ -390,11 +430,15 @@ impl Profile {
         }
     }
 
-    /// The scaling `intent`'s transform applies to the connection-space
-    /// value: [`Profile::media_scale`] for absolute colorimetric where it is
-    /// not one, and none otherwise.
-    fn scale_for(&self, intent: Intent) -> Option<[f64; 3]> {
-        if intent != Intent::AbsoluteColorimetric {
+    /// The scaling `intent`'s transform through `source` applies to the
+    /// connection-space value: [`Profile::media_scale`] for absolute
+    /// colorimetric where it is not one, and none otherwise — none through
+    /// `D2B3`, whose transform is ICC-absolute already and leaves the media
+    /// white unused (6.2.3, 9.2).
+    fn scale_for(&self, intent: Intent, source: &Source<'_>) -> Option<[f64; 3]> {
+        if intent != Intent::AbsoluteColorimetric
+            || matches!(source, Source::Pipeline { tag: 3, .. })
+        {
             return None;
         }
         Some(self.media_scale()).filter(|scale| *scale != [1.0; 3])
@@ -500,8 +544,8 @@ pub enum Model {
 }
 
 /// The `A2B*` tables a profile carries — sampled lookup tables, `mft1`,
-/// `mft2` or v4's `mAB ` — each read when an intent first converts through
-/// it.
+/// `mft2` or v4's `mAB ` — and its `D2B*` multi-process pipelines, each read
+/// when an intent first converts through it.
 ///
 /// What a printer profile carries, because the relation between ink and
 /// light is not a matrix and no curve makes it one. The census found 409
@@ -519,8 +563,13 @@ pub struct Tables {
     /// For `A2B0`, `A2B1` and `A2B2`, which of `tables` the tag names, or
     /// `None` where the profile does not carry it.
     slots: [Option<usize>; 3],
-    /// One a distinct element, in the order the tags first name them.
-    tables: Vec<Table>,
+    /// One a distinct `A2B*` element, in the order the tags first name them.
+    tables: Vec<Element<Lut>>,
+    /// For `D2B0` to `D2B3`, which of `pipelines` the tag names, or `None`
+    /// where the profile does not carry it.
+    pipeline_slots: [Option<usize>; 4],
+    /// One a distinct `D2B*` element, in the order the tags first name them.
+    pipelines: Vec<Element<mpe::Pipeline>>,
     /// Whether the connection space is `Lab` rather than `XYZ`.
     lab: bool,
 }
@@ -528,38 +577,23 @@ pub struct Tables {
 impl Tables {
     /// The tables at the elements `places` names — `A2B0`, `A2B1` and
     /// `A2B2`'s offset and size in `bytes`, where the profile carries them —
-    /// none of them read yet.
+    /// and the pipelines at the elements `pipeline_places` names, `D2B0` to
+    /// `D2B3`'s, none of them read yet.
     fn locate(
         places: [Option<(usize, usize)>; 3],
+        pipeline_places: [Option<(usize, usize)>; 4],
         bytes: &[u8],
         lab: bool,
     ) -> Result<Tables, IccError> {
-        let mut elements: Vec<(usize, usize)> = Vec::new();
-        let mut slots = [None; 3];
-        for (slot, place) in slots.iter_mut().zip(places) {
-            if let Some(place) = place {
-                let index = match elements.iter().position(|&element| element == place) {
-                    Some(index) => index,
-                    None => {
-                        elements.push(place);
-                        elements.len() - 1
-                    }
-                };
-                *slot = Some(index);
-            }
-        }
-        let mut tables = Vec::with_capacity(elements.len());
-        for (offset, size) in elements {
-            let data = offset
-                .checked_add(size)
-                .and_then(|end| bytes.get(offset..end))
-                .ok_or(IccError::TagOutOfBounds)?;
-            tables.push(Table {
-                bytes: Some(data.to_vec()),
-                read: OnceLock::new(),
-            });
-        }
-        Ok(Tables { slots, tables, lab })
+        let (slots, tables) = Element::locate(places, bytes)?;
+        let (pipeline_slots, pipelines) = Element::locate(pipeline_places, bytes)?;
+        Ok(Tables {
+            slots,
+            tables,
+            pipeline_slots,
+            pipelines,
+            lab,
+        })
     }
 
     /// No tables: a profile that carries none, or whose connection space no
@@ -568,59 +602,119 @@ impl Tables {
         Tables {
             slots: [None; 3],
             tables: Vec::new(),
+            pipeline_slots: [None; 4],
+            pipelines: Vec::new(),
             lab,
         }
     }
 
     /// The table `A2B*` tag `tag` names, where the profile carries it.
-    fn at(&self, tag: usize) -> Option<(usize, &Table)> {
+    fn at(&self, tag: usize) -> Option<(usize, &Element<Lut>)> {
         let index = (*self.slots.get(tag)?)?;
         Some((index, self.tables.get(index)?))
     }
 
-    /// Lets go of the bytes of every table that has been read, whatever
-    /// reading it gave: what it gave is kept, and a table is never read twice.
+    /// The pipeline `D2B*` tag `tag` names, where the profile carries it.
+    fn pipeline_at(&self, tag: usize) -> Option<(usize, &Element<mpe::Pipeline>)> {
+        let index = (*self.pipeline_slots.get(tag)?)?;
+        Some((index, self.pipelines.get(index)?))
+    }
+
+    /// The `A2B*` table at `element`, read now if nothing has read it yet.
+    fn read_table(&self, element: &Element<Lut>) -> Result<Arc<Lut>, IccError> {
+        element.read(|bytes| read_lut(bytes, self.lab))
+    }
+
+    /// The `D2B*` pipeline at `element`, read now if nothing has read it yet.
+    fn read_pipeline(
+        &self,
+        element: &Element<mpe::Pipeline>,
+    ) -> Result<Arc<mpe::Pipeline>, IccError> {
+        element.read(|bytes| mpe::read(bytes, self.lab))
+    }
+
+    /// Lets go of the bytes of every table and pipeline that has been read,
+    /// whatever reading it gave: what it gave is kept, and nothing is read
+    /// twice.
     fn release_read(&mut self) {
         for table in &mut self.tables {
-            if table.read.get().is_some() {
-                table.bytes = None;
-            }
+            table.release_read();
+        }
+        for pipeline in &mut self.pipelines {
+            pipeline.release_read();
         }
     }
 }
 
-/// One distinct `A2B*` element: its bytes, until they are read, and what
-/// reading them gave, kept from the first read.
+/// One distinct element a profile's tags name: its bytes, until they are
+/// read, and what reading them gave, kept from the first read.
 #[derive(Clone, Debug)]
-struct Table {
+struct Element<T> {
     /// The element's bytes; `None` once [`Profile::parse`] has read them.
     bytes: Option<Vec<u8>>,
-    /// The table, or why its bytes do not read as one.
-    read: OnceLock<Result<Arc<Lut>, IccError>>,
+    /// What the bytes read as, or why they do not.
+    read: OnceLock<Result<Arc<T>, IccError>>,
 }
 
-impl Table {
-    /// The table, read now if nothing has read it yet, or why it does not
-    /// read.
-    fn read(&self, lab: bool) -> Result<Arc<Lut>, IccError> {
+impl<T> Element<T> {
+    /// For each of `places` — a tag's offset and size, where the profile
+    /// carries the tag — which of the distinct elements it names, and those
+    /// elements, unread.
+    fn locate<const N: usize>(
+        places: [Option<(usize, usize)>; N],
+        bytes: &[u8],
+    ) -> Result<([Option<usize>; N], Vec<Element<T>>), IccError> {
+        let mut distinct: Vec<(usize, usize)> = Vec::new();
+        let mut slots = [None; N];
+        for (slot, place) in slots.iter_mut().zip(places) {
+            if let Some(place) = place {
+                let index = match distinct.iter().position(|&element| element == place) {
+                    Some(index) => index,
+                    None => {
+                        distinct.push(place);
+                        distinct.len() - 1
+                    }
+                };
+                *slot = Some(index);
+            }
+        }
+        let mut elements = Vec::with_capacity(distinct.len());
+        for (offset, size) in distinct {
+            let data = offset
+                .checked_add(size)
+                .and_then(|end| bytes.get(offset..end))
+                .ok_or(IccError::TagOutOfBounds)?;
+            elements.push(Element {
+                bytes: Some(data.to_vec()),
+                read: OnceLock::new(),
+            });
+        }
+        Ok((slots, elements))
+    }
+
+    /// What the element reads as by `reader`, read now if nothing has read
+    /// it yet, or why it does not read.
+    fn read(&self, reader: impl FnOnce(&[u8]) -> Result<T, IccError>) -> Result<Arc<T>, IccError> {
         self.read
             .get_or_init(|| {
                 let bytes = self.bytes.as_deref().ok_or(IccError::MalformedTag)?;
-                read_lut(bytes, lab).map(Arc::new)
+                reader(bytes).map(Arc::new)
             })
             .clone()
     }
 
-    /// The table, where it reads.
-    fn lut(&self, lab: bool) -> Option<Arc<Lut>> {
-        self.read(lab).ok()
+    /// Lets go of the bytes once they have been read.
+    fn release_read(&mut self) {
+        if self.read.get().is_some() {
+            self.bytes = None;
+        }
     }
 }
 
-/// Two tables are one where their bytes are, or, for the ones the parser
-/// read, where what it read is: whether another intent has read a table yet
-/// is not a property of the profile.
-impl PartialEq for Table {
+/// Two elements are one where their bytes are, or, for the ones the parser
+/// read, where what it read is: whether another intent has read one yet is
+/// not a property of the profile.
+impl<T: PartialEq> PartialEq for Element<T> {
     fn eq(&self, other: &Self) -> bool {
         match (&self.bytes, &other.bytes) {
             (Some(ours), Some(theirs)) => ours == theirs,
@@ -633,6 +727,13 @@ impl PartialEq for Table {
 /// Where one intent's transform comes from.
 #[derive(Clone, Debug)]
 enum Source<'a> {
+    /// The `D2B*` pipeline at this index of [`Tables`]'s distinct elements,
+    /// reached through the tag of number `tag`.
+    Pipeline {
+        tag: usize,
+        index: usize,
+        pipeline: Arc<mpe::Pipeline>,
+    },
     /// The table at this index of [`Tables`]'s distinct elements.
     Table(usize, Arc<Lut>),
     /// The profile's matrix/TRC or grey model.
@@ -643,6 +744,7 @@ impl Source<'_> {
     /// Which source this is, for telling whether two intents share one.
     fn id(&self) -> SourceId {
         match self {
+            Source::Pipeline { index, .. } => SourceId::Pipeline(*index),
             Source::Table(index, _) => SourceId::Table(*index),
             Source::Model(_) => SourceId::Model,
         }
@@ -652,22 +754,42 @@ impl Source<'_> {
 /// A [`Source`], by identity alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceId {
+    Pipeline(usize),
     Table(usize),
     Model,
 }
 
 impl Profile {
     /// Where `intent`'s transform comes from: the first of
-    /// [`Intent::order`]'s sources the profile carries that reads, a table
-    /// read now if no intent has read it yet. A table that does not read is
-    /// passed over, as ICC.1 8.10.2 passes over a tag the CMM does not
-    /// support; relative colorimetric's was found by [`Profile::parse`], so
-    /// that intent always finds one.
+    /// [`Intent::order`]'s sources the profile carries that reads, a table or
+    /// pipeline read now if no intent has read it yet. One that does not read
+    /// is passed over, as ICC.1 8.10.2 passes over a tag the CMM does not
+    /// support. An intent whose order finds nothing — a profile whose only
+    /// source is a `D2B*` tag of another intent's — converts as relative
+    /// colorimetric does, whose source [`Profile::parse`] found.
     fn source(&self, intent: Intent) -> Option<Source<'_>> {
+        self.walk(intent).or_else(|| {
+            (intent != Intent::RelativeColorimetric)
+                .then(|| self.walk(Intent::RelativeColorimetric))
+                .flatten()
+        })
+    }
+
+    /// The first of `intent`'s own sources that reads.
+    fn walk(&self, intent: Intent) -> Option<Source<'_>> {
         intent.order().into_iter().find_map(|step| match step {
+            Step::Pipeline(tag) => {
+                let (index, element) = self.tables.pipeline_at(tag)?;
+                let pipeline = self.tables.read_pipeline(element).ok()?;
+                Some(Source::Pipeline {
+                    tag,
+                    index,
+                    pipeline,
+                })
+            }
             Step::Table(tag) => {
-                let (index, table) = self.tables.at(tag)?;
-                Some(Source::Table(index, table.lut(self.tables.lab)?))
+                let (index, element) = self.tables.at(tag)?;
+                Some(Source::Table(index, self.tables.read_table(element).ok()?))
             }
             Step::Model => self.model.as_ref().map(Source::Model),
         })
@@ -712,12 +834,25 @@ pub struct Lut {
     lab: bool,
 }
 
-/// The most input channels a lookup table may declare.
+/// The most input channels a lookup table may declare, and the most channels
+/// a multi-process element may take or give.
 ///
-/// `mAB `'s CLUT header has room for sixteen grid counts, so sixteen is the
-/// format's own ceiling; the guard exists because the channel count is one byte
-/// and the grid product is what [`MAX_CLUT_ENTRIES`] bounds (ruling 1).
+/// `mAB `'s and a `clut` element's grid headers have room for sixteen grid
+/// counts, so sixteen is the format's own ceiling; the guard exists because
+/// the channel count is one byte, or two in a multi-process element, and the
+/// grid product is what [`MAX_CLUT_ENTRIES`] bounds (ruling 1). An `mft1` or
+/// `mft2` is held to it as well, since one grid count for every axis lets two
+/// points an axis name twenty inputs inside that bound.
 const MAX_LUT_INPUTS: usize = 16;
+
+/// The most inputs a table's grid is interpolated over as one weighted sum.
+///
+/// Each corner's weight is a product of one eighth-bit fraction an axis, so
+/// over `n` inputs a weight reaches `256^n` and a channel's sum `256^n x
+/// 65 535`: under 2^64 for six inputs and past it for seven. A table over
+/// more — a seven- or eight-ink printer profile an XPS document embeds, say —
+/// is interpolated one axis at a time instead ([`Lut::blend`]).
+const EXACT_INPUTS: usize = 6;
 
 /// The most grid points an axis may declare, and the most entries a CLUT may
 /// hold.
@@ -768,33 +903,39 @@ impl Lut {
                 base.push(index);
                 frac.push(((scaled - index as f64) * 256.0).round().clamp(0.0, 256.0) as u64);
             }
-            let corners = 1usize << self.inputs;
-            let mut mixed = [0u64; 3];
-            let mut total = 0u64;
-            for corner in 0..corners {
-                let mut weight = 1u64;
-                let mut offset = 0usize;
-                for axis in 0..self.inputs {
-                    let points = self.grids.get(axis).copied().unwrap_or(2);
-                    let last = points - 1;
-                    let high = corner & (1 << axis) != 0;
-                    let step = usize::from(high);
-                    weight *= if high { frac[axis] } else { 256 - frac[axis] };
-                    let index = (base[axis] + step).min(last);
-                    offset = offset * points + index;
+            if self.inputs > EXACT_INPUTS {
+                for (channel, slot) in mid.iter_mut().enumerate().take(self.outputs) {
+                    *slot = self.blend(0, 0, channel, &base, &frac).min(65535) as u16;
                 }
-                if weight == 0 {
-                    continue;
+            } else {
+                let corners = 1usize << self.inputs;
+                let mut mixed = [0u64; 3];
+                let mut total = 0u64;
+                for corner in 0..corners {
+                    let mut weight = 1u64;
+                    let mut offset = 0usize;
+                    for axis in 0..self.inputs {
+                        let points = self.grids.get(axis).copied().unwrap_or(2);
+                        let last = points - 1;
+                        let high = corner & (1 << axis) != 0;
+                        let step = usize::from(high);
+                        weight *= if high { frac[axis] } else { 256 - frac[axis] };
+                        let index = (base[axis] + step).min(last);
+                        offset = offset * points + index;
+                    }
+                    if weight == 0 {
+                        continue;
+                    }
+                    total += weight;
+                    for (channel, slot) in mixed.iter_mut().enumerate().take(self.outputs) {
+                        let at = offset * self.outputs + channel;
+                        *slot += weight * u64::from(self.clut.get(at).copied().unwrap_or(0));
+                    }
                 }
-                total += weight;
-                for (channel, slot) in mixed.iter_mut().enumerate().take(self.outputs) {
-                    let at = offset * self.outputs + channel;
-                    *slot += weight * u64::from(self.clut.get(at).copied().unwrap_or(0));
+                let total = total.max(1);
+                for (channel, slot) in mid.iter_mut().enumerate().take(self.outputs) {
+                    *slot = (mixed[channel] / total).min(65535) as u16;
                 }
-            }
-            let total = total.max(1);
-            for (channel, slot) in mid.iter_mut().enumerate().take(self.outputs) {
-                *slot = (mixed[channel] / total).min(65535) as u16;
             }
         }
 
@@ -830,6 +971,37 @@ impl Lut {
         out
     }
 
+    /// Channel `channel` of the grid interpolated over the axes from `axis`
+    /// on, the axes before it fixed at the node index `offset` they make:
+    /// linearly along `axis` between the cell's two nodes in the eighth-bit
+    /// fractions the weighted sum uses, rounding down as it does.
+    ///
+    /// Multilinear interpolation one axis at a time, so nothing is a product
+    /// of more than two numbers and a grid over any number of inputs fits;
+    /// the depth is the input count, which `MAX_LUT_INPUTS` bounds.
+    fn blend(
+        &self,
+        axis: usize,
+        offset: usize,
+        channel: usize,
+        base: &[usize],
+        frac: &[u64],
+    ) -> u64 {
+        let Some(&points) = self.grids.get(axis) else {
+            let at = offset * self.outputs + channel;
+            return u64::from(self.clut.get(at).copied().unwrap_or(0));
+        };
+        let cell = base.get(axis).copied().unwrap_or(0);
+        let fraction = frac.get(axis).copied().unwrap_or(0).min(256);
+        let low = self.blend(axis + 1, offset * points + cell, channel, base, frac);
+        if fraction == 0 {
+            return low;
+        }
+        let next = (cell + 1).min(points - 1);
+        let high = self.blend(axis + 1, offset * points + next, channel, base, frac);
+        (low * (256 - fraction) + high * fraction) / 256
+    }
+
     /// The sRGB this table's connection-space value is, that value first
     /// scaled channel by channel in XYZ where `media` says so — ICC-absolute
     /// colorimetry's media white (6.2.3).
@@ -859,41 +1031,24 @@ impl Lut {
             let l = pcs[0] * FULL * 100.0;
             let a = pcs[1] * FULL * 255.0 - 128.0;
             let b = pcs[2] * FULL * 255.0 - 128.0;
-            match media {
-                None => crate::lab_to_linear_srgb(l, a, b),
-                // The scaling is of XYZ (equations 4 to 6), so a Lab value
-                // goes to XYZ first, by the relation `lab_to_linear_srgb`
-                // runs.
-                Some(scale) => {
-                    let [x, y, z] = crate::lab_to_xyz(l, a, b);
-                    crate::xyz_d50_to_linear_srgb(x * scale[0], y * scale[1], z * scale[2])
-                }
-            }
+            pcs_to_linear([l, a, b], true, media)
         } else {
             // XYZ, in the s15Fixed16 convention the connection space uses:
             // 1.0 is 0x8000 of the 16-bit range, so full scale is just under
             // two.
             let scale = 65535.0 / 32768.0;
-            let [x, y, z] = match media {
-                None => [pcs[0] * scale, pcs[1] * scale, pcs[2] * scale],
-                Some(media) => [
-                    pcs[0] * scale * media[0],
-                    pcs[1] * scale * media[1],
-                    pcs[2] * scale * media[2],
-                ],
-            };
-            crate::xyz_d50_to_linear_srgb(x, y, z)
+            pcs_to_linear(
+                [pcs[0] * scale, pcs[1] * scale, pcs[2] * scale],
+                false,
+                media,
+            )
         }
     }
 
     /// How this table's light is encoded: as `lab_to_rgb` encodes it under a
     /// Lab connection space, as [`encode_component`] does under XYZ.
     const fn encoding(&self) -> Encoding {
-        if self.lab {
-            Encoding::Lab
-        } else {
-            Encoding::Xyz
-        }
+        Encoding::of(self.lab)
     }
 }
 
@@ -912,6 +1067,16 @@ enum Encoding {
 }
 
 impl Encoding {
+    /// The encoding of a connection space: Lab's where `lab`, XYZ's
+    /// otherwise.
+    const fn of(lab: bool) -> Encoding {
+        if lab {
+            Encoding::Lab
+        } else {
+            Encoding::Xyz
+        }
+    }
+
     /// One channel of linear light as the pipeline encodes it.
     fn encode(self, linear: f64) -> u8 {
         match self {
@@ -992,8 +1157,51 @@ const CHANNEL_BITS: u32 = 21;
 /// The bit that says a node has been evaluated.
 const FILLED: u64 = 1 << 63;
 
-/// A lookup-table transform's pipeline sampled at the nodes of an integer
-/// grid, and read between them in fixed point (`docs/design/icc.md`, P-22).
+/// What a grid samples, up to the linear sRGB its nodes hold: a transform's
+/// `A2B*` table, or its `D2B*` tag's elements (`docs/design/icc.md`, P-22,
+/// "Which transforms a grid stands in for").
+#[derive(Clone, Copy)]
+enum Light<'a> {
+    /// A sampled table.
+    Table(&'a Lut),
+    /// A multi-process pipeline.
+    Elements(&'a mpe::Pipeline),
+}
+
+impl Light<'_> {
+    /// How many components the pipeline takes.
+    fn inputs(self) -> usize {
+        match self {
+            Light::Table(lut) => lut.inputs,
+            Light::Elements(pipeline) => pipeline.inputs(),
+        }
+    }
+
+    /// How its light is encoded, which its connection space decides.
+    fn encoding(self) -> Encoding {
+        match self {
+            Light::Table(lut) => lut.encoding(),
+            Light::Elements(pipeline) => Encoding::of(pipeline.lab()),
+        }
+    }
+
+    /// The pipeline's light at `components`, its connection-space value
+    /// scaled by `media` where that is given.
+    fn at(self, components: &[f64], media: Option<[f64; 3]>) -> [f64; 3] {
+        match self {
+            Light::Table(lut) => lut.to_linear(components, media),
+            Light::Elements(pipeline) => {
+                #[cfg(test)]
+                tests::PIPELINE_EVALUATIONS.with(|count| count.set(count.get() + 1));
+                pcs_to_linear(pipeline.evaluate(components), pipeline.lab(), media)
+            }
+        }
+    }
+}
+
+/// A lookup-table transform's pipeline — a table's, or a `D2B*` tag's
+/// elements' — sampled at the nodes of an integer grid, and read between them
+/// in fixed point (`docs/design/icc.md`, P-22).
 ///
 /// Each node holds the pipeline's linear sRGB at the node — three signed
 /// channels of [`CHANNEL_BITS`], unclamped, beside [`FILLED`] — in one atomic
@@ -1018,14 +1226,14 @@ struct Grid {
 }
 
 impl Grid {
-    /// The grid `lut` converts through, its connection-space value scaled by
-    /// `media` where that is given, or `None` for an input count no grid is
-    /// built over.
-    fn over(lut: &Lut, media: Option<[f64; 3]>) -> Option<Grid> {
+    /// The grid `source` converts through, its connection-space value scaled
+    /// by `media` where that is given, or `None` for an input count no grid
+    /// is built over.
+    fn over(source: Light<'_>, media: Option<[f64; 3]>) -> Option<Grid> {
         Some(Grid {
-            inputs: lut.inputs,
-            points: grid_points(lut.inputs)?,
-            encoding: lut.encoding(),
+            inputs: source.inputs(),
+            points: grid_points(source.inputs())?,
+            encoding: source.encoding(),
             media,
             nodes: OnceLock::new(),
         })
@@ -1057,14 +1265,14 @@ impl Grid {
 
     /// Node `index`'s word, filled: evaluated through `lut` now if no read
     /// has reached it before.
-    fn node(&self, lut: &Lut, nodes: &[AtomicU64], index: usize) -> [i64; 3] {
+    fn node(&self, source: Light<'_>, nodes: &[AtomicU64], index: usize) -> [i64; 3] {
         let word = match nodes.get(index) {
             Some(slot) => {
                 let held = slot.load(Ordering::Relaxed);
                 if held & FILLED != 0 {
                     held
                 } else {
-                    let fresh = self.evaluate(lut, index);
+                    let fresh = self.evaluate(source, index);
                     slot.store(fresh, Ordering::Relaxed);
                     fresh
                 }
@@ -1072,7 +1280,7 @@ impl Grid {
             // An index past the grid is not reachable from `read`, whose
             // cells stop a node short of each axis's last; answered all the
             // same rather than indexed into.
-            None => self.evaluate(lut, index),
+            None => self.evaluate(source, index),
         };
         unpack(word)
     }
@@ -1080,9 +1288,9 @@ impl Grid {
     /// Node `index` evaluated: the pipeline's light there, each channel
     /// within `0..=1` pulled to the value nearest it that encodes to the
     /// pipeline's own byte, so a read at the node is the pipeline exactly.
-    fn evaluate(&self, lut: &Lut, index: usize) -> u64 {
+    fn evaluate(&self, source: Light<'_>, index: usize) -> u64 {
         let x = self.node_input(index);
-        let light = lut.to_linear(&x[..self.inputs], self.media);
+        let light = source.at(&x[..self.inputs], self.media);
         let table = self.encoding.table();
         let mut word = FILLED;
         for (channel, light) in light.into_iter().enumerate() {
@@ -1096,7 +1304,7 @@ impl Grid {
     /// `components` converted through the grid: each located on its axis,
     /// the nodes around it interpolated in fixed point, the light encoded as
     /// the pipeline encodes it.
-    fn read(&self, lut: &Lut, components: &[f64]) -> (u8, u8, u8) {
+    fn read(&self, source: Light<'_>, components: &[f64]) -> (u8, u8, u8) {
         let mut cells = [0usize; 4];
         let mut fractions = [0i64; 4];
         for (axis, (cell, fraction)) in cells
@@ -1108,20 +1316,26 @@ impl Grid {
             let x = components.get(axis).copied().unwrap_or(0.0);
             (*cell, *fraction) = locate(x, self.points);
         }
-        self.read_at(lut, &cells, &fractions)
+        self.read_at(source, &cells, &fractions)
     }
 
     /// The grid read at `cells` and `fractions`, one of each an input: the
     /// interpolation every conversion through the grid shares.
-    fn read_at(&self, lut: &Lut, cells: &[usize; 4], fractions: &[i64; 4]) -> (u8, u8, u8) {
-        self.read_with(lut, self.nodes(), self.encoding.table(), cells, fractions)
+    fn read_at(&self, source: Light<'_>, cells: &[usize; 4], fractions: &[i64; 4]) -> (u8, u8, u8) {
+        self.read_with(
+            source,
+            self.nodes(),
+            self.encoding.table(),
+            cells,
+            fractions,
+        )
     }
 
     /// [`Grid::read_at`] over `nodes`, this grid's, and `table`, its
     /// encoding's: what a row hoists out of its loop.
     fn read_with(
         &self,
-        lut: &Lut,
+        source: Light<'_>,
         nodes: &[AtomicU64],
         table: &EncodingTable,
         cells: &[usize; 4],
@@ -1130,8 +1344,8 @@ impl Grid {
         let points = self.points;
         let light = match self.inputs {
             1 => {
-                let low = self.node(lut, nodes, cells[0]);
-                let high = self.node(lut, nodes, cells[0] + 1);
+                let low = self.node(source, nodes, cells[0]);
+                let high = self.node(source, nodes, cells[0] + 1);
                 [0, 1, 2]
                     .map(|c| round_shift((low[c] << 16) + fractions[0] * (high[c] - low[c]), 16))
             }
@@ -1139,7 +1353,7 @@ impl Grid {
                 let base = (cells[0] * points + cells[1]) * points + cells[2];
                 let strides = [points * points, points, 1];
                 let sum = self.tetrahedral(
-                    lut,
+                    source,
                     nodes,
                     base,
                     strides,
@@ -1153,8 +1367,8 @@ impl Grid {
                 let base = ((cells[0] * points + cells[1]) * points + cells[2]) * points + cells[3];
                 let strides = [points * points * points, points * points, points];
                 let three = [fractions[0], fractions[1], fractions[2]];
-                let low = self.tetrahedral(lut, nodes, base, strides, three);
-                let high = self.tetrahedral(lut, nodes, base + 1, strides, three);
+                let low = self.tetrahedral(source, nodes, base, strides, three);
+                let high = self.tetrahedral(source, nodes, base + 1, strides, three);
                 [0, 1, 2]
                     .map(|c| round_shift((low[c] << 16) + fractions[3] * (high[c] - low[c]), 32))
             }
@@ -1172,18 +1386,18 @@ impl Grid {
     /// before: the light, in 2^-16 of [`LIGHT_ONE`]'s unit.
     fn tetrahedral(
         &self,
-        lut: &Lut,
+        source: Light<'_>,
         nodes: &[AtomicU64],
         base: usize,
         strides: [usize; 3],
         fractions: [i64; 3],
     ) -> [i64; 3] {
         let mut at = base;
-        let mut previous = self.node(lut, nodes, at);
+        let mut previous = self.node(source, nodes, at);
         let mut sum = previous.map(|value| value << 16);
         for axis in largest_first(fractions) {
             at += strides[axis];
-            let next = self.node(lut, nodes, at);
+            let next = self.node(source, nodes, at);
             for ((slot, now), before) in sum.iter_mut().zip(next).zip(previous) {
                 *slot += fractions[axis] * (now - before);
             }
@@ -1309,6 +1523,32 @@ fn interpolate(table: &[u16], x: f64) -> u16 {
     (a + (b - a) * fraction).round() as u16
 }
 
+/// A connection-space value in its own units — XYZ with the PCS white's `Y`
+/// at one, or `L*`, `a*` and `b*` as they are, the float encoding a `D2B*`
+/// tag gives (6.3.4.2) — as linear sRGB before it is encoded and unclamped,
+/// scaled channel by channel in XYZ first where `media` says so (equations 4
+/// to 6): a Lab value to XYZ by the relation `lab_to_linear_srgb` runs, then
+/// `XYZ_D50_TO_SRGB`. A table's value and a pipeline's both go this way.
+fn pcs_to_linear(pcs: [f64; 3], lab: bool, media: Option<[f64; 3]>) -> [f64; 3] {
+    let [x, y, z] = if lab {
+        crate::lab_to_xyz(pcs[0], pcs[1], pcs[2])
+    } else {
+        pcs
+    };
+    match media {
+        None => crate::xyz_d50_to_linear_srgb(x, y, z),
+        Some(scale) => crate::xyz_d50_to_linear_srgb(x * scale[0], y * scale[1], z * scale[2]),
+    }
+}
+
+/// [`pcs_to_linear`]'s light as sRGB bytes, encoded as its connection
+/// space's tables encode theirs.
+fn pcs_to_rgb(pcs: [f64; 3], lab: bool, media: Option<[f64; 3]>) -> (u8, u8, u8) {
+    let [r, g, b] = pcs_to_linear(pcs, lab, media);
+    let encoding = Encoding::of(lab);
+    (encoding.encode(r), encoding.encode(g), encoding.encode(b))
+}
+
 /// Linear light to an sRGB byte, through the same table the matrix path uses.
 fn encode_component(linear: f64) -> u8 {
     let clamped = (linear.clamp(0.0, 1.0) * 65536.0) as i64;
@@ -1425,28 +1665,51 @@ impl Profile {
                 .map(|&(_, offset, size)| (offset, size))
         };
         let mut tables = if tables_convert {
-            Tables::locate([place(b"A2B0"), place(b"A2B1"), place(b"A2B2")], bytes, lab)?
+            Tables::locate(
+                [place(b"A2B0"), place(b"A2B1"), place(b"A2B2")],
+                [
+                    place(b"D2B0"),
+                    place(b"D2B1"),
+                    place(b"D2B2"),
+                    place(b"D2B3"),
+                ],
+                bytes,
+                lab,
+            )?
         } else {
             Tables::none(lab)
         };
 
         // Relative colorimetric's source, found now: 8.6.5.8 makes it the
         // initial intent, so a profile with none is refused here, whatever
-        // intent a page later asks for. Its tables come first and its model
-        // after them, as 8.10.2 orders them (`Intent::order`). A table that
-        // does not read is passed over where the profile carries a model,
-        // as 8.10.2 passes over a tag the CMM does not support. A profile
-        // carrying none is refused for the first table the order names when
-        // that table does not read: in a profile of tables alone, a damaged
-        // table is a damaged profile.
+        // intent a page later asks for. Its `D2B1` comes first, its tables
+        // next and its model after them, as 8.10.2 orders them
+        // (`Intent::order`). A `D2B*` tag that does not read is passed over
+        // always, 8.10.2 a)'s tag the CMM does not support; a table that does
+        // not read is passed over where the profile carries a model. A
+        // profile carrying none is refused for the first table the order
+        // names when that table does not read: in a profile of tables alone,
+        // a damaged table is a damaged profile.
         let mut found = false;
+        let mut passed_over = None;
         for step in Intent::RelativeColorimetric.order() {
             match step {
+                Step::Pipeline(tag) => {
+                    let Some((_, pipeline)) = tables.pipeline_at(tag) else {
+                        continue;
+                    };
+                    match tables.read_pipeline(pipeline) {
+                        Ok(_) => found = true,
+                        Err(error) => {
+                            passed_over.get_or_insert(error);
+                        }
+                    }
+                }
                 Step::Table(tag) => {
                     let Some((_, table)) = tables.at(tag) else {
                         continue;
                     };
-                    match table.read(lab) {
+                    match tables.read_table(table) {
                         Ok(_) => found = true,
                         Err(error) if model.is_none() => return Err(error),
                         Err(_) => {}
@@ -1460,11 +1723,12 @@ impl Profile {
         }
         if !found {
             // A profile carrying a model is refused for the model's own
-            // reason, and one carrying neither a model nor a table for
-            // lacking both.
+            // reason, one whose only source was a pipeline that does not
+            // read for that pipeline's, by name, and one carrying neither a
+            // model nor a table for lacking both.
             return Err(match model {
                 Some(Err(error)) => error,
-                _ => IccError::MissingTags,
+                _ => passed_over.unwrap_or(IccError::MissingTags),
             });
         }
         tables.release_read();
@@ -1556,7 +1820,10 @@ fn read_lut(data: &[u8], lab: bool) -> Result<Lut, IccError> {
     let inputs = byte(8)? as usize;
     let outputs = byte(9)? as usize;
     let grid = byte(10)? as usize;
-    if inputs == 0 || outputs == 0 || grid < 2 {
+    // The input count is a byte, and a grid of two points an axis keeps
+    // `grid.pow(inputs)` under `MAX_CLUT_ENTRIES` up to twenty of them, so it
+    // is held to `MAX_LUT_INPUTS` as `mAB `'s is.
+    if inputs == 0 || outputs == 0 || grid < 2 || inputs > MAX_LUT_INPUTS {
         return Err(IccError::MalformedTag);
     }
     // Three is what the connection space is, and what `to_rgb` reads.
@@ -1925,12 +2192,13 @@ fn read_curve(data: &[u8]) -> Result<Curve, IccError> {
 ///
 /// # A lookup table is read through a grid
 ///
-/// A lookup-table transform over one, three or four inputs converts through
-/// a [`Grid`] of its own pipeline, sampled at 256, 33 or 17 nodes an axis and
-/// read between them in fixed point (`docs/design/icc.md`, P-22): its
-/// pipeline — `Lut::evaluate`, the connection space into sRGB and the
-/// encoding — runs once a node, the first time a conversion reaches it,
-/// rather than once a colour. A matrix/TRC or grey transform has no grid: its
+/// A lookup-table transform over one, three or four inputs — an `A2B*`
+/// table, or a `D2B*` tag's elements — converts through a [`Grid`] of its own
+/// pipeline, sampled at 256, 33 or 17 nodes an axis and read between them in
+/// fixed point (`docs/design/icc.md`, P-22): its pipeline — `Lut::evaluate`
+/// or the elements, the connection space into sRGB and the encoding — runs
+/// once a node, the first time a conversion reaches it, rather than once a
+/// colour. A matrix/TRC or grey transform has no grid: its
 /// pipeline is already integer, and exact.
 #[derive(Debug)]
 pub struct Transform {
@@ -1945,13 +2213,17 @@ pub struct Transform {
     /// shared with the profile's [`Tables`] and with every other intent that
     /// converts through it.
     lut: Option<Arc<Lut>>,
-    /// The table's connection-space value scaled channel by channel in XYZ
-    /// before it becomes sRGB, where this is ICC-absolute colorimetry's
-    /// transform through a table (6.2.3): the media white over the PCS
-    /// white. A model's scaling is folded into its matrix instead.
+    /// A `D2B*` tag's multi-process pipeline, where the transform converts
+    /// through one: shared with the profile's [`Tables`] and with every
+    /// other intent that converts through it.
+    pipeline: Option<Arc<mpe::Pipeline>>,
+    /// The table's or pipeline's connection-space value scaled channel by
+    /// channel in XYZ before it becomes sRGB, where this is ICC-absolute
+    /// colorimetry's transform through one (6.2.3): the media white over the
+    /// PCS white. A model's scaling is folded into its matrix instead.
     media: Option<[f64; 3]>,
-    /// The grid `lut` is read through, where it takes one, three or four
-    /// inputs.
+    /// The grid `lut` or `pipeline` is read through, where it takes one,
+    /// three or four inputs.
     grid: Option<Grid>,
     /// What a row of 8-bit samples converts through, built at the first row
     /// ([`Transform::convert_row`]).
@@ -1967,6 +2239,7 @@ impl Clone for Transform {
             matrix: self.matrix,
             inputs: self.inputs,
             lut: self.lut.clone(),
+            pipeline: self.pipeline.clone(),
             media: self.media,
             grid: self.grid.clone(),
             row: OnceLock::new(),
@@ -2011,6 +2284,7 @@ impl PartialEq for Transform {
             && self.matrix == other.matrix
             && self.inputs == other.inputs
             && self.lut == other.lut
+            && self.pipeline == other.pipeline
             && self.media == other.media
     }
 }
@@ -2044,13 +2318,27 @@ impl Transform {
     #[must_use]
     pub fn compile(profile: &Profile, intent: Intent) -> Option<Transform> {
         let source = profile.source(intent)?;
-        Some(Transform::of_source(source, profile.scale_for(intent)))
+        let media = profile.scale_for(intent, &source);
+        Some(Transform::of_source(source, media))
     }
 
     /// The transform `source` converts through, its connection-space value
     /// scaled by `media` where that is given.
     fn of_source(source: Source<'_>, media: Option<[f64; 3]>) -> Transform {
         match source {
+            // A pipeline was compiled when it was read: its stages are the
+            // transform, ending in the connection space, and like a table it
+            // is read through a grid of its own light.
+            Source::Pipeline { pipeline, .. } => Transform {
+                curves: Vec::new(),
+                matrix: [[0; 3]; 3],
+                inputs: pipeline.inputs(),
+                grid: Grid::over(Light::Elements(&pipeline), media),
+                lut: None,
+                pipeline: Some(pipeline),
+                media,
+                row: OnceLock::new(),
+            },
             // A table is already the transform: its curves arrived sampled and
             // its grid is the matrix's replacement rather than a factor of it.
             // What compiles is the grid it is read through, whose nodes are
@@ -2059,8 +2347,9 @@ impl Transform {
                 curves: Vec::new(),
                 matrix: [[0; 3]; 3],
                 inputs: lut.inputs,
-                grid: Grid::over(&lut, media),
+                grid: Grid::over(Light::Table(&lut), media),
                 lut: Some(lut),
+                pipeline: None,
                 row: OnceLock::new(),
                 media,
             },
@@ -2098,6 +2387,7 @@ impl Transform {
                     matrix,
                     inputs: 3,
                     lut: None,
+                    pipeline: None,
                     grid: None,
                     row: OnceLock::new(),
                     media: None,
@@ -2152,6 +2442,7 @@ impl Transform {
                     matrix,
                     inputs: 1,
                     lut: None,
+                    pipeline: None,
                     grid: None,
                     row: OnceLock::new(),
                     media: None,
@@ -2164,6 +2455,16 @@ impl Transform {
     #[must_use]
     pub const fn inputs(&self) -> usize {
         self.inputs
+    }
+
+    /// What this transform's grid samples: its table, or its `D2B*` tag's
+    /// elements; `None` for a model, which has no grid.
+    fn light_source(&self) -> Option<Light<'_>> {
+        match (&self.lut, &self.pipeline) {
+            (Some(lut), _) => Some(Light::Table(lut)),
+            (None, Some(pipeline)) => Some(Light::Elements(pipeline)),
+            (None, None) => None,
+        }
     }
 
     /// Converts every whole pixel of `samples` — [`Transform::inputs`] bytes
@@ -2188,7 +2489,7 @@ impl Transform {
         rgb.reserve((samples.len() / inputs).saturating_mul(3));
         match self.row_tables() {
             RowTables::Grid(axis) => {
-                let (Some(lut), Some(grid)) = (&self.lut, &self.grid) else {
+                let (Some(source), Some(grid)) = (self.light_source(), &self.grid) else {
                     return;
                 };
                 let nodes = grid.nodes();
@@ -2198,16 +2499,26 @@ impl Transform {
                     for pixel in samples.chunks_exact(3) {
                         let [(c0, f0), (c1, f1), (c2, f2)] =
                             [at(pixel[0]), at(pixel[1]), at(pixel[2])];
-                        let (r, g, b) =
-                            grid.read_with(lut, nodes, table, &[c0, c1, c2, 0], &[f0, f1, f2, 0]);
+                        let (r, g, b) = grid.read_with(
+                            source,
+                            nodes,
+                            table,
+                            &[c0, c1, c2, 0],
+                            &[f0, f1, f2, 0],
+                        );
                         rgb.extend_from_slice(&[r, g, b]);
                     }
                 } else {
                     for pixel in samples.chunks_exact(4) {
                         let [(c0, f0), (c1, f1), (c2, f2), (c3, f3)] =
                             [at(pixel[0]), at(pixel[1]), at(pixel[2]), at(pixel[3])];
-                        let (r, g, b) =
-                            grid.read_with(lut, nodes, table, &[c0, c1, c2, c3], &[f0, f1, f2, f3]);
+                        let (r, g, b) = grid.read_with(
+                            source,
+                            nodes,
+                            table,
+                            &[c0, c1, c2, c3],
+                            &[f0, f1, f2, f3],
+                        );
                         rgb.extend_from_slice(&[r, g, b]);
                     }
                 }
@@ -2256,13 +2567,13 @@ impl Transform {
             #[cfg(test)]
             tests::ROW_TABLE_BUILDS.with(|count| count.set(count.get() + 1));
             let component = |byte: u8| f64::from(byte) / 255.0;
-            match (&self.lut, &self.grid) {
-                (Some(lut), Some(grid)) if grid.inputs == 1 => RowTables::Colours(
+            match (self.light_source(), &self.grid) {
+                (Some(source), Some(grid)) if grid.inputs == 1 => RowTables::Colours(
                     (0..=u8::MAX)
                         .map(|byte| {
                             let (cell, fraction) = locate(component(byte), grid.points);
                             let (r, g, b) =
-                                grid.read_at(lut, &[cell, 0, 0, 0], &[fraction, 0, 0, 0]);
+                                grid.read_at(source, &[cell, 0, 0, 0], &[fraction, 0, 0, 0]);
                             [r, g, b]
                         })
                         .collect(),
@@ -2318,8 +2629,8 @@ impl Transform {
     pub fn apply(&self, components: &[f64]) -> (u8, u8, u8) {
         #[cfg(test)]
         tests::APPLY_CALLS.with(|count| count.set(count.get() + 1));
-        if let (Some(lut), Some(grid)) = (&self.lut, &self.grid) {
-            return grid.read(lut, components);
+        if let (Some(source), Some(grid)) = (self.light_source(), &self.grid) {
+            return grid.read(source, components);
         }
         self.evaluate(components)
     }
@@ -2329,6 +2640,11 @@ impl Transform {
     pub(crate) fn evaluate(&self, components: &[f64]) -> (u8, u8, u8) {
         if let Some(lut) = &self.lut {
             return lut.to_rgb(components, self.media);
+        }
+        if let Some(pipeline) = &self.pipeline {
+            #[cfg(test)]
+            tests::PIPELINE_EVALUATIONS.with(|count| count.set(count.get() + 1));
+            return pcs_to_rgb(pipeline.evaluate(components), pipeline.lab(), self.media);
         }
         let mut linear = [0i64; 3];
         for (channel, slot) in linear.iter_mut().enumerate() {
@@ -2415,7 +2731,7 @@ impl Transforms {
             let Some(source) = self.profile.source(intent) else {
                 return Arc::clone(&self.relative);
             };
-            let media = self.profile.scale_for(intent);
+            let media = self.profile.scale_for(intent, &source);
             if media.is_none() {
                 let id = source.id();
                 if id == self.relative_source {
@@ -2676,7 +2992,20 @@ pub(crate) mod tests {
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 9] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 10] = [
+            // `D2B0` and `D2B1` naming one multi-process element, a curve
+            // set with every segment kind, a matrix and a grid: the seed
+            // that reaches the `mpet` reader and its stages.
+            (
+                "d2b-elements",
+                build_sharing(
+                    b"RGB ",
+                    b"XYZ ",
+                    &[(*b"D2B0", 0), (*b"D2B1", 0)],
+                    &[Chain { t: 0.0 }.tag()],
+                ),
+                Reaches::Transform,
+            ),
             // Three lookup tables, one an intent, each a different grid: the
             // seed that reaches every intent's own table.
             (
@@ -4578,6 +4907,770 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    // ---- multi-process elements: the D2B* tags ------------------------------
+
+    /// `value` as the float32 a multi-process element stores it in.
+    fn float(value: f64) -> [u8; 4] {
+        (value as f32).to_bits().to_be_bytes()
+    }
+
+    /// What a float32 field holding `value` reads back as.
+    fn as_stored(value: f64) -> f64 {
+        f64::from(value as f32)
+    }
+
+    /// `out` padded with zeros to a four-byte boundary, as every element and
+    /// curve starts on one (10.14.1, 10.14.2.2).
+    fn padded(mut out: Vec<u8>) -> Vec<u8> {
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    /// A `parf` formula segment of function type `function`.
+    fn parf(function: u16, params: &[f64]) -> Vec<u8> {
+        let mut out = b"parf".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&function.to_be_bytes());
+        out.extend_from_slice(&[0; 2]);
+        for &param in params {
+            out.extend_from_slice(&float(param));
+        }
+        out
+    }
+
+    /// A `samf` sampled segment.
+    fn samf(samples: &[f64]) -> Vec<u8> {
+        let mut out = b"samf".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(samples.len() as u32).to_be_bytes());
+        for &sample in samples {
+            out.extend_from_slice(&float(sample));
+        }
+        out
+    }
+
+    /// A `curf` segmented curve: `segments` with `breaks` between them.
+    fn curf(breaks: &[f64], segments: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = b"curf".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(segments.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 2]);
+        for &point in breaks {
+            out.extend_from_slice(&float(point));
+        }
+        for segment in segments {
+            out.extend_from_slice(segment);
+        }
+        out
+    }
+
+    /// A processing element's header — its signature, four reserved bytes,
+    /// `p` inputs and `q` outputs — and `body`.
+    fn element_of(signature: &[u8; 4], p: u16, q: u16, body: &[u8]) -> Vec<u8> {
+        let mut out = signature.to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&p.to_be_bytes());
+        out.extend_from_slice(&q.to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// A `cvst` curve set, one `curf` a channel, each starting on a
+    /// four-byte boundary.
+    fn cvst(curves: &[Vec<u8>]) -> Vec<u8> {
+        let channels = curves.len();
+        let mut positions = Vec::new();
+        let mut data = Vec::new();
+        let start = 12 + 8 * channels;
+        for curve in curves {
+            positions.extend_from_slice(&((start + data.len()) as u32).to_be_bytes());
+            positions.extend_from_slice(&(curve.len() as u32).to_be_bytes());
+            data.extend_from_slice(&padded(curve.clone()));
+        }
+        positions.extend_from_slice(&data);
+        element_of(b"cvst", channels as u16, channels as u16, &positions)
+    }
+
+    /// A `matf` matrix: `rows`, each the coefficients of one output, then an
+    /// offset a row.
+    fn matf(rows: &[Vec<f64>], offsets: &[f64]) -> Vec<u8> {
+        let p = rows.first().map_or(0, Vec::len);
+        let mut body = Vec::new();
+        for row in rows {
+            for &value in row {
+                body.extend_from_slice(&float(value));
+            }
+        }
+        for &offset in offsets {
+            body.extend_from_slice(&float(offset));
+        }
+        element_of(b"matf", p as u16, rows.len() as u16, &body)
+    }
+
+    /// A `clut` lookup table with grid counts `grids` and `q` outputs: the
+    /// sixteen grid-count bytes, then `values`.
+    fn clut(grids: &[u8], q: u16, values: &[f64]) -> Vec<u8> {
+        let mut body = [0u8; 16].to_vec();
+        body[..grids.len()].copy_from_slice(grids);
+        for &value in values {
+            body.extend_from_slice(&float(value));
+        }
+        element_of(b"clut", grids.len() as u16, q, &body)
+    }
+
+    /// An `mpet` tag of `inputs` and `outputs` channels chaining `elements`,
+    /// each starting on a four-byte boundary.
+    fn mpet(inputs: u16, outputs: u16, elements: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = b"mpet".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&inputs.to_be_bytes());
+        out.extend_from_slice(&outputs.to_be_bytes());
+        out.extend_from_slice(&(elements.len() as u32).to_be_bytes());
+        let start = 16 + 8 * elements.len();
+        let mut data = Vec::new();
+        for element in elements {
+            out.extend_from_slice(&((start + data.len()) as u32).to_be_bytes());
+            out.extend_from_slice(&(element.len() as u32).to_be_bytes());
+            data.extend_from_slice(&padded(element.clone()));
+        }
+        out.extend_from_slice(&data);
+        out
+    }
+
+    /// The pipeline the `D2B*` tests chain, its parameters shifted by `t` so
+    /// each tag answers its own: a curve set — a power with a sampled segment
+    /// between its two formulas, an exponential and a logarithm, one a
+    /// channel — then a matrix with offsets, then a grid of two points an
+    /// axis.
+    struct Chain {
+        t: f64,
+    }
+
+    impl Chain {
+        /// The first channel's samples, over `(0.25, 0.75]`.
+        fn samples(&self) -> [f64; 4] {
+            [0.2, 0.35, 0.5, 0.65].map(|v| v + 0.02 * self.t)
+        }
+
+        /// The curve set's three `curf`s.
+        fn curves(&self) -> [Vec<u8>; 3] {
+            let last = self.samples()[3];
+            [
+                curf(
+                    &[0.25, 0.75],
+                    &[
+                        parf(0, &[2.0, 1.0, 0.0, 0.05 * self.t]),
+                        samf(&self.samples()),
+                        // Continuous at 0.75: 0.8 x + (last - 0.6).
+                        parf(0, &[1.0, 0.8, last - 0.6, 0.0]),
+                    ],
+                ),
+                curf(&[], &[parf(2, &[0.5, 2.0, 1.0, -1.0, 0.02 * self.t])]),
+                curf(&[], &[parf(1, &[1.0, 0.5, 9.0, 1.0, 0.01 * self.t])]),
+            ]
+        }
+
+        fn rows(&self) -> Vec<Vec<f64>> {
+            vec![
+                vec![0.6 + 0.01 * self.t, 0.3, 0.1],
+                vec![0.2, 0.7, 0.1],
+                vec![0.1, 0.1, 0.8],
+            ]
+        }
+
+        fn offsets(&self) -> [f64; 3] {
+            [0.05, 0.0, -0.02]
+        }
+
+        /// Node `node`'s three values, the first axis slowest.
+        fn node(&self, node: usize) -> [f64; 3] {
+            let (i, j, k) = ((node >> 2) & 1, (node >> 1) & 1, node & 1);
+            let (i, j, k) = (i as f64, j as f64, k as f64);
+            [
+                0.2 + 0.6 * i + 0.01 * self.t,
+                0.15 + 0.5 * j + 0.1 * i,
+                0.1 + 0.6 * k + 0.02 * self.t,
+            ]
+        }
+
+        /// The `mpet` tag.
+        fn tag(&self) -> Vec<u8> {
+            let values: Vec<f64> = (0..8).flat_map(|node| self.node(node)).collect();
+            mpet(
+                3,
+                3,
+                &[
+                    cvst(&self.curves()),
+                    matf(&self.rows(), &self.offsets()),
+                    clut(&[2, 2, 2], 3, &values),
+                ],
+            )
+        }
+
+        /// Channel `channel`'s curve at `x`, its segments' closed forms
+        /// (ICC.1:2010 10.14.2.2, Table 57) over the float32 values stored.
+        fn curve(&self, channel: usize, x: f64) -> f64 {
+            let r = as_stored;
+            match channel {
+                0 => {
+                    if x <= 0.25 {
+                        x * x + r(0.05 * self.t)
+                    } else if x <= 0.75 {
+                        let samples = self.samples().map(r);
+                        let position = (x - 0.25) / 0.5 * 4.0;
+                        let below = (position.floor() as usize).min(3);
+                        let start = if below == 0 {
+                            0.25 * 0.25 + r(0.05 * self.t)
+                        } else {
+                            samples[below - 1]
+                        };
+                        start + (samples[below] - start) * (position - below as f64)
+                    } else {
+                        r(0.8) * x + r(self.samples()[3] - 0.6)
+                    }
+                }
+                1 => r(0.5) * tinker_pdf_math::pow(2.0, x - 1.0) + r(0.02 * self.t),
+                _ => r(0.5) * tinker_pdf_math::log10(9.0 * x + 1.0) + r(0.01 * self.t),
+            }
+        }
+
+        /// The pipeline at `x`, recomputed: the curves, the matrix, the
+        /// grid's inputs held to `0..=1`, and trilinear interpolation.
+        fn value(&self, x: [f64; 3]) -> [f64; 3] {
+            let curved = [0, 1, 2].map(|channel| self.curve(channel, x[channel]));
+            let rows = self.rows();
+            let offsets = self.offsets();
+            let mixed = [0, 1, 2].map(|row| {
+                let sum: f64 = (0..3)
+                    .map(|column| as_stored(rows[row][column]) * curved[column])
+                    .sum();
+                (sum + as_stored(offsets[row])).clamp(0.0, 1.0)
+            });
+            let mut out = [0.0; 3];
+            for node in 0..8usize {
+                let bits = [(node >> 2) & 1, (node >> 1) & 1, node & 1];
+                let weight: f64 = (0..3)
+                    .map(|axis| {
+                        if bits[axis] == 1 {
+                            mixed[axis]
+                        } else {
+                            1.0 - mixed[axis]
+                        }
+                    })
+                    .product();
+                for (slot, value) in out.iter_mut().zip(self.node(node)) {
+                    *slot += weight * as_stored(value);
+                }
+            }
+            out
+        }
+    }
+
+    /// The inputs a pipeline is checked at: each component one of seven
+    /// values across the range, every segment of the first curve among them.
+    fn pipeline_inputs() -> Vec<[f64; 3]> {
+        let steps = [0.0, 0.1, 0.3, 0.5, 0.62, 0.8, 1.0];
+        let mut out = Vec::new();
+        for a in steps {
+            for b in steps {
+                for c in steps {
+                    out.push([a, b, c]);
+                }
+            }
+        }
+        out
+    }
+
+    /// The pipeline `transform` converts through, evaluated at `x`.
+    fn pipeline_pcs(transform: &Transform, x: [f64; 3]) -> [f64; 3] {
+        transform
+            .pipeline
+            .as_ref()
+            .expect("a multi-process transform")
+            .evaluate(&x)
+    }
+
+    /// **A `D2B*` tag converts by its element pipeline.** A profile whose
+    /// `D2B0` to `D2B3` each chain a curve set — a power with a sampled
+    /// segment between its formulas, an exponential, a logarithm — a matrix
+    /// with offsets and a grid answers each intent with its own tag, the
+    /// value the test computes from the elements' closed forms, within the
+    /// fixed point the stages compute in, on its own and through the set a
+    /// colour space carries: ICC.1 8.10.2 a) before the `A2B*` tables and the
+    /// matrix the profile also carries. Absolute colorimetric's `D2B3` is
+    /// ICC-absolute already, so the media white, though not D50, scales
+    /// nothing; with no `D2B3`, absolute colorimetric converts through
+    /// `A2B1`, scaled, and not through `D2B1`. Under a Lab connection space
+    /// the pipeline's value is `L*a*b*` as it stands.
+    #[test]
+    fn a_d2b_tag_converts_by_its_element_pipeline() {
+        let mut tags = matrix_tags();
+        tags.push((*b"wtpt", xyz(PAPER[0], PAPER[1], PAPER[2])));
+        for (t, signature) in [*b"D2B0", *b"D2B1", *b"D2B2", *b"D2B3"]
+            .into_iter()
+            .enumerate()
+        {
+            tags.push((signature, Chain { t: t as f64 }.tag()));
+        }
+        for (t, signature) in [*b"A2B0", *b"A2B1", *b"A2B2"].into_iter().enumerate() {
+            tags.push((signature, constant_table(3, fallback_value(t))));
+        }
+        let profile = Profile::parse(&build(b"RGB ", b"XYZ ", &tags)).expect("a D2B profile");
+        let transforms = Transforms::compile(profile.clone()).expect("transforms");
+        for (t, intent) in [
+            (0, Intent::Perceptual),
+            (1, Intent::RelativeColorimetric),
+            (2, Intent::Saturation),
+            (3, Intent::AbsoluteColorimetric),
+        ] {
+            let chain = Chain { t: f64::from(t) };
+            let transform = Transform::compile(&profile, intent).expect("a transform");
+            assert_eq!(
+                transform.media, None,
+                "{intent:?}: D2B{t} is scaled by nothing"
+            );
+            for x in pipeline_inputs() {
+                let want = chain.value(x);
+                for (what, got) in [
+                    ("its own", pipeline_pcs(&transform, x)),
+                    ("the space's", pipeline_pcs(transforms.get(intent), x)),
+                ] {
+                    for channel in 0..3 {
+                        assert!(
+                            (got[channel] - want[channel]).abs() < 2e-3,
+                            "{intent:?} at {x:?}, {what}: channel {channel} is {}, not {}",
+                            got[channel],
+                            want[channel]
+                        );
+                    }
+                }
+                assert_eq!(
+                    transform.evaluate(&x),
+                    pcs_to_rgb(pipeline_pcs(&transform, x), false, None),
+                    "{intent:?} at {x:?}: the sRGB of its value"
+                );
+                let read = apart(transform.apply(&x), transform.evaluate(&x));
+                assert!(
+                    read <= 2,
+                    "{intent:?} at {x:?}: the grid's read is {read} levels off"
+                );
+            }
+        }
+        // The four tags are four pipelines.
+        let x = [0.62, 0.3, 0.8];
+        let values: Vec<[u64; 3]> = Intent::ALL
+            .iter()
+            .map(|&intent| {
+                let transform = Transform::compile(&profile, intent).expect("a transform");
+                pipeline_pcs(&transform, x).map(|v| (v * 10_000.0).round() as u64)
+            })
+            .collect();
+        for (a, b) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
+            assert_ne!(values[a], values[b], "two intents read one tag");
+        }
+
+        // With no `D2B3`, absolute colorimetric's row goes on to `A2B1`,
+        // scaled by the media white; `D2B1` is not in it.
+        let without: Vec<([u8; 4], Vec<u8>)> = tags
+            .iter()
+            .filter(|(signature, _)| signature != b"D2B3")
+            .cloned()
+            .collect();
+        let profile = Profile::parse(&build(b"RGB ", b"XYZ ", &without)).expect("a profile");
+        let absolute =
+            Transform::compile(&profile, Intent::AbsoluteColorimetric).expect("a transform");
+        assert!(absolute.pipeline.is_none(), "absolute read a D2B tag");
+        assert_eq!(table_of(&absolute), 1, "absolute colorimetric's A2B1");
+        assert_eq!(
+            absolute.media,
+            Some(closed_scale(PAPER)),
+            "scaled by the paper"
+        );
+
+        // Under Lab, the pipeline's value is L*a*b* itself.
+        let lab_chain = Chain { t: 1.0 };
+        let lab = Profile::parse(&build(b"RGB ", b"Lab ", &[(*b"D2B1", lab_chain.tag())]))
+            .expect("a Lab D2B profile");
+        let transform =
+            Transform::compile(&lab, Intent::RelativeColorimetric).expect("a transform");
+        for x in pipeline_inputs() {
+            let pcs = pipeline_pcs(&transform, x);
+            assert_eq!(
+                transform.evaluate(&x),
+                crate::lab_to_rgb(pcs[0], pcs[1], pcs[2]),
+                "Lab at {x:?}"
+            );
+            let read = apart(transform.apply(&x), transform.evaluate(&x));
+            assert!(
+                read <= 2,
+                "Lab at {x:?}: the grid's read is {read} levels off"
+            );
+        }
+    }
+
+    /// **A `D2B*` tag's elements convert through a grid of their light**, as
+    /// a table does (`docs/design/icc.md`, P-22, "Which transforms a grid
+    /// stands in for"): over three inputs, and over one, a grid of the
+    /// design's size whose every node is the elements' pipeline exactly, and
+    /// whose reads between nodes are within two levels of it; over two
+    /// inputs no grid, every conversion the pipeline itself. A row of bytes
+    /// converts through each as `apply` does.
+    #[test]
+    fn a_d2b_transform_reads_through_a_grid_of_its_elements() {
+        let one = mpet(
+            1,
+            3,
+            &[matf(
+                &[vec![0.9], vec![0.95], vec![0.8]],
+                &[0.02, 0.0, 0.01],
+            )],
+        );
+        let two = mpet(
+            2,
+            3,
+            &[matf(
+                &[vec![0.5, 0.4], vec![0.3, 0.6], vec![0.1, 0.7]],
+                &[0.0, 0.01, 0.0],
+            )],
+        );
+        let levels: Vec<u8> = (0..17u32).map(|j| ((j * 255 + 8) / 16) as u8).collect();
+        for (name, space, tag, inputs) in [
+            ("three inputs", b"RGB ", Chain { t: 1.0 }.tag(), 3usize),
+            ("one input", b"GRAY", one, 1),
+            ("two inputs", b"2CLR", two, 2),
+        ] {
+            let profile = Profile::parse(&build(space, b"XYZ ", &[(*b"D2B1", tag)]))
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            let transform =
+                Transform::compile(&profile, Intent::RelativeColorimetric).expect("a transform");
+            assert!(transform.pipeline.is_some(), "{name}: the elements");
+            assert_eq!(transform.inputs(), inputs, "{name}");
+            match &transform.grid {
+                Some(grid) => {
+                    assert_eq!(Some(grid.points), grid_points(inputs), "{name}: its size");
+                    for index in 0..grid.count() {
+                        let node = grid.node_input(index);
+                        let x = &node[..inputs];
+                        assert_eq!(
+                            transform.apply(x),
+                            transform.evaluate(x),
+                            "{name} at node {index}"
+                        );
+                    }
+                    for x in sweep(inputs) {
+                        let read = apart(transform.apply(&x), transform.evaluate(&x));
+                        assert!(read <= 2, "{name} at {x:?}: {read} levels off");
+                    }
+                }
+                None => {
+                    assert_eq!(grid_points(inputs), None, "{name}: no grid");
+                    for x in sweep(inputs) {
+                        assert_eq!(
+                            transform.apply(&x),
+                            transform.evaluate(&x),
+                            "{name} at {x:?}"
+                        );
+                    }
+                }
+            }
+            // Every byte over one input, a lattice of 17 levels over more.
+            let mut samples = Vec::new();
+            match inputs {
+                1 => samples.extend(0..=u8::MAX),
+                2 => {
+                    for &a in &levels {
+                        for &b in &levels {
+                            samples.extend_from_slice(&[a, b]);
+                        }
+                    }
+                }
+                _ => {
+                    for &a in &levels {
+                        for &b in &levels {
+                            for &c in &levels {
+                                samples.extend_from_slice(&[a, b, c]);
+                            }
+                        }
+                    }
+                }
+            }
+            let mut row = Vec::new();
+            transform.convert_row(&samples, &mut row);
+            row_is_apply(name, &transform, &samples, &row);
+        }
+    }
+
+    /// An element of a type this build does not read.
+    fn unread_element() -> Vec<u8> {
+        element_of(b"calc", 3, 3, &[0; 16])
+    }
+
+    /// **An unread element is refused by name**, and its intent falls to its
+    /// `A2B*` tag. A `D2B*` tag holding a `calc` element — a calculator,
+    /// ICC.2's — is refused as `UnsupportedElement(calc)` wherever the element
+    /// stands, whatever is wrong elsewhere in the tag; a profile carrying it
+    /// beside an `A2B1` converts every intent through the table, and one
+    /// carrying nothing else is refused for it, by name. The `bACS` and
+    /// `eACS` placeholders read, and pass their channels through unchanged.
+    #[test]
+    fn an_unread_element_is_refused_by_name() {
+        let chain = Chain { t: 0.0 };
+        let values: Vec<f64> = (0..8).flat_map(|node| chain.node(node)).collect();
+        let curves = cvst(&chain.curves());
+        let matrix = matf(&chain.rows(), &chain.offsets());
+        let grid = clut(&[2, 2, 2], 3, &values);
+        for elements in [
+            vec![
+                unread_element(),
+                curves.clone(),
+                matrix.clone(),
+                grid.clone(),
+            ],
+            vec![curves.clone(), unread_element(), grid.clone()],
+            vec![
+                curves.clone(),
+                matrix.clone(),
+                grid.clone(),
+                unread_element(),
+            ],
+            // A channel count that does not chain is not what refuses it.
+            vec![element_of(b"matf", 9, 3, &[]), unread_element()],
+        ] {
+            assert_eq!(
+                mpe::read(&mpet(3, 3, &elements), false),
+                Err(IccError::UnsupportedElement(*b"calc")),
+                "{} elements",
+                elements.len()
+            );
+        }
+        let broken = mpet(3, 3, &[curves.clone(), unread_element(), grid.clone()]);
+
+        // Beside an `A2B1`: passed over, as 8.10.2 a) has a tag the CMM does
+        // not support passed over.
+        let profile = Profile::parse(&build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"D2B1", broken.clone()),
+                (*b"A2B1", constant_table(3, fallback_value(1))),
+            ],
+        ))
+        .expect("the table serves");
+        for intent in Intent::ALL {
+            let transform = Transform::compile(&profile, intent).expect("a transform");
+            assert!(
+                transform.pipeline.is_none(),
+                "{intent:?} read the broken tag"
+            );
+            assert_eq!(table_of(&transform), 1, "{intent:?}");
+        }
+
+        // Alone: refused, by the element's name.
+        assert_eq!(
+            Profile::parse(&build(b"RGB ", b"XYZ ", &[(*b"D2B1", broken)])),
+            Err(IccError::UnsupportedElement(*b"calc"))
+        );
+
+        // A tag at a `D2B*` tag that is not a multi-process one.
+        assert_eq!(
+            mpe::read(&constant_table(3, 9_000), false),
+            Err(IccError::MalformedTag)
+        );
+
+        // The placeholders pass through: the pipeline with them answers as
+        // the pipeline without them.
+        let placeholder = |signature: &[u8; 4]| element_of(signature, 3, 3, b"none");
+        let plain = mpe::read(&chain.tag(), false).expect("the chain");
+        let padded_out = mpe::read(
+            &mpet(
+                3,
+                3,
+                &[
+                    placeholder(b"bACS"),
+                    curves,
+                    placeholder(b"eACS"),
+                    matrix,
+                    placeholder(b"bACS"),
+                    grid,
+                    placeholder(b"eACS"),
+                ],
+            ),
+            false,
+        )
+        .expect("the chain with its placeholders");
+        assert_eq!(padded_out, plain, "a placeholder changed the pipeline");
+    }
+
+    /// **An impossible element count is refused before it is allocated**
+    /// (ruling 1). An `mpet` declaring four billion elements in sixteen bytes
+    /// is `TooLarge` before its position table is walked, one past
+    /// `MAX_MPE_ELEMENTS` likewise, and one at the cap is walked; channel
+    /// counts past `MAX_LUT_INPUTS`, a grid whose volume passes
+    /// `MAX_CLUT_ENTRIES`, and a grid that fits on its own but not beside the
+    /// curves already compiled, are `TooLarge` before their values are read;
+    /// a segment count, a sample count and a grid that the tag's bytes cannot
+    /// hold are `MalformedTag` before anything is allocated for them.
+    #[test]
+    fn an_impossible_element_count_is_refused_before_it_is_allocated() {
+        let header = |inputs: u16, outputs: u16, count: u32| {
+            let mut out = b"mpet".to_vec();
+            out.extend_from_slice(&[0; 4]);
+            out.extend_from_slice(&inputs.to_be_bytes());
+            out.extend_from_slice(&outputs.to_be_bytes());
+            out.extend_from_slice(&count.to_be_bytes());
+            out
+        };
+        assert_eq!(
+            mpe::read(&header(3, 3, u32::MAX), false),
+            Err(IccError::TooLarge),
+            "four billion elements in sixteen bytes"
+        );
+        assert_eq!(
+            mpe::read(&header(3, 3, MAX_MPE_ELEMENTS as u32 + 1), false),
+            Err(IccError::TooLarge)
+        );
+        assert_eq!(
+            mpe::read(&header(3, 3, MAX_MPE_ELEMENTS as u32), false),
+            Err(IccError::MalformedTag),
+            "the cap itself is walked, and its table is not there"
+        );
+        assert_eq!(
+            mpe::read(&header(u16::MAX, 3, 1), false),
+            Err(IccError::TooLarge),
+            "sixty-five thousand inputs"
+        );
+
+        let identity_curve = curf(&[], &[parf(0, &[1.0, 1.0, 0.0, 0.0])]);
+        let three = cvst(&[
+            identity_curve.clone(),
+            identity_curve.clone(),
+            identity_curve.clone(),
+        ]);
+        // An output count past the cap, at a matrix.
+        assert_eq!(
+            mpe::read(&mpet(3, 3, &[element_of(b"matf", 3, u16::MAX, &[])]), false),
+            Err(IccError::TooLarge)
+        );
+        // A grid of 255 points on each of sixteen axes.
+        let identity16 = cvst(&vec![identity_curve.clone(); 16]);
+        let mut wide = element_of(b"clut", 16, 3, &[255; 16]);
+        wide.extend_from_slice(&[0; 4]);
+        assert_eq!(
+            mpe::read(&mpet(16, 3, &[identity16.clone(), wide]), false),
+            Err(IccError::TooLarge),
+            "a grid of 255^16 points"
+        );
+        // A grid the bytes cannot hold.
+        assert_eq!(
+            mpe::read(
+                &mpet(3, 3, &[three.clone(), clut(&[9, 9, 9], 3, &[0.5; 10])]),
+                false
+            ),
+            Err(IccError::MalformedTag)
+        );
+        // Sixty-three curve sets of sixteen curves spend all but 65 536 of
+        // `MAX_CLUT_ENTRIES`, so a grid of 131 072 entries, under the cap on
+        // its own, is past what is left.
+        let mut chain: Vec<Vec<u8>> = vec![identity16.clone(); MAX_MPE_ELEMENTS - 1];
+        chain.push(element_of(b"clut", 16, 2, &[2; 16]));
+        assert_eq!(
+            mpe::read(&mpet(16, 3, &chain), false),
+            Err(IccError::TooLarge),
+            "past the budget the curves left"
+        );
+
+        // A segment count, and a sample count, the curve's bytes cannot hold.
+        let mut many = b"curf".to_vec();
+        many.extend_from_slice(&[0; 4]);
+        many.extend_from_slice(&u16::MAX.to_be_bytes());
+        many.extend_from_slice(&[0; 2]);
+        let mut huge = b"samf".to_vec();
+        huge.extend_from_slice(&[0; 4]);
+        huge.extend_from_slice(&u32::MAX.to_be_bytes());
+        let sampled = curf(
+            &[0.25, 0.75],
+            &[
+                parf(0, &[1.0, 1.0, 0.0, 0.0]),
+                huge,
+                parf(0, &[1.0, 1.0, 0.0, 0.0]),
+            ],
+        );
+        for curve in [many, sampled] {
+            let set = cvst(&[curve, identity_curve.clone(), identity_curve.clone()]);
+            assert_eq!(
+                mpe::read(&mpet(3, 3, &[set]), false),
+                Err(IccError::MalformedTag)
+            );
+        }
+    }
+
+    /// A value of [`wide_table`]'s node `node`, channel `channel`: a multiple
+    /// of 256, so halving it eight times leaves a whole number.
+    fn wide_node(node: usize, channel: usize) -> u16 {
+        (256 * ((node * 29 + channel * 7) % 256)) as u16
+    }
+
+    /// An `mft2` over `inputs` channels on a two-point grid, every node its
+    /// own value ([`wide_node`]).
+    fn wide_table(inputs: usize) -> Vec<u8> {
+        let clut: Vec<[u16; 3]> = (0..1usize << inputs)
+            .map(|node| [0, 1, 2].map(|channel| wide_node(node, channel)))
+            .collect();
+        mft2(inputs, 2, &clut)
+    }
+
+    /// **A table over seven or more inputs interpolates without overflow.**
+    /// Over six inputs a corner's weight is a product of fractions that a
+    /// 64-bit sum holds; over seven it is not, and an XPS document embeds
+    /// seven- and eight-ink printer profiles. A grid over six, seven and
+    /// eight inputs gives, at every input whose components are nought, a half
+    /// or one, the mean of the nodes of the cell's face it stands on; a
+    /// table declaring seventeen inputs is refused before its grid is read.
+    #[test]
+    fn a_table_over_seven_or_more_inputs_interpolates_without_overflow() {
+        for inputs in [6usize, 7, 8] {
+            let profile =
+                Profile::parse(&build(b"CMYK", b"XYZ ", &[(*b"A2B0", wide_table(inputs))]))
+                    .unwrap_or_else(|error| panic!("{inputs} inputs: {error:?}"));
+            let transform =
+                Transform::compile(&profile, Intent::RelativeColorimetric).expect("a transform");
+            // Every third input of the 3^n, so eight inputs check 2 187.
+            for x in halves(inputs).into_iter().step_by(3) {
+                let mut sum = [0u64; 3];
+                let mut count = 0u64;
+                for node in 0..1usize << inputs {
+                    let on = (0..inputs).all(|axis| {
+                        let high = (node >> (inputs - 1 - axis)) & 1 == 1;
+                        match x[axis] {
+                            v if v == 0.0 => !high,
+                            v if v == 1.0 => high,
+                            _ => true,
+                        }
+                    });
+                    if on {
+                        count += 1;
+                        for (channel, slot) in sum.iter_mut().enumerate() {
+                            *slot += u64::from(wide_node(node, channel));
+                        }
+                    }
+                }
+                let want = sum.map(|total| (total / count) as u32);
+                assert_eq!(pcs_at(&transform, &x), want, "{inputs} inputs at {x:?}");
+                let _ = transform.apply(&x);
+            }
+        }
+        let mut seventeen = b"mft2".to_vec();
+        seventeen.extend_from_slice(&[0; 4]);
+        seventeen.extend_from_slice(&[17, 3, 2, 0]);
+        assert_eq!(
+            Profile::parse(&build(b"CMYK", b"XYZ ", &[(*b"A2B0", seventeen)])),
+            Err(IccError::MalformedTag),
+            "seventeen inputs"
+        );
     }
 
     // ---- the price of an integer grid --------------------------------------
