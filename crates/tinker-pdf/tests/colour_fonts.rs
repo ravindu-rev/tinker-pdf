@@ -885,7 +885,8 @@ const RUN_ORIGIN: (f64, f64) = (20.0, 20.0);
 const TEXT_GREEN: [u8; 3] = [0, 128, 0];
 
 /// `text` in `face`, written through `shaping::write_run` as a colour run in
-/// `palette`, under `builder`; what the face warned, and the document.
+/// `palette`, under `builder`, on a page 900 by 100; what the face warned,
+/// and the document.
 fn colour_document(
     face: &Face,
     text: &str,
@@ -911,7 +912,7 @@ fn colour_document(
             colour: Some(&colour),
         },
     ));
-    builder.add_page(200.0, 100.0, |page| page.raw(&content));
+    builder.add_page(900.0, 100.0, |page| page.raw(&content));
     (builder.finish(), colour.warnings())
 }
 
@@ -1129,4 +1130,664 @@ fn a_face_without_a_palette_has_no_colour_glyph() {
     let program = no_palette.build();
     let sfnt = Sfnt::parse(&program).expect("a valid sfnt");
     assert!(!ColourFace::new(&sfnt, PaletteChoice::Default).has_colour());
+}
+
+// ---- COLR version 1, through `shaping::write_run` --------------------------
+
+/// A `COLR` version 1 paint to write (*Paint tables*): a tree, each node one
+/// table, a subtree written twice two tables — but for
+/// [`V1::LayersOfOne`], whose layer slots all name one table.
+enum V1 {
+    /// Format 1: a slice of the `LayerList`, bottom first.
+    Layers(Vec<V1>),
+    /// Format 1, its `n` slots all naming one table, so the reader reads one
+    /// node with `n` parents.
+    LayersOfOne(usize, Box<V1>),
+    /// Format 2: a palette entry and an alpha.
+    Solid(u16, f64),
+    /// Format 3, at the default instance.
+    VarSolid(u16, f64),
+    /// Format 4: a linear gradient of palette entries 0 to 1, which this
+    /// build does not draw yet.
+    Linear,
+    /// Format 10: a glyph's outline as the child's clip.
+    Glyph(u16, Box<V1>),
+    /// Format 11: another base glyph's graph.
+    ColrGlyph(u16),
+    /// Format 12: an `Affine2x3`, `xx yx xy yy dx dy`.
+    Transform([f64; 6], Box<V1>),
+    /// Formats 14: a translation in font units.
+    Translate(i16, i16, Box<V1>),
+    /// Formats 16 and 18: scales along x and y, about a centre for 18.
+    Scale(f64, f64, Option<[i16; 2]>, Box<V1>),
+    /// Formats 20 and 22.
+    ScaleUniform(f64, Option<[i16; 2]>, Box<V1>),
+    /// Formats 24 and 26: an angle in units of 180°, counter-clockwise.
+    Rotate(f64, Option<[i16; 2]>, Box<V1>),
+    /// Formats 28 and 30: the x and y skew angles in units of 180°.
+    Skew(f64, f64, Option<[i16; 2]>, Box<V1>),
+    /// Format 32: source, `compositeMode`, backdrop.
+    Composite(Box<V1>, u8, Box<V1>),
+}
+
+/// An `F2DOT14`.
+fn f2dot14(value: f64) -> [u8; 2] {
+    ((value * 16384.0).round() as i16).to_be_bytes()
+}
+
+/// A `Fixed`.
+fn fixed(value: f64) -> [u8; 4] {
+    ((value * 65536.0).round() as i32).to_be_bytes()
+}
+
+/// The paint tables of a `COLR`, written into one area, and the `LayerList`
+/// slots its layer lists filled, each the area offset of a table.
+#[derive(Default)]
+struct V1Writer {
+    area: Vec<u8>,
+    layers: Vec<usize>,
+}
+
+impl V1Writer {
+    /// Puts `value` as an `Offset24` at `at`.
+    fn patch(&mut self, at: usize, value: usize) {
+        let bytes = u32::try_from(value).expect("an offset").to_be_bytes();
+        self.area[at..at + 3].copy_from_slice(&bytes[1..]);
+    }
+
+    /// A child offset to fill at `at`, from the table at `table`, with the
+    /// child written now, after it.
+    fn child(&mut self, table: usize, at: usize, child: &V1) {
+        let written = self.write(child);
+        self.patch(at, written - table);
+    }
+
+    fn centre(&mut self, centre: Option<[i16; 2]>) {
+        if let Some([x, y]) = centre {
+            self.area.extend_from_slice(&x.to_be_bytes());
+            self.area.extend_from_slice(&y.to_be_bytes());
+        }
+    }
+
+    /// Writes `paint` at the area's end, its children after it, each offset
+    /// from the table that names it as *Paint tables* has it; returns where it
+    /// starts.
+    fn write(&mut self, paint: &V1) -> usize {
+        let at = self.area.len();
+        match paint {
+            V1::Layers(children) => {
+                let first = self.layers.len();
+                self.layers.extend(std::iter::repeat_n(0, children.len()));
+                self.area.extend_from_slice(&[1, children.len() as u8]);
+                self.area.extend_from_slice(&(first as u32).to_be_bytes());
+                for (i, child) in children.iter().enumerate() {
+                    let written = self.write(child);
+                    self.layers[first + i] = written;
+                }
+            }
+            V1::LayersOfOne(count, child) => {
+                let first = self.layers.len();
+                self.layers.extend(std::iter::repeat_n(0, *count));
+                self.area.extend_from_slice(&[1, *count as u8]);
+                self.area.extend_from_slice(&(first as u32).to_be_bytes());
+                let written = self.write(child);
+                for slot in &mut self.layers[first..first + count] {
+                    *slot = written;
+                }
+            }
+            V1::Solid(entry, alpha) | V1::VarSolid(entry, alpha) => {
+                let variable = matches!(paint, V1::VarSolid(..));
+                self.area.push(if variable { 3 } else { 2 });
+                self.area.extend_from_slice(&entry.to_be_bytes());
+                self.area.extend_from_slice(&f2dot14(*alpha));
+                if variable {
+                    self.area.extend_from_slice(&0u32.to_be_bytes());
+                }
+            }
+            V1::Linear => {
+                self.area.extend_from_slice(&[4, 0, 0, 0]);
+                for value in [0i16, 0, 1000, 0, 0, 1000] {
+                    self.area.extend_from_slice(&value.to_be_bytes());
+                }
+                let line = self.area.len();
+                self.patch(at + 1, line - at);
+                // *ColorLine*: EXTEND_PAD, two stops.
+                self.area.push(0);
+                self.area.extend_from_slice(&2u16.to_be_bytes());
+                for (offset, entry) in [(0.0, 0u16), (1.0, 1)] {
+                    self.area.extend_from_slice(&f2dot14(offset));
+                    self.area.extend_from_slice(&entry.to_be_bytes());
+                    self.area.extend_from_slice(&f2dot14(1.0));
+                }
+            }
+            V1::Glyph(glyph, child) => {
+                self.area.extend_from_slice(&[10, 0, 0, 0]);
+                self.area.extend_from_slice(&glyph.to_be_bytes());
+                self.child(at, at + 1, child);
+            }
+            V1::ColrGlyph(glyph) => {
+                self.area.push(11);
+                self.area.extend_from_slice(&glyph.to_be_bytes());
+            }
+            V1::Transform(matrix, child) => {
+                self.area.extend_from_slice(&[12, 0, 0, 0, 0, 0, 0]);
+                let affine = self.area.len();
+                for value in matrix {
+                    self.area.extend_from_slice(&fixed(*value));
+                }
+                self.patch(at + 4, affine - at);
+                self.child(at, at + 1, child);
+            }
+            V1::Translate(dx, dy, child) => {
+                self.area.extend_from_slice(&[14, 0, 0, 0]);
+                self.area.extend_from_slice(&dx.to_be_bytes());
+                self.area.extend_from_slice(&dy.to_be_bytes());
+                self.child(at, at + 1, child);
+            }
+            V1::Scale(x, y, centre, child) => {
+                self.area
+                    .extend_from_slice(&[if centre.is_some() { 18 } else { 16 }, 0, 0, 0]);
+                self.area.extend_from_slice(&f2dot14(*x));
+                self.area.extend_from_slice(&f2dot14(*y));
+                self.centre(*centre);
+                self.child(at, at + 1, child);
+            }
+            V1::ScaleUniform(scale, centre, child) => {
+                self.area
+                    .extend_from_slice(&[if centre.is_some() { 22 } else { 20 }, 0, 0, 0]);
+                self.area.extend_from_slice(&f2dot14(*scale));
+                self.centre(*centre);
+                self.child(at, at + 1, child);
+            }
+            V1::Rotate(angle, centre, child) => {
+                self.area
+                    .extend_from_slice(&[if centre.is_some() { 26 } else { 24 }, 0, 0, 0]);
+                self.area.extend_from_slice(&f2dot14(*angle));
+                self.centre(*centre);
+                self.child(at, at + 1, child);
+            }
+            V1::Skew(x, y, centre, child) => {
+                self.area
+                    .extend_from_slice(&[if centre.is_some() { 30 } else { 28 }, 0, 0, 0]);
+                self.area.extend_from_slice(&f2dot14(*x));
+                self.area.extend_from_slice(&f2dot14(*y));
+                self.centre(*centre);
+                self.child(at, at + 1, child);
+            }
+            V1::Composite(source, mode, backdrop) => {
+                self.area.extend_from_slice(&[32, 0, 0, 0, *mode, 0, 0, 0]);
+                self.child(at, at + 1, source);
+                self.child(at, at + 5, backdrop);
+            }
+        }
+        at
+    }
+}
+
+/// A version 1 `COLR` (*COLR header*, *BaseGlyphList, LayerList and
+/// ClipList*): the 34-byte header, a `BaseGlyphList` of `bases` (in
+/// increasing glyph order, as the chapter requires), the `LayerList` their
+/// layer lists filled, a format 1 `ClipList` of `clips` where there are any,
+/// and then every paint table.
+fn colr_v1(bases: &[(u16, V1)], clips: &[(u16, u16, [i16; 4])]) -> Vec<u8> {
+    let mut writer = V1Writer::default();
+    let roots: Vec<(u16, usize)> = bases
+        .iter()
+        .map(|(glyph, paint)| (*glyph, writer.write(paint)))
+        .collect();
+    let base_list_at = 34usize;
+    let layer_list_at = base_list_at + 4 + 6 * roots.len();
+    let clip_list_at = layer_list_at + 4 + 4 * writer.layers.len();
+    let clip_list_len = if clips.is_empty() {
+        0
+    } else {
+        5 + 16 * clips.len()
+    };
+    let area_at = clip_list_at + clip_list_len;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&1u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&(base_list_at as u32).to_be_bytes());
+    out.extend_from_slice(&(layer_list_at as u32).to_be_bytes());
+    let clip_offset = if clips.is_empty() { 0 } else { clip_list_at };
+    out.extend_from_slice(&(clip_offset as u32).to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
+
+    out.extend_from_slice(&(roots.len() as u32).to_be_bytes());
+    for (glyph, root) in &roots {
+        out.extend_from_slice(&glyph.to_be_bytes());
+        out.extend_from_slice(&((area_at + root - base_list_at) as u32).to_be_bytes());
+    }
+    out.extend_from_slice(&(writer.layers.len() as u32).to_be_bytes());
+    for layer in &writer.layers {
+        out.extend_from_slice(&((area_at + layer - layer_list_at) as u32).to_be_bytes());
+    }
+    if !clips.is_empty() {
+        out.push(1);
+        out.extend_from_slice(&(clips.len() as u32).to_be_bytes());
+        for (i, (start, end, _)) in clips.iter().enumerate() {
+            out.extend_from_slice(&start.to_be_bytes());
+            out.extend_from_slice(&end.to_be_bytes());
+            let box_at = 5 + 7 * clips.len() + 9 * i;
+            out.extend_from_slice(&(box_at as u32).to_be_bytes()[1..]);
+        }
+        for (_, _, rect) in clips {
+            out.push(1);
+            for value in rect {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+    }
+    out.extend_from_slice(&writer.area);
+    out
+}
+
+/// The rectangles a version 1 face's graphs clip to, at
+/// `Face::colour_glyph(n)`.
+const V1_RECTS: [[i16; 4]; 5] = [
+    // 0: the square every glyph below uses.
+    [100, 100, 500, 500],
+    // 1: a larger square around the em's middle.
+    [200, 200, 800, 800],
+    // 2: the em.
+    [0, 0, 1000, 1000],
+    // 3: a bar along the x axis, centred at (500, 0).
+    [300, -50, 700, 50],
+    // 4: a bar below the em's middle.
+    [400, 100, 600, 400],
+];
+
+/// Palette 0's entries: red, blue, green.
+const RED: [u8; 3] = [255, 0, 0];
+const BLUE: [u8; 3] = [0, 0, 255];
+const GREEN: [u8; 3] = [0, 255, 0];
+const WHITE: [u8; 3] = [255, 255, 255];
+
+fn v1_palette() -> Vec<u8> {
+    cpal(&[vec![[255, 0, 0, 255], [0, 0, 255, 255], [0, 255, 0, 255]]])
+}
+
+/// `source` at `alpha` over `backdrop`, unrounded alpha: simple alpha
+/// compositing, rounded to eight bits.
+fn over_at(source: [u8; 3], alpha: f64, backdrop: [u8; 3]) -> [u8; 3] {
+    let mut out = [0u8; 3];
+    for i in 0..3 {
+        let value = f64::from(source[i]) * alpha + f64::from(backdrop[i]) * (1.0 - alpha);
+        out[i] = value.round() as u8;
+    }
+    out
+}
+
+/// A face covering `letters`, a full em each, whose `COLR` version 1 graphs
+/// `graphs` makes from its rectangle glyphs' ids and its letters' glyph ids,
+/// with `clips` (by letter) as its `ClipList`.
+fn v1_face(
+    letters: &str,
+    graphs: impl Fn(&dyn Fn(usize) -> u16, &dyn Fn(char) -> u16) -> Vec<(char, V1)>,
+    clips: &[(char, [i16; 4])],
+) -> Face {
+    let base = Face::new("Fixture COLR", letters).with_advance(1000);
+    let rect = |n: usize| base.colour_glyph(n);
+    let letter = |c: char| base.glyph_of(c).expect("a covered letter");
+    let mut bases: Vec<(u16, V1)> = graphs(&rect, &letter)
+        .into_iter()
+        .map(|(c, paint)| (letter(c), paint))
+        .collect();
+    bases.sort_by_key(|(glyph, _)| *glyph);
+    let clips: Vec<(u16, u16, [i16; 4])> = clips
+        .iter()
+        .map(|&(c, rect)| (letter(c), letter(c), rect))
+        .collect();
+    let colr = colr_v1(&bases, &clips);
+    base.clone().with_colour(Colour {
+        rectangles: V1_RECTS.to_vec(),
+        colr,
+        cpal: v1_palette(),
+    })
+}
+
+/// `Glyph(rect, Solid(entry))`, the commonest graph below.
+fn filled(rect: u16, entry: u16) -> V1 {
+    V1::Glyph(rect, Box::new(V1::Solid(entry, 1.0)))
+}
+
+/// **FT-06.12's exit.** One letter a paint format, each glyph's graph
+/// written, drawn through `shaping::write_run` and rendered: at a sample
+/// point inside the transformed clip, the colour the graph paints there,
+/// and at one outside it, the page — every place computed here from the
+/// graph's own affine arithmetic, the matrices of *Formats 12 to 31*, and
+/// every colour from the palette and simple alpha compositing.
+#[test]
+fn colr_v1_solids_glyphs_and_transforms_draw_by_the_formulas() {
+    let letters = "ABCDEFGHIJKLMNOP";
+    let face = v1_face(
+        letters,
+        |rect, letter| {
+            let r0 = rect(0);
+            vec![
+                // Formats 10 and 2.
+                ('A', filled(r0, 0)),
+                // Format 1: blue under green at half.
+                (
+                    'B',
+                    V1::Layers(vec![
+                        filled(rect(1), 1),
+                        V1::Glyph(r0, Box::new(V1::Solid(2, 0.5))),
+                    ]),
+                ),
+                // Format 14.
+                ('C', V1::Translate(300, 200, Box::new(filled(r0, 0)))),
+                // Formats 16, 18, 20 and 22.
+                ('D', V1::Scale(1.5, 0.5, None, Box::new(filled(r0, 0)))),
+                (
+                    'E',
+                    V1::Scale(0.5, 0.5, Some([300, 300]), Box::new(filled(r0, 0))),
+                ),
+                ('F', V1::ScaleUniform(1.5, None, Box::new(filled(r0, 0)))),
+                (
+                    'G',
+                    V1::ScaleUniform(0.5, Some([100, 100]), Box::new(filled(r0, 0))),
+                ),
+                // Formats 24 and 26: a quarter of 180° about the origin, and a
+                // half about the em's middle.
+                ('H', V1::Rotate(0.25, None, Box::new(filled(rect(3), 0)))),
+                (
+                    'I',
+                    V1::Rotate(0.5, Some([500, 500]), Box::new(filled(rect(4), 0))),
+                ),
+                // Formats 28 and 30: 45° along y about the origin, and 45°
+                // along x about (300, 300).
+                ('J', V1::Skew(0.0, 0.25, None, Box::new(filled(r0, 0)))),
+                (
+                    'K',
+                    V1::Skew(0.25, 0.0, Some([300, 300]), Box::new(filled(r0, 0))),
+                ),
+                // Format 12: a quarter turn and a move of an em along x.
+                (
+                    'L',
+                    V1::Transform([0.0, 1.0, -1.0, 0.0, 1000.0, 0.0], Box::new(filled(r0, 0))),
+                ),
+                // Format 11: `A`'s graph.
+                ('M', V1::ColrGlyph(letter('A'))),
+                // A clip box over the em's lower left quarter.
+                ('N', filled(rect(2), 1)),
+                // The text's own colour.
+                ('O', V1::Glyph(r0, Box::new(V1::Solid(FOREGROUND, 1.0)))),
+                // Format 3, at the default instance.
+                ('P', V1::Glyph(r0, Box::new(V1::VarSolid(1, 1.0)))),
+            ]
+        },
+        &[('N', [0, 0, 500, 500])],
+    );
+    let (bytes, warnings) = colour_document(
+        &face,
+        letters,
+        PaletteChoice::Default,
+        DocumentBuilder::new(),
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (bitmap, text) = rendered(bytes);
+    assert_eq!(text, letters);
+
+    // A point of glyph space through a matrix, for the rotations and skews.
+    let through = |matrix: [f64; 6], [x, y]: [f64; 2]| {
+        [
+            matrix[0] * x + matrix[2] * y + matrix[4],
+            matrix[1] * x + matrix[3] * y + matrix[5],
+        ]
+    };
+    let quarter = std::f64::consts::FRAC_PI_4;
+    let rotate_45 = [
+        quarter.cos(),
+        quarter.sin(),
+        -quarter.sin(),
+        quarter.cos(),
+        0.0,
+        0.0,
+    ];
+    let samples: Vec<(char, [f64; 2], [u8; 3])> = vec![
+        ('A', [300.0, 300.0], RED),
+        ('A', [700.0, 700.0], WHITE),
+        // Green at half over blue where both are, blue alone, green alone
+        // over the page.
+        ('B', [300.0, 300.0], over_at(GREEN, 0.5, BLUE)),
+        ('B', [700.0, 700.0], BLUE),
+        ('B', [150.0, 150.0], over_at(GREEN, 0.5, WHITE)),
+        ('B', [900.0, 900.0], WHITE),
+        // The square moved to (400, 300)-(800, 700).
+        ('C', [600.0, 500.0], RED),
+        ('C', [300.0, 300.0], WHITE),
+        // Scaled to (150, 50)-(750, 250).
+        ('D', [450.0, 150.0], RED),
+        ('D', [300.0, 350.0], WHITE),
+        // Halved about its middle: (200, 200)-(400, 400).
+        ('E', [300.0, 300.0], RED),
+        ('E', [150.0, 150.0], WHITE),
+        ('E', [450.0, 450.0], WHITE),
+        // Scaled to (150, 150)-(750, 750).
+        ('F', [700.0, 700.0], RED),
+        ('F', [850.0, 850.0], WHITE),
+        // Halved about (100, 100): (100, 100)-(300, 300).
+        ('G', [200.0, 200.0], RED),
+        ('G', [400.0, 400.0], WHITE),
+        // The bar's middle, turned 45° about the origin; and where it was.
+        ('H', through(rotate_45, [500.0, 0.0]), RED),
+        ('H', [500.0, 30.0], WHITE),
+        // Turned a half of 180° about (500, 500): (x, y) to (1000 - y, x).
+        ('I', [1000.0 - 250.0, 500.0], RED),
+        ('I', [500.0, 250.0], WHITE),
+        // y' = x + y: (300, 300) to (300, 600); (300, 200) comes from
+        // (300, -100), outside the square.
+        ('J', [300.0, 600.0], RED),
+        ('J', [300.0, 200.0], WHITE),
+        // x' = x - y + 300 about (300, 300): (300, 400) to (200, 400); (600,
+        // 300) comes from (600, 300), outside.
+        ('K', [200.0, 400.0], RED),
+        ('K', [600.0, 300.0], WHITE),
+        // x' = 1000 - y, y' = x: (300, 300) to (700, 300).
+        ('L', [700.0, 300.0], RED),
+        ('L', [300.0, 300.0], WHITE),
+        ('M', [300.0, 300.0], RED),
+        ('M', [700.0, 700.0], WHITE),
+        // The em filled blue, but for the clip box's quarter.
+        ('N', [250.0, 250.0], BLUE),
+        ('N', [750.0, 750.0], WHITE),
+        ('N', [250.0, 750.0], WHITE),
+        ('O', [300.0, 300.0], TEXT_GREEN),
+        ('P', [300.0, 300.0], BLUE),
+        ('P', [700.0, 700.0], WHITE),
+    ];
+    for (letter, unit, want) in samples {
+        let pen = letters.find(letter).expect("a letter") as f64;
+        let point = at_units(pen, unit);
+        let got = pixel(&bitmap, point, 100.0);
+        assert!(
+            close(got, want, 2),
+            "{letter} at {unit:?} ({point:?}) is {got:?}, not {want:?}"
+        );
+    }
+}
+
+/// **FT-06.12's exit.** A composite whose mode is not source-over is drawn
+/// source-over — the backdrop, then the source over it — and named with its
+/// mode (ruling 10); a source-over composite is that, and named not at all.
+#[test]
+fn a_composite_is_named_until_it_is_drawn() {
+    let face = v1_face(
+        "AB",
+        |rect, _| {
+            let composite = |mode| {
+                V1::Composite(
+                    Box::new(filled(rect(0), 1)),
+                    mode,
+                    Box::new(filled(rect(1), 0)),
+                )
+            };
+            // 23, COMPOSITE_MULTIPLY; 3, COMPOSITE_SRC_OVER.
+            vec![('A', composite(23)), ('B', composite(3))]
+        },
+        &[],
+    );
+    let (bytes, warnings) =
+        colour_document(&face, "AB", PaletteChoice::Default, DocumentBuilder::new());
+    let a = face.glyph_of('A').expect("covered");
+    assert_eq!(
+        warnings,
+        [ColourWarning::CompositeDrawnSourceOver {
+            glyph: a,
+            mode: tinker_pdf_font::colr::CompositeMode::Multiply,
+        }]
+    );
+    let (bitmap, _) = rendered(bytes);
+    for pen in [0.0, 1.0] {
+        for (unit, want) in [
+            ([300.0, 300.0], BLUE),
+            ([700.0, 700.0], RED),
+            ([150.0, 150.0], BLUE),
+            ([900.0, 900.0], WHITE),
+        ] {
+            let got = pixel(&bitmap, at_units(pen, unit), 100.0);
+            assert!(close(got, want, 2), "{pen} {unit:?}: {got:?}");
+        }
+    }
+}
+
+/// What version 1 cannot draw yet falls to the glyph's next table, named:
+/// a gradient (until FT-06.13), a graph that is not bounded and has no clip
+/// box, and a palette entry the palette lacks; a graph bounded only by its
+/// clip box draws inside it; and a table refused for a cycle is named, the
+/// rest of the graph drawn.
+#[test]
+fn version_1_graphs_it_cannot_draw_fall_to_the_next_table_and_are_named() {
+    let face = v1_face(
+        "ABCDE",
+        |rect, letter| {
+            vec![
+                ('A', V1::Glyph(rect(0), Box::new(V1::Linear))),
+                ('B', V1::Solid(0, 1.0)),
+                ('C', V1::Solid(0, 1.0)),
+                ('D', filled(rect(0), 9)),
+                (
+                    'E',
+                    V1::Layers(vec![filled(rect(0), 1), V1::ColrGlyph(letter('E'))]),
+                ),
+            ]
+        },
+        &[('C', [100, 100, 400, 400])],
+    );
+    let (bytes, warnings) = colour_document(
+        &face,
+        "ABCDE",
+        PaletteChoice::Default,
+        DocumentBuilder::new(),
+    );
+    let glyph = |c| face.glyph_of(c).expect("covered");
+    assert!(warnings.contains(&ColourWarning::GradientNotDrawn {
+        glyph: glyph('A'),
+        format: 4,
+    }));
+    assert!(warnings.contains(&ColourWarning::Unbounded { glyph: glyph('B') }));
+    assert!(warnings.contains(&ColourWarning::PaletteEntryMissing {
+        glyph: glyph('D'),
+        entry: 9,
+    }));
+    assert!(
+        warnings.iter().any(|w| matches!(
+            w,
+            ColourWarning::Read {
+                glyph,
+                warning: tinker_pdf_font::colr::ColrWarning::PaintRefused(
+                    tinker_pdf_font::colr::ColrRefusal::Cycle { .. }
+                ),
+            } if *glyph == face.glyph_of('E').expect("covered")
+        )),
+        "{warnings:?}"
+    );
+    let (bitmap, text) = rendered(bytes);
+    assert_eq!(text, "ABCDE");
+    let samples = [
+        // A, B and D: each its own outline, the box from 0 to 700, in the
+        // text's colour.
+        (0.0, [350.0, 350.0], TEXT_GREEN),
+        (0.0, [850.0, 850.0], WHITE),
+        (1.0, [350.0, 350.0], TEXT_GREEN),
+        (3.0, [350.0, 350.0], TEXT_GREEN),
+        // C: red inside its clip box only.
+        (2.0, [250.0, 250.0], RED),
+        (2.0, [600.0, 600.0], WHITE),
+        // E: its first layer, the cycle drawn as nothing.
+        (4.0, [300.0, 300.0], BLUE),
+        (4.0, [700.0, 700.0], WHITE),
+    ];
+    for (pen, unit, want) in samples {
+        let got = pixel(&bitmap, at_units(pen, unit), 100.0);
+        assert!(close(got, want, 2), "{pen} {unit:?}: {got:?}, not {want:?}");
+    }
+}
+
+/// `LayersOfOne` nested `depth` times over `leaf`: one table at each level,
+/// its two slots naming the level below, so the paths double at each.
+fn fan_out(depth: usize, leaf: V1) -> V1 {
+    (0..depth).fold(leaf, |below, _| V1::LayersOfOne(2, Box::new(below)))
+}
+
+/// A table that many parents name and that draws only inside its own
+/// outlines is written once, as a form each parent draws: twenty levels of a
+/// layer list naming the level below twice is a million paths and a page of
+/// a few kilobytes, painting its square red.
+#[test]
+fn a_table_shared_by_many_parents_is_written_once() {
+    let face = v1_face(
+        "A",
+        |rect, _| vec![('A', fan_out(20, filled(rect(0), 0)))],
+        &[],
+    );
+    let (bytes, warnings) =
+        colour_document(&face, "A", PaletteChoice::Default, DocumentBuilder::new());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(bytes.len() < 1 << 16, "{} bytes", bytes.len());
+    let (bitmap, _) = rendered(bytes);
+    assert!(close(
+        pixel(&bitmap, at_units(0.0, [300.0, 300.0]), 100.0),
+        RED,
+        2
+    ));
+    assert!(close(
+        pixel(&bitmap, at_units(0.0, [700.0, 700.0]), 100.0),
+        WHITE,
+        2
+    ));
+}
+
+/// The same fan-out with a fill below it that no outline of its own bounds —
+/// the clip is the glyph's, above the fan — cannot be one form, and its
+/// million paths pass `MAX_DRAWN_PAINTS`: the glyph is drawn as its outline
+/// and named (ruling 1).
+#[test]
+fn a_fan_out_past_the_walk_budget_is_named() {
+    let face = v1_face(
+        "A",
+        |rect, _| {
+            vec![(
+                'A',
+                V1::Glyph(rect(0), Box::new(fan_out(20, V1::Solid(0, 1.0)))),
+            )]
+        },
+        &[],
+    );
+    let (bytes, warnings) =
+        colour_document(&face, "A", PaletteChoice::Default, DocumentBuilder::new());
+    let a = face.glyph_of('A').expect("covered");
+    assert_eq!(warnings, [ColourWarning::GraphTooLarge { glyph: a }]);
+    let (bitmap, _) = rendered(bytes);
+    assert!(close(
+        pixel(&bitmap, at_units(0.0, [350.0, 350.0]), 100.0),
+        TEXT_GREEN,
+        2
+    ));
 }

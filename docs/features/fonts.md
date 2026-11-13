@@ -1095,16 +1095,35 @@ What it does:
   add the procedure of each glyph the builder has none for, and writes it
   through `colour_glyph_run`. A glyph's procedure is the first of
   [the design](../design/colour-fonts.md)'s tables that describes it, in font
-  units: COLR version 0's layers bottom first, each layer's outline — from
-  `glyf`, or `CFF ` in a face without one — filled under `q`/`Q` in its
-  palette colour, an alpha below one through an `/ExtGState` the face
-  registers once per value, a foreground layer setting no colour so it paints
-  in the text's own; and for a glyph no table describes, its outline in the
+  units. COLR version 1's graph comes first, each paint as the design's
+  construct: a layer list drawn bottom first; a solid filling the box of the
+  clip region it paints inside, in its palette colour, its alpha the entry's
+  times the paint's through an `/ExtGState`; a glyph's outline — from `glyf`,
+  or `CFF ` in a face without one — as `W n` around its child; a
+  `PaintColrGlyph` as the named glyph's graph in place, its clip box not
+  applying; the transform family as `cm` — `Affine2x3` in its own order, a
+  rotation `[cos θ, sin θ, −sin θ, cos θ]` and a skew `[1, tan ψ, −tan φ, 1]`
+  through `tinker_pdf_svg::transform`'s `rotation` and `tangent`, each
+  around-centre form carried to its centre and back — and the glyph's clip
+  box as `W n` around the whole and its form's box. A node several parents
+  name that paints only inside its own outlines is one form each parent draws,
+  so a fan-out writes its tables and not its paths. COLR version 0's layers
+  come next, bottom first, each layer's outline filled under `q`/`Q` in its
+  palette colour and alpha, a foreground layer setting no colour so it paints
+  in the text's own; and a glyph no table describes is its outline in the
   text's colour. Every number is rounded once to a ten-thousandth of a unit,
-  so the procedures are the same bytes on every target. Under a profile that
-  forbids transparency a glyph whose layers need an alpha is drawn as its
-  outline and named, `ColourWarning::TransparencyForbidden`, on
-  `ColourFace::warnings`, and the builder refuses nothing.
+  so the procedures are the same bytes on every target. What a glyph cannot
+  be drawn as is named on `ColourFace::warnings` and drawn as its next table:
+  a graph holding a gradient (`ColourWarning::GradientNotDrawn`), one with no
+  clip box that a fill leaves unbounded (`Unbounded`), one whose walk passes
+  `MAX_DRAWN_PAINTS` paints (`GraphTooLarge`), one naming a palette entry the
+  palette lacks (`PaletteEntryMissing`), and, under a profile that forbids
+  transparency, one needing an alpha (`TransparencyForbidden`, the builder
+  refusing nothing). A composite is drawn source-over, the backdrop then the
+  source, and named with its mode (`CompositeDrawnSourceOver`); a transform
+  that is no number or flattens the plane draws nothing of what it holds
+  (`TransformUnusable`); and what the graph's reader tolerated or refused is
+  passed on (`Read`), a refused table drawing nothing and the rest drawn.
 
 - **Shaped values into a form field.** `tinker_pdf_cos::Font::program` walks
   `/DescendantFonts` → `/FontDescriptor` → `/FontFile2` (or `/FontFile3`, or
@@ -1529,6 +1548,9 @@ corpora already vendored here. So every name stays on the list.
 | An `sbix` graphic of type `mask` or `pdf `, or of any type but `png `, `jpg ` and `tiff` | `SbixRefusal::GraphicType` | The sbix chapter's *Glyph data* names `mask` and `pdf ` as not supported in OpenType, and defines no other | [design](../design/colour-fonts.md) |
 | CBDT's uncompressed and component glyph data, the EBDT formats 1 to 9 it inherits | `CbdtRefusal::DataFormat(n)` | Read and drawn by their own step; the PNG formats 17 to 19 are what colour fonts carry | [ROADMAP](../ROADMAP.md) FT-06.21 |
 | A gzip-encoded `SVG ` document that inflates past `MAX_SVG_DOCUMENT` (16 MiB), or that RFC 1952's reader refuses | `SvgRefusal::TooLarge`, `SvgRefusal::Gzip` | A few kilobytes of deflate inflate to gigabytes (ruling 1), and a document cut short or read past a failed check is a different picture, so the glyph is left to the next table that describes it | [design](../design/colour-fonts.md) |
+| A COLR version 1 gradient, written into a document | `ColourWarning::GradientNotDrawn` | Drawn as shadings by its own step; until then the glyph is drawn as its next table, a glyph with a fill missing being a different picture | [ROADMAP](../ROADMAP.md) FT-06.13 |
+| A COLR version 1 composite whose mode is not source-over, written into a document | `ColourWarning::CompositeDrawnSourceOver` | Drawn source-over, the backdrop then the source, until its own step writes each mode ISO 32000-2's transparency expresses | [ROADMAP](../ROADMAP.md) FT-06.14 |
+| A COLR version 1 graph with no clip box that a fill leaves unbounded, or whose walk passes `MAX_DRAWN_PAINTS` | `ColourWarning::Unbounded`, `GraphTooLarge` | The chapter forbids drawing an unbounded glyph; a graph of 2^64 paths is a few hundred bytes (ruling 1); the glyph is drawn as its next table | [design](../design/colour-fonts.md) |
 | TrueType and Type 2 hinting | none — outlines are unhinted, not degraded | The bytecode interpreter makes small text differently wrong; subset output keeps `cvt `/`fpgm`/`prep` for readers that disagree. Stem darkening, the bytecode interpreter, CFF hints and an autohinter are roadmap rows, the small-text judgement a person's | [ROADMAP](../ROADMAP.md) FT-04a…FT-04d |
 
 ## Verified
@@ -1780,7 +1802,15 @@ corpora already vendored here. So every name stays on the list.
   composites from either palette over the layers below, the foreground layer
   in the text's colour, the text extracting; one form for a glyph drawn
   twice; a translucent layer under a part 1 profile drawn as the outline and
-  named.
+  named. For COLR version 1, one glyph a paint format — solids, the variable
+  solid at its default, layers, a glyph as clip, a `PaintColrGlyph`, every
+  transform with and without a centre, a clip box and the foreground — at
+  points inside and outside its transformed clip, each place computed from
+  the graph's own affine arithmetic; a composite drawn source-over and named
+  with its mode; a gradient, an unbounded graph and a missing palette entry
+  falling to the outline, named; a cycle named and the rest drawn; a
+  million-path fan-out of one shared table written in kilobytes, and one no
+  outline of its own bounds named past the walk budget.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

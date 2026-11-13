@@ -98,6 +98,17 @@ pub fn rotation(degrees: f64) -> [f64; 6] {
     [cos, sin, -sin, cos, 0.0, 0.0]
 }
 
+/// The tangent of an angle of `degrees`, through `tinker-pdf-math` — the
+/// number §7.6's `skewX` and `skewY` put in their matrices.
+///
+/// Public for [`rotation`]'s reason: a caller writing a skew of its own — a
+/// colour font's `PaintSkew` — must not compute it with a platform `tan`
+/// (ruling 4).
+#[must_use]
+pub fn tangent(degrees: f64) -> f64 {
+    math::tan(math::to_radians(degrees))
+}
+
 /// One transform function, as its own matrix.
 fn function(name: &str, n: &[f64]) -> Option<[f64; 6]> {
     Some(match (name, n.len()) {
@@ -127,8 +138,8 @@ fn function(name: &str, n: &[f64]) -> Option<[f64; 6]> {
                 y - sin * x - cos * y,
             ]
         }
-        ("skewX", 1) => [1.0, 0.0, math::tan(math::to_radians(n[0])), 1.0, 0.0, 0.0],
-        ("skewY", 1) => [1.0, math::tan(math::to_radians(n[0])), 0.0, 1.0, 0.0, 0.0],
+        ("skewX", 1) => [1.0, 0.0, tangent(n[0]), 1.0, 0.0, 0.0],
+        ("skewY", 1) => [1.0, tangent(n[0]), 0.0, 1.0, 0.0, 0.0],
         _ => return None,
     })
 }
