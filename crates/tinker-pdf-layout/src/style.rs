@@ -34,7 +34,7 @@
 //! `font-variant` is still carried rather than honoured: it reaches the painter
 //! as a value and no synthesis of small capitals happens anywhere.
 
-use tinker_pdf_css::cascade::ComputedStyle;
+use tinker_pdf_css::cascade::{ComputedStyle, Language};
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BackgroundPosition, BackgroundRepeat, BackgroundSize,
     BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
@@ -86,6 +86,10 @@ pub struct Consumed {
     /// `hyphens`: whether a soft hyphen is a break, and a hyphen where the
     /// line breaks at it.
     pub hyphens: Hyphens,
+    /// The element's content language (`selectors-4` §6.5.1), carried by
+    /// every piece of an inline formatting context [`crate::flow`] lays out.
+    /// One shared tag, eight bytes here.
+    pub language: Option<Language>,
     /// `color`.
     pub color: Color,
     /// `text-decoration`.
@@ -331,6 +335,9 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         direction,
         unicode_bidi,
         hyphens,
+        // The content language: not a property, and read all the same, so
+        // that every piece of an inline formatting context carries it.
+        language,
         display,
         float,
         clear,
@@ -447,6 +454,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         direction: *direction,
         unicode_bidi: *unicode_bidi,
         hyphens: *hyphens,
+        language: language.clone(),
         color: *color,
         text_decoration: *text_decoration,
         line_height,

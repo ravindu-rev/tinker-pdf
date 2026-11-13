@@ -611,3 +611,58 @@ fn the_document_language_answers_the_pseudo_classes_that_are_its_own() {
         }
     }
 }
+
+/// **The content language every computed style carries is XHTML's**:
+/// `xml:lang` before `lang` on one element, inherited from an ancestor, an
+/// empty `xml:lang` saying the language is not known even where a `lang`
+/// beside it names one, and kept as the document wrote it.
+///
+/// The cascade's own suite proves the walk over a fixture element; this
+/// proves the real element's answer reaches it, for the reason the test above
+/// gives for `:lang()`.
+#[test]
+fn the_content_language_is_xml_lang_before_lang_and_inherited() {
+    use tinker_pdf_css::cascade::{cascade, Language, Origin};
+    let markup = r#"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en-GB" lang="fr">
+  <body>
+    <p id="inherits">one</p>
+    <p id="dutch" lang="NL-be">two</p>
+    <p id="unknown" xml:lang="" lang="de"><em id="under">three</em></p>
+  </body>
+</html>
+"#;
+    let dom = xhtml::read(markup.as_bytes(), &tinker_pdf_xml::Limits::DEFAULT).expect("markup");
+    assert!(dom.defects.is_empty(), "{:?}", dom.defects);
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let sheet = parse(
+        b"p { color: red }",
+        None,
+        &NoImports,
+        &MediaContext::screen(432.0, 648.0),
+        &limits,
+        &mut budget,
+    )
+    .expect("a one-rule sheet");
+    let styled = cascade(
+        &[(Origin::Author, &sheet)],
+        &dom.nodes,
+        &limits,
+        &mut budget,
+    )
+    .expect("under every cap");
+    let spoken = |id: &str| {
+        let at = dom.by_id(id).unwrap_or_else(|| panic!("no #{id}"));
+        styled.styles[at].language.clone()
+    };
+    assert_eq!(
+        styled.styles[0].language,
+        Language::new("en-GB"),
+        "`xml:lang` beats `lang` on the root"
+    );
+    assert_eq!(spoken("inherits"), Language::new("en-GB"));
+    assert_eq!(spoken("dutch"), Language::new("NL-be"), "as written");
+    assert_eq!(spoken("unknown"), None, "an empty `xml:lang` is not known");
+    assert_eq!(spoken("under"), None, "and its descendants inherit that");
+}

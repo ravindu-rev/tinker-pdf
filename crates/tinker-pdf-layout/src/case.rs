@@ -20,13 +20,14 @@
 //! `SpecialCasing.txt` that names no language.
 //!
 //! The **language-conditional** mappings — Lithuanian's retained dot, and
-//! Turkish and Azeri's dotted and dotless `i` — are not, because this crate is
-//! never told a run's language: a box tree carries computed styles and the
-//! language is the document's. §2.1 requires them *"if (and only if) the
-//! content language of the element is ... known"*, so the cascade counts every
-//! element in one of the three languages with a casing transform as
-//! `text-transform` unimplemented, rather than letting a Turkish heading set
-//! with an English `I` read as honoured.
+//! Turkish and Azeri's dotted and dotless `i` — are not. Each run's language
+//! reaches this crate now, as the content language every computed style
+//! carries (`ComputedStyle::language`, read into `Consumed::language`), and
+//! nothing here applies `SpecialCasing.txt`'s rows for it yet. §2.1 requires
+//! them *"if (and only if) the content language of the element is ...
+//! known"*, so the cascade counts every element in one of the three languages
+//! with a casing transform as `text-transform` unimplemented, rather than
+//! letting a Turkish heading set with an English `I` read as honoured.
 //!
 //! # What a word is
 //!

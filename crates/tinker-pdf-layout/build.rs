@@ -334,9 +334,9 @@ fn letter_or_number(data: &Path, out: &mut String) {
 /// language-independent — `Final_Sigma`, Σ lowercasing to ς at the end of a
 /// word — and `crate::case` implements it, so its row is checked here and not
 /// tabled. Every other conditional row names a language (`lt`, `tr`, `az`),
-/// and this crate is never told a run's language, so they are counted and not
-/// applied; a conditional row naming a context this file does not know
-/// **fails the build**, for the reason `Class` names its variants.
+/// and `crate::case` does not apply them for a run's language, so they are
+/// counted and not tabled; a conditional row naming a context this file does
+/// not know **fails the build**, for the reason `Class` names its variants.
 fn case_mappings(data: &Path, out: &mut String) {
     let path = data.join("UnicodeData.txt");
     let text = std::fs::read_to_string(&path)

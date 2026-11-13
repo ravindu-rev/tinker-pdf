@@ -1219,10 +1219,10 @@ fn a_break_alias_and_its_legacy_name_are_one_property_in_the_cascade() {
 /// counted as unimplemented** (`css-text-3` §2.1).
 ///
 /// §2.1 makes the language-specific mappings mandatory when the element's
-/// language is known, and the layout crate that applies the transform is never
-/// told a language. So an element in one of the three with a casing transform
-/// is a `text-transform` gap, by element; one in any other language, or with
-/// no transform, is not.
+/// language is known, and the layout crate that applies the transform, though
+/// it is told each run's language, does not apply them. So an element in one
+/// of the three with a casing transform is a `text-transform` gap, by element;
+/// one in any other language, or with no transform, is not.
 #[test]
 fn text_transform_inherits_and_is_counted_where_its_language_conditions_it() {
     use crate::property::TextTransform;
@@ -1258,6 +1258,153 @@ fn text_transform_inherits_and_is_counted_where_its_language_conditions_it() {
             .map(|(_, count)| *count),
         Some(3)
     );
+}
+
+/// **Each element's content language is computed, and inherited down the
+/// tree** (`selectors-4` §6.5.1): the nearest element that declares one
+/// gives it, `xml:lang` before `lang` where an element declares both, an
+/// empty declaration says the language is not known and gives none to the
+/// element and everything under it, and a root that declares nothing gives
+/// its tree none.
+///
+/// The tag is kept as the document wrote it, a generated box speaks its
+/// originating element's language, an anonymous box made from a style
+/// speaks that style's, no declaration reaches it — `color: inherit` and
+/// `hyphens: initial` leave it where it was — and the lazy resolution, which
+/// walks the tree for it, agrees with the single pass.
+#[test]
+fn the_content_language_is_computed_and_inherited() {
+    use crate::cascade::Language;
+    let mut nodes = tree(&[
+        ("html", None),
+        ("body", Some(0)),
+        ("p", Some(1)),
+        ("em", Some(2)),
+        ("div", Some(1)),
+        ("span", Some(4)),
+        ("q", Some(4)),
+        ("aside", None),
+        ("p", Some(7)),
+    ]);
+    nodes[0].attributes.push(("lang".into(), "en-GB".into()));
+    // `lang` written first, so that the order the attributes come in is not
+    // what decides it.
+    nodes[2].attributes.push(("lang".into(), "fr".into()));
+    nodes[2].attributes.push(("xml:lang".into(), "nl".into()));
+    nodes[4].attributes.push(("lang".into(), String::new()));
+    nodes[6].attributes.push(("lang".into(), "PT-br".into()));
+    let source = "p::before { content: \"-\" } em { color: inherit; hyphens: initial }";
+    let parsed = sheet(source);
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let styled = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    let spoken: Vec<Option<&str>> = styled
+        .styles
+        .iter()
+        .map(|style| style.language.as_ref().map(Language::as_str))
+        .collect();
+    assert_eq!(
+        spoken,
+        vec![
+            Some("en-GB"),
+            Some("en-GB"),
+            Some("nl"),
+            Some("nl"),
+            None,
+            None,
+            Some("PT-br"),
+            None,
+            None,
+        ],
+        "html declares, body inherits, p's xml:lang beats its lang, em inherits, \
+         div's empty lang is none and span inherits that, q declares its own, and \
+         the second root and its child have none"
+    );
+    let before = |at: usize| {
+        styled.generated[at]
+            .before
+            .as_ref()
+            .expect("a ::before")
+            .style
+            .language
+            .clone()
+    };
+    assert_eq!(before(2), Language::new("nl"), "the generated box's");
+    assert_eq!(before(8), None);
+    assert_eq!(
+        ComputedStyle::inherit_from(&styled.styles[3]).language,
+        Language::new("nl"),
+        "an anonymous box's"
+    );
+    assert_eq!(Language::new(""), None, "the empty tag is no language");
+
+    let sheets = [(Origin::Author, &parsed)];
+    for (at, expected) in styled.styles.iter().enumerate() {
+        let lazy = resolve_lazily(&sheets, &nodes, at, &mut Budget::new(&limits))
+            .expect("under every cap");
+        assert_eq!(lazy.language, expected.language, "element {at}");
+    }
+}
+
+/// **Two elements the memo gives one style keep their own languages**, and
+/// so do their children and their generated boxes.
+///
+/// The memo keys a style by its parent's style number, its winners and the
+/// root's font size, and a `lang` attribute is none of the three: the two
+/// `div`s below share one style, so the two `p`s share one too, and so do
+/// their `::after` boxes — in two languages. The count says the memo did
+/// share them, so the languages are not right because nothing was shared.
+#[test]
+fn a_shared_style_keeps_each_elements_own_language() {
+    use crate::cascade::{cascade_fresh, Language, STYLES_COMPUTED};
+    let mut nodes = tree(&[
+        ("body", None),
+        ("div", Some(0)),
+        ("p", Some(1)),
+        ("div", Some(0)),
+        ("p", Some(3)),
+    ]);
+    nodes[1].attributes.push(("lang".into(), "nl".into()));
+    nodes[3].attributes.push(("lang".into(), "pt".into()));
+    let parsed = sheet("p { color: red } p::after { content: \"x\" }");
+    let limits = Limits::DEFAULT;
+    STYLES_COMPUTED.with(|n| n.set(0));
+    let memoised = cascade(
+        &[(Origin::Author, &parsed)],
+        &nodes,
+        &limits,
+        &mut Budget::new(&limits),
+    )
+    .expect("under every cap");
+    assert_eq!(
+        STYLES_COMPUTED.with(std::cell::Cell::get),
+        4,
+        "body, one div, one p and one ::after: the second div, p and ::after shared"
+    );
+    let language = |at: usize| memoised.styles[at].language.clone();
+    assert_eq!(language(2), Language::new("nl"));
+    assert_eq!(language(4), Language::new("pt"));
+    let after = |at: usize| {
+        memoised.generated[at]
+            .after
+            .as_ref()
+            .expect("a ::after")
+            .style
+            .language
+            .clone()
+    };
+    assert_eq!(after(2), Language::new("nl"));
+    assert_eq!(after(4), Language::new("pt"));
+    let fresh = cascade_fresh(
+        &[(Origin::Author, &parsed)],
+        &nodes,
+        &limits,
+        &mut Budget::new(&limits),
+        &ComputedStyle::initial(),
+    )
+    .expect("under every cap");
+    assert_eq!(memoised, fresh, "and a fresh cascade's styles");
 }
 
 /// **`overflow-x: auto` alone makes a box that clips in both axes**

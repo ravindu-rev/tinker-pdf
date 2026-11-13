@@ -47,6 +47,7 @@
 //! compare the two; it is not the shipped route and its doc comment says so.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::longhand::Longhand;
 use crate::parser::{Declared, LayerPart, Report, StyleRule, Stylesheet};
@@ -110,6 +111,37 @@ struct CascadeKey {
     specificity: Specificity,
     /// §6.1 criterion 6: later in the document order of the sheets wins.
     order: usize,
+}
+
+/// An element's content language: the BCP 47 tag the nearest `xml:lang` or
+/// `lang` declares (`selectors-4` §6.5.1), exactly as the document wrote it.
+///
+/// **One shared, immutable tag behind one pointer.** The tag is allocated
+/// once, for the element that declares it, and every element that inherits it
+/// holds the same allocation, so a copy is a reference count and
+/// `Option<Language>` is eight bytes in every computed style and in every
+/// `tinker_pdf_layout::style::Consumed` (`docs/design/hyphenation.md`).
+///
+/// It is kept as written: RFC 5646 §2.1.1 makes a tag case-insensitive, so a
+/// consumer that matches one compares it ASCII-case-insensitively — the
+/// hyphenation tables' lookup does — rather than this type folding it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Language(Arc<String>);
+
+impl Language {
+    /// The language a declaration of `tag` gives, or `None` for the empty
+    /// tag: `lang=""` says the language is **not known**, which is no
+    /// language rather than one called the empty string.
+    #[must_use]
+    pub fn new(tag: &str) -> Option<Language> {
+        (!tag.is_empty()).then(|| Language(Arc::new(tag.to_owned())))
+    }
+
+    /// The tag, as the document wrote it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Every property this build computes, resolved.
@@ -205,8 +237,19 @@ pub struct ComputedStyle {
     pub direction: Direction,
     /// `unicode-bidi`, §2.2.
     pub unicode_bidi: UnicodeBidi,
-    /// `hyphens`, `css-text-3` §5.4.
+    /// `hyphens`, `css-text-3` §5.3.
     pub hyphens: Hyphens,
+    /// The element's **content language** (`selectors-4` §6.5.1): the tag
+    /// the nearest element that declares one declares, or `None` where none
+    /// up to the root does or the nearest declares the empty string.
+    ///
+    /// Not a property: no declaration sets it, and `inherit`, `initial`,
+    /// `unset` and `all` leave it alone. The cascade assigns it from the
+    /// element tree after the memo has given an element its style, since two
+    /// elements the memo gives one style may speak two languages, and
+    /// [`ComputedStyle::inherit_from`] copies it, so an anonymous box speaks
+    /// its parent's. `hyphens: auto` keys its dictionary on it.
+    pub language: Option<Language>,
     /// `display`
     pub display: Display,
     /// `float`
@@ -373,6 +416,7 @@ impl ComputedStyle {
             direction: Direction::Ltr,
             unicode_bidi: UnicodeBidi::Normal,
             hyphens: Hyphens::Manual,
+            language: None,
             display: Display::Inline,
             float: Float::None,
             clear: Clear::None,
@@ -476,6 +520,10 @@ impl ComputedStyle {
         style.font_feature_settings = parent.font_feature_settings.clone();
         style.direction = parent.direction;
         style.hyphens = parent.hyphens;
+        // Not a property, and copied all the same: a box with no element of
+        // its own — a text node's inline box, a table's wrapper — speaks the
+        // language of the element it was made for (`selectors-4` §6.5.1).
+        style.language = parent.language.clone();
         style.list_style_type = parent.list_style_type;
         style.list_style_position = parent.list_style_position;
         style.quotes = parent.quotes.clone();
@@ -1159,7 +1207,6 @@ fn cascade_with<E: Element>(
     let mut styles: Vec<ComputedStyle> = Vec::with_capacity(elements.len());
     let mut generated: Vec<Generated> = Vec::with_capacity(elements.len());
     let mut root_font_size = initial.font_size;
-    let mut language_of: Vec<Option<usize>> = Vec::with_capacity(elements.len());
     // Each element's computed style's number in the memo, so that a child
     // can say which style it inherits from without comparing styles.
     let mut numbers: Vec<u32> = Vec::with_capacity(elements.len());
@@ -1179,7 +1226,7 @@ fn cascade_with<E: Element>(
             .as_ref()
             .and_then(|key| memo.styles.get(key))
             .and_then(|&(number, at)| styles.get(at).map(|style| (number, style.clone())));
-        let (number, style) = match shared {
+        let (number, mut style) = match shared {
             Some(found) => found,
             None => {
                 computed();
@@ -1207,6 +1254,18 @@ fn cascade_with<E: Element>(
         if elements[index].parent().is_none() {
             root_font_size = style.font_size;
         }
+        // `selectors-4` §6.5.1's content language: the element's own
+        // declaration, or its parent's computed one, so it is one copy per
+        // element rather than a walk per element. Assigned whatever the memo
+        // answered, because the memo's key does not hold it: two elements of
+        // one style number may speak two languages, and so may their children.
+        style.language = match elements[index].language() {
+            Some(tag) => Language::new(tag),
+            None => elements[index]
+                .parent()
+                .and_then(|parent| styles.get(parent))
+                .and_then(|parent| parent.language.clone()),
+        };
         // After the element's own style and not before: §12.1 inherits the
         // generated box from the originating element's **computed** style, so
         // there is nothing to inherit from until this line has run.
@@ -1227,27 +1286,27 @@ fn cascade_with<E: Element>(
                 memoise.then_some(&mut memo.pseudos),
             )
         };
-        let before = pseudo(PseudoElement::Before)?;
-        let after = pseudo(PseudoElement::After)?;
-        let first_letter = pseudo(PseudoElement::FirstLetter)?;
+        let mut before = pseudo(PseudoElement::Before)?;
+        let mut after = pseudo(PseudoElement::After)?;
+        let mut first_letter = pseudo(PseudoElement::FirstLetter)?;
+        // A generated box speaks its originating element's language. The
+        // pseudo memo is keyed by the originating style's number, which two
+        // elements in two languages can share, so the language is assigned
+        // here rather than trusted to the style the memo handed back.
+        for generated_box in [&mut before, &mut after, &mut first_letter]
+            .into_iter()
+            .flatten()
+        {
+            generated_box.style.language = style.language.clone();
+        }
         generated.push(Generated {
             marker: None,
             before,
             after,
             first_letter,
         });
-        // `selectors-4` §6.5.1's inheritance of a language, kept as the index
-        // of the nearest element that declares one so that it is one word per
-        // element rather than a walk per element.
-        let declares = elements[index].language().map(|_| index);
-        let speaks = declares.or_else(|| {
-            elements[index]
-                .parent()
-                .and_then(|parent| language_of.get(parent).copied().flatten())
-        });
-        language_of.push(speaks);
         if style.text_transform != TextTransform::None {
-            let language = speaks.and_then(|at| elements[at].language()).unwrap_or("");
+            let language = style.language.as_ref().map_or("", Language::as_str);
             if casing_needs_language(language) {
                 note(&mut report.unsupported, "text-transform");
             }
@@ -1275,10 +1334,11 @@ fn cascade_with<E: Element>(
 /// **`text-transform` is honoured everywhere else and not here**, and this is
 /// what makes the difference a number rather than a silence. `css-text-3` §2.1
 /// requires the language-specific mappings *"if (and only if) the content
-/// language of the element is ... known"*; the layout crate that applies the
-/// transform is handed computed styles and never a language, so an element in
-/// one of these three with a casing transform is counted as `text-transform`
-/// unimplemented — a Turkish heading set in capitals with an English `I` is
+/// language of the element is ... known"*. The layout crate that applies the
+/// transform is told each run's language ([`ComputedStyle::language`]) and
+/// does not apply those mappings, so an element in one of these three with a
+/// casing transform is counted as `text-transform`
+/// unimplemented: a Turkish heading set in capitals with an English `I` is
 /// the plausible wrong page this exists to name.
 fn casing_needs_language(language: &str) -> bool {
     let primary = language.split('-').next().unwrap_or("");
@@ -2454,6 +2514,17 @@ fn lazily<E: Element>(
         &initial,
         root_font_size,
     );
+    // The content language on demand too: the nearest declaration up the
+    // tree, walked rather than inherited, which is the same answer.
+    let mut speaker = Some(at);
+    style.language = None;
+    while let Some(element) = speaker {
+        if let Some(tag) = elements[element].language() {
+            style.language = Language::new(tag);
+            break;
+        }
+        speaker = elements[element].parent();
+    }
     Ok(style)
 }
 

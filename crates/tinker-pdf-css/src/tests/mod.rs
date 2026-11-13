@@ -54,9 +54,11 @@ impl Element for Node {
     fn inline_style(&self) -> Option<&str> {
         self.style.as_deref()
     }
-    /// `lang`, which is enough document language for a fixture.
+    /// `xml:lang`, else `lang`: the facade's XHTML adapter's rule, so that a
+    /// fixture declares a language the way a content document does.
     fn language(&self) -> Option<&str> {
-        self.attribute("lang")
+        self.attribute("xml:lang")
+            .or_else(|| self.attribute("lang"))
     }
     /// A `hint` attribute's declarations, standing in for a document
     /// language's presentational hints.
