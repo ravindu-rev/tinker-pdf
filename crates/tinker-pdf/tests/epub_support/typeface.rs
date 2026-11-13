@@ -139,6 +139,37 @@ pub struct Face {
     /// a face with no kerning; [`Face::placement`] and [`Face::pair`] win over
     /// it, one lookup per face.
     pub kern: Option<Kern>,
+    /// A `GPOS` `PairPosFormat1` that changes both advances of the first
+    /// glyph of one pair — the horizontal one a line takes and the vertical
+    /// one a column takes — under one feature.
+    ///
+    /// The point of carrying both is that each direction applies one: down a
+    /// column a `YAdvance` lengthens the advance height and an `XAdvance` is
+    /// "only used for horizontal layout", and along a line the `XAdvance`
+    /// moves the pen. So one record under `vkrn` shows a column kerned and a
+    /// line not, and under `kern` the other way round. `None` is a face with
+    /// none; every other `GPOS` field wins over it, one lookup per face.
+    pub vertical_kern: Option<VerticalKern>,
+}
+
+/// The first glyph of one pair re-spaced along both axes, by a `GPOS`
+/// `PairPosFormat1` whose first value record is an `XAdvance` and a
+/// `YAdvance` and whose second is empty.
+#[derive(Clone, Copy, Debug)]
+pub struct VerticalKern {
+    /// The first character of the pair, whose advances change.
+    pub first: char,
+    /// The second.
+    pub second: char,
+    /// The script tag the lookup is declared under; `DFLT` reaches every run.
+    pub script: [u8; 4],
+    /// The feature tag: `vkrn` for vertical kerning, `kern` for horizontal.
+    pub feature: [u8; 4],
+    /// `XAdvance` of the first glyph, in font units.
+    pub x_advance: i16,
+    /// `YAdvance` of the first glyph, in font units: negative shortens its
+    /// advance height down a column.
+    pub y_advance: i16,
 }
 
 /// The first glyph of one pair narrowed or widened, by a `GPOS`
@@ -290,6 +321,7 @@ impl Face {
             placement: None,
             pair: None,
             kern: None,
+            vertical_kern: None,
         }
     }
 
@@ -297,6 +329,13 @@ impl Face {
     #[must_use]
     pub fn with_kern(mut self, kern: Kern) -> Face {
         self.kern = Some(kern);
+        self
+    }
+
+    /// The same face, re-spacing one pair along both axes through `GPOS`.
+    #[must_use]
+    pub fn with_vertical_kern(mut self, kern: VerticalKern) -> Face {
+        self.vertical_kern = Some(kern);
         self
     }
 
@@ -507,11 +546,12 @@ fn build(face: &Face) -> Vec<u8> {
         (None, Some(joining)) => Some(gsub_joining(face, joining)),
         (None, None) => None,
     };
-    let gpos = match (face.placement, face.pair, face.kern) {
-        (Some(placement), _, _) => Some(gpos_placement(face, placement)),
-        (None, Some(pair), _) => Some(gpos_pair(face, pair)),
-        (None, None, Some(kern)) => Some(gpos_kern(face, kern)),
-        (None, None, None) => None,
+    let gpos = match (face.placement, face.pair, face.kern, face.vertical_kern) {
+        (Some(placement), _, _, _) => Some(gpos_placement(face, placement)),
+        (None, Some(pair), _, _) => Some(gpos_pair(face, pair)),
+        (None, None, Some(kern), _) => Some(gpos_kern(face, kern)),
+        (None, None, None, Some(kern)) => Some(gpos_vertical_kern(face, kern)),
+        (None, None, None, None) => None,
     };
 
     // Built as a list rather than as two hard-coded arrays, because `GPOS` and
@@ -623,6 +663,33 @@ fn gpos_kern(face: &Face, kern: Kern) -> Vec<u8> {
     subtable.extend_from_slice(&1u16.to_be_bytes()); // pairValueCount
     subtable.extend_from_slice(&second.to_be_bytes()); // secondGlyph
     subtable.extend_from_slice(&kern.x_advance.to_be_bytes()); // XAdvance
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // coverage format 1
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
+    subtable.extend_from_slice(&first.to_be_bytes());
+    gpos_of_one_lookup(2, &subtable, kern.script, kern.feature)
+}
+
+/// A `GPOS` with one `PairPosFormat1` lookup changing both advances of the
+/// first glyph when the second follows it.
+///
+/// `valueFormat1` is `0x000C`, `X_ADVANCE | Y_ADVANCE`, and `valueFormat2`
+/// zero, so a pair value record is the second glyph and two `int16`s: six
+/// bytes, and the pair set eight. The header is twelve bytes, so the pair set
+/// starts at twelve and the coverage at twenty.
+fn gpos_vertical_kern(face: &Face, kern: VerticalKern) -> Vec<u8> {
+    let first = face.glyph_of(kern.first).unwrap_or(0);
+    let second = face.glyph_of(kern.second).unwrap_or(0);
+    let mut subtable = Vec::new();
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // posFormat 1
+    subtable.extend_from_slice(&20u16.to_be_bytes()); // coverage, from here
+    subtable.extend_from_slice(&0x000Cu16.to_be_bytes()); // valueFormat1: XAdvance, YAdvance
+    subtable.extend_from_slice(&0u16.to_be_bytes()); // valueFormat2
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // pairSetCount
+    subtable.extend_from_slice(&12u16.to_be_bytes()); // pairSetOffsets[0]
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // pairValueCount
+    subtable.extend_from_slice(&second.to_be_bytes()); // secondGlyph
+    subtable.extend_from_slice(&kern.x_advance.to_be_bytes()); // XAdvance
+    subtable.extend_from_slice(&kern.y_advance.to_be_bytes()); // YAdvance
     subtable.extend_from_slice(&1u16.to_be_bytes()); // coverage format 1
     subtable.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
     subtable.extend_from_slice(&first.to_be_bytes());

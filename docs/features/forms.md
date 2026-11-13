@@ -116,13 +116,22 @@ glyph.
 computes:
 
 - **A vertical CMap** (9.7.4.3) is written as a **column**: the glyphs are
-  found as above, `GSUB` runs `vert` and `vrt2` in place of the horizontal
-  features and no `GPOS` runs, and the pen goes down the box's centre line —
-  a glyph is drawn displaced by its position vector, whose horizontal half
-  is half its width, so the column is centred — advancing by each CID's own
-  `/W2` displacement, so the run carries no `TJ` numbers. `/Q` reads down
-  the column (top, centred, bottom); a multiline field's lines are columns
-  from the right; auto-sizing fits the longest column to the height.
+  found as above, and the value is shaped by the shaper's vertical plan
+  ([design/shaping.md](../design/shaping.md), *Vertical shaping*) with every
+  run set upright — a reader draws every glyph of a vertical font upright
+  and turns none — and `vrt2` turned on, in `vert`'s place where the face
+  carries it, so the face's own rotated forms stand in for a rotation. The
+  pen goes down the box's centre line — a glyph is drawn displaced by its
+  position vector, whose horizontal half is half its width, so the column is
+  centred — advancing by each CID's own `/W2` displacement, and what `GPOS`
+  changed over the metrics the shaper gave each glyph is written on top:
+  `vkrn`'s and the other vertical features' advance heights and placements
+  down the column as `TJ` numbers, a negative one moving the pen up, and a
+  placement across the column as a new text matrix at the pen. A face with
+  no `GPOS` writes one `TJ` of codes and no number. `/Q` reads down the
+  column (top, centred, bottom); a multiline field's lines are columns from
+  the right; auto-sizing fits the longest column, its `GPOS` heights
+  included, to the height.
 - **A bare CFF** (`/FontFile3 /Subtype /CIDFontType0C` or `/Type1C` under a
   `CIDFontType0`) has no `cmap`, no `hmtx` and no `GSUB`, and the shaper
   takes an sfnt, so the program is **wrapped** per line in the smallest
@@ -619,7 +628,10 @@ embedded CMap stream, under a one-byte codespace, under a registry CMap —
 where the codes are checked *forwards* through `CMap::cid`, which is what
 makes it a round trip rather than a restatement — and over a non-identity
 `/CIDToGIDMap`; a vertical CMap written as a column at the box's centre,
-with `/Q` read down it; a bare CFF drawn through its wrapper at `/W`'s
+with `/Q` read down it, the vertical plan's substitutions and none of a
+line's positioning, a `vkrn` pair's `TJ` number, and the column of a face
+with no positioning written as one `TJ` of codes; a bare CFF drawn through
+its wrapper at `/W`'s
 advances, naming a character its `/ToUnicode` never mentions and one whose
 CID the program lacks, and refused with no `/ToUnicode`; a simple TrueType
 font carrying a `GPOS` placement as `TJ` numbers and `Ts`, and keeping the

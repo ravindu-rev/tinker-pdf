@@ -40,9 +40,13 @@
 //! fixture whose expected operators are computed in the test:
 //!
 //! - **A vertical CMap** is written as a column down the box's centre line,
-//!   each glyph where its own `/DW2` displacement puts it
+//!   shaped by the shaper's vertical plan, each glyph where its own `/DW2`
+//!   displacement puts it and what `GPOS` changed written over that
 //!   ([`a_vertical_encoding_is_written_as_a_column`],
-//!   [`quadding_runs_down_a_column`]).
+//!   [`quadding_runs_down_a_column`],
+//!   [`a_column_runs_the_vertical_features_and_not_the_horizontal_ones`],
+//!   [`a_column_takes_its_faces_vertical_kerning`],
+//!   [`a_column_without_positioning_writes_what_it_wrote`]).
 //! - **A bare CFF** under a `CIDFontType0` is wrapped, per line, in the
 //!   smallest sfnt the shaper can read — a `cmap` from the font's own
 //!   `/ToUnicode` read backwards and an `hmtx` from `/W` — and drawn at `/W`'s
@@ -113,7 +117,7 @@ mod written_support;
 
 use std::sync::Arc;
 
-use epub_support::typeface::{Face, Form, Joining, Ligature, Placement};
+use epub_support::typeface::{Face, Form, Joining, Ligature, Placement, VerticalKern};
 use tinker_pdf_cos::{
     CosDocument, DocumentEditor, ObjRef, ProgramKey, WarningKind, WriteMode, WriteOptions,
 };
@@ -788,17 +792,33 @@ fn quadding_runs_down_a_column() {
     }
 }
 
-/// **A column runs `vert` and `vrt2`, and not the horizontal features**
-/// (a nit of the review of lane 6C: no fixture had a vertical substitution, so
-/// dropping either feature from the column's set fired nothing).
+/// **A column runs the shaper's vertical plan, and not a line's own
+/// features** (`docs/design/shaping.md`, *Vertical shaping*).
 ///
-/// One face per feature, each with an `A`+`B` ligature under that one
-/// feature, so whether the pair becomes one glyph says whether the feature
-/// ran. In a column `vert` and `vrt2` join it and `liga` does not; across a
-/// row `liga` joins it and neither vertical feature does.
+/// One face per substitution feature, each with an `A`+`B` ligature under
+/// that one feature, so whether the pair becomes one glyph says whether the
+/// feature ran:
+///
+/// - `vert` joins it in a column and not across a row, and so does `vrt2`,
+///   which a column turns on and which takes `vert`'s place where the face
+///   carries it — the face carrying `vert` alone keeps `vert`;
+/// - `liga` joins it in both: the OpenType feature registry restricts none of
+///   a line's default substitutions to horizontal text, so an upright run
+///   keeps them.
+///
+/// And one face per positioning feature, each re-spacing `A` before `B` with
+/// an `XAdvance` of −77 and a `YAdvance` of −200 under that feature: `kern`
+/// moves the row's pen 77 back and leaves the column alone, since the
+/// registry's `kern` "is not intended for use in vertical text layout", and
+/// `vkrn` the other way round, its `YAdvance` taking 200 off the column's
+/// advance height.
 #[test]
 fn a_column_runs_the_vertical_features_and_not_the_horizontal_ones() {
-    for (feature, in_a_column) in [(*b"vert", true), (*b"vrt2", true), (*b"liga", false)] {
+    for (feature, in_a_column, across_a_row) in [
+        (*b"vert", true, false),
+        (*b"vrt2", true, false),
+        (*b"liga", true, true),
+    ] {
         let face = Face::new("Fixture Latin", "ABC").with_ligature(Ligature {
             first: 'A',
             second: 'B',
@@ -829,9 +849,131 @@ fn a_column_runs_the_vertical_features_and_not_the_horizontal_ones() {
         let (_, content) = filled(&row, "AB");
         assert_eq!(
             codes(&content),
-            if in_a_column { apart } else { joined },
+            if across_a_row { joined } else { apart },
             "{name} across a row:\n{content}"
         );
+    }
+
+    for (feature, in_a_column, across_a_row) in [(*b"kern", false, true), (*b"vkrn", true, false)] {
+        let face = Face::new("Fixture Latin", "ABC").with_vertical_kern(VerticalKern {
+            first: 'A',
+            second: 'B',
+            script: *b"DFLT",
+            feature,
+            x_advance: -77,
+            y_advance: -200,
+        });
+        let program = face.build();
+        let name = String::from_utf8_lossy(&feature).into_owned();
+        let column = form_document(&Fixture::named(&program, "/Identity-V"));
+        let (_, content) = filled(&column, "AB");
+        assert_eq!(
+            content.contains("> -200 <"),
+            in_a_column,
+            "{name}'s advance height in a column:\n{content}"
+        );
+        assert!(
+            !content.contains("77"),
+            "a column applied an XAdvance under {name}:\n{content}"
+        );
+        let row = form_document(&Fixture::named(&program, "/Identity-H"));
+        let (_, content) = filled(&row, "AB");
+        assert_eq!(
+            content.contains("> 77 <"),
+            across_a_row,
+            "{name}'s advance across a row:\n{content}"
+        );
+        assert!(
+            !content.contains("200"),
+            "a row moved by a YAdvance under {name}:\n{content}"
+        );
+    }
+}
+
+/// **A column takes its face's vertical kerning.**
+///
+/// The face's `vkrn` takes 200 off `A`'s advance height before `B` (its
+/// `XAdvance` of −77, "only used for horizontal layout", moves nothing). The
+/// reader still advances by `/DW2`'s 1000 thousandths of an em past `A`, so
+/// `B` is written after a `TJ` number of −200 — which in vertical writing
+/// moves the pen up (9.4.3: the number is subtracted from the vertical
+/// coordinate), 200 back towards `A` — and `C` follows `B` where the reader's
+/// own displacement leaves the pen, with no number. At a thousand units to
+/// the em the face's units are already thousandths of text space, so the
+/// number is the record's, computed here rather than read back; and the
+/// glyphs are still placed by `/W2`, one `TJ` of codes and one number with
+/// no second text matrix, nothing having moved across the column.
+#[test]
+fn a_column_takes_its_faces_vertical_kerning() {
+    let face = Face::new("Fixture Latin", "ABC").with_vertical_kern(VerticalKern {
+        first: 'A',
+        second: 'B',
+        script: *b"DFLT",
+        feature: *b"vkrn",
+        x_advance: -77,
+        y_advance: -200,
+    });
+    let [a, b, c] = ['A', 'B', 'C'].map(|ch| face.glyph_of(ch).expect("covered"));
+    let doc = form_document(&Fixture::named(&face.build(), "/Identity-V"));
+    let (_, content) = filled(&doc, "ABC");
+    let run = format!("1 0 0 1 90.00 23.00 Tm\n[<{a:04X}> -200 <{b:04X}><{c:04X}>] TJ\nET\n");
+    assert!(
+        content.contains(&run),
+        "the column does not carry the vkrn pair's TJ number:\n{content}"
+    );
+    assert_eq!(
+        content.matches(" Tm\n").count(),
+        1,
+        "one text matrix:\n{content}"
+    );
+    assert!(unrepresentable(&doc).is_empty());
+}
+
+/// **A column whose face carries no feature beyond `locl`, `ccmp`, `vert` and
+/// `vrt2` writes the bytes it wrote** when the column had a feature list of
+/// its own, those four.
+///
+/// Its glyphs are the ones those four make — each of them is in the upright
+/// plan, `vrt2` turned on in `vert`'s place where the face carries it and
+/// `vert` kept where it does not — and with no `GPOS` there is nothing to
+/// write over `/W2`: one text matrix, one `TJ` of codes, no number.
+#[test]
+fn a_column_without_positioning_writes_what_it_wrote() {
+    let plain = Face::new("Fixture Latin", "ABC");
+    let mut faces: Vec<(String, Face, Vec<u16>)> = vec![(
+        "no layout tables".to_owned(),
+        plain.clone(),
+        "ABC"
+            .chars()
+            .map(|ch| plain.glyph_of(ch).expect("covered"))
+            .collect(),
+    )];
+    for feature in [*b"locl", *b"ccmp", *b"vert", *b"vrt2"] {
+        let face = plain.clone().with_ligature(Ligature {
+            first: 'A',
+            second: 'B',
+            script: *b"DFLT",
+            feature,
+        });
+        let glyphs = vec![
+            face.ligature_glyph().expect("a ligature"),
+            face.glyph_of('C').expect("covered"),
+        ];
+        faces.push((String::from_utf8_lossy(&feature).into_owned(), face, glyphs));
+    }
+    for (name, face, glyphs) in faces {
+        let doc = form_document(&Fixture::named(&face.build(), "/Identity-V"));
+        let (_, content) = filled(&doc, "ABC");
+        let codes: String = glyphs
+            .iter()
+            .map(|glyph| format!("<{glyph:04X}>"))
+            .collect();
+        let column = format!("1 0 0 1 90.00 23.00 Tm\n[{codes}] TJ\nET\n");
+        assert!(
+            content.contains(&column),
+            "{name}: the column is not the one it wrote:\n{content}"
+        );
+        assert_eq!(content.matches(" Tm\n").count(), 1, "{name}:\n{content}");
     }
 }
 

@@ -665,8 +665,11 @@ What it does:
   registry CMap where this build compiled its table in, because
   `CMap::code_for_cid` inverts the encoding and verifies each candidate
   forwards before answering. Three more fonts shape: a **vertical** CMap,
-  written as a column at each CID's own `/W2` displacement with `vert`/`vrt2`
-  applied; a **bare CFF** under a `CIDFontType0`, wrapped per line in a
+  shaped as a column by the shaper's vertical plan with every run upright
+  and `vrt2` turned on, and written at each CID's own `/W2` displacement with
+  what `GPOS` changed — `vkrn` among it — written over that as `TJ` numbers
+  down the column and a text matrix across it; a **bare CFF** under a
+  `CIDFontType0`, wrapped per line in a
   synthesised sfnt whose `cmap` is the font's `/ToUnicode` read backwards and
   checked forwards (`CMap::code_for_unicode`) and whose `hmtx` is `/W`; and a
   **simple TrueType** font, each glyph written as the lowest byte its encoding

@@ -280,6 +280,23 @@ pub struct VerticalMetrics {
     pub synthesized: bool,
 }
 
+/// What every glyph of a face stands on in a column
+/// ([`Shaper::column_metrics`]): one view of the face's vertical origins,
+/// asked once per glyph.
+#[derive(Clone, Debug)]
+pub struct ColumnMetrics<'a> {
+    shaper: Shaper<'a>,
+    origins: VerticalOrigins<'a, 'a>,
+}
+
+impl ColumnMetrics<'_> {
+    /// [`Shaper::vertical_metrics`] of `glyph`.
+    #[must_use]
+    pub fn of(&self, glyph: u16) -> VerticalMetrics {
+        self.shaper.metrics_of(&self.origins, glyph)
+    }
+}
+
 /// How a run stands: along a line, or in a column, upright or sideways.
 ///
 /// `docs/design/shaping.md`, *Vertical shaping*. [`itemize`] makes every run
@@ -986,10 +1003,21 @@ impl<'a> Shaper<'a> {
     /// so in [`VerticalMetrics::synthesized`]. A consumer that places glyphs
     /// by metrics of its own subtracts these to keep only what `GPOS`
     /// changed. For a CFF face without `VORG`, each call parses the face's
-    /// `CFF ` table; shaping a run parses it once.
+    /// `CFF ` table; shaping a run parses it once, and a caller asking for
+    /// many glyphs makes one [`Shaper::column_metrics`] and asks it.
     #[must_use]
     pub fn vertical_metrics(&self, glyph: u16) -> VerticalMetrics {
-        self.metrics_of(&self.face.vertical_origins(), glyph)
+        self.column_metrics().of(glyph)
+    }
+
+    /// [`Shaper::vertical_metrics`] for as many glyphs as a caller asks,
+    /// through one view of the face's vertical origins.
+    #[must_use]
+    pub fn column_metrics(&self) -> ColumnMetrics<'a> {
+        ColumnMetrics {
+            shaper: *self,
+            origins: self.face.vertical_origins(),
+        }
     }
 
     /// [`Shaper::vertical_metrics`], through a view of the face's origins

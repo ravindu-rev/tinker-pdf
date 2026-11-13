@@ -14,8 +14,8 @@ use std::collections::HashMap;
 
 use tinker_pdf_font::{Cff, Sfnt};
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
-use tinker_pdf_shape::shape::{itemize, Shaper};
-use tinker_pdf_shape::{Plans, ShapedGlyph, Tag};
+use tinker_pdf_shape::shape::{itemize, Run, Shaper, VRT2};
+use tinker_pdf_shape::{Orientation, Plans, ShapedGlyph, Tag};
 
 use crate::build::{close_array, number};
 use crate::doc::CosDocument;
@@ -148,12 +148,18 @@ pub(crate) fn escape(out: &mut Vec<u8>, text: &str, unwritable: &mut Vec<char>) 
 ///   covers `/Identity-H`, every embedded CMap stream, and — where this build
 ///   compiled the tables in — every registry CMap of 9.7.5.2.
 /// - **The same under a vertical CMap** (9.7.4.3). The glyphs are found the
-///   same way; what differs is where they go. The pen advances *down* by each
-///   CID's own `/W2` displacement, so the value is written as a column at the
-///   box's centre and every glyph sits where a reader's own vertical metrics
-///   put it. `GSUB` runs `vert` and `vrt2` instead of the horizontal features
-///   and no `GPOS` runs at all, since every positioning feature this crate
-///   applies by default is horizontal.
+///   same way; what differs is where they go. The value is shaped as a
+///   column by the shaper's own vertical plan (`docs/design/shaping.md`, *A
+///   form field's column*): every run set upright, because a reader draws
+///   every glyph of a vertical font upright and turns none, and `vrt2` turned
+///   on, the registry's feature for a layout that depends on the face for
+///   its rotated forms, in `vert`'s place where the face carries it. The pen
+///   advances *down* by each CID's own `/W2` displacement, so every glyph
+///   sits where a reader's own vertical metrics put it, and what `GPOS`
+///   changes over the metrics the shaper gave the glyph is written on top:
+///   `vkrn`'s and the other vertical features' advances and placements down
+///   the column as `TJ` numbers, and a placement across it by moving the
+///   text matrix. A face with no `GPOS` writes no number.
 /// - **A simple TrueType font.** A byte names at most 256 glyphs, but which
 ///   256 is decidable: each code the encoding gives a character (9.6.6, read
 ///   by [`Font::char_drawn_by`]) reaches the glyph the program's `cmap` gives
@@ -242,7 +248,9 @@ struct Placed {
     /// Where the glyph's origin sits along the line — rightwards along a
     /// baseline, downwards along a column — from the line's start.
     x: f64,
-    /// Its origin off the baseline — 9.4.3's `Ts`. Always zero in a column.
+    /// Its origin off the line: off the baseline, 9.4.3's `Ts`, along a
+    /// baseline, and across the column, rightwards, which the text matrix
+    /// carries, in a column.
     rise: f64,
 }
 
@@ -261,14 +269,10 @@ struct ShapedLine {
     unwritable: Vec<char>,
 }
 
-/// The `GSUB` features a column of text runs: the default set's two that are
-/// not about horizontal setting, and the two vertical alternates.
-const VERTICAL_GSUB: &[Tag] = &[
-    Tag::new(b"locl"),
-    Tag::new(b"ccmp"),
-    Tag::new(b"vert"),
-    Tag::new(b"vrt2"),
-];
+/// What a column turns on over the shaper's vertical plan: `vrt2`, so the
+/// face's own rotated forms stand in for the rotation a reader of a vertical
+/// font never does. See [`Shapeable`].
+const COLUMN_SETTINGS: &[(Tag, u32)] = &[(VRT2, 1)];
 
 impl Shapeable {
     /// The font behind a `/DA`, if one of [`Path`]'s conditions holds, and
@@ -407,7 +411,10 @@ impl Shapeable {
     /// the box where a reader of the script expects it.
     ///
     /// A column is not reordered: the text runs top to bottom in the order it
-    /// was written, which is what vertical setting is.
+    /// was written, which is what vertical setting is. Each of its runs is
+    /// set upright, whatever UAX #50 would say of its characters, because the
+    /// reader of a vertical font draws every glyph upright at its own `/W2`
+    /// position and turns none (9.7.4.3).
     ///
     /// Glyph 0 is `.notdef`, and every `code_for` here refuses it rather than
     /// writing it: it is the face saying it has nothing for that character,
@@ -429,7 +436,7 @@ impl Shapeable {
         let scale = |units: i32| f64::from(units) * 1000.0 / upem;
         let column = self.vertical();
         let shaper = if column {
-            Shaper::new(face).with_features(VERTICAL_GSUB, &[])
+            Shaper::new(face).with_settings(COLUMN_SETTINGS)
         } else {
             Shaper::new(face)
         }
@@ -440,8 +447,24 @@ impl Shapeable {
             BaseDirection::Auto
         };
         let paragraph = Paragraph::new(text, direction);
-        let runs = itemize(text, &paragraph);
+        let runs: Vec<Run> = itemize(text, &paragraph)
+            .into_iter()
+            .map(|run| {
+                if column {
+                    Run {
+                        orientation: Orientation::Upright,
+                        ..run
+                    }
+                } else {
+                    run
+                }
+            })
+            .collect();
         let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(text, run)).collect();
+        // What the shaper gave each glyph of a column before `GPOS` ran, so
+        // what `GPOS` changed can be told from it; one view of the face's
+        // vertical origins for the whole line.
+        let own = column.then(|| shaper.column_metrics());
         let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
         let order: Vec<usize> = if column {
             (0..shaped.len()).collect()
@@ -462,11 +485,22 @@ impl Shapeable {
             for glyph in glyphs {
                 match code_for(glyph.glyph) {
                     Some((code, bytes)) => {
-                        let (x, rise, advance) = if column {
+                        let (x, rise, advance) = if let Some(own) = &own {
                             // 9.7.4.3: `w1` is negative for text running
-                            // down, and the column's length is its sum.
+                            // down, and the column's length is its sum. What
+                            // `GPOS` did is measured from the metrics the
+                            // shaper gave the glyph: a placement up the
+                            // column and across it, and a longer or shorter
+                            // advance height, each written over `/W2`.
                             let (_, _, w1) = font.vertical_metrics(font.cid_of(code));
-                            (pen, 0.0, -w1)
+                            let metrics = own.of(glyph.glyph);
+                            let up = glyph.y_offset.saturating_add(metrics.origin_y);
+                            let across = glyph.x_offset.saturating_add(metrics.origin_x);
+                            let longer = glyph
+                                .y_advance
+                                .saturating_neg()
+                                .saturating_sub(metrics.advance);
+                            (pen - scale(up), scale(across), scale(longer) - w1)
                         } else {
                             (
                                 pen + scale(glyph.x_offset),
@@ -682,21 +716,50 @@ fn write_shaped(out: &mut Vec<u8>, font: &Font, line: &ShapedLine, x: f64, y: f6
     }
 }
 
-/// Writes one shaped column at `(x, y)`, the pen's start at the top.
+/// Writes one shaped column at `(x, y)`, the pen's start at the top, in a
+/// font of `size`.
 ///
-/// No `TJ` numbers, by construction: every glyph was placed at the
-/// displacement 9.7.4.3 gives its own CID, which is the one a reader will
-/// advance by, so the pen and the placement cannot part.
-fn write_column(out: &mut Vec<u8>, line: &ShapedLine, x: f64, y: f64) {
+/// The reader's pen advances down by each CID's own `/W2` displacement
+/// (9.7.4.3), and every glyph was placed at that displacement plus what
+/// `GPOS` changed, so the two part only where `GPOS` moved something. Down
+/// the column the difference is a `TJ` number, which in vertical writing
+/// moves the pen *down* by that many thousandths of an em — 9.4.3: the number
+/// is subtracted from the vertical coordinate — the opposite sign to a
+/// line's. Across the column there is no such number, so a placement across
+/// it is a new text matrix, moved across by the placement and down to where
+/// the pen stands, the pen carrying on from it. A column whose glyphs `GPOS`
+/// never moved is one `TJ` of codes, with no number and no second matrix.
+fn write_column(out: &mut Vec<u8>, font: &Font, line: &ShapedLine, x: f64, y: f64, size: f64) {
     out.extend_from_slice(format!("1 0 0 1 {x:.2} {y:.2} Tm\n").as_bytes());
-    if line.glyphs.is_empty() {
-        return;
-    }
-    out.push(b'[');
+    // The reader's pen, and the matrix's offset across the column, both in
+    // thousandths of an em from the column's top.
+    let mut pen = 0.0f64;
+    let mut across = 0.0f64;
+    let mut open = false;
     for placed in &line.glyphs {
+        if placed.rise != across {
+            close_array(out, &mut open);
+            across = placed.rise;
+            let (mx, my) = (x + across / 1000.0 * size, y - pen / 1000.0 * size);
+            out.extend_from_slice(format!("1 0 0 1 {mx:.2} {my:.2} Tm\n").as_bytes());
+        }
+        if !open {
+            out.push(b'[');
+            open = true;
+        }
+        let adjust = placed.x - pen;
+        if number(adjust) != "0" {
+            if out.last() == Some(&b'>') {
+                out.push(b' ');
+            }
+            out.extend_from_slice(number(adjust).as_bytes());
+            out.push(b' ');
+        }
         write_code(out, placed);
+        let (_, _, w1) = font.vertical_metrics(font.cid_of(placed.code));
+        pen = placed.x - w1;
     }
-    out.extend_from_slice(b"] TJ\n");
+    close_array(out, &mut open);
 }
 
 /// One code as a hex string as wide as its codespace says.
@@ -961,7 +1024,7 @@ pub(crate) fn text_appearance_in<R: Resolve + ?Sized>(
 
     if column {
         for (index, line) in shaped.iter().enumerate() {
-            let Some(line) = line else {
+            let (Some(line), Some(font)) = (line, font.as_ref()) else {
                 continue;
             };
             let length = line.advance / 1000.0 * size;
@@ -983,7 +1046,7 @@ pub(crate) fn text_appearance_in<R: Resolve + ?Sized>(
                 _ => h - PAD,
             }
             .min(h - PAD);
-            write_column(&mut content, line, x, top);
+            write_column(&mut content, font, line, x, top, size);
         }
         content.extend_from_slice(b"ET\nQ\nEMC\n");
         report(doc.document(), field, &refusals, &unwritable);

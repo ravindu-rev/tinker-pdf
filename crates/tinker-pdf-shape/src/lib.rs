@@ -99,7 +99,7 @@ pub use common::{
 };
 pub use gdef::{AttachList, Caret, Gdef, GlyphClass, LigCaretList};
 pub use limits::Limits;
-pub use shape::{Orientation, Plans, ShapedRun, Shaper, VerticalMetrics};
+pub use shape::{ColumnMetrics, Orientation, Plans, ShapedRun, Shaper, VerticalMetrics};
 
 use std::sync::Arc;
 
