@@ -223,6 +223,20 @@ pub enum Warning {
     /// saying is that the column was set on a synthesis, and the face is the
     /// object it touched.
     VerticalMetricsSynthesized,
+    /// The face's only layout tables are a kind this crate does not run yet,
+    /// so the run was shaped as if the face had none: `cmap` and `hmtx`
+    /// alone.
+    ///
+    /// `table` names the table that was not run. A face whose layout is a
+    /// Graphite description — a `Silf`, with no `GSUB`, `GPOS` or `morx`
+    /// beside it — is named by `Silf` (`docs/design/shaping.md`, *Graphite
+    /// shaping*; ROADMAP row FT-07d, ruling 3). Recorded once per run,
+    /// whatever the run holds, because the fact is the face's and the run is
+    /// what it touched.
+    TableNotRun {
+        /// The table, as the face's table directory spells it.
+        table: Tag,
+    },
 }
 
 /// What positioning does with the advance a mark glyph arrived with.

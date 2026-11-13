@@ -673,21 +673,45 @@ pub struct Shaper<'a> {
     /// The face's kept lookup plans and coverage indexes, where the caller
     /// keeps them. See [`Shaper::with_plans`].
     plans: Option<&'a Plans>,
+    /// The layout table the face's runs are shaped without, where its only
+    /// layout tables are of a kind this crate does not run: `Silf`, for a
+    /// Graphite description. See [`Warning::TableNotRun`].
+    not_run: Option<Tag>,
+}
+
+/// `Silf`, the table a Graphite description's rules live in.
+const SILF: u32 = u32::from_be_bytes(*b"Silf");
+/// `morx`, the AAT table a face's substitutions live in.
+const MORX: u32 = u32::from_be_bytes(*b"morx");
+
+/// The table a face's runs go without, where its only layout tables are a
+/// Graphite description's: a `Silf`, and no readable `GSUB` or `GPOS` and no
+/// `morx` beside it (`docs/design/shaping.md`, *Graphite shaping*,
+/// *Precedence*). A face that carries either OpenType Layout table shapes
+/// through it as it always has, whatever else it carries.
+fn table_not_run(face: &Sfnt<'_>, layout: &Layout<'_>) -> Option<Tag> {
+    let graphite_only = face.table(SILF).is_some()
+        && layout.gsub().is_none()
+        && layout.gpos().is_none()
+        && face.table(MORX).is_none();
+    graphite_only.then(|| Tag::new(b"Silf"))
 }
 
 impl<'a> Shaper<'a> {
     /// Reads a face's layout tables, once, for however many runs follow.
     #[must_use]
     pub fn new(face: &'a Sfnt<'a>) -> Self {
+        let layout = Layout::parse(face);
         Self {
             face,
-            layout: Layout::parse(face),
+            layout,
             language: None,
             limits: None,
             gsub_features: None,
             gpos_features: None,
             settings: &[],
             plans: None,
+            not_run: table_not_run(face, &layout),
         }
     }
 
@@ -1049,6 +1073,10 @@ impl<'a> Shaper<'a> {
     /// column, and a line's again for a sideways run, with `vrtr` added and
     /// `vert` and `vrt2` kept out (`docs/design/shaping.md`, *Vertical
     /// shaping*).
+    ///
+    /// A face whose only layout tables are a Graphite description is shaped
+    /// as though it carried none, and every run over it says so, once:
+    /// [`Warning::TableNotRun`], naming `Silf`.
     #[must_use]
     pub fn shape(&self, text: &str, run: &Run) -> ShapedRun {
         let slice = text.get(run.text.clone()).unwrap_or("");
@@ -1075,6 +1103,12 @@ impl<'a> Shaper<'a> {
             .limits
             .unwrap_or_else(|| Limits::for_glyphs(buffer.len()));
         let mut warnings = Vec::new();
+        // Ruling 3: a description this crate does not run yet is refused by
+        // name, once a run, and the run is shaped as the face's `cmap` and
+        // `hmtx` alone shape it.
+        if let Some(table) = self.not_run {
+            warnings.push(Warning::TableNotRun { table });
+        }
         if let Some(gsub) = self.layout.gsub() {
             let script = self.script_tag(gsub, run.script);
             let stages = self.gsub_plan(
@@ -2420,5 +2454,64 @@ mod tests {
         assert!(is_variation_selector('\u{E01EF}'));
         assert!(!is_variation_selector('\u{180B}'));
         assert!(!is_variation_selector('a'));
+    }
+
+    /// A table directory of `tables` and nothing else, which is all
+    /// `Sfnt::parse` and `Layout::parse` read.
+    fn directory(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let count = u16::try_from(tables.len()).expect("a small directory");
+        let mut out = 0x0001_0000u32.to_be_bytes().to_vec();
+        out.extend(count.to_be_bytes());
+        out.extend([0u8; 6]);
+        let mut offset = 12 + tables.len() * 16;
+        let mut body = Vec::new();
+        for (tag, bytes) in tables {
+            out.extend_from_slice(*tag);
+            out.extend(0u32.to_be_bytes());
+            out.extend(u32::try_from(offset).expect("small").to_be_bytes());
+            out.extend(u32::try_from(bytes.len()).expect("small").to_be_bytes());
+            offset += bytes.len();
+            body.extend_from_slice(bytes);
+        }
+        out.extend(body);
+        out
+    }
+
+    /// Only a face whose layout is a Graphite description alone goes without
+    /// it: a readable `GSUB` or `GPOS`, or a `morx`, beside the `Silf` takes
+    /// the path it always took, and a face with no `Silf` has nothing to go
+    /// without.
+    #[test]
+    fn only_a_face_whose_only_layout_is_graphite_goes_without_it() {
+        let silf: &[u8] = &[0, 4, 0, 0, 0, 4, 0, 2, 0, 0, 0, 0];
+        // Version 1.0 and three absent offsets: readable, and empty.
+        let layout: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+        // A major version this crate does not read.
+        let unreadable: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+        let gdef: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let silf_tag = Some(Tag::new(b"Silf"));
+        let cases: Vec<(Vec<(&[u8; 4], &[u8])>, Option<Tag>)> = vec![
+            (vec![(b"Silf", silf)], silf_tag),
+            (vec![(b"GDEF", gdef), (b"Silf", silf)], silf_tag),
+            (vec![(b"GSUB", unreadable), (b"Silf", silf)], silf_tag),
+            (vec![(b"GSUB", layout), (b"Silf", silf)], None),
+            (vec![(b"GPOS", layout), (b"Silf", silf)], None),
+            (vec![(b"Silf", silf), (b"morx", &[0u8, 2, 0, 0][..])], None),
+            (
+                vec![
+                    (b"Glat", &[0u8, 1, 0, 0][..]),
+                    (b"Gloc", &[0u8, 1, 0, 0][..]),
+                ],
+                None,
+            ),
+            (vec![], None),
+        ];
+        for (tables, expected) in cases {
+            let bytes = directory(&tables);
+            let face = Sfnt::parse(&bytes).expect("a directory parses");
+            let layout = crate::Layout::parse(&face);
+            let names: Vec<&[u8; 4]> = tables.iter().map(|(tag, _)| *tag).collect();
+            assert_eq!(super::table_not_run(&face, &layout), expected, "{names:?}");
+        }
     }
 }
