@@ -1216,9 +1216,12 @@ What it does:
   grammar, its cluster types recognised and a cluster that starts with a mark
   broken, for a script the specification lists, and by milestone 5's cluster
   for Tai Tham, whose corpus the grammar contradicts, and for the scripts it
-  does not list — every `GSUB`
-  feature applied inside one syllable and never across two, USE's feature
-  stages, the canonical decomposition of a Brahmic character that has one, and
+  does not list — USE's feature stages, each feature of the groups the
+  specification applies one cluster at a time applied inside one syllable and
+  never across two and its presentation features across them
+  (`tests/synthetic.rs`'s `a_confined_feature_does_not_reach_across_a_cluster`
+  holds both), the canonical decomposition of a Brahmic character that has
+  one, and
   one reordering pause that moves a pre-base glyph to the front of its
   syllable — over the glyphs, through a category each one carries from the
   character it came from, so a conjunct formed before the pause is still
@@ -1825,12 +1828,6 @@ What it does **not** do, each named so it is a backlog and not a mystery:
   [design/shaping.md](../design/shaping.md)'s *The traced rows* holds the
   trace, and `TRIAGE` in `crates/tinker-pdf-shape/tests/text_rendering.rs`
   the case list.
-- **The per-syllable `GSUB` confinement stays**, though it gains nothing in
-  this corpus and costs three cases. Two say a syllable *boundary* is in the
-  wrong place: a mark typed between a halant and the base it stacks starts a
-  new syllable at the base (`SHLANA-3/3`, `SHLANA-7/5`). The third says the
-  presentation features are confined where the specification applies them to
-  the whole run (`SHLANA-4/2`). *The traced rows* has the trace.
 - **Dotted circles.** USE inserts one into a cluster that its grammar calls
   broken. This crate never inserts a glyph the text did not ask for, so a
   malformed cluster renders as its parts.

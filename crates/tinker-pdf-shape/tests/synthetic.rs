@@ -32,6 +32,8 @@ use tinker_pdf_shape::{
     Buffer, Caret, Gdef, GlyphClass, Layout, Limits, MarkWidths, Table, Tag, Warning,
 };
 
+mod column_face;
+
 // --- a very small table assembler ---------------------------------------
 //
 // Enough of one to write a lookup by hand and no more. Every OpenType Layout
@@ -1131,4 +1133,78 @@ fn positioning_leaves_the_advances_it_was_given_where_no_lookup_touches_them() {
     assert!(warnings.is_empty(), "a face with no GPOS positions nothing");
     assert_eq!(buffer.glyph(0).expect("in range").x_advance, 500);
     assert_eq!(buffer.glyph(1).expect("in range").x_advance, 600);
+}
+
+// --- per-cluster confinement, end to end on a face this file builds -------
+
+/// FT-08.6: a feature the Universal Shaping Engine applies one cluster at a
+/// time does not reach across a cluster, and one it applies to the whole run
+/// does (`docs/design/shaping.md`, *What a cluster confines*).
+///
+/// Balinese, which the published grammar cuts: `KA PA` is two bases and two
+/// clusters, `KA ULU` one. Each face carries a ligature over a pair under
+/// the feature named; with the confinement off, `blwf`'s ligature over two
+/// clusters would be made and the first assertion would fail.
+#[test]
+fn a_confined_feature_does_not_reach_across_a_cluster() {
+    use tinker_pdf_font::Sfnt;
+    use tinker_pdf_shape::bidi::BaseDirection;
+    use tinker_pdf_shape::Shaper;
+
+    const KA: char = '\u{1B13}';
+    const PA: char = '\u{1B27}';
+    const ULU: char = '\u{1B36}';
+    let cmap = [(KA, 1), (PA, 2), (ULU, 3)];
+    let shaped = |features: &[([u8; 4], Vec<u16>)], lookups: &[Vec<u8>], text: &str| {
+        let mut face = column_face::Face::new(7, &cmap);
+        face.gsub = Some(column_face::layout_table(&[*b"bali"], features, lookups));
+        let bytes = face.build();
+        let sfnt = Sfnt::parse(&bytes).expect("an assembled face");
+        let (_, runs) = Shaper::new(&sfnt).shape_text(text, BaseDirection::LeftToRight);
+        runs.iter()
+            .flat_map(|run| run.glyphs())
+            .map(|glyph| glyph.glyph)
+            .collect::<Vec<u16>>()
+    };
+    let across =
+        |into: u16| column_face::lookup(4, 0, &[column_face::ligature_subst(1, &[2], into)]);
+    let inside = column_face::lookup(4, 0, &[column_face::ligature_subst(1, &[3], 6)]);
+    let two_clusters: String = [KA, PA].iter().collect();
+    let one_cluster: String = [KA, ULU].iter().collect();
+
+    // `blwf`, of the orthographic unit group: refused across two clusters...
+    assert_eq!(
+        shaped(&[(*b"blwf", vec![0])], &[across(4)], &two_clusters),
+        [1, 2],
+        "a confined feature's ligature reached across a cluster"
+    );
+    // ...and made inside one.
+    assert_eq!(shaped(&[(*b"blwf", vec![0])], &[inside], &one_cluster), [6]);
+    // `abvs`, of the presentation group: made across the same two.
+    assert_eq!(
+        shaped(&[(*b"abvs", vec![0])], &[across(5)], &two_clusters),
+        [5],
+        "a presentation feature's ligature was confined to a cluster"
+    );
+    // Both in one face: `blwf`'s stage runs first and is refused, and the
+    // presentation stage after it reaches across.
+    assert_eq!(
+        shaped(
+            &[(*b"blwf", vec![0]), (*b"abvs", vec![1])],
+            &[across(4), across(5)],
+            &two_clusters
+        ),
+        [5]
+    );
+    // `rlig`, of the presentation group too, in the last stage.
+    assert_eq!(
+        shaped(&[(*b"rlig", vec![0])], &[across(5)], &two_clusters),
+        [5]
+    );
+    // `ccmp`, of the pre-processing group, refused in both the stages that
+    // run it.
+    assert_eq!(
+        shaped(&[(*b"ccmp", vec![0])], &[across(4)], &two_clusters),
+        [1, 2]
+    );
 }

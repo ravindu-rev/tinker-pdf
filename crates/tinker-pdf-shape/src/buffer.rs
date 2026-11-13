@@ -339,13 +339,16 @@ impl Buffer {
     ///
     /// # What this restricts, and what it deliberately does not
     ///
-    /// A `GSUB` lookup never matches across a syllable boundary once syllables
-    /// are set: two adjacent clusters are two words as far as a conjunct-
-    /// forming rule is concerned, and a rule that reached across one would
-    /// build a conjunct out of the end of one syllable and the start of the
-    /// next. The Universal Shaping Engine turns this on for every feature it
-    /// asks for, which is why it is a property of the buffer here rather than
-    /// a flag on each lookup.
+    /// A `GSUB` rule whose stage confines it never takes an input across a
+    /// syllable boundary once syllables are set: two adjacent clusters are two
+    /// words as far as a conjunct-forming rule is concerned, and a rule that
+    /// reached across one would build a conjunct out of the end of one
+    /// syllable and the start of the next. The Universal Shaping Engine
+    /// applies its pre-processing, reordering and orthographic unit groups
+    /// "one cluster at a time", which is the confinement; its presentation
+    /// group "all together to the entire run", which is a stage that is not
+    /// confined. The clusters are a property of the buffer, and whether a
+    /// stage reads them is the stage's (`crate::shape`'s `Plan::confines`).
     ///
     /// **`GPOS` is not restricted by it**, and that is the specification's own
     /// asymmetry rather than an omission: kerning and mark attachment are
@@ -354,20 +357,17 @@ impl Buffer {
     /// Zero means "no syllable" and imposes nothing, so a run that never calls
     /// this — every Latin, Arabic and Han run — behaves exactly as it did.
     ///
-    /// # What the restriction costs here, measured
+    /// # What guards it
     ///
-    /// Switching it off entirely — `GSUB` confined to nothing, like `GPOS` —
-    /// **gains three text-rendering-tests cases and costs none**:
-    /// `SHLANA-3/3`, `SHLANA-4/2` and `SHLANA-7/5`. So the rule has no
-    /// positive evidence in this corpus and three cases of negative evidence,
-    /// and it stays anyway.
-    ///
-    /// The reason is that the three do not say the restriction is wrong. Two
-    /// say a *boundary* was: a mark typed between a halant and its base cut
-    /// the cluster there, and `crate::universal`'s clusters now join a halant
-    /// to its base across the dependents between them. Dropping the
-    /// confinement would trade a rule USE states for those cases and let a
-    /// conjunct-forming lookup build one out of two words.
+    /// `tests/synthetic.rs`'s `a_confined_feature_does_not_reach_across_a_cluster`
+    /// holds both halves on a face it builds: a `blwf` ligature over two
+    /// clusters is refused and one inside a cluster is made, and an `abvs`
+    /// ligature over the same two clusters is made. The corpus asks for the
+    /// same split (`docs/design/shaping.md`, *The traced rows*): `SHLANA-3/3`
+    /// and `SHLANA-7/5` need a halant kept in one cluster with the base it
+    /// stacks across the marks typed between them, which `crate::universal`'s
+    /// clusters do, and `SHLANA-4/2` needs the face's presentation lookups to
+    /// reach across a cluster, which a presentation stage does.
     pub fn set_syllable(&mut self, at: usize, syllable: u16) {
         if let Some(props) = self.props.get_mut(at) {
             props.syllable = syllable;

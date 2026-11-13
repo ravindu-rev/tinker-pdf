@@ -1,14 +1,15 @@
 //! The face assembler the column tests share: `vertical.rs`, which holds a
 //! column to the tables a test wrote, and `fingerprints.rs`, which hashes
 //! columns shaped through such faces on every target
-//! (`docs/design/shaping.md`, *Vertical shaping*).
+//! (`docs/design/shaping.md`, *Vertical shaping*) — and `synthetic.rs`, whose
+//! per-cluster confinement test shapes a Balinese run through one.
 //!
 //! Every face is written here byte by byte, so the `wasm32-wasip1` run, which
 //! has no filesystem, builds the same faces as every other target.
 
 #![allow(
     dead_code,
-    reason = "shared by two test binaries; each uses a different subset"
+    reason = "shared by three test binaries; each uses a different subset"
 )]
 
 use tinker_pdf_shape::{ShapedGlyph, VerticalMetrics};

@@ -721,29 +721,39 @@ impl<'a> Layout<'a> {
     /// This exists because Arabic needs it: `init`, `medi`, `fina` and `isol`
     /// are one substitution each in most faces and the *position* is the whole
     /// of what tells them apart.
+    ///
+    /// A rule's input is kept inside the cluster it starts in wherever the
+    /// buffer carries clusters ([`Buffer::set_syllable`]); a buffer that sets
+    /// none is restricted by nothing.
     pub fn substitute_masked(
         &self,
         buffer: &mut Buffer,
         lookups: &[(u16, u32)],
         limits: Limits,
     ) -> Vec<Warning> {
-        self.substitute_planned(buffer, lookups, &[], limits)
+        self.substitute_planned(buffer, lookups, &[], limits, true)
     }
 
     /// [`Layout::substitute_masked`], passing the positions `covered` — one
-    /// entry per lookup, from a [`Plans`] — says a lookup cannot apply at.
+    /// entry per lookup, from a [`Plans`] — says a lookup cannot apply at,
+    /// with the stage's confinement: `confined` keeps a rule's input inside
+    /// its cluster, and `false` is a stage the Universal Shaping Engine
+    /// applies to the whole run (`docs/design/shaping.md`, *What a cluster
+    /// confines*).
     pub(crate) fn substitute_planned(
         &self,
         buffer: &mut Buffer,
         lookups: &[(u16, u32)],
         covered: &[Option<Arc<LookupIndex>>],
         limits: Limits,
+        confined: bool,
     ) -> Vec<Warning> {
         let Some(gsub) = self.gsub else {
             return Vec::new();
         };
         let mut runner = Runner::new(Table::Gsub, gsub.lookups(), self.gdef.as_ref(), limits)
-            .with_index(covered);
+            .with_index(covered)
+            .with_confinement(confined);
         runner.run(buffer, lookups);
         runner.warnings
     }

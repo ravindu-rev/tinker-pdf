@@ -1318,11 +1318,15 @@ impl<'a> Shaper<'a> {
                 let wanted: Vec<(Tag, u32)> =
                     stage.iter().map(|tag| (*tag, feature_mask(*tag))).collect();
                 let lookups = self.lookups_for(gsub, script, wanted, &limits);
+                // Each stage confines its rules to a cluster or lets them
+                // reach across, as the feature group it runs is applied; see
+                // [`Plan::confines`].
                 warnings.extend(self.layout.substitute_planned(
                     &mut buffer,
                     lookups.lookups(),
                     lookups.covered(),
                     limits,
+                    plan.confines(index),
                 ));
                 #[cfg(test)]
                 crate::trace::stage(
@@ -1807,6 +1811,23 @@ impl Plan {
         }
     }
 
+    /// Whether stage `index` of this plan keeps a rule's input inside the
+    /// cluster it starts in.
+    ///
+    /// The Universal plan answers per stage, from [`USE_STAGE_CONFINED`]: the
+    /// groups the Universal Shaping Engine applies "one cluster at a time" are
+    /// confined, and its standard typographic presentation group, applied
+    /// "all together to the entire run", is not. A stage past the table's
+    /// end is not confined, which no plan reaches. Every other plan sets no
+    /// clusters, so its answer restricts nothing either way; it is the
+    /// buffer's own, as a caller of [`Layout::substitute_masked`] has it.
+    fn confines(self, index: usize) -> bool {
+        match self {
+            Plan::Universal => USE_STAGE_CONFINED.get(index).copied().unwrap_or(false),
+            Plan::Default | Plan::Joining | Plan::AsAsked => true,
+        }
+    }
+
     /// The stages this plan runs, in order.
     fn gsub_stages(self, asked: Option<&[Tag]>) -> Vec<&[Tag]> {
         match self {
@@ -1845,8 +1866,12 @@ impl Plan {
 /// script, so nothing here is lost that a fixture could see, and the omission
 /// is named in `docs/features/fonts.md` rather than left to be discovered.
 ///
-/// The default features are the last stage rather than the first, so that a
-/// Brahmic face's `liga` and `calt` see the cluster after it has been built.
+/// The default features are the last two stages rather than the first, so
+/// that a Brahmic face's `liga` and `calt` see the cluster after it has been
+/// built: [`DEFAULT_GSUB_FEATURES`] split in two, `locl` and `ccmp`, which the
+/// specification applies one cluster at a time, and then the four it applies
+/// to the whole run, so that each stage is confined or not as a whole
+/// ([`USE_STAGE_CONFINED`]).
 pub const USE_GSUB_STAGES: &[&[Tag]] = &[
     &[
         Tag::new(b"locl"),
@@ -1872,8 +1897,25 @@ pub const USE_GSUB_STAGES: &[&[Tag]] = &[
         Tag::new(b"pres"),
         Tag::new(b"psts"),
     ],
-    DEFAULT_GSUB_FEATURES,
+    &[Tag::new(b"locl"), Tag::new(b"ccmp")],
+    &[
+        Tag::new(b"rlig"),
+        Tag::new(b"liga"),
+        Tag::new(b"clig"),
+        Tag::new(b"calt"),
+    ],
 ];
+
+/// Whether each of [`USE_GSUB_STAGES`] keeps a rule's input inside its
+/// cluster, by the feature group it runs (`docs/design/shaping.md`, *What a
+/// cluster confines*): *OpenType feature application I*'s default glyph
+/// pre-processing, reordering and orthographic unit groups are applied "one
+/// cluster at a time", and *II*'s standard typographic presentation group
+/// "all together to the entire run".
+const USE_STAGE_CONFINED: [bool; 7] = [true, true, true, true, false, true, false];
+
+// One flag per stage, or a stage would be confined by another's answer.
+const _: () = assert!(USE_STAGE_CONFINED.len() == USE_GSUB_STAGES.len());
 
 /// Moves every pre-base glyph of every syllable in front of its base.
 ///
@@ -2557,6 +2599,40 @@ mod tests {
             "USE_REORDER_AFTER no longer indexes the orthographic-unit group"
         );
         const { assert!(super::USE_RPHF_STAGE < super::USE_REORDER_AFTER) };
+    }
+
+    /// FT-08.6: each stage is confined as the group of features it runs is
+    /// applied — *OpenType feature application I*'s groups one cluster at a
+    /// time, *II*'s presentation group to the whole run — and no stage mixes
+    /// the two.
+    #[test]
+    fn each_stage_confines_as_its_group_is_applied() {
+        let per_cluster = [
+            "locl", "ccmp", "nukt", "akhn", "rphf", "pref", "rkrf", "abvf", "blwf", "half", "pstf",
+            "vatu", "cjct",
+        ];
+        let whole_run = [
+            "abvs", "blws", "calt", "clig", "haln", "liga", "pres", "psts", "rclt", "rlig",
+        ];
+        for (index, stage) in super::USE_GSUB_STAGES.iter().enumerate() {
+            let confined = Plan::Universal.confines(index);
+            for tag in *stage {
+                let name = tag.to_string();
+                let group: &[&str] = if confined { &per_cluster } else { &whole_run };
+                assert!(
+                    group.contains(&name.as_str()),
+                    "stage {index} confined {confined} holds {name}"
+                );
+            }
+        }
+        // The two the split made, and nothing past the table.
+        assert!(Plan::Universal.confines(5));
+        assert!(!Plan::Universal.confines(6));
+        assert!(!Plan::Universal.confines(super::USE_GSUB_STAGES.len()));
+        // The plans that set no clusters keep the buffer's own answer.
+        for plan in [Plan::Default, Plan::Joining, Plan::AsAsked] {
+            assert!(plan.confines(0), "{plan:?}");
+        }
     }
 
     /// Where `rphf` is offered a position, over the four shapes that matter.

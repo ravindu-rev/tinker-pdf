@@ -81,6 +81,11 @@ pub(crate) struct Runner<'a, 'g> {
     /// The coverage index of each lookup [`Runner::run`] is handed, by its
     /// place in that list; empty, or `None` at a place, where there is none.
     covered: &'g [Option<Arc<LookupIndex>>],
+    /// Whether a `GSUB` rule's input is kept inside the cluster it starts
+    /// in: the stage's own answer, from the feature group it runs
+    /// (`docs/design/shaping.md`, *What a cluster confines*). See
+    /// [`Runner::per_syllable`].
+    confined: bool,
 }
 
 /// What a lookup's subtables could apply at, so a position none of them
@@ -520,6 +525,7 @@ impl<'a, 'g> Runner<'a, 'g> {
             ops: 0,
             mask: !0,
             covered: &[],
+            confined: true,
         }
     }
 
@@ -528,6 +534,15 @@ impl<'a, 'g> Runner<'a, 'g> {
     /// list's order.
     pub(crate) fn with_index(mut self, covered: &'g [Option<Arc<LookupIndex>>]) -> Self {
         self.covered = covered;
+        self
+    }
+
+    /// The same runner, with a `GSUB` rule's input kept inside its cluster
+    /// or let reach across: `true`, the default, keeps the syllables a
+    /// buffer carries; `false` is a stage the specification applies to the
+    /// whole run.
+    pub(crate) const fn with_confinement(mut self, confined: bool) -> Self {
+        self.confined = confined;
         self
     }
 
@@ -602,16 +617,17 @@ impl<'a, 'g> Runner<'a, 'g> {
 
     /// The cluster a lookup starting at `at` is confined to, or zero for none.
     ///
-    /// `GPOS` is never confined; [`crate::buffer::Buffer::set_syllable`] says
-    /// why the two tables differ here.
+    /// `GPOS` is never confined, and nor is a `GSUB` stage that applies its
+    /// features to the whole run; [`crate::buffer::Buffer::set_syllable`]
+    /// says why the two differ from the rest.
     fn per_syllable(&self, buffer: &Buffer, at: usize) -> u16 {
         #[cfg(test)]
         if crate::trace::unconfined() {
             return 0;
         }
         match self.table {
-            Table::Gsub => buffer.props(at).syllable,
-            Table::Gpos => 0,
+            Table::Gsub if self.confined => buffer.props(at).syllable,
+            Table::Gsub | Table::Gpos => 0,
         }
     }
 

@@ -907,9 +907,10 @@ the runner's `per_syllable`:
 Stages 5 and 6 were one stage of the default features; they are split so that
 each stage is wholly one group or the other, `locl` and `ccmp` keeping the
 confinement their group has and the other four losing it. A lookup run in a
-confined stage matches its input inside the cluster it starts in, its context
-outside it as before; a nested lookup inherits its caller's confinement. The
-Joining and default plans are not confined at all, as before.
+confined stage matches its input inside the cluster it starts in and its
+context outside it, as before, and a lookup a contextual rule names applies at
+the positions the rule matched. The Joining and default plans set no clusters,
+so nothing confines them, as before.
 
 #### Dotted circles (FT-08.7)
 
