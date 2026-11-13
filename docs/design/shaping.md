@@ -59,6 +59,10 @@ covers the producing half of the engine only.
   features and languages, the rules its finite-state machines find, the stack
   machine, positioning, collision avoidance and justification — *Graphite
   shaping* below.
+- **Justification** (FT-07e): `JSTF`'s priorities and kashida applied to a
+  run by a justify call in integer font units, chosen by CSS Text 3's
+  `text-justify`, offered a line's slack by layout and drawn as measured —
+  *Justification* below.
 
 ## Non-goals
 
@@ -82,8 +86,9 @@ covers the producing half of the engine only.
 - **Font selection and fallback.** Which face a run gets stays
   `css-fonts-4` §5 matching above the layout crate; the shaper takes one
   face and never picks another.
-- **Justification beyond space adjustment.** No `JSTF`, no kashida
-  elongation. [ROADMAP](../ROADMAP.md) row FT-07e.
+- **Justification beyond what *Justification* below designs.** Shrinkage in
+  line breaking, spacing between the letters of scripts that do not join,
+  and calligraphic elongation are that section's non-goals.
 
 ## Design
 
@@ -1567,3 +1572,385 @@ the person-written rows land, and FT-07d.17 reads them through it.
 | A compressed table names a size it does not decode to, or a size meant to exhaust memory | The stated size is bounded before a byte is decoded, and the decoded length must equal it |
 | An inserted or reordered slot breaks cluster monotonicity | Clusters are merged as `Buffer::reorder` merges them, and the fuzz target's assertion that clusters never go backwards carries over |
 | The faces' licences | OFL-1.1, which `deny.toml` admits (ruling 18); each face vendored whole with its licence beside it |
+
+## Justification
+
+A justified line today takes all of its slack in its spaces
+(`crates/tinker-pdf-layout/src/flow.rs`, the alignment pass of a line). Two
+more ways to fill a line are written down, and this section designs both: a
+face's own justification suggestions, which ISO/IEC 14496-22 stores in its
+`JSTF` table — lookups to enable or disable, and lookups whose values are a
+maximum adjustment — and **kashida**, the elongation of the join between two
+letters of a cursive script, written here as extender glyphs inserted at the
+join. CSS Text 3's `text-justify` says which of them a line may use.
+
+The `JSTF` rules below are transcribed from the table's definition as
+OpenType 1.9.1 publishes it (Microsoft's `JSTF` chapter), the text
+ISO/IEC 14496-22 holds for the table; `text-justify` from CSS Text Module
+Level 3, §6.4 and its subsections; and the kashida ranking from two published
+sources on Arabic justification — W3C's *Text Layout Requirements for the
+Arabic Script*, §7.2.5, and Elyaakoubi and Lazrek, "Justify Just or Just
+Justify", *Journal of Electronic Publishing* 13(1), 2010, which states the
+calligraphic rules of Benatia, Elyaakoubi and Lazrek, "Arabic text
+justification", *TUGboat* 27(2), 2006.
+
+### Scope
+
+- **`text-justify`** (`css-text-3` §6.4): `auto`, `none`, `inter-word`,
+  `inter-character` and the legacy `distribute`, which computes to
+  `inter-character`, parsed, cascaded and inherited into layout's style, each
+  value given the method this build has for it.
+- **`JSTF` read** (FT-07e.2): its script records, each script's extender
+  glyphs, default and per-language `JstfLangSys` tables, each language
+  system's priorities, each priority's eight `JstfModList`s — the `GSUB` and
+  `GPOS` lookups to enable and to disable, for shrinkage and for extension —
+  and its two `JstfMax` tables of `GPOS`-type lookups; carried on `Layout`
+  beside `GDEF`, `GSUB` and `GPOS`.
+- **The shaper's justify call** (FT-07e.3, FT-07e.4): a shaped run and a
+  width to gain, in integer font units, in; the run with the width taken by
+  `JSTF`'s priorities and then by kashida, and how much was taken, out.
+- **The layout seam** (FT-07e.6): a justified line offers its runs their
+  share of its slack through `metrics::Shaper`, records what each run's
+  shaper took on its `TextRun`, and spreads the rest over the spaces as
+  before.
+- **The painter** (FT-07e.7): each justified run drawn with the glyphs the
+  call gave layout, inserted glyphs included, and extracted as the text the
+  book holds.
+- **The price of the default** (FT-07e.8): a switch that sets `auto` on a
+  joining run as `inter-character` is set, for H-143's figures.
+
+### Non-goals
+
+- **Shrinkage in line breaking.** A line is broken at its natural widths,
+  first fit, as today, and justification only ever *adds* to a line: layout
+  never asks for less than the natural width, so `JSTF`'s shrinkage lists and
+  shrinkage `JstfMax` are read and applied by the justify call when it is
+  asked for a negative width, and no line asks for one. A breaker that let a
+  line hold more text by shrinking it would measure every candidate line
+  twice, and §6.4.1 makes negative space the user agent's option, not a
+  requirement.
+- **Spacing between the letters of scripts that do not join.**
+  `inter-character`'s own method for Latin, CJK or Thai text — the slack
+  spread between every pair of typographic character units — is not built
+  here; such a run under `inter-character` is justified over its spaces and
+  counted (*What `text-justify` asks*, below).
+- **Calligraphic elongation.** Curvilinear kashida, stretched letter
+  variants (`jalt`), swashes and compressed ligatures are not chosen; an
+  elongation is extender glyphs on the baseline. A run whose joins `curs`
+  attached takes no kashida, since a flat extender between glyphs joined off
+  the baseline breaks the join.
+- **Paragraph-wide optimisation.** No optimum-fit line breaking, no penalty
+  for elongations stacked in consecutive lines; each line is justified alone.
+- **Columns.** Justification of vertical text (FT-07b's columns) is not
+  designed here.
+- **Variations.** A `JstfMax` lookup's values at an instance of a variable
+  face are FT-07a's, as every `GPOS` value's are; here they are read at the
+  default.
+
+### Design
+
+#### What `text-justify` asks, and what this build gives each value
+
+`text-justify` (§6.4) is `auto | none | inter-word | inter-character`,
+initial `auto`, inherited, applying to text; `distribute` computes to
+`inter-character` for legacy reasons. A word separator's justification
+opportunity is its parent's value's, and an opportunity between two
+typographic character units is their nearest common ancestor's (§6.4.1), so
+layout reads the value **run by run**: a space belongs to the run that holds
+it, and kashida is offered only between two letters of one run, whose nearest
+common ancestor is that run's element. A join across a span boundary takes
+no kashida.
+
+| Value | Method in this build |
+| --- | --- |
+| `auto` | the slack over the line's spaces, as before, in every script — H-143's answer |
+| `inter-word` | the same: word separators only, §6.4's own description |
+| `none` | no justification opportunity: the run's spaces take nothing, and a line none of whose runs offers one is set at its start, as §6.4.3 sets a line that cannot be stretched under `text-align-last: auto` |
+| `inter-character`, `distribute` | in a run that joins, the run's share of the slack is offered to its shaper's justify call — `JSTF`'s priorities, then kashida, §6.4.4's "cursive elongation" — and what the call does not take goes to the spaces; in any other run, the spaces |
+
+**The value that selects kashida and `JSTF` is `inter-character`.** §6.4.4
+forbids gaps between the joined letters of a cursive script and lets a user
+agent "translate space distributed to justification opportunities within a
+run of such typographic letter units into some form of cursive elongation";
+`inter-character` is the value whose opportunities fall within such a run,
+and `inter-word` puts none there. H-143 keeps `auto` on the spaces, so a book
+asks for elongation by naming `inter-character`. A run "joins" as the
+Arabic shaper decides it does (`arabic::joins`): it holds a letter whose
+joining type joins.
+
+**What is refused, and when.** FT-07e.5 reads all five keywords into a
+`TextJustify` of four values, and refuses `inter-character` and
+`distribute` by value — `Declaration::Unsupported`, counted against
+`text-justify` by element, as `hyphens: auto` is — because until FT-07e.7's
+provider answers the justify call nothing in a book honours them, and a
+value parsed and not honoured is the failure the property table exists to
+prevent. FT-07e.6's layout tests set the value on a computed style directly.
+FT-07e.7 lifts the refusal in the same commit that makes the call answer,
+and the facade then counts `text-justify` against each element whose
+`inter-character` run does not join, at paint time where a run's text is
+known, as it counts `font-kerning` against the standard 14: that is the half
+of `inter-character` this row does not build.
+
+#### `JSTF`, read (FT-07e.2)
+
+`jstf::Jstf` is a view over the table's bytes, every read through
+`read::Bytes` (ruling 1), every offset measured from the table that holds
+it, a NULL offset absent:
+
+- **The header**: `majorVersion` 1 — another is not read — and
+  `jstfScriptCount` `JstfScriptRecord`s, each a tag and an offset. A script
+  is found by its tag, the records scanned in their order; the tag is the one
+  the run's `GSUB` script resolved to.
+- **`JstfScript`**: the `ExtenderGlyph` table — a count and that many glyph
+  ids, in the table's order — the default `JstfLangSys` and
+  `jstfLangSysCount` records of a tag and an offset. The run's language
+  selects a record; with none, or none for its tag, the default.
+- **`JstfLangSys`**: `jstfPriorityCount` offsets to `JstfPriority` tables, in
+  priority order, the first the least obtrusive suggestion.
+- **`JstfPriority`**: ten offsets, in the chapter's order —
+  `gsubShrinkageEnable`, `gsubShrinkageDisable`, `gposShrinkageEnable`,
+  `gposShrinkageDisable`, `shrinkageJstfMax`, `gsubExtensionEnable`,
+  `gsubExtensionDisable`, `gposExtensionEnable`, `gposExtensionDisable`,
+  `extensionJstfMax`.
+- **`JstfModList`**: a count and that many lookup indices into the `GSUB` or
+  `GPOS` `LookupList`.
+- **`JstfMax`**: a count and that many offsets to lookups of the `GPOS` form,
+  in design order, read by the `GPOS` lookup reader over the `JstfMax`
+  table's own bytes; a contextual positioning lookup there, which the
+  chapter excludes, is skipped with a warning.
+
+An offset past the table, a count past its bytes, or a version other than 1
+answers `None` for what it leads to, never a panic. `Layout` carries the
+table as `Layout::jstf`: `Layout::parse` reads it from the face, and
+`Layout::with_jstf` adds it to a `Layout::from_tables`, whose signature
+stays as it is. The `shape` fuzz target reads every structure of it.
+
+#### The justify call (FT-07e.3)
+
+`Shaper::justify(text, run, shaped, width)` takes the run as `Shaper::shape`
+shaped it and the width to gain, in the face's integer units, positive to
+extend; it returns the justified run and the units it took, never more than
+`width`, and which priority and how many inserted glyphs took them.
+
+1. **The language system** is the run's script's `JstfScript` and its
+   language's `JstfLangSys`. A face with no `JSTF`, or none for the run,
+   skips to kashida.
+2. **Each priority stands alone**, the chapter says, "its suggestions are
+   not added to the previous levels", and a suggestion that modifies a lookup
+   already applied is applied "to an unmodified version of the glyph string".
+   So priority `k` re-shapes the run from its text with its plan changed at
+   the lookup level: the extension-enable lookups added and the
+   extension-disable lookups removed, `GSUB`'s and `GPOS`'s each, the list
+   reassembled in `LookupList` order. Its gain is the re-shaped run's advance
+   less the original's.
+3. **`JstfMax`.** The priority's extension `JstfMax` lookups run over the
+   re-shaped run, each value record at its full value, through
+   `apply::Runner` over their own lookup list. That is the most the priority
+   may add; "a text-processing client may choose to adjust a glyph's
+   positioning by any amount from zero to the specified maximum", so when the
+   width left is less, each glyph's adjustment is scaled to it in integers —
+   `adjustment × left ÷ maximum`, rounded toward zero, the units the rounding
+   lost given one at a time to the adjusted glyphs in logical order.
+4. **The choice.** A priority whose lookup changes alone gain more than the
+   width overshoots and is not taken. Of the rest, the first whose gain and
+   `JstfMax` together meet the width ends the search; with none, the one that
+   took the most, the earlier on a tie. The search stops at the first that
+   meets it, so a priority is re-shaped at most once.
+5. **Kashida**, below, takes what is left, where the run joins.
+
+Shrinkage is the same with the four shrinkage lists and the shrinkage
+`JstfMax`, for a negative width, taking no more than it is asked for.
+
+#### Kashida: opportunities and their ranking (FT-07e.4)
+
+**An opportunity** is a join between two letters of one word of the run:
+the first letter in a form that joins forward (initial or medial,
+`arabic::forms`), the next one joining backward (medial or final), the two in
+different glyphs — a ligature's components share one and have no join
+between them to elongate — and no cursive attachment between them. The
+inserted glyphs go after every glyph of the first letter's cluster, its marks
+included, so a mark stays on its letter. A word is a stretch of the run
+between characters that do not join.
+
+**What is never elongated**: a word of two letters ("strictly prohibited",
+JEP 2010), and the joins the same source prohibits for the letter Beh —
+Beh followed by Ain, Seen, Feh, Qaf or Kaf — read for every letter of Beh's
+skeleton by Unicode's `Joining_Group`: a letter of group `BEH`, `NOON` or
+`YEH` followed by one of `AIN`, `SEEN`, `SAD`, `FEH`, `QAF` or `KAF`.
+`ArabicShaping.txt` is vendored for its `Joining_Group` field at the pinned
+Unicode version beside `DerivedJoiningType.txt`.
+
+**The ranking**, each opportunity a key compared field by field, the
+smallest first:
+
+1. *Approval*, from the same rules: 0 for a join JEP 2010 approves — Beh's
+   skeleton followed by `TAH`; 2 for one it authorises without approving —
+   Beh's skeleton followed by `ALEF`, `HAH`, `DAL`, `REH` or `LAM`; 1 for
+   every other.
+2. *The word's length*: 0 for four letters or more, 1 for three — "usually
+   kashida is not used in a word composed of three letters", so only where
+   no longer word offers one.
+3. *The place in the word*: the distance from the join after the second
+   letter, "it is preferable to use kashida in the second letter".
+4. *The place in the run*, the word nearest the run's logical end first:
+   calligraphers elongate near the end of the line, and the run's end stands
+   for the line's, which is where layout offers first.
+5. *The cluster*, the earlier first, so the order is total.
+
+**The fill.** One elongation a word — W3C's §7.2.5, "avoiding multiple
+kashidas in a single word" — at the word's best opportunity, the words taken
+in their best opportunities' order. An elongation takes extender glyphs
+while the next one keeps its own length within the face's em and the run's
+gain within the width, and the next word is elongated only when the one
+before is full: so a line is elongated once where one elongation fills it,
+JEP 2010's convention of one elongation to a line, and more only where the
+slack is longer than an em. The extender glyphs are the `ExtenderGlyph`
+table's for the run's script where the face has one — the longest that fits
+first, the lower glyph id on a tie — and otherwise the face's glyph for
+U+0640 TATWEEL, which joins on both sides (`arabic.rs`'s
+`tatweel_joins_on_both_sides`), so no joining form changes; a face with
+neither inserts nothing. Each inserted glyph takes its `hmtx` advance and no
+offset, carries the **cluster of the letter before it**, and is marked
+inserted on the `ShapedGlyph`, which is how the painter writes it with no
+text. The glyph ceiling (`Limits::max_glyphs`) bounds the insertions; the
+first glyph past it is not inserted and the run records a warning naming it.
+
+#### The layout seam (FT-07e.6)
+
+`metrics::Shaper` gains `justify(text, font, rtl, context, width)`, the
+width in points, answering the points the provider's shaper took — at most
+`width` and never negative — and, by default, zero: a provider that does not
+justify declines, and its lines are justified over their spaces exactly as
+before. A justified line (`text-align: justify`, not its last line, not a
+line ended by a preserved newline) with slack:
+
+1. offers its runs whose `text-justify` is `inter-character`, and which the
+   shaper measured, the slack still left, **from the line's logical end
+   toward its start**, each in the context it was measured in;
+2. adds what a run took to its width and records the offer and the take on
+   the run (`TextRun::justify`), so that the painter asks the same question
+   and gets the same answer;
+3. spreads the rest over the spaces of the runs whose `text-justify` is not
+   `none`, as `extra_per_space` does today; with none, sets the line at its
+   start.
+
+`flow.rs` asks for the shaper in its one place and keeps to it, so a run is
+measured, justified and drawn by one path (`tests/shaper.rs`'s
+`a_justified_run_is_measured_by_one_path`: a provider whose `advance`
+panics still justifies). The layout crate gains no dependency edge.
+
+#### The painter, and extracted text (FT-07e.7)
+
+`BookMetrics` answers the call through `tinker-pdf-shape`: the width in
+points is the face's units `round(width × units_per_em ÷ size)`, the call
+runs, and what it took comes back as `units × size ÷ units_per_em`, each one
+multiply and one divide. The painter shapes a justified run and calls the
+same justify with the offer layout recorded, in the same context, so the
+glyphs it draws are the glyphs layout measured.
+
+**An inserted glyph stays out of the text.** `PageBuilder::glyphs` and
+`PageBuilder::glyph_run` record a glyph's `/ToUnicode` text by the first
+non-empty text it is drawn with, one text a code. An inserted extender is
+written with **empty text**, so it never sets its glyph's entry; but the
+extender is the face's tatweel glyph, and a book that also *types* a tatweel
+gives that glyph the text "ـ", which every inserted copy would then extract
+as. So a run holding an inserted glyph is drawn inside a stated span —
+`PageBuilder::begin_stated`, a `/Span` whose `/ActualText` is the run's
+text as the book holds it (14.9.4) — and a reader reads the typed text in
+place of the glyphs, whatever the extender's `/ToUnicode` says. The cluster
+an inserted glyph carries is its letter's, so the run's glyph-to-text
+correspondence is unchanged everywhere the span is not read.
+
+#### The price of the default (FT-07e.8, H-143)
+
+H-143 rules that `auto` is justified over its spaces. FT-07e.8a measures what
+the other answer would cost with **the `auto-elongation` cargo feature** of
+`tinker-pdf-layout`, forwarded by the facade and off by default: with it on,
+`auto` on a run that joins is set as `inter-character` is. The feature
+changes nothing else, and no build the repository ships turns it on.
+
+#### What H-64's person writes for (FT-07e.10)
+
+- **Kashida**, over **Noto Naskh Arabic Regular** vendored into
+  `crates/tinker-pdf-shape/data/arabic/` under `OFL-1.1`, which `deny.toml`
+  admits, declared in `THIRDPARTY.md`. Six lines — بسم الله الرحمن الرحيم,
+  محمد رسول الله, كتب الطالب الدرس, سلام عليكم, في البيت (a word of two
+  letters beside a longer one) and تطبيق (Beh before Tah) — each justified
+  through the call at its natural width plus a quarter, a half and one em,
+  and at two em, which one elongation cannot fill. The person writes each
+  line's glyphs and positions with the extenders where a reader of the
+  script places them.
+- **`JSTF`**, over a face `tests/justify.rs` assembles, since no vendored
+  face carries the table: Latin glyphs with an `ffi` ligature lookup, a kerning
+  lookup, and a `JSTF` of three priorities for `latn` — the ligature disabled
+  for extension, the kerning disabled, and a `JstfMax` that widens the space
+  by up to 360 units — and the strings "office affinity" and "waffle iron",
+  each at widths that the first, the second and the third priority meets and
+  one that none meets.
+
+#### Bounds
+
+Ruling 1 and the resource-exhaustion design hold the call to the shaper's
+budgets: at most one re-shape a priority, and at most
+`Limits::max_jstf_priorities` (64) priorities a call, the rest not tried and
+a warning recorded once; `JstfMax` lookups run under the run's `Limits` like
+any lookup; insertions under `Limits::max_glyphs`. A `JstfModList` naming a
+lookup past its `LookupList` changes nothing.
+
+### Milestones
+
+1. **FT-07e.2, `JSTF` read.** `crates/tinker-pdf-shape/tests/justify.rs`:
+   `a_jstf_table_reads_back_as_assembled` (every structure of a table the
+   test assembles), `an_offset_past_the_jstf_answers_none`,
+   `every_jstf_fuzz_seed_shapes_without_panicking`; `cargo xtask check`.
+2. **FT-07e.3, the priorities.** `tests/justify.rs`:
+   `a_priority_extends_a_run_by_enabling_its_lookups`,
+   `justification_stops_at_the_first_priority_that_fits`,
+   `a_jstf_max_lookup_bounds_the_extension`,
+   `a_face_without_jstf_returns_the_run_unchanged`, with the `cfg(test)`
+   count of one re-shape a priority.
+3. **FT-07e.4, kashida.** `tests/justify.rs`:
+   `kashidas_fill_the_width_at_the_ranked_opportunities`,
+   `an_inserted_kashida_carries_its_letters_cluster`,
+   `a_word_with_no_opportunity_is_left_to_the_spaces`,
+   `a_kashida_past_the_glyph_ceiling_is_refused_and_named`; `fingerprints.rs`
+   `justified_shaping_is_stable_across_targets`.
+4. **FT-07e.5, the property.** `tinker-pdf-css`'s `src/tests/parser.rs`
+   `text_justify_parses_the_values_the_design_reads` and `src/tests/cascade.rs`
+   `text_justify_cascades_as_the_design_reads`, `inter-character` and
+   `distribute` refused by value and counted.
+5. **FT-07e.6, the seam.** `crates/tinker-pdf-layout/tests/shaper.rs`:
+   `a_justified_line_offers_its_slack_to_the_shaper_first`,
+   `a_shaper_that_declines_leaves_the_line_justified_by_its_spaces`,
+   `a_justified_run_is_measured_by_one_path`; every older layout test passes.
+6. **FT-07e.7, books.** `crates/tinker-pdf/tests/epub_shaped.rs`:
+   `a_justified_arabic_line_is_elongated_and_extracts_as_typed`,
+   `a_typed_tatweel_beside_an_inserted_kashida_extracts_once`,
+   `a_justified_line_is_measured_as_drawn`, under `inter-character`, which
+   the parser takes from this step; an `inter-character` run that does not
+   join counted; default and `bundled-fonts` builds.
+7. **FT-07e.8a, the price.** With `auto-elongation` and without it, the
+   figures committed here: the books whose pages move, the cases that change,
+   time and bytes in release and debug, in both builds; FT-07e.8b's
+   wall-clock figure in the timing phase.
+8. **FT-07e.9, H-143 landed.** `epub_shaped.rs`
+   `a_justified_arabic_paragraph_under_auto_is_set_as_ruled`: over its
+   spaces.
+9. **FT-07e.10, the person's fixtures.** `tests/justify.rs`
+   `every_person_written_justification_fixture_is_reproduced`, the kashida
+   and the `JSTF` sets each counted.
+10. **FT-07e.11, the speed row.** A justified Arabic paragraph through the
+    call in MS-04's fonts group, held by `xtask/src/bench.rs`'s
+    `the_committed_baseline_agrees_with_the_tree`.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| Kashida placement is a reader's judgement, and ruling 13 lets no other engine settle it | The ranking is stated with its sources and adjudicated by H-64's person-written fixtures (FT-07e.10); until they land, every test is a face whose expected glyphs the test computes from the ranking, which shows the ranking applied and not that it is right |
+| A line measured with one set of glyphs and drawn with another | One call, asked the same offer in the same context by layout and painter; `a_justified_line_is_measured_as_drawn` |
+| An inserted extender extracts as text, or a typed one is lost | Inserted glyphs carry empty text and their run is a stated span with `/ActualText`; `a_typed_tatweel_beside_an_inserted_kashida_extracts_once` |
+| A hostile `JSTF` makes justification the denial of service | One re-shape a priority, 64 priorities a call, every lookup under the run's `Limits`, insertions under the glyph ceiling |
+| A committed book's pages move | `auto` keeps its spaces (H-143), `inter-character` is refused until FT-07e.7 and no committed book declares `text-justify`; `epub_fallback.rs` and `epub_conservation.rs` hold the books |
+| Flat extenders break joins off the baseline | A join `curs` attached takes no kashida |
+| `inter-character` half built | The half not built is named here and counted by element in the books |
