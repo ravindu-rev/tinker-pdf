@@ -26,6 +26,8 @@
 //! its false-alarm count over the 195 conforming fixtures is owed by the next
 //! local corpus run.
 
+mod written_support;
+
 use tinker_pdf::{ConformanceFinding, Document, FindingKind, PdfUaCoverage, PdfUaPart};
 
 // A face with real `cmap`, `glyf` and `hmtx` tables, for the width rule.
@@ -1446,7 +1448,8 @@ fn an_xfa_form_is_a_part_two_finding() {
 #[test]
 fn an_encrypted_file_that_withholds_accessibility_is_reported() {
     let encrypted = |permissions: i32| {
-        let bytes = Document::open(Ua::new("1").build())
+        let baseline = Ua::new("1").build();
+        let bytes = Document::open(baseline.clone())
             .expect("opens")
             .editor()
             .save(&tinker_pdf::WriteOptions {
@@ -1459,6 +1462,20 @@ fn an_encrypted_file_that_withholds_accessibility_is_reported() {
                 }),
                 ..tinker_pdf::WriteOptions::default()
             });
+        let withheld = [written_support::Expected::PdfUa(
+            FindingKind::AccessibilityPermissionWithheld {
+                permissions: Some(i64::from(permissions)),
+            },
+        )];
+        if permissions & (1 << 9) == 0 {
+            written_support::expecting(
+                "the baseline, withholding accessibility",
+                &bytes,
+                &withheld,
+            );
+        } else {
+            written_support::rewritten("the baseline, encrypted", &baseline, &bytes);
+        }
         let document = Document::open(bytes).expect("it opens");
         document
             .authenticate("")

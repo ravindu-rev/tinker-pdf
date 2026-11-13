@@ -30,6 +30,13 @@
     reason = "shared by several test binaries; each uses a different subset"
 )]
 
+/// The validate-on-save helper's facade reading, for the conversions this
+/// module makes; a test that takes this module may take the reading itself
+/// too.
+#[allow(clippy::duplicate_mod)]
+#[path = "../written_support/mod.rs"]
+mod written_support;
+
 pub mod book;
 pub mod conservation;
 pub mod layout;
@@ -639,9 +646,10 @@ pub enum TodaysAnswer {
 pub fn todays_answer(bytes: &[u8]) -> TodaysAnswer {
     match tinker_pdf::Document::open(bytes.to_vec()) {
         Ok(doc) => {
-            let report = doc
-                .archive()
-                .expect("a book that opens today opens through the container path");
+            // A book that opens today opens through the container path, and
+            // what it synthesised is held to the validate-on-save helper.
+            let doc = written_support::synthesised("a book that opens today", doc);
+            let report = doc.archive().expect("synthesised holds a report");
             let sizes = (0..doc.page_count())
                 .map(|i| doc.page(i).expect("page in range").size())
                 .collect();

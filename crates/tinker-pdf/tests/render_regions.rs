@@ -131,6 +131,8 @@
 //! (`Bounds` in `tinker-pdf-render`), which also puts the lattice's and the
 //! mesh's budgets on the page's side of the decision.
 
+mod written_support;
+
 use std::sync::Barrier;
 
 use tinker_pdf::{
@@ -205,7 +207,9 @@ fn shaped(bytes: Vec<u8>, shape: Shape) -> Vec<u8> {
     if let Some((x0, y0, x1, y1)) = shape.crop {
         assert!(editor.set_crop_box(0, x0, y0, x1, y1), "the crop box sets");
     }
-    editor.save(&WriteOptions::default())
+    let out = editor.save(&WriteOptions::default());
+    written_support::rewritten("shaped", document.cos().bytes(), &out);
+    out
 }
 
 /// Seven lines of the six-shape synthetic face, at two sizes and two sub-pixel
@@ -231,7 +235,7 @@ fn text_page(shape: Shape) -> Vec<u8> {
             page.text(b"F0", 15.0, x, y, "tiled#page");
         }
     });
-    shaped(builder.finish(), shape)
+    shaped(built("text page", builder), shape)
 }
 
 /// The page flooded by one diagonal axial shading (8.7.4.5.3).
@@ -261,7 +265,7 @@ fn shading_page(shape: Shape) -> Vec<u8> {
         assert!(page.shading(b"Sh0"));
         page.raw(b"Q");
     });
-    shaped(builder.finish(), shape)
+    shaped(built("shading page", builder), shape)
 }
 
 /// A 5x7 colour image stretched over the page at a ratio that is not a whole
@@ -290,7 +294,7 @@ fn image_page(shape: Shape) -> Vec<u8> {
     builder.add_page(PAGE_W, PAGE_H, |page| {
         page.image(b"Im0", 3.0, 4.0, PAGE_W - 7.0, PAGE_H - 9.0);
     });
-    shaped(builder.finish(), shape)
+    shaped(built("image page", builder), shape)
 }
 
 /// Curves and strokes at an angle: the stroker's joins and the flattening
@@ -313,7 +317,7 @@ fn strokes_page(shape: Shape) -> Vec<u8> {
     }
     let mut builder = DocumentBuilder::new();
     builder.add_page(PAGE_W, PAGE_H, |page| page.raw(content.as_bytes()));
-    shaped(builder.finish(), shape)
+    shaped(built("strokes page", builder), shape)
 }
 
 /// A bare one-page document around `content`, with `resources` and any further
@@ -1112,7 +1116,13 @@ fn a_rotated_page_region_is_the_corner_of_the_displayed_picture() {
         builder.add_page(PAGE_W, PAGE_H, |page| {
             page.fill_rect(0.0, 0.0, 18.0, 18.0, 0.0);
         });
-        let bytes = shaped(builder.finish(), Shape::turned(rotation));
+        let bytes = shaped(
+            built(
+                "a rotated page region is the corner of the displayed picture",
+                builder,
+            ),
+            Shape::turned(rotation),
+        );
         let document = Document::open(bytes).expect("it opens");
         let page = document.page(0).expect("a page");
         let options = RenderOptions::default();
@@ -1162,7 +1172,8 @@ fn a_crop_box_does_not_move_the_region() {
         page.set_crop_box(crop.0, crop.1, crop.2, crop.3);
         page.fill_rect(crop.0, crop.1, 14.0, 14.0, 0.0);
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document =
+        Document::open(built("a crop box does not move the region", builder)).expect("it opens");
     let page = document.page(0).expect("a page");
     assert_eq!(page.crop_box(), crop, "the crop box reached the page");
 
@@ -1234,7 +1245,11 @@ fn a_region_indexes_the_clamped_lattice_of_an_enormous_page() {
         page.fill_rect(0.0, 0.0, 400.0, 400.0, 0.0);
         page.fill_rect(WIDE - 400.0, TALL - 400.0, 400.0, 400.0, 0.0);
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = Document::open(built(
+        "a region indexes the clamped lattice of an enormous page",
+        builder,
+    ))
+    .expect("it opens");
     let page = document.page(0).expect("a page");
     let options = RenderOptions::default();
     let (width, height) = page.pixel_size(&options);
@@ -1530,4 +1545,13 @@ fn bands_drawn_on_two_three_four_and_seven_threads_are_the_page() {
             }
         });
     }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

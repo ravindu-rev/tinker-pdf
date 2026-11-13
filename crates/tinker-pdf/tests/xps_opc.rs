@@ -27,6 +27,7 @@
 //! through an 8 193-part package and `MAX_XPS_PAGES` through a fixed document
 //! naming 4 097 pages.
 
+mod written_support;
 mod xps_support;
 
 use tinker_pdf::cbz;
@@ -46,7 +47,10 @@ use xps_support::{
 #[test]
 fn a_hand_built_package_opens_as_a_fixed_document() {
     let bytes = archive(one_page_package());
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a hand built package opens as a fixed document",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 1);
     assert_eq!(document.page(0).map(|p| p.size()), Some((612.0, 792.0)));
     let report = document.archive().expect("a synthesised document");
@@ -88,7 +92,10 @@ fn a_comic_carrying_a_content_types_part_is_still_a_comic() {
         ],
         Damage::None,
     );
-    let document = open(&bytes).expect("a comic archive");
+    let document = converted(
+        "a comic carrying a content types part is still a comic",
+        open(&bytes).expect("a comic archive"),
+    );
     assert_eq!(document.page_count(), 1);
     assert_eq!(
         document.page(0).map(|p| p.size()),
@@ -124,7 +131,10 @@ fn an_opc_package_that_names_no_fixed_representation_is_still_a_comic() {
         ],
         Damage::None,
     );
-    let document = open(&bytes).expect("the comic path, unchanged");
+    let document = converted(
+        "an opc package that names no fixed representation is still a comic",
+        open(&bytes).expect("the comic path, unchanged"),
+    );
     assert_eq!(document.page_count(), 1);
     assert_eq!(document.page(0).map(|p| p.size()), Some((4.0, 6.0)));
 }
@@ -362,7 +372,10 @@ fn a_relative_package_relationship_target_resolves_against_the_root() {
         "_rels/.rels",
         &package_rels("FixedDocumentSequence.fdseq"),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a relative package relationship target resolves against the root",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 1);
 }
 
@@ -439,7 +452,10 @@ fn a_part_resolves_however_a_reference_spells_its_case() {
         "Documents/1/FixedDocument.fdoc",
         &document(&["PAGES/1.FPAGE"]),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a part resolves however a reference spells its case",
+        open(&bytes).expect("an XPS"),
+    );
     let seen = document.archive().expect("a report").warnings().to_vec();
     assert!(
         !seen
@@ -459,7 +475,12 @@ fn a_shared_prefix_that_is_not_a_segment_boundary_is_not_derivable() {
         "a part whose parent is `one`, not `one.txt`",
     ));
     assert!(
-        open(&bytes).is_ok(),
+        open(&bytes)
+            .map(|document| converted(
+                "a shared prefix that is not a segment boundary is not derivable",
+                document
+            ))
+            .is_ok(),
         "`/Resources/one.txt` is not derivable from `/Resources/one/two.txt`"
     );
 }
@@ -500,7 +521,10 @@ fn directory_records_are_not_parts() {
     );
     // And `/Documents` is not derivable from `/Documents/1/Pages/1.fpage`,
     // because the directory record is not a part in the first place.
-    let document = open(&bytes).expect("directory records are not parts");
+    let document = converted(
+        "directory records are not parts",
+        open(&bytes).expect("directory records are not parts"),
+    );
     assert_eq!(document.page_count(), 1);
 }
 
@@ -572,7 +596,10 @@ fn an_interleaved_part_is_read_as_the_part_its_pieces_join_into() {
     ));
     let bytes = archive(parts);
 
-    let document = open(&bytes).expect("an interleaved XPS opens");
+    let document = converted(
+        "an interleaved part is read as the part its pieces join into",
+        open(&bytes).expect("an interleaved XPS opens"),
+    );
     assert_eq!(document.page_count(), 1);
     assert_eq!(document.page(0).map(|p| p.size()), Some((612.0, 792.0)));
     let report = document.archive().expect("a synthesised document");
@@ -621,7 +648,14 @@ fn pieces_are_joined_in_number_order_whatever_the_archive_order() {
         package.read_part(&name).expect("the joined part"),
         fixed_page("816", "1056").as_bytes()
     );
-    assert_eq!(open(&bytes).expect("it opens").page_count(), 1);
+    assert_eq!(
+        converted(
+            "pieces are joined in number order whatever the archive order",
+            open(&bytes).expect("it opens")
+        )
+        .page_count(),
+        1
+    );
 }
 
 /// **Pieces that do not join into one part refuse the package by name**,
@@ -762,7 +796,14 @@ fn piece_suffixes_fold_case_and_mean_nothing_outside_a_package() {
         .collect();
     let pieces: Vec<(&str, &[u8])> = shouted.iter().map(|(n, b)| (n.as_str(), *b)).collect();
     let bytes = archive(in_pieces("Documents/1/Pages/1.fpage", &pieces));
-    assert_eq!(open(&bytes).expect("it opens").page_count(), 1);
+    assert_eq!(
+        converted(
+            "piece suffixes fold case and mean nothing outside a package",
+            open(&bytes).expect("it opens")
+        )
+        .page_count(),
+        1
+    );
 
     let comic = zip(
         &[
@@ -771,7 +812,10 @@ fn piece_suffixes_fold_case_and_mean_nothing_outside_a_package() {
         ],
         Damage::None,
     );
-    let document = open(&comic).expect("a comic with a piece-shaped name");
+    let document = converted(
+        "piece suffixes fold case and mean nothing outside a package",
+        open(&comic).expect("a comic with a piece-shaped name"),
+    );
     assert_eq!(document.page_count(), 1);
 }
 
@@ -980,7 +1024,10 @@ fn a_truncated_part_name_is_unresolvable_and_an_untruncated_one_is_not() {
 
     // And the warning reaches the report, rather than being read into a loop
     // nothing checks.
-    let document = open(&bytes).expect("the rest of the package is fine");
+    let document = converted(
+        "a truncated part name is unresolvable and an untruncated one is not",
+        open(&bytes).expect("the rest of the package is fine"),
+    );
     let report = document.archive().expect("a report");
     assert!(
         report
@@ -1028,7 +1075,10 @@ fn a_page_content_that_does_not_resolve_keeps_its_number() {
         "Documents/1/Pages/3.fpage",
         &fixed_page("816", "1056"),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a page content that does not resolve keeps its number",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 3, "every reference produces a page");
     let report = document.archive().expect("a report");
     assert!(report.warnings().contains(&ArchiveWarning::XpsPage {
@@ -1061,7 +1111,10 @@ fn only_a_direct_child_of_a_fixed_document_is_a_page() {
         "Documents/1/FixedDocument.fdoc",
         &nested,
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "only a direct child of a fixed document is a page",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(
         document.page_count(),
         1,
@@ -1078,7 +1131,10 @@ fn a_document_reference_that_does_not_resolve_leaves_a_page() {
         "FixedDocumentSequence.fdseq",
         &sequence(&["Documents/1/FixedDocument.fdoc", "Documents/2/Gone.fdoc"]),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a document reference that does not resolve leaves a page",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 2);
     let report = document.archive().expect("a report");
     assert!(report.warnings().contains(&ArchiveWarning::XpsPage {
@@ -1110,7 +1166,10 @@ fn a_fixed_page_with_no_usable_size_takes_the_books_size() {
             "Documents/1/Pages/2.fpage",
             &fixed_page(width, height),
         ));
-        let document = open(&bytes).unwrap_or_else(|e| panic!("{width}x{height}: {e:?}"));
+        let document = converted(
+            "a fixed page with no usable size takes the books size",
+            open(&bytes).unwrap_or_else(|e| panic!("{width}x{height}: {e:?}")),
+        );
         assert_eq!(document.page_count(), 2);
         assert_eq!(
             document.page(1).map(|p| p.size()),
@@ -1136,7 +1195,10 @@ fn a_fixed_page_part_that_is_not_one_is_a_named_placeholder() {
         "Documents/1/Pages/1.fpage",
         r#"<NotAPage xmlns="http://schemas.microsoft.com/xps/2005/06" />"#,
     ));
-    let document = open(&bytes).expect("an XPS with one unreadable page");
+    let document = converted(
+        "a fixed page part that is not one is a named placeholder",
+        open(&bytes).expect("an XPS with one unreadable page"),
+    );
     assert_eq!(document.page_count(), 1);
     let report = document.archive().expect("a report");
     assert!(report.warnings().contains(&ArchiveWarning::XpsPage {
@@ -1194,7 +1256,10 @@ fn a_package_mixing_the_two_dialects_is_accepted() {
         "Documents/1/Pages/1.fpage",
         &format!(r#"<FixedPage xmlns="{OXPS}" Width="816" Height="1056" />"#),
     ));
-    let document = open(&bytes).expect("one vocabulary, two spellings");
+    let document = converted(
+        "a package mixing the two dialects is accepted",
+        open(&bytes).expect("one vocabulary, two spellings"),
+    );
     assert_eq!(document.page_count(), 1);
     assert_eq!(
         document.archive().and_then(|r| r.xps_dialect()),
@@ -1211,7 +1276,10 @@ fn markup_in_a_third_namespace_is_not_read_as_a_fixed_page() {
         "Documents/1/Pages/1.fpage",
         r#"<FixedPage xmlns="http://example.invalid/xps" Width="816" Height="1056" />"#,
     ));
-    let document = open(&bytes).expect("the page still exists");
+    let document = converted(
+        "markup in a third namespace is not read as a fixed page",
+        open(&bytes).expect("the page still exists"),
+    );
     let report = document.archive().expect("a report");
     assert!(report.warnings().contains(&ArchiveWarning::XpsPage {
         page: 0,
@@ -1245,7 +1313,12 @@ fn a_package_past_the_part_cap_is_refused_by_name() {
         parts.insert(parts.len() - 1, part(&format!("Filler/{n:06}.bin"), "x"));
     }
     let bytes = archive(parts);
-    assert!(open(&bytes).is_ok(), "exactly at the cap is allowed");
+    assert!(
+        open(&bytes)
+            .map(|document| converted("a package past the part cap is refused by name", document))
+            .is_ok(),
+        "exactly at the cap is allowed"
+    );
 }
 
 /// `MAX_XPS_PAGES`, fired the same way.
@@ -1269,7 +1342,10 @@ fn a_page_count_past_the_xps_cap_is_refused_by_name() {
         "Documents/1/FixedDocument.fdoc",
         &document(&names),
     ));
-    let document = open(&bytes).expect("exactly at the cap is allowed");
+    let document = converted(
+        "a page count past the xps cap is refused by name",
+        open(&bytes).expect("exactly at the cap is allowed"),
+    );
     assert_eq!(document.page_count() as usize, xps::MAX_XPS_PAGES);
 }
 
@@ -1312,7 +1388,10 @@ fn the_synthesised_document_fits_inside_what_was_charged_for_it() {
             "Documents/1/FixedDocument.fdoc",
             &document(&refs),
         ));
-        let document = open(&bytes).expect("an XPS");
+        let document = converted(
+            "the synthesised document fits inside what was charged for it",
+            open(&bytes).expect("an XPS"),
+        );
         let report = document.archive().expect("a report");
         let charged = cbz::DOCUMENT_OVERHEAD + pages * cbz::PAGE_OVERHEAD;
         assert!(
@@ -1340,7 +1419,13 @@ fn hostile_bytes_through_an_interleaved_package_never_panic() {
     for at in (0..original.len()).step_by(251) {
         let mut bytes = original.clone();
         bytes[at] ^= 0xA5;
-        let _ = open(&bytes);
+        // What a damaged package still converts to is held all the same.
+        if let Ok(document) = open(&bytes) {
+            converted(
+                "hostile bytes through an interleaved package never panic",
+                document,
+            );
+        }
         tried += 1;
     }
     // The central directory, where every piece name is spelled a second time,
@@ -1352,8 +1437,26 @@ fn hostile_bytes_through_an_interleaved_package_never_panic() {
     for at in (directory..original.len()).step_by(7) {
         let mut bytes = original.clone();
         bytes[at] ^= 0x01;
-        let _ = open(&bytes);
+        // What a damaged package still converts to is held all the same.
+        if let Ok(document) = open(&bytes) {
+            converted(
+                "hostile bytes through an interleaved package never panic",
+                document,
+            );
+        }
         tried += 1;
     }
     assert!(tried > 300, "the sweep ran: {tried} inputs");
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

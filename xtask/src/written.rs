@@ -106,82 +106,6 @@ pub const PENDING: &[&str] = &[
     "crates/tinker-pdf-ffi/src/read/tests.rs",
     "crates/tinker-pdf-ffi/src/tagging/tests.rs",
     "crates/tinker-pdf-ffi/tests/open_copies.rs",
-    "crates/tinker-pdf/src/annots.rs",
-    "crates/tinker-pdf/src/epub/tests.rs",
-    "crates/tinker-pdf/src/pdfua.rs",
-    "crates/tinker-pdf/src/pdfx.rs",
-    "crates/tinker-pdf/src/reading_order.rs",
-    "crates/tinker-pdf/src/resources.rs",
-    "crates/tinker-pdf/tests/appearance_synthesis.rs",
-    "crates/tinker-pdf/tests/bench_inputs.rs",
-    "crates/tinker-pdf/tests/cbz_images.rs",
-    "crates/tinker-pdf/tests/cbz_real.rs",
-    "crates/tinker-pdf/tests/cff_fonts.rs",
-    "crates/tinker-pdf/tests/cff_subset_census.rs",
-    "crates/tinker-pdf/tests/deflate_size.rs",
-    "crates/tinker-pdf/tests/determinism.rs",
-    "crates/tinker-pdf/tests/epub.rs",
-    "crates/tinker-pdf/tests/epub_analytic.rs",
-    "crates/tinker-pdf/tests/epub_css.rs",
-    "crates/tinker-pdf/tests/epub_fallback.rs",
-    "crates/tinker-pdf/tests/epub_fetched.rs",
-    "crates/tinker-pdf/tests/epub_float_order.rs",
-    "crates/tinker-pdf/tests/epub_fonts.rs",
-    "crates/tinker-pdf/tests/epub_ocf.rs",
-    "crates/tinker-pdf/tests/epub_paint.rs",
-    "crates/tinker-pdf/tests/epub_pseudo.rs",
-    "crates/tinker-pdf/tests/epub_reading.rs",
-    "crates/tinker-pdf/tests/epub_reftest.rs",
-    "crates/tinker-pdf/tests/epub_structure.rs",
-    "crates/tinker-pdf/tests/epub_support/mod.rs",
-    "crates/tinker-pdf/tests/epub_tables.rs",
-    "crates/tinker-pdf/tests/ext_gstate.rs",
-    "crates/tinker-pdf/tests/facade_read.rs",
-    "crates/tinker-pdf/tests/guards.rs",
-    "crates/tinker-pdf/tests/images.rs",
-    "crates/tinker-pdf/tests/level_six_counts.rs",
-    "crates/tinker-pdf/tests/metamorphic_classes.rs",
-    "crates/tinker-pdf/tests/page_geometry.rs",
-    "crates/tinker-pdf/tests/page_images.rs",
-    "crates/tinker-pdf/tests/pdfa_fonts.rs",
-    "crates/tinker-pdf/tests/pdfua.rs",
-    "crates/tinker-pdf/tests/pdfua_rules.rs",
-    "crates/tinker-pdf/tests/pdfx_rules.rs",
-    "crates/tinker-pdf/tests/peak_memory.rs",
-    "crates/tinker-pdf/tests/png_output.rs",
-    "crates/tinker-pdf/tests/png_passthrough.rs",
-    "crates/tinker-pdf/tests/reading_order.rs",
-    "crates/tinker-pdf/tests/reading_order_census.rs",
-    "crates/tinker-pdf/tests/render_analytic.rs",
-    "crates/tinker-pdf/tests/render_differential.rs",
-    "crates/tinker-pdf/tests/render_goldens.rs",
-    "crates/tinker-pdf/tests/render_options.rs",
-    "crates/tinker-pdf/tests/render_parts.rs",
-    "crates/tinker-pdf/tests/render_regions.rs",
-    "crates/tinker-pdf/tests/render_support/mod.rs",
-    "crates/tinker-pdf/tests/signature_shapes.rs",
-    "crates/tinker-pdf/tests/signatures.rs",
-    "crates/tinker-pdf/tests/stats.rs",
-    "crates/tinker-pdf/tests/streaming_determinism.rs",
-    "crates/tinker-pdf/tests/streaming_open.rs",
-    "crates/tinker-pdf/tests/stroke_parameters.rs",
-    "crates/tinker-pdf/tests/substitute_fonts.rs",
-    "crates/tinker-pdf/tests/surface_goldens.rs",
-    "crates/tinker-pdf/tests/svg_output.rs",
-    "crates/tinker-pdf/tests/table_census.rs",
-    "crates/tinker-pdf/tests/tables.rs",
-    "crates/tinker-pdf/tests/tagged_pdf.rs",
-    "crates/tinker-pdf/tests/text_logical_order.rs",
-    "crates/tinker-pdf/tests/text_options.rs",
-    "crates/tinker-pdf/tests/text_render_modes.rs",
-    "crates/tinker-pdf/tests/tinker_parity.rs",
-    "crates/tinker-pdf/tests/verdicts.rs",
-    "crates/tinker-pdf/tests/word_boxes.rs",
-    "crates/tinker-pdf/tests/xps.rs",
-    "crates/tinker-pdf/tests/xps_markup.rs",
-    "crates/tinker-pdf/tests/xps_opc.rs",
-    "crates/tinker-pdf/tests/xps_resources.rs",
-    "crates/tinker-pdf/tests/xps_spine.rs",
     "tools/tpdf/src/doubled_peak.rs",
     "tools/tpdf/src/images.rs",
     "tools/tpdf/src/main.rs",
@@ -222,7 +146,10 @@ pub struct Writer {
 /// count only beside their writer's type, because a hand-built file's
 /// `b.finish(…)` and a digest's `.finish()` are not writers. A conversion
 /// writes inside `Document::open`, a name every reading test shares, so it is
-/// recognised by what only a conversion test names.
+/// recognised by what only a conversion test names: a fixture module beside
+/// the `Document` it opens a container as, since a unit that takes a fixture
+/// module for its parts — a stylesheet, a layout — and opens no document
+/// converts nothing.
 pub const WRITERS: &[Writer] = &[
     Writer {
         entry: "DocumentBuilder::finish_reporting",
@@ -302,17 +229,17 @@ pub const WRITERS: &[Writer] = &[
     Writer {
         entry: "epub_support, a conversion's fixtures",
         needle: "epub_support",
-        beside: &[],
+        beside: &["Document"],
     },
     Writer {
         entry: "xps_support, a conversion's fixtures",
         needle: "xps_support",
-        beside: &[],
+        beside: &["Document"],
     },
     Writer {
         entry: "cbz_support, a conversion's fixtures",
         needle: "cbz_support",
-        beside: &[],
+        beside: &["Document"],
     },
 ];
 
@@ -1284,12 +1211,18 @@ mod tests {
                 "fn t() { let _ = Document::open_markdown(b, &o); }\n",
             ),
             ("report", "fn t(d: Document) { let _ = d.archive(); }\n"),
-            ("epub", "mod epub_support;\nfn t() {}\n"),
+            (
+                "epub",
+                "mod epub_support;\nfn t() { let _ = Document::open(b); }\n",
+            ),
             (
                 "xps",
-                "#[path = \"xps_support/mod.rs\"]\nmod xps_support;\nfn t() {}\n",
+                "#[path = \"xps_support/mod.rs\"]\nmod xps_support;\nfn t(d: Document) {}\n",
             ),
-            ("cbz", "fn t() { let _ = cbz_support::comic(&[]); }\n"),
+            (
+                "cbz",
+                "fn t() { let _ = tinker_pdf::Document::open(cbz_support::comic(&[])); }\n",
+            ),
             ("cli", "fn t() { writing::merge(&o).unwrap(); }\n"),
         ] {
             let path = format!("crates/x/tests/{name}.rs");
@@ -1298,6 +1231,31 @@ mod tests {
         }
         let other = "fn t(zip: Zip) { let archive = zip.archive; let _ = d.archives(); }\n";
         assert!(judge(&tree(&[("crates/x/tests/other.rs", other)]), &[]).is_empty());
+    }
+
+    /// A unit that takes a fixture module for its parts and opens no document
+    /// converts nothing: the module beside no `Document` is not a write, and a
+    /// `DocumentBuilder` is not a `Document`.
+    #[test]
+    fn a_fixture_module_beside_no_document_is_not_a_conversion() {
+        for (name, text) in [
+            (
+                "css",
+                "mod epub_support;\nuse epub_support::{entries, is_stylesheet};\nfn t() {}\n",
+            ),
+            (
+                "layout",
+                "mod epub_support;\nfn t() { let _ = epub_support::layout::lines(&l); }\n",
+            ),
+            (
+                "builder",
+                "mod xps_support;\nfn t() { let _ = DocumentBuilder::new(); }\n",
+            ),
+        ] {
+            let path = format!("crates/x/tests/{name}.rs");
+            let problems = judge(&tree(&[(path.as_str(), text)]), &[]);
+            assert!(problems.is_empty(), "{name}: {problems:?}");
+        }
     }
 
     /// Writer code outside a `src` file's test modules is not a write; an

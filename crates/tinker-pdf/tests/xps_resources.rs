@@ -51,6 +51,7 @@
 //! which is exactly why a suite with only one of the two would pass with the
 //! other deleted.
 
+mod written_support;
 mod xps_support;
 
 use tinker_pdf::{ArchiveWarning, Document, XpsElementDefect};
@@ -110,7 +111,7 @@ fn package(body: &str, extra: Vec<Part>) -> Vec<u8> {
 }
 
 fn defects(bytes: &[u8]) -> Vec<XpsElementDefect> {
-    let document = Document::open(bytes.to_vec()).expect("an XPS");
+    let document = converted("defects", Document::open(bytes.to_vec()).expect("an XPS"));
     document
         .archive()
         .expect("a synthesised document")
@@ -124,7 +125,7 @@ fn defects(bytes: &[u8]) -> Vec<XpsElementDefect> {
 }
 
 fn stream(bytes: &[u8]) -> String {
-    let document = Document::open(bytes.to_vec()).expect("an XPS");
+    let document = converted("stream", Document::open(bytes.to_vec()).expect("an XPS"));
     let cos = document.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
@@ -369,7 +370,10 @@ fn two_pages_naming_one_dictionary_both_resolve_it() {
     let bytes = archive(parts);
     assert_eq!(defects(&bytes), []);
 
-    let document = Document::open(bytes).expect("an XPS");
+    let document = converted(
+        "two pages naming one dictionary both resolve it",
+        Document::open(bytes).expect("an XPS"),
+    );
     let cos = document.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     assert_eq!(pages.len(), 2);
@@ -380,5 +384,17 @@ fn two_pages_naming_one_dictionary_both_resolve_it() {
             content.contains("0 1 0 rg"),
             "both spellings reach one dictionary: {content}"
         );
+    }
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
     }
 }

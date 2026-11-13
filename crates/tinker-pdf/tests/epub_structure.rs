@@ -47,6 +47,7 @@
 
 #[path = "epub_support/mod.rs"]
 mod epub_support;
+mod written_support;
 
 #[path = "cbz_support/mod.rs"]
 mod cbz_support;
@@ -94,7 +95,10 @@ fn book(style: &str, body: &str) -> Vec<u8> {
 }
 
 fn opened(body: &str) -> Document {
-    Document::open_with(book("", body), &OpenOptions::at_page(400.0, 600.0)).expect("a book")
+    converted(
+        "opened",
+        Document::open_with(book("", body), &OpenOptions::at_page(400.0, 600.0)).expect("a book"),
+    )
 }
 
 /// Every standard type the tree carries, in the order the walk meets them.
@@ -225,8 +229,11 @@ fn logical_order_conserves_the_source_exactly() {
     );
     for tenths in 4..=12 {
         let height = f64::from(tenths) * 50.0;
-        let doc = Document::open_with(bytes.clone(), &OpenOptions::at_page(300.0, height))
-            .expect("a book");
+        let doc = converted(
+            "logical order conserves the source exactly",
+            Document::open_with(bytes.clone(), &OpenOptions::at_page(300.0, height))
+                .expect("a book"),
+        );
         let verdict = conservation_in_logical_order(&bytes, &doc);
         assert!(
             verdict.holds(),
@@ -259,8 +266,11 @@ fn a_paragraph_broken_after_an_inline_child_reads_in_order() {
     );
     for tenths in 3..=14 {
         let height = f64::from(tenths) * 20.0;
-        let doc = Document::open_with(bytes.clone(), &OpenOptions::at_page(220.0, height))
-            .expect("a book");
+        let doc = converted(
+            "a paragraph broken after an inline child reads in order",
+            Document::open_with(bytes.clone(), &OpenOptions::at_page(220.0, height))
+                .expect("a book"),
+        );
         let verdict = conservation_in_logical_order(&bytes, &doc);
         assert!(
             verdict.holds(),
@@ -298,8 +308,11 @@ fn a_float_reads_where_it_was_written_even_across_a_page() {
     );
     for tenths in 6..=16 {
         let height = f64::from(tenths) * 10.0;
-        let doc = Document::open_with(bytes.clone(), &OpenOptions::at_page(200.0, height))
-            .expect("a book");
+        let doc = converted(
+            "a float reads where it was written even across a page",
+            Document::open_with(bytes.clone(), &OpenOptions::at_page(200.0, height))
+                .expect("a book"),
+        );
         let logical = conservation_in_logical_order(&bytes, &doc);
         assert!(
             logical.holds(),
@@ -561,7 +574,10 @@ fn every_img_alt_is_a_figure_alt() {
             ("bare.png", png, picture([90, 90, 90])),
         ],
     );
-    let doc = Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book");
+    let doc = converted(
+        "every img alt is a figure alt",
+        Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book"),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
 
@@ -657,7 +673,10 @@ fn every_language_declaration_is_a_lang() {
         );
         let xhtml = chapter(html, body);
         let bytes = book_of(package, &xhtml, &[]);
-        let doc = Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book");
+        let doc = converted(
+            "every language declaration is a lang",
+            Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book"),
+        );
 
         let source = source_elements(&xhtml);
         let tree = tree_languages(&doc);
@@ -749,7 +768,10 @@ fn every_a_href_is_a_link_holding_its_annotation() {
     );
     let xhtml = chapter(r#"lang="en""#, body);
     let bytes = book_of("en", &xhtml, &[]);
-    let doc = Document::open_with(bytes, &OpenOptions::at_page(220.0, 600.0)).expect("a book");
+    let doc = converted(
+        "every a href is a link holding its annotation",
+        Document::open_with(bytes, &OpenOptions::at_page(220.0, 600.0)).expect("a book"),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
 
@@ -891,7 +913,10 @@ fn every_table_attribute_is_carried_from_the_source() {
     );
     let xhtml = chapter(r#"lang="en""#, body);
     let bytes = book_of("en", &xhtml, &[]);
-    let doc = Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book");
+    let doc = converted(
+        "every table attribute is carried from the source",
+        Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book"),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     let texts = tree_languages(&doc);
@@ -1021,7 +1046,10 @@ fn every_element_keeps_its_name_and_says_what_it_is() {
     );
     let xhtml = chapter(r#"lang="en""#, body);
     let bytes = book_of("en", &xhtml, &[]);
-    let doc = Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book");
+    let doc = converted(
+        "every element keeps its name and says what it is",
+        Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book"),
+    );
     let tree = doc.structure().expect("a tree");
     assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
     let texts = tree_languages(&doc);
@@ -1186,4 +1214,16 @@ fn element_names_past_what_a_role_map_carries_are_written_as_their_types() {
         [written_as_span],
         "one warning, counting the names written as their type"
     );
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

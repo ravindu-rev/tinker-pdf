@@ -65,6 +65,7 @@
 //! multiply by 0.75 to know what to expect would be doing the reader's
 //! arithmetic a second time and agreeing with itself.
 
+mod written_support;
 mod xps_support;
 
 use tinker_pdf::xps::geometry::{self, FillRule, Segment};
@@ -103,13 +104,16 @@ fn stream(document: &Document) -> String {
 /// Opens a page body and hands back its content stream.
 fn drawn(body: &str) -> String {
     let bytes = package(body);
-    let document = open(&bytes).unwrap_or_else(|e| panic!("{body}: {e:?}"));
+    let document = converted(
+        "drawn",
+        open(&bytes).unwrap_or_else(|e| panic!("{body}: {e:?}")),
+    );
     stream(&document)
 }
 
 /// Every element-level defect a page reported, in order.
 fn defects(bytes: &[u8]) -> Vec<XpsElementDefect> {
-    let document = open(bytes).expect("an XPS");
+    let document = converted("defects", open(bytes).expect("an XPS"));
     document
         .archive()
         .expect("a synthesised document")
@@ -619,7 +623,10 @@ fn a_canvas_opacity_over_overlapping_children_is_a_transparency_group() {
     let bytes = package(
         r##"<Canvas Opacity="0.5"><Path Fill="#FF0000" Data="M0,0L100,0 100,100 0,100Z" /><Path Fill="#0000FF" Data="M50,50L150,50 150,150 50,150Z" /></Canvas>"##,
     );
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a canvas opacity over overlapping children is a transparency group",
+        open(&bytes).expect("an XPS"),
+    );
     let content = stream(&document);
     assert!(content.contains(" Do\n"), "a form is drawn: {content}");
 
@@ -835,7 +842,10 @@ fn a_linear_gradient_is_axial_and_a_radial_is_radial() {
     let bytes = package(
         r##"<Path Data="M0,0L400,0 400,200 0,200Z"><Path.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="400,200"><LinearGradientBrush.GradientStops><GradientStop Color="#FF0000" Offset="0" /><GradientStop Color="#00FF00" Offset="0.5" /><GradientStop Color="#0000FF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Fill></Path>"##,
     );
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a linear gradient is axial and a radial is radial",
+        open(&bytes).expect("an XPS"),
+    );
     let raw = String::from_utf8_lossy(document.cos().bytes()).into_owned();
     assert!(raw.contains("/ShadingType 2"), "an axial shading");
     assert!(raw.contains("/Coords [0 0 400 200]"), "{raw}");
@@ -848,7 +858,10 @@ fn a_linear_gradient_is_axial_and_a_radial_is_radial() {
     let bytes = package(
         r##"<Path Data="M0,0L300,0 300,300 0,300Z"><Path.Fill><RadialGradientBrush Center="150,150" RadiusX="150" RadiusY="150" GradientOrigin="120,120"><RadialGradientBrush.GradientStops><GradientStop Color="#FFFFFF" Offset="0" /><GradientStop Color="#191970" Offset="1" /></RadialGradientBrush.GradientStops></RadialGradientBrush></Path.Fill></Path>"##,
     );
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a linear gradient is axial and a radial is radial",
+        open(&bytes).expect("an XPS"),
+    );
     let raw = String::from_utf8_lossy(document.cos().bytes()).into_owned();
     assert!(raw.contains("/ShadingType 3"), "a radial shading");
     // The focal circle has radius zero and the outer one is the stated radius.
@@ -870,7 +883,10 @@ fn the_three_spread_methods_are_three_shadings() {
         let bytes = package(&format!(
             r##"<Path Data="M0,0L100,0 100,100 0,100Z"><Path.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="100,0" SpreadMethod="{spread}"><LinearGradientBrush.GradientStops><GradientStop Color="#FF0000" Offset="0" /><GradientStop Color="#0000FF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Fill></Path>"##
         ));
-        let document = open(&bytes).expect("an XPS");
+        let document = converted(
+            "the three spread methods are three shadings",
+            open(&bytes).expect("an XPS"),
+        );
         String::from_utf8_lossy(document.cos().bytes()).into_owned()
     };
 
@@ -927,7 +943,10 @@ fn a_gradients_stops_are_read_by_offset_and_not_by_document_order() {
         let bytes = package(&format!(
             r##"<Path Data="M0,0L100,0 100,100 0,100Z"><Path.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="100,0"><LinearGradientBrush.GradientStops>{stops}</LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Fill></Path>"##
         ));
-        let document = open(&bytes).expect("an XPS");
+        let document = converted(
+            "a gradients stops are read by offset and not by document order",
+            open(&bytes).expect("an XPS"),
+        );
         String::from_utf8_lossy(document.cos().bytes()).into_owned()
     };
 
@@ -963,7 +982,10 @@ fn an_elliptical_radial_gradient_is_a_circle_in_a_scaled_space() {
     let bytes = package(
         r##"<Path Data="M0,0L200,0 200,100 0,100Z"><Path.Fill><RadialGradientBrush Center="100,50" RadiusX="100" RadiusY="50"><RadialGradientBrush.GradientStops><GradientStop Color="#FFFFFF" Offset="0" /><GradientStop Color="#000000" Offset="1" /></RadialGradientBrush.GradientStops></RadialGradientBrush></Path.Fill></Path>"##,
     );
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "an elliptical radial gradient is a circle in a scaled space",
+        open(&bytes).expect("an XPS"),
+    );
     let raw = String::from_utf8_lossy(document.cos().bytes()).into_owned();
     assert!(
         raw.contains("/Coords [100 50 0 100 50 100]"),
@@ -1109,7 +1131,10 @@ fn a_fills_alpha_and_a_strokes_alpha_are_two_numbers() {
     let bytes = package(
         r##"<Path Data="M0,0L100,0 100,100Z" Fill="#40FF0000" Stroke="#C00000FF" StrokeThickness="3" />"##,
     );
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a fills alpha and a strokes alpha are two numbers",
+        open(&bytes).expect("an XPS"),
+    );
     let raw = String::from_utf8_lossy(document.cos().bytes()).into_owned();
     // 0x40 is 64/255 and 0xC0 is 192/255.
     assert!(raw.contains("/ca 0.2509"), "the fill's own alpha: {raw}");
@@ -1120,7 +1145,10 @@ fn a_fills_alpha_and_a_strokes_alpha_are_two_numbers() {
     let bytes = package(
         r##"<Path Data="M0,0L100,0 100,100Z" Opacity="0.5" Fill="#40FF0000" Stroke="#C00000FF" StrokeThickness="3" />"##,
     );
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a fills alpha and a strokes alpha are two numbers",
+        open(&bytes).expect("an XPS"),
+    );
     let raw = String::from_utf8_lossy(document.cos().bytes()).into_owned();
     assert!(raw.contains("/ca 0.1254"), "{raw}");
     assert!(raw.contains("/CA 0.3764"), "{raw}");
@@ -1129,8 +1157,7 @@ fn a_fills_alpha_and_a_strokes_alpha_are_two_numbers() {
 /// The red channel of the pixel at an **XPS-unit** position of a page body
 /// rendered at one pixel per point.
 fn red_at(body: &str, x: f64, y: f64) -> u8 {
-    let bitmap = open(&package(body))
-        .expect("an XPS")
+    let bitmap = converted("red at", open(&package(body)).expect("an XPS"))
         .page(0)
         .expect("a page")
         .render(&tinker_pdf::RenderOptions::default());
@@ -1251,7 +1278,10 @@ fn sc_rgb_interpolation_blends_in_linear_light() {
         let got = f64::from(red_at(&srgb, x, 50.0));
         assert!((got - gamma).abs() < 6.0, "sRGB at {x}: {got}");
     }
-    let document = open(&package(&linear)).expect("an XPS");
+    let document = converted(
+        "sc rgb interpolation blends in linear light",
+        open(&package(&linear)).expect("an XPS"),
+    );
     let raw = String::from_utf8_lossy(document.cos().bytes()).into_owned();
     assert!(raw.contains("/FunctionType 0"), "a sampled ramp: {raw}");
 }
@@ -1393,7 +1423,10 @@ fn a_part_shown_on_a_thousand_pages_is_painted_once() {
         &markup,
     );
     let bytes = archive(parts);
-    let opened = open(&bytes).expect("one part painted once fits under the element total");
+    let opened = converted(
+        "a part shown on a thousand pages is painted once",
+        open(&bytes).expect("one part painted once fits under the element total"),
+    );
     assert_eq!(opened.page_count(), 1_000, "every reference is a page");
 }
 
@@ -1574,7 +1607,10 @@ fn markup_from_another_vocabulary_is_skipped_whole_and_named() {
 /// resolve), and exactly two things on the page are owed to later milestones.
 #[test]
 fn the_real_one_page_package_from_the_design_section_renders() {
-    let document = Document::open(corpus("wpf-image-and-text.xps")).expect("a fixed document");
+    let document = converted(
+        "the real one page package from the design section renders",
+        Document::open(corpus("wpf-image-and-text.xps")).expect("a fixed document"),
+    );
     assert_eq!(document.page_count(), 1);
     assert_eq!(document.page(0).map(|p| p.size()), Some((612.0, 792.0)));
 
@@ -1624,7 +1660,10 @@ fn the_real_one_page_package_from_the_design_section_renders() {
     // The OpenXPS twin of the same document is the same page. Its markup
     // spells the geometry `M 0,0 L 200,0 …`, its colours six digits, and its
     // `ImageSource` relatively — and none of that reaches the content stream.
-    let twin = Document::open(corpus("xpsom-image-and-text.oxps")).expect("a fixed document");
+    let twin = converted(
+        "the real one page package from the design section renders",
+        Document::open(corpus("xpsom-image-and-text.oxps")).expect("a fixed document"),
+    );
     assert_eq!(ops(&stream(&twin)), ops(&content));
 }
 
@@ -1653,7 +1692,10 @@ fn every_package_in_the_corpus_draws_and_says_what_it_does_not() {
     ];
     for (name, owed) in expected {
         let bytes = corpus(name);
-        let document = Document::open(bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let document = converted(
+            "every package in the corpus draws and says what it does not",
+            Document::open(bytes).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+        );
         let report = document.archive().expect("a synthesised document");
         assert!(
             !report
@@ -1718,7 +1760,9 @@ fn a_page_past_the_element_cap_is_refused_by_name() {
 
     // 3 * (1 + 349 524) is 1 048 575, one under the cap.
     assert!(
-        open(&package(349_524)).is_ok(),
+        open(&package(349_524))
+            .map(|document| converted("a page past the element cap is refused by name", document))
+            .is_ok(),
         "one element short of the cap opens"
     );
     // 3 * (1 + 349 525) is 1 048 578, past it.
@@ -1757,7 +1801,12 @@ fn a_geometry_past_the_segment_cap_is_refused_by_name() {
 
     // The `M` is one segment, so 8 388 607 `H` commands is exactly the cap.
     assert!(
-        open(&page(8_388_607)).is_ok(),
+        open(&page(8_388_607))
+            .map(|document| converted(
+                "a geometry past the segment cap is refused by name",
+                document
+            ))
+            .is_ok(),
         "a geometry exactly at the cap is drawn"
     );
     assert!(matches!(
@@ -1795,6 +1844,26 @@ fn the_element_total_is_a_total_and_not_a_per_page_cap() {
         "Documents/1/Pages/1.fpage",
         &stuffed(349_525),
     ));
-    assert!(open(&one).is_ok(), "one page of that size is fine");
+    assert!(
+        open(&one)
+            .map(|document| converted(
+                "the element total is a total and not a per page cap",
+                document
+            ))
+            .is_ok(),
+        "one page of that size is fine"
+    );
     // Three of them is not, which is the whole of what "total" means.
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

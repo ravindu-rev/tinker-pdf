@@ -15,6 +15,7 @@
 //! did before the ruling.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::typeface::Face;
 use tinker_pdf::{Document, TextFormat, TextOptions, TextWriter};
@@ -108,13 +109,16 @@ fn page_of(lines: &[Vec<Stroke>]) -> Vec<u8> {
         ));
     }
     builder.add_page(300.0, 200.0 + below, |page| page.raw(&content));
-    builder.finish()
+    built("page of", builder)
 }
 
 /// Every line of the page's text through [`tinker_pdf::Page::text`], with
 /// the direction ruling 14 read it in (`true` for right to left).
 fn extract_lines(bytes: Vec<u8>) -> Vec<(String, bool)> {
-    let doc = Document::open(bytes).expect("the page opens");
+    let doc = converted(
+        "extract lines",
+        Document::open(bytes).expect("the page opens"),
+    );
     let text = doc.page(0).expect("a page").text();
     text.lines()
         .into_iter()
@@ -134,7 +138,7 @@ fn visual(text: &str) -> Vec<Stroke> {
 /// The page's text through [`tinker_pdf::Page::text`], without the trailing
 /// newline of its one line.
 fn extract(bytes: Vec<u8>) -> String {
-    let doc = Document::open(bytes).expect("the page opens");
+    let doc = converted("extract", Document::open(bytes).expect("the page opens"));
     let text = doc.page(0).expect("a page").text().plain_text();
     text.trim_end_matches('\n').to_owned()
 }
@@ -170,7 +174,10 @@ fn the_same_word_drawn_in_reading_order_extracts_the_same() {
 /// producer is the word backwards.
 #[test]
 fn content_order_is_the_order_the_stream_drew() {
-    let doc = Document::open(page(&visual(&reversed(SHALOM)))).expect("opens");
+    let doc = converted(
+        "content order is the order the stream drew",
+        Document::open(page(&visual(&reversed(SHALOM)))).expect("opens"),
+    );
     let page = doc.page(0).expect("a page");
     let drawn = page
         .text_with(&TextOptions {
@@ -443,7 +450,7 @@ fn pieces_page(pieces: &[Vec<Stroke>]) -> Vec<u8> {
         ));
     }
     builder.add_page(300.0, 200.0, |page| page.raw(&content));
-    builder.finish()
+    built("pieces page", builder)
 }
 
 /// **A right-to-left line that opens with a bracketed Latin run reads as
@@ -543,8 +550,10 @@ fn a_mark_follows_its_base_whichever_side_the_producer_wrote_it() {
 /// though it were the leftmost would come back inside out.
 #[test]
 fn search_finds_the_word_as_it_is_read() {
-    let doc =
-        Document::open(page(&visual(&format!("see {} now", reversed(SHALOM))))).expect("opens");
+    let doc = converted(
+        "search finds the word as it is read",
+        Document::open(page(&visual(&format!("see {} now", reversed(SHALOM))))).expect("opens"),
+    );
     let text = doc.page(0).expect("a page").text();
     let hits = text.search(SHALOM);
     assert_eq!(hits.len(), 1, "the word as read is found once");
@@ -568,7 +577,10 @@ fn search_finds_the_word_as_it_is_read() {
 /// **The structured formats read the same extraction.**
 #[test]
 fn the_structured_formats_carry_reading_order() {
-    let doc = Document::open(page(&visual(&reversed(SHALOM)))).expect("opens");
+    let doc = converted(
+        "the structured formats carry reading order",
+        Document::open(page(&visual(&reversed(SHALOM)))).expect("opens"),
+    );
     let page = doc.page(0).expect("a page");
     for format in [TextFormat::Json, TextFormat::Xml, TextFormat::Html] {
         let mut writer = TextWriter::new(format);
@@ -621,6 +633,7 @@ fn no_left_to_right_page_moves() {
             // question here.
             continue;
         };
+        let doc = converted("a committed fixture", doc);
         for page in doc.pages() {
             let logical = page.text();
             let stream = page.text_with(&TextOptions {
@@ -692,7 +705,7 @@ fn stated_page(rows: usize, items: &[Item]) -> Vec<u8> {
     let content = stated_content(&mut builder, &face, rows, items);
     let below = LEADING * rows.saturating_sub(1) as f64;
     builder.add_page(300.0, 200.0 + below, |page| page.raw(&content));
-    builder.finish()
+    built("stated page", builder)
 }
 
 /// [`stated_page`]'s page, `items` drawn in a form XObject, `/Fm0`, which
@@ -714,7 +727,7 @@ fn formed_page(rows: usize, items: &[Item]) -> Vec<u8> {
         }
     ));
     builder.add_page(300.0, 200.0 + below, |page| page.raw(b"/Fm0 Do"));
-    builder.finish()
+    built("formed page", builder)
 }
 
 /// The content stream [`stated_page`] draws `items` in, with `face` as `F0`.
@@ -790,7 +803,10 @@ fn a_line_a_span_states_whole_reads_as_its_text() {
             Item::Close,
         ],
     );
-    let doc = Document::open(bytes).expect("opens");
+    let doc = converted(
+        "a line a span states whole reads as its text",
+        Document::open(bytes).expect("opens"),
+    );
     let page = doc.page(0).expect("a page");
     let text = page.text();
     assert_eq!(text.plain_text().trim_end(), typed);
@@ -833,7 +849,10 @@ fn a_span_inside_a_left_to_right_line_stands_where_its_glyphs_do() {
             Item::Run(0, vec![('o', 2.0 * ADVANCE)]),
         ],
     );
-    let doc = Document::open(bytes).expect("opens");
+    let doc = converted(
+        "a span inside a left to right line stands where its glyphs do",
+        Document::open(bytes).expect("opens"),
+    );
     assert_eq!(
         doc.page(0).expect("a page").text().plain_text().trim_end(),
         "swao"
@@ -900,7 +919,10 @@ fn a_span_across_two_lines_keeps_each_characters_own_glyph() {
             Item::Close,
         ],
     );
-    let doc = Document::open(bytes).expect("opens");
+    let doc = converted(
+        "a span across two lines keeps each characters own glyph",
+        Document::open(bytes).expect("opens"),
+    );
     let text = doc.page(0).expect("a page").text();
     let lines = text.lines();
     assert_eq!(lines.len(), 1, "the second line reads nothing");
@@ -935,7 +957,10 @@ fn a_span_with_an_mcid_states_its_text_in_its_sequence() {
             Item::Close,
         ],
     );
-    let doc = Document::open(bytes).expect("opens");
+    let doc = converted(
+        "a span with an mcid states its text in its sequence",
+        Document::open(bytes).expect("opens"),
+    );
     let text = doc.page(0).expect("a page").text();
     assert_eq!(text.plain_text().trim_end(), typed);
     assert!(text.lines()[0].chars.iter().all(|c| c.mcid == Some(0)));
@@ -957,7 +982,10 @@ fn a_right_to_left_word_a_span_states_keeps_each_letter_on_its_own_glyph() {
             Item::Close,
         ],
     );
-    let doc = Document::open(bytes).expect("opens");
+    let doc = converted(
+        "a right to left word a span states keeps each letter on its own glyph",
+        Document::open(bytes).expect("opens"),
+    );
     let text = doc.page(0).expect("a page").text();
     let lines = text.lines();
     assert_eq!(lines.len(), 1);
@@ -1018,7 +1046,7 @@ fn declaring(
         attributes.insert(editor.intern(key.as_bytes()), name(editor, value));
         Object::Dict(attributes)
     }
-    let doc = Document::open(bytes).expect("opens");
+    let doc = converted("attribute", Document::open(bytes).expect("opens"));
     let cos = doc.cos();
     let page = tinker_pdf_cos::pages::collect(cos)[0].reference;
     let catalog = cos.trailer().get_ref(Name::ROOT).expect("a catalog");
@@ -1150,7 +1178,9 @@ fn declaring(
         let data = editor.stream_bytes(form).expect("the form's content");
         editor.put_stream(form, StreamData { dict, data });
     }
-    editor.save(&WriteOptions::default())
+    let out = editor.save(&WriteOptions::default());
+    written_support::rewritten("attribute", editor.document().bytes(), &out);
+    out
 }
 
 /// A Hebrew line that ends in a number and a stop, `שלום 60.` typed in a
@@ -1368,4 +1398,25 @@ fn a_sequence_a_form_draws_finds_its_element_through_the_forms_entry() {
         &[&[0], &[1]],
     );
     assert_eq!(extract_lines(bytes), [(typed, true)]);
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

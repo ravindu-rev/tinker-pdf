@@ -56,6 +56,8 @@
 //! and a job depending on it greps its own output for the second; with
 //! `TINKER_CORPUS_REQUIRED` set, a skip is a failure.
 
+mod written_support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -461,7 +463,10 @@ fn tagged(tags: &[&[u8]]) -> Document {
             });
         }
     });
-    Document::open(builder.finish()).expect("opens")
+    converted(
+        "tagged",
+        Document::open(built("tagged", builder)).expect("opens"),
+    )
 }
 
 /// The heading skips the structure group reports, as `(previous, level)`.
@@ -529,7 +534,14 @@ fn heading_levels_are_an_outline_over_the_whole_document_in_reading_order() {
                 });
             }
         });
-        Document::open(builder.finish()).expect("opens")
+        converted(
+            "heading levels are an outline over the whole document in reading order",
+            Document::open(built(
+                "heading levels are an outline over the whole document in reading order",
+                builder,
+            ))
+            .expect("opens"),
+        )
     };
     assert!(
         skips(&nested).is_empty(),
@@ -650,7 +662,10 @@ fn a_book_that_says_what_it_is() -> Vec<u8> {
 ///   and none is this validator's.
 #[test]
 fn this_engines_own_epub_output_is_censused_and_what_remains_is_named() {
-    let doc = Document::open(a_book_that_says_what_it_is()).expect("a book");
+    let doc = converted(
+        "this engines own epub output is censused and what remains is named",
+        Document::open(a_book_that_says_what_it_is()).expect("a book"),
+    );
     assert_eq!(
         findings_of(&doc),
         [
@@ -700,7 +715,14 @@ fn a_tagged_document_builder_document_is_censused_and_what_remains_is_named() {
             page.fill_rect(20.0, 150.0, 40.0, 40.0, 0.5);
         });
     });
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = converted(
+        "a tagged document builder document is censused and what remains is named",
+        Document::open(built(
+            "a tagged document builder document is censused and what remains is named",
+            builder,
+        ))
+        .expect("opens"),
+    );
     assert_eq!(
         findings_of(&doc),
         [
@@ -713,4 +735,25 @@ fn a_tagged_document_builder_document_is_censused_and_what_remains_is_named() {
             "FontNotEmbedded"
         ]
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

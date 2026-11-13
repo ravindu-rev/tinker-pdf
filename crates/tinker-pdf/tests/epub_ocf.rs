@@ -28,6 +28,7 @@
 //!   the only thing that can see the order of the two tests.
 
 mod epub_support;
+mod written_support;
 mod xps_support;
 
 use epub_support::{ocf_zip, OcfEntry};
@@ -133,7 +134,7 @@ fn ocf(bytes: &[u8]) -> Ocf<'_> {
 /// What `Document::open` said, as a refusal or as a page count.
 fn opened(bytes: &[u8]) -> Result<u32, ArchiveRefusal> {
     match Document::open(bytes.to_vec()) {
-        Ok(doc) => Ok(doc.page_count()),
+        Ok(doc) => Ok(converted("a book that opens", doc).page_count()),
         Err(OpenError::UnsupportedArchive(why)) => Err(why),
         Err(other) => panic!("opened in a new way: {other:?}"),
     }
@@ -196,7 +197,10 @@ fn every_committed_book_is_read_as_the_book_it_is() {
         // those pages are the itemrefs, in the itemrefs' order. A chapter that
         // fragmented adds pages and adds no origin; a chapter that vanished
         // takes one away.
-        let doc = tinker_pdf::Document::open(bytes).expect("a book");
+        let doc = converted(
+            "every committed book is read as the book it is",
+            tinker_pdf::Document::open(bytes).expect("a book"),
+        );
         let report = doc.archive().expect("a report");
         let mut origins: Vec<&str> = Vec::new();
         for origin in report.pages() {
@@ -318,7 +322,10 @@ fn a_package_that_is_both_an_xps_and_a_container_is_read_as_the_xps() {
     let archive = Archive::open(&bytes, &ZipLimits::DEFAULT).expect("a ZIP");
     assert!(is_container(&archive), "the fixture lost its container.xml");
 
-    let doc = Document::open(bytes).expect("an XPS opens");
+    let doc = converted(
+        "a package that is both an xps and a container is read as the xps",
+        Document::open(bytes).expect("an XPS opens"),
+    );
     assert_eq!(doc.page_count(), 1);
     // 400 x 500 XPS units at 96 to the inch, which is 300 x 375 points: the
     // page came out of the fixed-page markup and not out of any default.
@@ -682,7 +689,10 @@ fn two_entries_at_one_path_are_warned_about_and_the_first_one_wins() {
 
     // And it is still a book, with its own page.
     assert_eq!(opened(&bytes), Ok(1));
-    let doc = Document::open(bytes.clone()).expect("a book");
+    let doc = converted(
+        "two entries at one path are warned about and the first one wins",
+        Document::open(bytes.clone()).expect("a book"),
+    );
     assert!(
         doc.archive()
             .expect("a report")
@@ -945,4 +955,16 @@ fn resolving_a_file_twice_does_not_inflate_it_twice() {
         .expect("a package document");
     book.read(index).expect("the package document's bytes");
     assert!(book.archive().inflated() > once);
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

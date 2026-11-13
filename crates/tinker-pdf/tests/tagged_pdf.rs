@@ -9,6 +9,8 @@
 //! build that ignores the structure tree entirely passes, and this whole file
 //! exists to tell those two builds apart.
 
+mod written_support;
+
 use tinker_pdf::{Document, ObjRef, StructureWarning, TextSource};
 
 /// A one-page document with a structure tree.
@@ -231,7 +233,11 @@ fn an_elements_actual_text_reads_only_on_a_page_that_holds_it() {
             page.text(b"F1", 12.0, 10.0, 50.0, "o");
         });
     });
-    let doc = Document::open(builder.finish()).expect("it opens");
+    let doc = Document::open(built(
+        "an elements actual text reads only on a page that holds it",
+        builder,
+    ))
+    .expect("it opens");
     let first = doc
         .page(0)
         .expect("page one")
@@ -1132,4 +1138,13 @@ fn a_shared_namespace_is_copied_within_the_walks_copy_budget() {
         [ssn],
         "the root's list is read within what was left"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

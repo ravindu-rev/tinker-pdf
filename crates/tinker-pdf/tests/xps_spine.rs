@@ -33,6 +33,7 @@
 //! So the package a test wants here is one no producer would ever write, which
 //! is the shape `tests/xps_opc.rs` already argues for at length.
 
+mod written_support;
 mod xps_support;
 
 use tinker_pdf::xps::opc::PartName;
@@ -138,7 +139,10 @@ fn corpus(name: &str) -> Vec<u8> {
 #[test]
 fn pages_come_in_markup_order_and_in_no_order_over_their_names() {
     let bytes = archive(out_of_order_package());
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "pages come in markup order and in no order over their names",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 3);
 
     let markup = vec![
@@ -191,7 +195,10 @@ fn the_real_multi_page_package_has_one_page_per_page_content() {
     let references = text.matches("<PageContent").count();
     assert_eq!(references, 3, "the committed package has three references");
 
-    let document = Document::open(bytes).expect("a fixed document");
+    let document = converted(
+        "the real multi page package has one page per page content",
+        Document::open(bytes).expect("a fixed document"),
+    );
     assert_eq!(document.page_count() as usize, references);
     assert_eq!(
         page_order(&document)
@@ -220,7 +227,10 @@ fn an_unresolved_page_keeps_its_place_in_markup_order() {
         "Documents/1/FixedDocument.fdoc",
         &document(&["Pages/p10.fpage", "Pages/gone.fpage", "Pages/p2.fpage"]),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "an unresolved page keeps its place in markup order",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 3);
     assert_eq!(
         page_order(&document),
@@ -268,7 +278,10 @@ fn a_content_box_and_a_bleed_box_reach_the_pdf_scaled_once_and_flipped_once() {
             r#"ContentBox="96,48,192,96" BleedBox="48,24,720,1008" "#,
         ),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a content box and a bleed box reach the pdf scaled once and flipped once",
+        open(&bytes).expect("an XPS"),
+    );
     let page = document.page(0).expect("a page");
 
     assert_eq!(
@@ -307,7 +320,10 @@ fn a_content_box_and_a_bleed_box_reach_the_pdf_scaled_once_and_flipped_once() {
 #[test]
 fn a_page_that_states_no_box_carries_none() {
     let bytes = archive(one_page_package());
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a page that states no box carries none",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(
         document.page(0).map(|p| p.crop_box()),
         Some((0.0, 0.0, 612.0, 792.0))
@@ -319,7 +335,10 @@ fn a_page_that_states_no_box_carries_none() {
     );
     assert_eq!(bleed_box(&document, 0), None);
 
-    let real = Document::open(corpus("wpf-image-and-text.xps")).expect("a fixed document");
+    let real = converted(
+        "a page that states no box carries none",
+        Document::open(corpus("wpf-image-and-text.xps")).expect("a fixed document"),
+    );
     assert_eq!(crop_box(&real, 0), None, "no real package states one");
     assert_eq!(bleed_box(&real, 0), None);
 }
@@ -337,7 +356,10 @@ fn a_bleed_box_that_runs_off_the_page_is_reduced_to_the_page() {
         "Documents/1/Pages/1.fpage",
         &fixed_page_with("816", "1056", r#"BleedBox="-24,-24,864,1104" "#),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a bleed box that runs off the page is reduced to the page",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(bleed_box(&document, 0), Some(vec![0.0, 0.0, 612.0, 792.0]));
     // It is a statement, not a defect: nothing warns about a box that clamped.
     assert!(!warnings(&document).contains(&ArchiveWarning::XpsPage {
@@ -368,7 +390,10 @@ fn a_page_box_that_will_not_read_is_named_rather_than_defaulted() {
             "Documents/1/Pages/1.fpage",
             &fixed_page_with("816", "1056", attributes),
         ));
-        let document = open(&bytes).unwrap_or_else(|e| panic!("{attributes}: {e:?}"));
+        let document = converted(
+            "a page box that will not read is named rather than defaulted",
+            open(&bytes).unwrap_or_else(|e| panic!("{attributes}: {e:?}")),
+        );
         assert_eq!(document.page_count(), 1, "{attributes}");
         assert_eq!(
             document.page(0).map(|p| p.size()),
@@ -407,7 +432,10 @@ fn a_box_on_a_page_with_no_usable_size_is_not_written() {
         "Documents/1/Pages/1.fpage",
         &fixed_page_with("816", "", r#"ContentBox="96,48,192,96" "#),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a box on a page with no usable size is not written",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(crop_box(&document, 0), None);
     assert!(warnings(&document).contains(&ArchiveWarning::XpsPage {
         page: 0,
@@ -443,7 +471,10 @@ fn a_fixed_page_is_routed_by_media_type_and_not_by_its_name() {
         "[Content_Types].xml",
         &types,
     );
-    let document = open(&archive(parts)).expect("an XPS whose page is named `.txt`");
+    let document = converted(
+        "a fixed page is routed by media type and not by its name",
+        open(&archive(parts)).expect("an XPS whose page is named `.txt`"),
+    );
     assert_eq!(document.page(0).map(|p| p.size()), Some((612.0, 792.0)));
     assert!(!warnings(&document)
         .iter()
@@ -455,7 +486,10 @@ fn a_fixed_page_is_routed_by_media_type_and_not_by_its_name() {
         r#"<Override PartName="/Documents/1/Pages/1.fpage" ContentType="text/plain" />"#,
     );
     let bytes = archive(with(one_page_package(), "[Content_Types].xml", &types));
-    let document = open(&bytes).expect("the page still exists");
+    let document = converted(
+        "a fixed page is routed by media type and not by its name",
+        open(&bytes).expect("the page still exists"),
+    );
     assert_eq!(document.page_count(), 1);
     assert!(warnings(&document).contains(&ArchiveWarning::XpsPage {
         page: 0,
@@ -479,7 +513,10 @@ fn a_page_content_naming_something_that_is_not_a_page_keeps_its_number() {
         ),
         binary_part("Resources/one.png", png),
     );
-    let document = open(&archive(parts)).expect("an XPS");
+    let document = converted(
+        "a page content naming something that is not a page keeps its number",
+        open(&archive(parts)).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 3);
     assert_eq!(
         document
@@ -511,7 +548,10 @@ fn a_document_reference_naming_something_that_is_not_a_document_is_named() {
             "Documents/1/Pages/1.fpage",
         ]),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a document reference naming something that is not a document is named",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 2);
     assert!(warnings(&document).contains(&ArchiveWarning::XpsPage {
         page: 1,
@@ -532,7 +572,10 @@ fn a_payload_part_with_no_media_type_is_not_a_page() {
     );
     assert!(!bare.contains("fpage"), "the fixture really removed it");
     let bytes = archive(with(one_page_package(), "[Content_Types].xml", &bare));
-    let document = open(&bytes).expect("the page still exists");
+    let document = converted(
+        "a payload part with no media type is not a page",
+        open(&bytes).expect("the page still exists"),
+    );
     assert!(warnings(&document).contains(&ArchiveWarning::XpsPage {
         page: 0,
         defect: XpsPageDefect::MediaTypeMismatch,
@@ -565,7 +608,10 @@ fn a_page_that_will_not_read_is_grey_and_a_page_that_draws_nothing_is_white() {
         "Documents/1/Pages/1.fpage",
         &fixed_page("16", "24"),
     ));
-    let document = open(&empty).expect("an XPS");
+    let document = converted(
+        "a page that will not read is grey and a page that draws nothing is white",
+        open(&empty).expect("an XPS"),
+    );
     let bitmap = document
         .page(0)
         .expect("a page")
@@ -592,7 +638,10 @@ fn a_page_that_will_not_read_is_grey_and_a_page_that_draws_nothing_is_white() {
             xps_support::XPS_NS
         ),
     ));
-    let document = open(&broken).expect("an XPS whose page will not read");
+    let document = converted(
+        "a page that will not read is grey and a page that draws nothing is white",
+        open(&broken).expect("an XPS whose page will not read"),
+    );
     assert!(warnings(&document).contains(&ArchiveWarning::XpsPage {
         page: 0,
         defect: XpsPageDefect::ContentUnreadable,
@@ -612,7 +661,10 @@ fn a_page_that_will_not_read_is_grey_and_a_page_that_draws_nothing_is_white() {
     // a 612 x 792 render is 1.4 MB and reading all of it proves nothing more.
     // The third page of `wpf-three-pages.xps` is one steel-blue rectangle on
     // white: the corners are the paper and the middle of the rectangle is not.
-    let real = Document::open(corpus("wpf-three-pages.xps")).expect("a fixed document");
+    let real = converted(
+        "a page that will not read is grey and a page that draws nothing is white",
+        Document::open(corpus("wpf-three-pages.xps")).expect("a fixed document"),
+    );
     let bitmap = real
         .page(2)
         .expect("the third page")
@@ -638,7 +690,10 @@ fn a_page_that_will_not_read_is_grey_and_a_page_that_draws_nothing_is_white() {
 #[test]
 fn the_object_model_cos_lends_is_the_document_that_was_synthesised() {
     let bytes = archive(out_of_order_package());
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "the object model cos lends is the document that was synthesised",
+        open(&bytes).expect("an XPS"),
+    );
     let pages = tinker_pdf_cos::pages::collect(document.cos());
     assert_eq!(pages.len(), document.page_count() as usize);
     for (at, page) in pages.iter().enumerate() {
@@ -737,7 +792,10 @@ fn a_part_named_by_a_thousand_references_is_parsed_once() {
         "Documents/1/FixedDocument.fdoc",
         &document(&names),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a part named by a thousand references is parsed once",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 1_000);
     let report = document.archive().expect("a report");
     assert_eq!(
@@ -749,7 +807,10 @@ fn a_part_named_by_a_thousand_references_is_parsed_once() {
     // Three distinct pages cost two more, so the count is the number of parts
     // and not a constant.
     let bytes = archive(out_of_order_package());
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a part named by a thousand references is parsed once",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 3);
     assert_eq!(
         document.archive().expect("a report").parsed_parts(),
@@ -781,7 +842,10 @@ fn a_part_named_by_a_thousand_references_is_parsed_once() {
             "Documents/1/FixedDocument.fdoc",
         ]),
     ));
-    let document = open(&bytes).expect("an XPS");
+    let document = converted(
+        "a part named by a thousand references is parsed once",
+        open(&bytes).expect("an XPS"),
+    );
     assert_eq!(document.page_count(), 3, "one document shown three times");
     assert_eq!(
         document.archive().expect("a report").parsed_parts(),
@@ -855,7 +919,10 @@ fn a_comic_archive_parses_no_markup() {
         ],
         xps_support::Damage::None,
     );
-    let document = open(&bytes).expect("a comic archive");
+    let document = converted(
+        "a comic archive parses no markup",
+        open(&bytes).expect("a comic archive"),
+    );
     let report = document.archive().expect("a report");
     assert_eq!(report.xps_dialect(), None);
     assert_eq!(report.parsed_parts(), 0);
@@ -900,9 +967,12 @@ fn the_invalid_part_name_refusal_is_narrower_than_it_looks() {
             part(name, "left behind by something that repacked it"),
         );
     }
-    let document = open(&archive(parts)).unwrap_or_else(|e| {
-        panic!("the names a repacking tool leaves behind are all part names: {e:?}")
-    });
+    let document = converted(
+        "the invalid part name refusal is narrower than it looks",
+        open(&archive(parts)).unwrap_or_else(|e| {
+            panic!("the names a repacking tool leaves behind are all part names: {e:?}")
+        }),
+    );
     assert_eq!(document.page_count(), 1);
 
     // And the refusal itself, one prohibition at a time, so "it refuses
@@ -945,4 +1015,16 @@ fn crop_box(document: &Document, page: usize) -> Option<Vec<f64>> {
 
 fn bleed_box(document: &Document, page: usize) -> Option<Vec<f64>> {
     page_rect(document, page, b"BleedBox")
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

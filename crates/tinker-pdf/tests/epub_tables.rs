@@ -29,6 +29,7 @@
 //! *ordered* comparison against the source, which is what text conservation is.
 
 mod epub_support;
+mod written_support;
 
 use tinker_pdf::epub::paint::BookMetrics;
 use tinker_pdf::epub::read::{box_tree, Pictures, PX_TO_PT, UA_STYLESHEET};
@@ -528,7 +529,10 @@ fn a_table_that_is_not_a_table_element_inherits_its_border_collapse() {
 fn a_book_of_tables_conserves_every_character() {
     for (name, body) in table_fixtures() {
         let bytes = book(body);
-        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let doc = converted(
+            "a book of tables conserves every character",
+            Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e}")),
+        );
         let verdict = conservation(&bytes, &doc);
         assert!(
             verdict.holds(),
@@ -554,8 +558,11 @@ fn a_table_across_a_page_boundary_conserves_every_character() {
     }
     body.push_str("</table>");
     let bytes = book(&body);
-    let doc = Document::open_with(bytes.clone(), &OpenOptions::at_page(288.0, 200.0))
-        .expect("a book of one long table");
+    let doc = converted(
+        "a table across a page boundary conserves every character",
+        Document::open_with(bytes.clone(), &OpenOptions::at_page(288.0, 200.0))
+            .expect("a book of one long table"),
+    );
     assert!(
         doc.page_count() > 3,
         "the table did not cross a page boundary at all: {} pages",
@@ -794,4 +801,16 @@ fn corpus_book(name: &str) -> Vec<u8> {
         .join("epub")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

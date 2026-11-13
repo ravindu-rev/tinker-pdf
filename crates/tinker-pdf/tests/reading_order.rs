@@ -26,6 +26,7 @@
 
 mod epub_support;
 mod reading_order_support;
+mod written_support;
 
 use epub_support::book::styled_book;
 use std::collections::BTreeSet;
@@ -95,7 +96,7 @@ fn page(width: f64, height: f64, runs: &[Run], draw: &[usize], read: Option<&[u6
             }
         }
     });
-    builder.finish()
+    built("page", builder)
 }
 
 /// A US letter page with two columns of `rows` lines each, at 10 points:
@@ -139,7 +140,7 @@ fn hidden() -> InferenceOptions {
 }
 
 fn open(bytes: Vec<u8>) -> Document {
-    Document::open(bytes).expect("the fixture opens")
+    converted("open", Document::open(bytes).expect("the fixture opens"))
 }
 
 /// The fixture's text in the order the answer reads it.
@@ -726,7 +727,7 @@ fn right_to_left_columns_read_from_the_right() {
             page.tagged_keyed(b"P", order + 1, *order, |p| p.raw(content));
         }
     });
-    let doc = open(builder.finish());
+    let doc = open(built("right to left columns read from the right", builder));
     let scored = Scored::read(&doc, 0).expect("tagged");
     let stream = scored.stream_agreement();
     println!("right-to-left columns: stream {:.4}", stream.score());
@@ -814,7 +815,7 @@ fn furnished_book(pages: usize, marked: bool) -> Document {
         };
         furnished_page(&mut builder, head, right, &(at + 1).to_string(), at, marked);
     }
-    open(builder.finish())
+    open(built("furnished book", builder))
 }
 
 /// The characters of page `index`'s lines that read one of `texts`: the
@@ -962,7 +963,10 @@ fn a_book_drawn_in_reading_order_moves_nothing_with_its_furniture_marked() {
                 furniture(page, "Header", 760.0, "A Treatise On Columns");
             });
         }
-        open(builder.finish())
+        open(built(
+            "a book drawn in reading order moves nothing with its furniture marked",
+            builder,
+        ))
     };
     let marked = book(true);
     for index in 0..marked.page_count() {
@@ -996,7 +1000,10 @@ fn artifact_text_is_read_where_its_stream_drew_it_not_where_it_lies() {
         page.text(b"F1", 10.0, 72.0, 588.0, "a note set between two lines");
         page.raw(b"EMC\n");
     });
-    let doc = open(builder.finish());
+    let doc = open(built(
+        "artifact text is read where its stream drew it not where it lies",
+        builder,
+    ));
     let order = doc.inferred_order(0, &hidden()).expect("the page");
     assert_eq!(order.moved(), 0, "{}", order.plain_text());
     let last = order.blocks.last().expect("blocks");
@@ -1063,7 +1070,10 @@ fn two_pages_confirm_their_numbers_and_not_their_heads() {
             false,
         );
     }
-    let doc = open(builder.finish());
+    let doc = open(built(
+        "two pages confirm their numbers and not their heads",
+        builder,
+    ));
     for index in 0..2 {
         let order = doc.inferred_order(index, &hidden()).expect("a page");
         let last = order.blocks.last().expect("blocks");
@@ -1109,7 +1119,7 @@ fn a_margin_line_that_does_not_recur_is_body() {
             }
         });
     }
-    let doc = open(builder.finish());
+    let doc = open(built("a margin line that does not recur is body", builder));
     let order = doc
         .inferred_order(2, &InferenceOptions::default())
         .expect("page 3");
@@ -1147,7 +1157,10 @@ fn a_recurrence_elsewhere_on_the_band_is_not_a_running_head() {
             }
         });
     }
-    let doc = open(builder.finish());
+    let doc = open(built(
+        "a recurrence elsewhere on the band is not a running head",
+        builder,
+    ));
     for index in 0..5 {
         let order = doc
             .inferred_order(index, &InferenceOptions::default())
@@ -1182,7 +1195,7 @@ fn masked_and_roman_page_furniture_is_found() {
             }
         });
     }
-    let doc = open(builder.finish());
+    let doc = open(built("masked and roman page furniture is found", builder));
     for index in 0..5 {
         let order = doc
             .inferred_order(index, &InferenceOptions::default())
@@ -1259,7 +1272,7 @@ fn untagged_book(pages: usize) -> Document {
             page.text(b"F1", 9.0, 300.0, 40.0, &(at + 1).to_string());
         });
     }
-    open(builder.finish())
+    open(built("untagged book", builder))
 }
 
 /// Everything an inferred order says, to compare two of one page.
@@ -1434,7 +1447,7 @@ fn footnoted(notes: Notes) -> Document {
             page.tagged_keyed(b"Note", key + 2, key + 1, |p| p.raw(note2.as_bytes()));
         }
     });
-    open(builder.finish())
+    open(built("footnoted", builder))
 }
 
 const ALL: Notes = Notes {
@@ -1679,7 +1692,10 @@ fn a_page_of_scattered_glyphs_is_inferred_in_bounded_work() {
     let mut builder = DocumentBuilder::new();
     builder.add_base_font(b"F1", b"Helvetica");
     builder.add_page(612.0, 792.0, |page| page.raw(content.as_bytes()));
-    let doc = open(builder.finish());
+    let doc = open(built(
+        "a page of scattered glyphs is inferred in bounded work",
+        builder,
+    ));
     let page = doc.page(0).expect("a page");
     let started = std::time::Instant::now();
     let order = page.inferred_order(&InferenceOptions::default());
@@ -1780,7 +1796,10 @@ fn rotated_lines_are_unplaced_and_a_rotated_page_is_declined() {
             );
         }
     });
-    let doc = open(builder.finish());
+    let doc = open(built(
+        "rotated lines are unplaced and a rotated page is declined",
+        builder,
+    ));
     let order = doc
         .inferred_order(0, &InferenceOptions::default())
         .expect("page one");
@@ -2026,7 +2045,7 @@ fn table_page(close: bool, columns: bool, tag: bool) -> Vec<u8> {
             }
         }
     });
-    builder.finish()
+    built("table page", builder)
 }
 
 /// The table's text in its own order: each cell's lines, cell by cell, row
@@ -2207,7 +2226,10 @@ fn a_table_across_the_columns_is_read_between_them() {
             });
         }
     });
-    let doc = open(builder.finish());
+    let doc = open(built(
+        "a table across the columns is read between them",
+        builder,
+    ));
     let scored = Scored::read(&doc, 0).expect("a tagged page");
     let stream = scored.stream_agreement();
     let inferred = scored.inferred_agreement();
@@ -2258,7 +2280,7 @@ fn a_page_that_is_mostly_a_table_is_declined() {
     let mut builder = DocumentBuilder::new();
     builder.add_base_font(b"F1", b"Helvetica");
     builder.add_page(612.0, 792.0, |page| page.raw(content.as_bytes()));
-    let doc = open(builder.finish());
+    let doc = open(built("a page that is mostly a table is declined", builder));
     let order = doc
         .inferred_order(0, &InferenceOptions::default())
         .expect("a page");
@@ -2309,7 +2331,7 @@ fn a_tables_rules_do_not_make_a_footnote() {
     let mut builder = DocumentBuilder::new();
     builder.add_base_font(b"F1", b"Helvetica");
     builder.add_page(612.0, 792.0, |page| page.raw(content.as_bytes()));
-    let doc = open(builder.finish());
+    let doc = open(built("a tables rules do not make a footnote", builder));
     let order = doc
         .inferred_order(0, &InferenceOptions::default())
         .expect("a page");
@@ -2546,7 +2568,10 @@ fn the_two_column_book_redrawn_across_the_page_reads_in_the_authors_order() {
                 });
             }
         });
-        let redrawn = open(builder.finish());
+        let redrawn = open(built(
+            "the two column book redrawn across the page reads in the authors order",
+            builder,
+        ));
         let scored = Scored::read(&redrawn, 0).expect("tagged");
         let (stream, inferred) = (scored.stream_agreement(), scored.inferred_agreement());
         println!(
@@ -2619,9 +2644,30 @@ fn committed() -> Vec<(String, Document)> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if let Ok(doc) = Document::open(bytes) {
-                out.push((name, doc));
+                out.push((name, converted("a committed fixture", doc)));
             }
         }
     }
     out
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

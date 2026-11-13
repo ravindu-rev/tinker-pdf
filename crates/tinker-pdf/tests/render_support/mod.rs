@@ -31,6 +31,12 @@
     reason = "shared by four test binaries; each uses a different subset"
 )]
 
+/// The validate-on-save helper's facade reading, for the pages this module
+/// builds; a test that takes this module may take the reading itself too.
+#[allow(clippy::duplicate_mod)]
+#[path = "../written_support/mod.rs"]
+mod written_support;
+
 use tinker_pdf::{
     Bitmap, BlendMode, DeviceSpace, Document, DocumentBuilder, ExtGState, Function, ImageData,
     RenderOptions, Shading,
@@ -167,7 +173,7 @@ fn flooded(shading: &Shading) -> Vec<u8> {
         assert!(page.shading(b"Sh0"));
         page.raw(b"Q");
     });
-    builder.finish()
+    built("flooded", builder)
 }
 
 /// A page flooded by one axial shading (8.7.4.5.3).
@@ -227,7 +233,7 @@ pub fn image_page() -> Vec<u8> {
     builder.add_page(SIZE, SIZE, |page| {
         page.image(b"Im0", 0.0, 0.0, SIZE, SIZE);
     });
-    builder.finish()
+    built("image page", builder)
 }
 
 /// 11.3.5.2's twelve separable modes, which are the ones with a closed form
@@ -301,7 +307,7 @@ pub fn blend_grid_page() -> Vec<u8> {
             }
         }
     });
-    builder.finish()
+    built("blend grid page", builder)
 }
 
 /// The pen's whole range on one 91 x 131 page: the `strokes` fingerprint's
@@ -340,7 +346,7 @@ pub fn pen_page() -> Vec<u8> {
 ";
     let mut builder = DocumentBuilder::new();
     builder.add_page(91.0, 131.0, |page| page.raw(CONTENT.as_bytes()));
-    builder.finish()
+    built("pen page", builder)
 }
 
 // ---- the bilevel page --------------------------------------------------------
@@ -779,4 +785,13 @@ fn cmap() -> Vec<u8> {
     cmap.extend_from_slice(&12u32.to_be_bytes());
     cmap.extend_from_slice(&sub);
     cmap
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

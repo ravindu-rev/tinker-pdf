@@ -13,6 +13,7 @@
 //! the same book without the property must not write what this one writes.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::{ArchiveWarning, Document, RenderOptions};
@@ -54,8 +55,13 @@ fn book(style: &str, body: &str) -> Vec<u8> {
     ocf_zip(&entries, &directory)
 }
 
+/// The book opened, what it synthesised held to the validate-on-save helper.
+#[track_caller]
 fn open(style: &str, body: &str) -> Document {
-    Document::open(book(style, body)).expect("the book opens")
+    written_support::synthesised(
+        "a book of one styled page",
+        Document::open(book(style, body)).expect("the book opens"),
+    )
 }
 
 /// The first page's content stream, as whitespace-separated tokens.

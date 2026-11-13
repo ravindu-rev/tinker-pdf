@@ -8,6 +8,8 @@
 //!
 //! These are the tests that would have failed.
 
+mod written_support;
+
 use tinker_pdf::{Document, RenderOptions};
 use tinker_pdf_cos::{DocumentBuilder, ImageData};
 
@@ -42,7 +44,7 @@ fn an_rgb_image_is_drawn() {
         page.image(b"Im0", 0.0, 0.0, 20.0, 20.0);
     });
 
-    let bitmap = render(builder.finish());
+    let bitmap = render(built("an rgb image is drawn", builder));
     let (r, g, b) = pixel(&bitmap, 10, 10);
     assert!(
         r > 200 && g < 60 && b < 60,
@@ -67,7 +69,7 @@ fn a_grey_image_is_drawn() {
         page.image(b"Im0", 0.0, 0.0, 20.0, 20.0);
     });
 
-    let bitmap = render(builder.finish());
+    let bitmap = render(built("a grey image is drawn", builder));
     let (r, g, b) = pixel(&bitmap, 10, 10);
     assert!(
         (0x30..=0x50).contains(&r) && r == g && g == b,
@@ -94,7 +96,7 @@ fn an_image_lands_where_its_transform_puts_it() {
         page.image(b"Im0", 0.0, 0.0, 20.0, 40.0);
     });
 
-    let bitmap = render(builder.finish());
+    let bitmap = render(built("an image lands where its transform puts it", builder));
     let left = pixel(&bitmap, 5, 20);
     let right = pixel(&bitmap, 35, 20);
     assert!(
@@ -168,7 +170,10 @@ fn a_progressive_jpeg_is_decoded_rather_than_placeheld() {
         page.image(b"Im0", 0.0, 0.0, 20.0, 20.0);
     });
 
-    let bitmap = render(builder.finish());
+    let bitmap = render(built(
+        "a progressive jpeg is decoded rather than placeheld",
+        builder,
+    ));
     let (r, g, b) = pixel(&bitmap, 10, 10);
 
     // −3 × 255 through the transform is a dark grey near 32. The placeholder
@@ -770,7 +775,11 @@ fn a_jpeg_decodes_into_its_image_without_a_second_copy() {
     builder.add_page(f64::from(width), f64::from(height), |page| {
         page.image(b"Im0", 0.0, 0.0, f64::from(width), f64::from(height));
     });
-    let doc = Document::open(builder.finish()).expect("it opens");
+    let doc = Document::open(built(
+        "a jpeg decodes into its image without a second copy",
+        builder,
+    ))
+    .expect("it opens");
     let page = doc.page(0).expect("a page");
 
     let counted = page.render(&RenderOptions {
@@ -797,4 +806,13 @@ fn a_jpeg_decodes_into_its_image_without_a_second_copy() {
     }
     let plain = page.render(&RenderOptions::default());
     assert!(plain.data == counted.data, "counting changed the page");
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

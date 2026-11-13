@@ -25,6 +25,8 @@
 //! subsetter that rebuilt the charset instead of copying it would break them
 //! while leaving every outline exactly right.
 
+mod written_support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -59,7 +61,10 @@ enum Opened {
 /// does not authenticate, and the censuses try the empty password after.
 fn open_corpus_file(bytes: Vec<u8>) -> Opened {
     match Document::open(bytes) {
-        Ok(doc) if doc.archive().is_some() => Opened::Synthesised,
+        Ok(doc) if doc.archive().is_some() => {
+            written_support::synthesised("a corpus file this engine converts", doc);
+            Opened::Synthesised
+        }
         Ok(doc) => Opened::Pdf(doc),
         Err(error) => Opened::Refused(error),
     }
@@ -79,7 +84,13 @@ fn the_walk_counts_a_synthesised_document_apart_from_the_pdfs() {
     let mut builder = tinker_pdf::DocumentBuilder::new();
     builder.add_page(100.0, 100.0, |_| {});
     assert!(
-        matches!(open_corpus_file(builder.finish()), Opened::Pdf(_)),
+        matches!(
+            open_corpus_file(built(
+                "the walk counts a synthesised document apart from the pdfs",
+                builder
+            )),
+            Opened::Pdf(_)
+        ),
         "a PDF is a PDF"
     );
 
@@ -1229,3 +1240,12 @@ const PROGRAM_BYTES_BEFORE: u64 = 669_086_159;
 const PROGRAM_BYTES_AFTER: u64 = 401_957_637;
 const GLYPH_COUNTS_COMPARED: u32 = 5811;
 const LENGTH1_CHECKED: u32 = 5410;
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}

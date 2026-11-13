@@ -16,6 +16,8 @@
 //! golden is the writer's output with its header in an XML comment after the
 //! XML declaration, compared past that comment byte for byte.
 
+mod written_support;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -343,7 +345,11 @@ fn annotation_appearances() -> Bitmap {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
-    let document = Document::open(saved).expect("the saved file opens");
+    written_support::rewritten("annotation appearances", doc.bytes(), &saved);
+    let document = converted(
+        "annotation appearances",
+        Document::open(saved).expect("the saved file opens"),
+    );
     let page = document.page(0).expect("the page");
     let annotations = page.annotations();
     assert_eq!(
@@ -412,7 +418,10 @@ fn seal_picture() -> SignatureImage {
 fn visible_signature() -> Bitmap {
     let mut builder = tinker_pdf::DocumentBuilder::new();
     builder.add_page(SIGNATURE_PAGE.0, SIGNATURE_PAGE.1, |_| {});
-    let blank = Document::open(builder.finish()).expect("the blank page opens");
+    let blank = converted(
+        "visible signature",
+        Document::open(built("visible signature", builder)).expect("the blank page opens"),
+    );
 
     let signer = Unsigned;
     let mut request = SigningRequest::new(
@@ -447,14 +456,17 @@ fn visible_signature() -> Bitmap {
             &request,
         )
         .expect("the seal is drawn and the file signed");
+    written_support::rewritten("visible signature", blank.cos().bytes(), &signed);
 
     let face = Arc::new(SimpleFontProvider::new(curvy_font()));
-    Document::open(signed)
-        .expect("the signed file opens")
-        .with_fonts(face)
-        .page(0)
-        .expect("the page")
-        .render(&RenderOptions::default())
+    converted(
+        "visible signature",
+        Document::open(signed).expect("the signed file opens"),
+    )
+    .with_fonts(face)
+    .page(0)
+    .expect("the page")
+    .render(&RenderOptions::default())
 }
 
 // ---- pages made from other formats --------------------------------------------
@@ -560,8 +572,10 @@ fn epub_sample() -> Vec<u8> {
 /// with its style sheet into the book box, its text in the face the book
 /// embeds (3.2) and no other.
 fn epub_page() -> Bitmap {
-    let document =
-        Document::open_with(epub_sample(), &book_options(false)).expect("the book opens");
+    let document = converted(
+        "epub page",
+        Document::open_with(epub_sample(), &book_options(false)).expect("the book opens"),
+    );
     only_page("epub-page", &document)
 }
 
@@ -578,8 +592,10 @@ fn html_page() -> Bitmap {
         "<table><tr><td>one</td><td>two</td><td>three</td></tr></table>",
         "</body></html>\n"
     );
-    let document =
-        Document::open_with(html.as_bytes().to_vec(), &book_options(true)).expect("the page opens");
+    let document = converted(
+        "html page",
+        Document::open_with(html.as_bytes().to_vec(), &book_options(true)).expect("the page opens"),
+    );
     only_page("html-page", &document)
 }
 
@@ -588,8 +604,11 @@ fn html_page() -> Bitmap {
 /// laid out as the XHTML the reader translates them to.
 fn markdown_page() -> Bitmap {
     let text = "## A heading\n\nSome *emphasis* and **strong** words.\n\n1. One\n2. Two\n";
-    let document = Document::open_markdown(text.as_bytes().to_vec(), &book_options(true))
-        .expect("the text opens");
+    let document = converted(
+        "markdown page",
+        Document::open_markdown(text.as_bytes().to_vec(), &book_options(true))
+            .expect("the text opens"),
+    );
     only_page("markdown-page", &document)
 }
 
@@ -607,8 +626,10 @@ fn fb2_page() -> Bitmap {
         "<p>It began with <emphasis>one</emphasis> step.</p>",
         "</section></body></FictionBook>\n"
     );
-    let document =
-        Document::open_with(fb2.as_bytes().to_vec(), &book_options(true)).expect("the book opens");
+    let document = converted(
+        "fb2 page",
+        Document::open_with(fb2.as_bytes().to_vec(), &book_options(true)).expect("the book opens"),
+    );
     only_page("fb2-page", &document)
 }
 
@@ -634,8 +655,11 @@ fn svg_page() -> Bitmap {
         r##"<text x="8" y="60" font-family="serif" font-size="12" fill="#222222">SVG text</text>"##,
         r#"</svg>"#
     );
-    let document = Document::open_with(svg.as_bytes().to_vec(), &book_options(true))
-        .expect("the picture opens");
+    let document = converted(
+        "svg page",
+        Document::open_with(svg.as_bytes().to_vec(), &book_options(true))
+            .expect("the picture opens"),
+    );
     let page = document.page(0).expect("page one");
     assert_eq!(page.size(), SVG_PAGE, "the page is the document's own size");
     only_page("svg-page", &document)
@@ -731,7 +755,10 @@ fn xps_sample() -> Vec<u8> {
 /// ECMA-388: the package's one fixed page, its text drawn from the package's
 /// own font part.
 fn xps_page() -> Bitmap {
-    let document = Document::open(xps_sample()).expect("the package opens");
+    let document = converted(
+        "xps page",
+        Document::open(xps_sample()).expect("the package opens"),
+    );
     only_page("xps-page", &document)
 }
 
@@ -803,7 +830,10 @@ fn to_svg_fixture() -> Vec<u8> {
 /// soft mask is the one thing the page asks for that the writer declines, so
 /// what it masks is written unmasked and named, and nothing else is.
 fn to_svg() -> String {
-    let document = Document::open(to_svg_fixture()).expect("the fixture opens");
+    let document = converted(
+        "to svg",
+        Document::open(to_svg_fixture()).expect("the fixture opens"),
+    );
     let svg = document
         .page(0)
         .expect("the page")
@@ -1266,5 +1296,26 @@ fn write_the_surface_goldens() {
                 println!("  wrote {} ({} bytes)", surface.name, text.len());
             }
         }
+    }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
     }
 }

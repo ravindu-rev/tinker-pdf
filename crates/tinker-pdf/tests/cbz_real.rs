@@ -40,6 +40,7 @@
 //! every page present and the comic unreadable.
 
 mod cbz_support;
+mod written_support;
 
 use std::path::{Path, PathBuf};
 use tinker_pdf::{cbz, ArchiveWarning, ComicInfoDefect, Container, Document, Name, RenderOptions};
@@ -228,7 +229,10 @@ fn the_inventory_matches_the_archives() {
 fn every_real_archive_opens_and_pages_in_natural_order() {
     let want: Vec<&str> = PAGES.iter().map(|(name, _, _)| *name).collect();
     for name in ZIPS {
-        let document = Document::open(read(name)).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let document = converted(
+            "every real archive opens and pages in natural order",
+            Document::open(read(name)).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+        );
         let report = document
             .archive()
             .unwrap_or_else(|| panic!("{name} is a synthesised document"));
@@ -279,7 +283,10 @@ fn five_zip_writers_produce_the_same_five_pictures() {
         .copied()
         .chain(READ_CONTAINERS.iter().map(|(name, _)| *name))
         .collect();
-    let first = Document::open(read(ZIPS[0])).expect("the first archive opens");
+    let first = converted(
+        "five zip writers produce the same five pictures",
+        Document::open(read(ZIPS[0])).expect("the first archive opens"),
+    );
     for index in 0..PAGES.len() as u32 {
         let reference = first
             .page(index)
@@ -298,7 +305,10 @@ fn five_zip_writers_produce_the_same_five_pictures() {
             ZIPS[0]
         );
         for name in &others {
-            let document = Document::open(read(name)).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let document = converted(
+                "five zip writers produce the same five pictures",
+                Document::open(read(name)).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+            );
             let bitmap = document
                 .page(index)
                 .unwrap_or_else(|| panic!("{name}: page {index}"))
@@ -341,7 +351,10 @@ fn the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not(
     for (name, what, expected_defects) in PARTLY_READ {
         let bytes = read(name);
         assert_eq!(cbz::container(&bytes), Some(*what), "{name}: the sniff");
-        let document = Document::open(bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let document = converted(
+            "the rar a real archiver wrote pages what it stored and names what it did not",
+            Document::open(bytes).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+        );
         let report = document.archive().expect("a synthesised document");
 
         let want: Vec<&str> = PAGES.iter().map(|(page, _, _)| *page).collect();
@@ -382,7 +395,10 @@ fn the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not(
         );
 
         // And the four that are stored are the same pictures the ZIPs give.
-        let reference = Document::open(read(ZIPS[0])).expect("the reference archive");
+        let reference = converted(
+            "the rar a real archiver wrote pages what it stored and names what it did not",
+            Document::open(read(ZIPS[0])).expect("the reference archive"),
+        );
         for (index, (page, width, height)) in PAGES.iter().enumerate() {
             if *page == "page3.jpg" {
                 continue;
@@ -421,7 +437,10 @@ fn the_rar_a_real_archiver_wrote_pages_what_it_stored_and_names_what_it_did_not(
 #[test]
 fn the_tar_a_real_archiver_wrote_pages_in_natural_order() {
     let want: Vec<&str> = PAGES.iter().map(|(name, _, _)| *name).collect();
-    let document = Document::open(read("7z-tar.cbt")).expect("the .cbt opens");
+    let document = converted(
+        "the tar a real archiver wrote pages in natural order",
+        Document::open(read("7z-tar.cbt")).expect("the .cbt opens"),
+    );
     let report = document.archive().expect("a synthesised document");
     let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
     assert_eq!(order, want, "the .cbt's page order");
@@ -492,7 +511,10 @@ fn the_7z_a_real_archiver_wrote_pages_in_natural_order() {
         .filter(|(_, kind)| *kind == Container::SevenZip)
         .map(|(name, _)| *name)
     {
-        let document = Document::open(read(name)).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let document = converted(
+            "the 7z a real archiver wrote pages in natural order",
+            Document::open(read(name)).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+        );
         let report = document.archive().expect("a synthesised document");
         let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
         assert_eq!(order, want, "{name}: page order");
@@ -571,7 +593,10 @@ fn a_real_archiver_s_lzma_entries_are_the_files_that_went_in() {
         "each entry charged its declared size against the archive's total, once"
     );
 
-    let document = Document::open(bytes).expect("the method-14 comic opens");
+    let document = converted(
+        "a real archiver s lzma entries are the files that went in",
+        Document::open(bytes).expect("the method-14 comic opens"),
+    );
     let report = document.archive().expect("a synthesised document");
     let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
     let want: Vec<&str> = PAGES.iter().map(|(name, _, _)| *name).collect();
@@ -742,7 +767,10 @@ fn a_damaged_lzma_header_is_a_placeholder_page_naming_it() {
     );
     bytes[at + 2] = 1;
 
-    let document = Document::open(bytes).expect("four pages are still a comic");
+    let document = converted(
+        "a damaged lzma header is a placeholder page naming it",
+        Document::open(bytes).expect("four pages are still a comic"),
+    );
     let report = document.archive().expect("a synthesised document");
     let defects: Vec<(&str, Option<cbz::PageDefect>)> = report
         .pages()
@@ -827,7 +855,10 @@ fn a_feature_refused_by_name_is_a_placeholder_naming_it() {
         assert_eq!(bytes[at], was, "{name}: the byte its writer wrote");
         bytes[at] = now;
 
-        let document = Document::open(bytes).expect("four pages are still a comic");
+        let document = converted(
+            "a feature refused by name is a placeholder naming it",
+            Document::open(bytes).expect("four pages are still a comic"),
+        );
         let report = document.archive().expect("a synthesised document");
         let refused =
             cbz::PageDefect::EntryRefused(cbz::ZipEntryError::UnsupportedFeature(feature));
@@ -927,7 +958,10 @@ fn a_jpeg_2000_page_is_placed_as_jpxdecode_and_draws_the_samples_t800_publishes(
         "a JP2 by its signature box"
     );
 
-    let document = Document::open(bytes).expect("the comic opens");
+    let document = converted(
+        "a jpeg 2000 page is placed as jpxdecode and draws the samples t800 publishes",
+        Document::open(bytes).expect("the comic opens"),
+    );
     let report = document.archive().expect("a synthesised document");
     assert_eq!(
         report
@@ -1033,7 +1067,10 @@ fn a_jpeg_2000_entry_whose_header_is_refused_is_a_placeholder_naming_it() {
             ],
             cbz_support::Damage::None,
         );
-        let document = Document::open(comic).unwrap_or_else(|e| panic!("{why}: {e:?}"));
+        let document = converted(
+            "a jpeg 2000 entry whose header is refused is a placeholder naming it",
+            Document::open(comic).unwrap_or_else(|e| panic!("{why}: {e:?}")),
+        );
         let report = document.archive().expect("a synthesised document");
         assert_eq!(
             report
@@ -1185,7 +1222,10 @@ fn the_metadata_a_comic_carries_reaches_the_document() {
         b"<ComicInfo><Series>Nightwatch</Series><Number>12</Number>\
           <Writer>A. Writer</Writer></ComicInfo>",
     );
-    let document = Document::open(bytes).expect("a comic with metadata opens");
+    let document = converted(
+        "the metadata a comic carries reaches the document",
+        Document::open(bytes).expect("a comic with metadata opens"),
+    );
 
     // The pages are untouched: metadata is a third thing an entry can be, and
     // adding it must not have made the archive one page longer or shorter.
@@ -1234,7 +1274,10 @@ fn the_metadata_a_comic_carries_reaches_the_document() {
 #[test]
 fn unreadable_metadata_degrades_and_is_named() {
     let bytes = comic_with_metadata(b"<ComicInfo><Title>unclosed");
-    let document = Document::open(bytes).expect("the pages open regardless");
+    let document = converted(
+        "unreadable metadata degrades and is named",
+        Document::open(bytes).expect("the pages open regardless"),
+    );
     let report = document.archive().expect("a synthesised document");
     assert_eq!(
         report.pages().len(),
@@ -1276,5 +1319,17 @@ fn the_census_of_what_real_archivers_do() {
             archive.entries().len(),
             archive.warnings()
         );
+    }
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
     }
 }

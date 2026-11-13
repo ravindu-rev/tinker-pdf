@@ -7,6 +7,8 @@
 //! the JPEG case, which is lossy by construction, is held to its geometry and
 //! to the decoder's own output instead.
 
+mod written_support;
+
 use tinker_pdf::{
     CalculatorOp, CompressedImage, DeviceSpace, Document, DocumentBuilder, FormXObject, Function,
     ImageColorSpace, ImageData, ImageMask, ImageSpace, PageImage, SampleCodec, SoftMask,
@@ -23,7 +25,7 @@ fn page_drawing(build: impl FnOnce(&mut DocumentBuilder) -> Vec<&'static [u8]>) 
             page.image(name, 10.0 * at as f64, 20.0, 8.0, 6.0);
         }
     });
-    Document::open(builder.finish()).expect("the built document opens")
+    Document::open(built("page drawing", builder)).expect("the built document opens")
 }
 
 /// The one image on page 0.
@@ -369,7 +371,11 @@ fn placements_are_every_drawing_including_inside_a_form() {
         page.image(b"Im0", 20.0, 30.0, 5.0, 5.0);
         assert!(page.form(b"Fm0"));
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = Document::open(built(
+        "placements are every drawing including inside a form",
+        builder,
+    ))
+    .expect("it opens");
     let image = only(&document);
     exactly(&image, 8, 1, samples);
     assert_eq!(
@@ -414,7 +420,11 @@ fn an_image_only_a_form_names_is_found_through_the_forms_scope() {
         assert!(page.form(b"Fm0"));
         page.raw(b"Q");
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = Document::open(built(
+        "an image only a form names is found through the forms scope",
+        builder,
+    ))
+    .expect("it opens");
     let image = only(&document);
     exactly(&image, 8, 1, inner);
     assert_eq!(image.name, b"Only");
@@ -438,7 +448,8 @@ fn inline_images_are_reported_too() {
         named.extend_from_slice(b" EI");
         page.raw(&named);
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document =
+        Document::open(built("inline images are reported too", builder)).expect("it opens");
     let images = document.page(0).expect("a page").images();
     assert_eq!(images.len(), 2, "{images:#?}");
 
@@ -479,7 +490,8 @@ fn a_jpeg_reports_the_decoders_samples() {
     let mut builder = DocumentBuilder::new();
     assert!(builder.add_image(b"Im0", &ImageData::Jpeg(&jpeg)));
     builder.add_page(100.0, 100.0, |page| page.image(b"Im0", 0.0, 0.0, 16.0, 8.0));
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document =
+        Document::open(built("a jpeg reports the decoders samples", builder)).expect("it opens");
     let image = only(&document);
     assert_eq!(image.codec, SampleCodec::Dct);
     assert_eq!((image.width, image.height), (16, 8));
@@ -530,7 +542,10 @@ fn a_fax_is_one_bit_samples_whatever_the_dictionary_claims() {
         })
     ));
     builder.add_page(100.0, 100.0, |page| page.image(b"Im0", 0.0, 0.0, 8.0, 3.0));
-    let honest = builder.finish();
+    let honest = built(
+        "a fax is one bit samples whatever the dictionary claims",
+        builder,
+    );
 
     // The same file with the dictionary lying about the depth, the same
     // length so every offset still holds.
@@ -812,7 +827,7 @@ fn mutated_image_documents_never_panic() {
         page.image(b"C", 10.0, 0.0, 5.0, 5.0);
         page.raw(b"BI /W 2 /H 1 /CS /RGB /BPC 8 ID abcdef EI");
     });
-    let original = builder.finish();
+    let original = built("mutated image documents never panic", builder);
 
     let mut state = 0x2545_f491_4f6c_dd1du64;
     let mut next = || {
@@ -834,4 +849,13 @@ fn mutated_image_documents_never_panic() {
             }
         }
     }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

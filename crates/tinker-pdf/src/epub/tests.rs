@@ -2447,7 +2447,12 @@ fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
     assert_eq!(refused, 0);
     builder.push_page(page);
 
-    let doc = crate::Document::open(builder.finish()).expect("opens");
+    let bytes = builder.finish();
+    crate::subset::tests_support::written_support::authored(
+        "the public draw page still tags a page from its element tree",
+        &bytes,
+    );
+    let doc = crate::Document::open(bytes).expect("opens");
     let tree = doc.structure().expect("the page is tagged");
     let kinds: Vec<String> = tree
         .elements()
@@ -2675,11 +2680,13 @@ fn a_page_of_many_atomic_inlines_sets_each_from_its_record() {
         let text: String = (0..doc.page_count())
             .map(|at| doc.page(at).expect("a page").text().plain_text())
             .collect();
-        (
-            OBJECTS_SET.with(core::cell::Cell::get),
-            text.matches('ב').count(),
-            doc.page_count(),
-        )
+        let set = OBJECTS_SET.with(core::cell::Cell::get);
+        // Held once its count is read, so the count is the open's alone.
+        let doc = crate::subset::tests_support::written_support::synthesised(
+            "a page of many atomic inlines",
+            doc,
+        );
+        (set, text.matches('ב').count(), doc.page_count())
     };
     for blocks in [3000, 20] {
         let (set, found, pages) = open(blocks);
@@ -2697,7 +2704,10 @@ fn readings_to_open(book: Vec<u8>) -> usize {
     READINGS.with(|readings| readings.set(0));
     let doc = crate::Document::open(book).expect("opens");
     assert!(doc.page_count() > 0);
-    READINGS.with(core::cell::Cell::get)
+    let readings = READINGS.with(core::cell::Cell::get);
+    // Held once its count is read, so the count is the open's alone.
+    crate::subset::tests_support::written_support::synthesised("a book read back to open", doc);
+    readings
 }
 
 /// **A line whose rules' drawing a reader reads the letters of in order is
@@ -2893,7 +2903,10 @@ fn a_line_of_units_the_read_back_has_read_is_not_searched_again() {
 /// a Layout one's with its `/WritingMode` (`Layout:RlTb`).
 fn attribute_owners(book: Vec<u8>) -> Vec<(String, Vec<String>)> {
     use tinker_pdf_cos::Object;
-    let doc = crate::Document::open(book).expect("opens");
+    let doc = crate::subset::tests_support::written_support::synthesised(
+        "attribute owners",
+        crate::Document::open(book).expect("opens"),
+    );
     let cos = doc.cos();
     let name = |object: &Object| {
         object
@@ -2972,7 +2985,10 @@ fn each_element_holding_right_to_left_text_declares_its_paragraphs_direction() {
             expect("TD", &[]),
         ]
     );
-    let doc = crate::Document::open(book).expect("opens");
+    let doc = crate::subset::tests_support::written_support::synthesised(
+        "each element holding right to left text declares its paragraphs direction",
+        crate::Document::open(book).expect("opens"),
+    );
     let text = doc.page(0).expect("a page").text().plain_text();
     for typed in ["مرحبا بالعالم.", "Plain words.", "בראשית. אור ٦٠.", "שם"]
     {
@@ -3027,7 +3043,10 @@ fn mixed_directions_declare_nothing_and_plaintext_declares_what_p2_finds() {
 #[test]
 fn a_line_is_read_back_in_the_direction_its_structure_declares() {
     let book = stored_book("he", "", r#"<p dir="rtl">?!(<b>בראשית</b>) עולם</p>"#);
-    let doc = crate::Document::open(book).expect("opens");
+    let doc = crate::subset::tests_support::written_support::synthesised(
+        "a line is read back in the direction its structure declares",
+        crate::Document::open(book).expect("opens"),
+    );
     let text = doc.page(0).expect("a page").text().plain_text();
     assert_eq!(text, "?!(בראשית) עולם\n");
 }
@@ -3050,7 +3069,10 @@ fn a_line_no_drawing_reads_right_states_its_text_round_its_runs_sequences() {
             r#"<p dir="rtl">שלום עולם.</p>"#,
         ),
     );
-    let doc = crate::Document::open(book).expect("opens");
+    let doc = crate::subset::tests_support::written_support::synthesised(
+        "a line no drawing reads right states its text round its runs sequences",
+        crate::Document::open(book).expect("opens"),
+    );
     let page = doc.page(0).expect("a page");
     let text = page.text();
     assert_eq!(

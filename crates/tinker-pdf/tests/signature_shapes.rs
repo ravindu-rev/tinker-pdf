@@ -35,6 +35,8 @@
 //! with the committed throwaway key. Each is a refusal with a control beside
 //! it, and what holds them up is this engine's own reading of RFC 5652.
 
+mod written_support;
+
 use std::ops::Range;
 
 use tinker_pdf::{
@@ -1131,11 +1133,13 @@ fn assembled(shape: Shape, certificate: &[u8], sub_filter: &str) -> Vec<u8> {
     );
     request.sub_filter = sub_filter.into();
     request.reserve = 8192;
-    Document::open(UNSIGNED.to_vec())
+    let signed = Document::open(UNSIGNED.to_vec())
         .expect("the fixture opens")
         .editor()
         .save_signed(&incremental(), &request)
-        .expect("the signature is written")
+        .expect("the signature is written");
+    written_support::rewritten("assembled", UNSIGNED, &signed);
+    signed
 }
 
 #[test]
@@ -1321,6 +1325,7 @@ fn assembled_timestamp(message_digest: bool) -> Verdict {
         .editor()
         .save_timestamped(&incremental(), &request)
         .expect("the timestamp is written");
+    written_support::rewritten("assembled timestamp", UNSIGNED, &stamped);
     verdict_for(&stamped, SIGNER)
 }
 

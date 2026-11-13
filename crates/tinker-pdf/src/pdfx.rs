@@ -966,6 +966,7 @@ fn text(doc: &CosDocument, info: &Dict, key: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subset::tests_support::written_support::{self, Expected};
 
     fn claiming(version: Option<&str>, conformance: Option<&str>) -> Document {
         let mut builder = crate::DocumentBuilder::new();
@@ -976,7 +977,18 @@ mod tests {
             builder.set_info(b"GTS_PDFXConformance", conformance);
         }
         builder.add_page(200.0, 200.0, |_| {});
-        Document::open(builder.finish()).expect("the fixture opens")
+        let bytes = builder.finish();
+        let validated = matches!(version, Some("PDF/X-1a:2003" | "PDF/X-3:2003"));
+        let lacks = [
+            Expected::PdfX(FindingKind::TrappedMissing),
+            Expected::PdfX(FindingKind::TrimOrArtBoxMissing),
+            Expected::PdfX(FindingKind::OutputIntentMissing {
+                subtype: "GTS_PDFX".to_string(),
+            }),
+        ];
+        let expected: &[Expected] = if validated { &lacks } else { &[] };
+        written_support::expecting("a blank page claiming a PDF/X level", &bytes, expected);
+        Document::open(bytes).expect("the fixture opens")
     }
 
     /// Every identification form the design's first milestone names, read

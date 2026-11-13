@@ -8,6 +8,8 @@
 //! really makes, from a real content stream, are the lines those rules see,
 //! and that the default is the unoptioned answer to the byte.
 
+mod written_support;
+
 use tinker_pdf::{Document, PlainTextOptions, SearchOptions};
 use tinker_pdf_cos::DocumentBuilder;
 
@@ -19,7 +21,7 @@ fn document(content: &str) -> Document {
     builder.add_page(300.0, 200.0, |page| {
         page.raw(content.as_bytes());
     });
-    Document::open(builder.finish()).expect("it opens")
+    Document::open(built("document", builder)).expect("it opens")
 }
 
 /// Four lines: a word broken at a hard hyphen before a lower-case start,
@@ -100,4 +102,13 @@ fn each_search_option_finds_what_it_says_and_the_default_is_search() {
         "sum is inside three words and is none of them"
     );
     assert_eq!(with("resume", whole), 2);
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

@@ -13,6 +13,8 @@
 //! `/CA`, `/ca`, `/BM` and `/SMask` have no operator twin; their pages are held
 //! to pinned pixels.
 
+mod written_support;
+
 use tinker_pdf::write::{save, SaveOptions};
 use tinker_pdf::{Bitmap, Document, RenderOptions};
 
@@ -472,6 +474,7 @@ fn readings(bytes: Vec<u8>) -> (Vec<u8>, String, Vec<u8>, (String, bool, bool)) 
     let pixels = page.render(&RenderOptions::default()).data;
     let text = page.text().plain_text();
     let saved = save(&mut doc.editor(), &SaveOptions::default());
+    written_support::rewritten("readings", doc.cos().bytes(), &saved.bytes);
     let reopened = Document::open(saved.bytes).expect("the saved document opens");
     let program = reopened
         .fonts()

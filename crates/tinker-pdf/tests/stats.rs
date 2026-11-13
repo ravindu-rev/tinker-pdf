@@ -66,11 +66,12 @@
 //!   chain.
 
 mod render_support;
+mod written_support;
 
 use std::sync::Arc;
 
 use tinker_pdf::write::{
-    save, BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions, Saved,
+    BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions, Saved,
 };
 use tinker_pdf::{
     Bitmap, Document, DocumentBuilder, ObjRef, Page, PdfACoverage, PdfUaCoverage, PdfXCoverage,
@@ -1285,15 +1286,15 @@ fn save_stats_are_none_unless_asked() {
             stats: true,
             ..unasked.clone()
         };
-        let plain = save(&mut document.editor(), &unasked);
+        let plain = held_save(&mut document.editor(), &unasked);
         assert_eq!(plain.stats, None, "{what}: stats nobody asked for");
         let mut editor = document.editor();
         editor.count_work();
-        let quiet = save(&mut editor, &unasked);
+        let quiet = held_save(&mut editor, &unasked);
         assert_eq!(quiet.stats, None, "{what}: a counting editor, not asked");
         same_save(&quiet, &plain, what);
 
-        let counted = save(&mut document.editor(), &asked);
+        let counted = held_save(&mut document.editor(), &asked);
         same_save(&counted, &plain, what);
         // The font pass decodes the content and `F1`'s program, at its first
         // glyph, and its cut reads the program from that decode; an image
@@ -1401,7 +1402,7 @@ fn merge(parts: &[Document], counting: bool, options: &SaveOptions) -> Saved {
         }
     }
     assert_eq!(editor.page_refs().len(), 40, "every page imported");
-    save(&mut editor, options)
+    held_save(&mut editor, options)
 }
 
 /// A merge is pages imported and then saved, and it reads its stats from the
@@ -1769,13 +1770,15 @@ fn linearized(pages: usize) -> Vec<u8> {
             page.raw(b"0 0 10 10 re f");
         });
     }
-    let base = Document::open(builder.finish()).expect("it opens");
-    base.editor().save(&WriteOptions {
+    let base = Document::open(built("linearized", builder)).expect("it opens");
+    let out = base.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         linearize: true,
         object_streams: false,
         ..WriteOptions::default()
-    })
+    });
+    written_support::rewritten("linearized", base.cos().bytes(), &out);
+    out
 }
 
 /// How many ancestors page `index` of `document` has along `/Parent`.
@@ -1957,7 +1960,7 @@ fn decodes_are_counted_per_stream_and_operation() {
     // decodes each page's content, and the program at the first page's first
     // glyph, which every other page's scope and the cut are handed.
     let document = Document::open(part(0)).expect("the part opens");
-    let saved = save(
+    let saved = held_save(
         &mut document.editor(),
         &SaveOptions {
             stats: true,
@@ -1998,8 +2001,8 @@ fn a_deduplicating_save_counts_the_streams_it_compares() {
         stats: true,
         ..unasked.clone()
     };
-    let plain = save(&mut document.editor(), &unasked);
-    let counted = save(&mut document.editor(), &asked);
+    let plain = held_save(&mut document.editor(), &unasked);
+    let counted = held_save(&mut document.editor(), &asked);
     same_save(&counted, &plain, "a deduplicating save");
     let expected = decoding(
         Stats::default(),
@@ -2011,6 +2014,33 @@ fn a_deduplicating_save_counts_the_streams_it_compares() {
     let mut editor = document.editor();
     editor.count_work();
     let bytes = editor.save(&asked.write);
+    written_support::rewritten(
+        "a deduplicating save counts the streams it compares",
+        document.cos().bytes(),
+        &bytes,
+    );
     assert!(bytes == plain.bytes, "the bytes differ");
     assert_eq!(editor.work().map(|work| work.stats()), Some(expected));
+}
+
+/// The facade's save door, what it wrote held to the validate-on-save helper as
+/// a rewrite of the bytes the editor was opened over. The save's own tally is
+/// taken before the hold, which reads its own copies.
+#[track_caller]
+fn held_save(
+    editor: &mut tinker_pdf::DocumentEditor,
+    options: &tinker_pdf::write::SaveOptions,
+) -> tinker_pdf::write::Saved {
+    let saved = tinker_pdf::write::save(editor, options);
+    written_support::rewritten("a save", editor.document().bytes(), &saved.bytes);
+    saved
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

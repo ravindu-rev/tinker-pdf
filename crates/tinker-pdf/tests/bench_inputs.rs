@@ -11,6 +11,8 @@
 //! sets the variable the whole process shares. They reach the harness's list
 //! reader, `benches/support/list.rs`, the same way.
 
+mod written_support;
+
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +30,7 @@ mod inputs;
 mod list;
 
 use inputs::{Fixture, Store};
-use tinker_pdf::{Document, RenderOptions};
+use tinker_pdf::RenderOptions;
 
 /// An empty directory of this test's own.
 fn empty(test: &str) -> PathBuf {
@@ -69,6 +71,7 @@ fn an_input_is_written_into_the_directory_once_and_read_back_by_every_later_call
     };
 
     let first = store.bytes("three-pages.pdf", generate);
+    written_support::authored("the three-page input", &first);
     assert_eq!(generated.get(), 1, "the first call generates the input");
     assert_eq!(
         first,
@@ -125,8 +128,10 @@ fn a_file_a_child_reads_is_the_one_the_first_call_wrote() {
     // A file the in-process store wrote is the one a child reads, and the
     // other way round, so an operation and its CLI twin time one input.
     let read = store.bytes("small-3.pdf", || panic!("the file is there"));
+    written_support::authored("the three small pages", &read);
     assert_eq!(read, inputs::small(3));
     let bytes = store.bytes("dense-1.pdf", || inputs::dense(1, 0));
+    written_support::authored("the dense page", &bytes);
     let file = store.file("dense-1.pdf", || panic!("the bytes were written"));
     assert_eq!(std::fs::read(file).expect("it reads"), bytes);
     assert_eq!(names(&dir), ["dense-1.pdf", "small-3.pdf"]);
@@ -176,8 +181,7 @@ fn a_set_a_scan_text_and_a_bitmap_come_back_as_they_went_in() {
     }
 
     let render = || {
-        Document::open(inputs::near_blank())
-            .expect("the page opens")
+        written_support::authored("the near-blank page", inputs::near_blank())
             .page(0)
             .expect("a page")
             .render(&RenderOptions::at_dpi(36.0))

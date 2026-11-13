@@ -1119,7 +1119,15 @@ mod tests {
         builder.add_page(200.0, 200.0, |page| {
             page.tagged(b"P", |page| page.text(b"F1", 12.0, 10.0, 10.0, "x"));
         });
-        let doc = crate::Document::open(builder.finish()).expect("the fixture opens");
+        let doc = crate::Document::open({
+            let bytes = builder.finish();
+            crate::subset::tests_support::written_support::authored(
+                "a structure sweep never reaches for the font group",
+                &bytes,
+            );
+            bytes
+        })
+        .expect("the fixture opens");
 
         let (verdict, (metadata, fonts, colour)) =
             validate_counting(&doc, Coverage::STRUCTURE, None);

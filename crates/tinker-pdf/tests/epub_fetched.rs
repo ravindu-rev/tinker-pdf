@@ -25,6 +25,7 @@
 //! a green tick.
 
 mod epub_support;
+mod written_support;
 
 use std::path::PathBuf;
 
@@ -222,7 +223,10 @@ fn every_fetched_book_paginates_to_its_own_spine() {
                     pages >= want,
                     "{name} paginated to {pages} pages for {want} spine items"
                 );
-                let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                let doc = converted(
+                    "every fetched book paginates to its own spine",
+                    Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+                );
                 let report = doc.archive().expect("a report");
                 let mut spine: Vec<&str> = Vec::new();
                 for origin in report.pages() {
@@ -315,7 +319,10 @@ fn every_fetched_placeholder_says_why_and_every_other_page_reads() {
     let mut read = 0usize;
     let mut blank = Vec::new();
     for (name, bytes) in &books {
-        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let doc = converted(
+            "every fetched placeholder says why and every other page reads",
+            Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+        );
         let report = doc.archive().expect("a book carries a report");
         let mut named = vec![false; doc.page_count() as usize];
         for warning in report.warnings() {
@@ -425,7 +432,10 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
     // book that does not conserve rather than the first of them.
     let mut failures: Vec<String> = Vec::new();
     for (name, bytes) in &books {
-        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let doc = converted(
+            "no fetched page carries a character its book does not have",
+            Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+        );
         let verdict = conservation(bytes, &doc);
         let pinned = NOT_CONSERVED.iter().find(|book| book.name == *name);
         let allowed = pinned.map_or((0, 0), |book| (book.extra, book.missing));
@@ -524,7 +534,10 @@ fn every_fetched_book_conserves_exactly_in_logical_order() {
     // As above: every book is read before anything is asserted.
     let mut failures: Vec<String> = Vec::new();
     for (name, bytes) in &books {
-        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let doc = converted(
+            "every fetched book conserves exactly in logical order",
+            Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+        );
         // The book with no glyphs cannot conserve in any order: its characters
         // were never set, which the row above says by name. Reading order is
         // not what it is missing.
@@ -1053,7 +1066,10 @@ fn the_unimplemented_property_census() {
     let books = fetched!("the unimplemented property census");
     let mut totals: Vec<(&'static str, usize)> = Vec::new();
     for (name, bytes) in &books {
-        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let doc = converted(
+            "the unimplemented property census",
+            Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}")),
+        );
         let report = doc.archive().expect("a book carries a report");
         let mut properties = 0usize;
         let mut elements = 0usize;
@@ -1129,7 +1145,10 @@ fn the_six_svg_spine_items_draw_rather_than_placehold() {
     else {
         panic!("the corpus manifest lists sample-svg-in-spine.epub");
     };
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "the six svg spine items draw rather than placehold",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     assert_eq!(doc.page_count(), 6, "one page per spine itemref");
 
     let mut drawn = 0usize;
@@ -1184,4 +1203,16 @@ fn the_six_svg_spine_items_draw_rather_than_placehold() {
         })
         .count();
     assert_eq!(unresolved, 0, "every marker reference names a <marker>");
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

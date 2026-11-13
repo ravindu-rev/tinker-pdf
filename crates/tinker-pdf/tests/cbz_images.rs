@@ -14,6 +14,7 @@
 //! anything.
 
 mod cbz_support;
+mod written_support;
 
 use std::path::Path;
 
@@ -65,7 +66,10 @@ fn open(files: &[(&str, Vec<u8>)]) -> Document {
         .iter()
         .map(|(name, data)| ZipFile::stored(name, data))
         .collect();
-    Document::open(zip(&entries, Damage::None)).expect("the archive opens")
+    converted(
+        "open",
+        Document::open(zip(&entries, Damage::None)).expect("the archive opens"),
+    )
 }
 
 fn render(document: &Document, page: u32) -> Bitmap {
@@ -666,5 +670,17 @@ fn cielab_tiff_pages_are_lab_images_drawn_to_the_clauses_arithmetic() {
                 );
             }
         }
+    }
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
     }
 }

@@ -19,6 +19,8 @@
 //! cargo test -p tinker-pdf --test verdicts -- --ignored --nocapture
 //! ```
 
+mod written_support;
+
 use std::path::{Path, PathBuf};
 
 use tinker_pdf::{
@@ -481,7 +483,7 @@ fn a_signature_whose_contents_are_not_cms_is_unreadable_rather_than_invalid() {
         &signer,
     );
     request.reserve = 256;
-    let signed = Document::open(bytes)
+    let signed = Document::open(bytes.clone())
         .expect("opens")
         .editor()
         .save_signed(
@@ -492,6 +494,7 @@ fn a_signature_whose_contents_are_not_cms_is_unreadable_rather_than_invalid() {
             &request,
         )
         .expect("signing");
+    written_support::rewritten("sign", &bytes, &signed);
 
     let document = Document::open(signed).expect("reopens");
     let verdicts = document.verify_signatures(&TrustAnchors::new(), None);

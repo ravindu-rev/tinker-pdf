@@ -13,6 +13,7 @@
 //! and the inference that reads them share an author.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::book::styled_book;
 use tinker_pdf::tables::MAX_TABLE_RULES;
@@ -23,7 +24,7 @@ use tinker_pdf::{
 use tinker_pdf_cos::build::{DocumentBuilder, FormXObject};
 
 fn open(bytes: Vec<u8>) -> Document {
-    Document::open(bytes).expect("the fixture opens")
+    converted("open", Document::open(bytes).expect("the fixture opens"))
 }
 
 /// The stated tables of every page of `doc`, each with the index of its page.
@@ -143,7 +144,7 @@ fn tagged_table(rows: &[&[(&str, u32, u32)]]) -> Document {
             }
         });
     });
-    open(builder.finish())
+    open(built("tagged table", builder))
 }
 
 /// **Spans that do not add up are named, not repaired.** A column span
@@ -265,7 +266,10 @@ fn a_page_of_many_small_stated_tables_is_read_in_bounded_work() {
             });
         }
     });
-    let doc = open(builder.finish());
+    let doc = open(built(
+        "a page of many small stated tables is read in bounded work",
+        builder,
+    ));
     let page = doc.page(0).expect("a page");
     let tables = page.stated_tables();
     assert_eq!(tables.len(), TABLES);
@@ -490,7 +494,10 @@ fn a_table_is_stated_only_on_the_page_that_holds_it() {
             });
         });
     });
-    let doc = open(builder.finish());
+    let doc = open(built(
+        "a table is stated only on the page that holds it",
+        builder,
+    ));
     let tables = stated(&doc);
     let pages: Vec<u32> = tables.iter().map(|(index, _)| *index).collect();
     assert_eq!(pages, [1], "stated on its own page alone");
@@ -505,7 +512,7 @@ fn no_tree_and_no_table_state_nothing() {
     builder.add_page(612.0, 792.0, |page| {
         page.text(b"F1", 10.0, 72.0, 700.0, "plain")
     });
-    assert!(stated(&open(builder.finish())).is_empty());
+    assert!(stated(&open(built("no tree and no table state nothing", builder))).is_empty());
     let doc = open(styled_book("en", "", "<p>No table here.</p>"));
     assert!(stated(&doc).is_empty());
 }
@@ -555,7 +562,7 @@ fn drawn(content: &str) -> Document {
     let mut builder = DocumentBuilder::new();
     builder.add_base_font(b"F1", b"Helvetica");
     builder.add_page(612.0, 792.0, |page| page.raw(content.as_bytes()));
-    open(builder.finish())
+    open(built("drawn", builder))
 }
 
 fn rules(doc: &Document) -> TableRules {
@@ -746,7 +753,10 @@ fn a_form_that_leaves_a_q_open_does_not_clip_the_page() {
                 }
             }
         });
-        let doc = open(builder.finish());
+        let doc = open(built(
+            "a form that leaves a q open does not clip the page",
+            builder,
+        ));
         let page = doc.page(0).expect("a page");
         let name = format!(
             "{} (bracketed {bracketed})",
@@ -929,7 +939,7 @@ fn ruled_grid(tag: bool) -> Document {
             }
         }
     });
-    open(builder.finish())
+    open(built("ruled grid", builder))
 }
 
 /// **A ruled grid is read row by row however it was drawn.** Untagged, its
@@ -1101,6 +1111,7 @@ fn boxes_forms_and_untabled_pages_are_not_tables() {
             let Ok(doc) = Document::open(std::fs::read(&path).expect("readable")) else {
                 continue;
             };
+            let doc = converted("a committed fixture", doc);
             for index in 0..doc.page_count() {
                 let page = doc.page(index).expect("a page");
                 if !page.stated_tables().is_empty() {
@@ -1705,7 +1716,7 @@ fn a_right_to_left_table_reads_from_the_right() {
         }
     }
     builder.add_page(612.0, 792.0, |page| page.raw(&content));
-    let doc = open(builder.finish());
+    let doc = open(built("a right to left table reads from the right", builder));
     let found = doc
         .page(0)
         .expect("a page")
@@ -1897,7 +1908,10 @@ fn an_unruled_tagged_table_is_found_by_its_alignment() {
             }
         });
     });
-    let doc = open(builder.finish());
+    let doc = open(built(
+        "an unruled tagged table is found by its alignment",
+        builder,
+    ));
     let page = doc.page(0).expect("a page");
     let stated = page.stated_tables();
     assert_eq!(stated.len(), 1);
@@ -1933,7 +1947,7 @@ fn a_monospaced_listing_is_not_a_table() {
             );
         }
     });
-    let doc = open(builder.finish());
+    let doc = open(built("a monospaced listing is not a table", builder));
     let found = doc
         .page(0)
         .expect("a page")
@@ -1962,7 +1976,7 @@ fn columns_aligned_with_spaces_are_found() {
             page.text(b"F2", 10.0, 72.0, 700.0 - row as f64 * 12.0, text);
         }
     });
-    let doc = open(builder.finish());
+    let doc = open(built("columns aligned with spaces are found", builder));
     let found = doc
         .page(0)
         .expect("a page")
@@ -1982,4 +1996,25 @@ fn columns_aligned_with_spaces_are_found() {
             "5", "0.10"
         ]
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

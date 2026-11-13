@@ -2862,7 +2862,15 @@ mod tests {
                 page.text(b"F1", 9.0, 300.0, 40.0, &(at + 1).to_string());
             });
         }
-        let document = crate::Document::open(builder.finish()).expect("the book opens");
+        let document = crate::Document::open({
+            let bytes = builder.finish();
+            crate::subset::tests_support::written_support::authored(
+                "a batch holds at most half a window ahead",
+                &bytes,
+            );
+            bytes
+        })
+        .expect("the book opens");
         let half = (RUNNING_WINDOW / 2) as usize;
         let mut batch = InferredPages::new(&document, 0..pages, &InferenceOptions::default(), None);
         let mut most = 0;
@@ -2915,7 +2923,15 @@ mod tests {
                 page.text(b"F1", 10.0, 72.0, 600.0, &format!("The body of page {at}"));
             });
         }
-        let document = crate::Document::open(builder.finish()).expect("the book opens");
+        let document = crate::Document::open({
+            let bytes = builder.finish();
+            crate::subset::tests_support::written_support::authored(
+                "a page past the pages counted is inferred with no window",
+                &bytes,
+            );
+            bytes
+        })
+        .expect("the book opens");
         let page = document.page(11).expect("page twelve");
         let mut batch = Batch::new(&document.inner, None, InferenceOptions::default(), 12, None);
         // The walk counted none of the pages the lookup found.

@@ -18,6 +18,8 @@
 //! package is mis-read now says what each one is, and the inventory's media
 //! type column is checked for the first time, through OPC 7.2.3.5.
 
+mod written_support;
+
 use std::path::PathBuf;
 
 use tinker_pdf::xps::opc::PartName;
@@ -188,8 +190,11 @@ fn both_dialects_are_represented_and_the_content_type_does_not_tell_them_apart()
 /// page that is entirely white. Neither passes below.
 #[test]
 fn an_xps_with_a_raster_resource_is_not_a_one_page_comic() {
-    let document = Document::open(package("wpf-image-and-text.xps"))
-        .expect("today it opens; after milestone 3 it opens as a fixed document");
+    let document = converted(
+        "an xps with a raster resource is not a one page comic",
+        Document::open(package("wpf-image-and-text.xps"))
+            .expect("today it opens; after milestone 3 it opens as a fixed document"),
+    );
     let page = document.page(0).expect("a first page");
     let (w, h) = page.size();
     assert_eq!(
@@ -247,7 +252,10 @@ fn an_xps_without_a_raster_resource_is_not_refused_as_having_no_images() {
         "`NoImages` is a true sentence about a comic archive and a false one \
          about a fixed document with one page in it"
     );
-    let document = opened.expect("a fixed document with one page in it");
+    let document = converted(
+        "an xps without a raster resource is not refused as having no images",
+        opened.expect("a fixed document with one page in it"),
+    );
     assert_eq!(document.page_count(), 1);
     assert_eq!(
         document.page(0).map(|page| page.size()),
@@ -308,8 +316,11 @@ fn every_package_in_the_corpus_opens_as_the_document_it_is() {
         "the sweep covers the corpus"
     );
     for (name, pages, dialect) in expected {
-        let document = Document::open(package(name))
-            .unwrap_or_else(|e| panic!("{name} should open as a fixed document: {e:?}"));
+        let document = converted(
+            "every package in the corpus opens as the document it is",
+            Document::open(package(name))
+                .unwrap_or_else(|e| panic!("{name} should open as a fixed document: {e:?}")),
+        );
         assert_eq!(document.page_count(), *pages, "{name}: pages");
         let report = document
             .archive()
@@ -356,8 +367,14 @@ fn every_package_in_the_corpus_opens_as_the_document_it_is() {
 /// the obvious wrong answer — these two would not agree.
 #[test]
 fn the_two_dialects_of_one_document_open_the_same_way() {
-    let one = Document::open(package("wpf-image-and-text.xps")).expect("XPS 1.0");
-    let other = Document::open(package("xpsom-image-and-text.oxps")).expect("OpenXPS");
+    let one = converted(
+        "the two dialects of one document open the same way",
+        Document::open(package("wpf-image-and-text.xps")).expect("XPS 1.0"),
+    );
+    let other = converted(
+        "the two dialects of one document open the same way",
+        Document::open(package("xpsom-image-and-text.oxps")).expect("OpenXPS"),
+    );
     assert_eq!(one.page_count(), other.page_count());
     assert_eq!(
         one.page(0).map(|p| p.size()),
@@ -717,4 +734,16 @@ fn the_content_types_item_is_in_no_fixed_position() {
         positions.contains("last") && positions.contains("index 1"),
         "both observed positions should still be here: {positions:?}"
     );
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

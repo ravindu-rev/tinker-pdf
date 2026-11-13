@@ -11,6 +11,8 @@
 //! render, and assert which corner the ink lands in. A transform that is
 //! wrong in any of the three ways above moves it somewhere else.
 
+mod written_support;
+
 use tinker_pdf::{Document, RenderOptions};
 use tinker_pdf_cos::DocumentBuilder;
 
@@ -25,7 +27,7 @@ fn page_with_mark(rotation: Option<i64>, crop: Option<(f64, f64, f64, f64)>) -> 
         // Bottom-left of the media box, in black.
         page.fill_rect(0.0, 0.0, 20.0, 20.0, 0.0);
     });
-    let bytes = builder.finish();
+    let bytes = built("page with mark", builder);
 
     let Some(extra) = rotation
         .map(|r| format!("/Rotate {r}"))
@@ -240,4 +242,13 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
         "and the caller is told the scale is not the one asked for: {:?}",
         bitmap.warnings
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

@@ -18,6 +18,8 @@
 //! own field walk would find exactly the signatures the reader finds, which
 //! proves nothing about the ones it misses.
 
+mod written_support;
+
 use std::path::{Path, PathBuf};
 
 use tinker_pdf::{Anchor, Coverage, CoverageDefect, DigestAlgorithm, Document, SubFilter};
@@ -255,6 +257,11 @@ fn a_signature_survived_by_an_incremental_update_covers_a_revision() {
         mode: tinker_pdf::WriteMode::Incremental,
         ..Default::default()
     });
+    written_support::rewritten(
+        "a signature survived by an incremental update covers a revision",
+        &original,
+        &updated,
+    );
     assert!(
         updated.starts_with(&original),
         "an incremental save leaves the signed prefix alone"

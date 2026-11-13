@@ -25,6 +25,7 @@
 //! too.
 
 mod render_support;
+mod written_support;
 
 use render_support::curvy_font;
 use tinker_pdf::{
@@ -128,7 +129,7 @@ fn forms_page() -> Vec<u8> {
         page.raw(b"/Fm#20B Do");
         page.raw(b"0.3 0.3 0.3 rg 78 5 30 20 re f");
     });
-    builder.finish()
+    built("forms page", builder)
 }
 
 /// Where each form lands on the page, in pixels at `scale`: `/BBox` through
@@ -606,4 +607,13 @@ fn mutated_documents_never_panic_a_part_render() {
         drawn > 100 && refused > 100,
         "the campaign must reach both answers: {drawn} drawn, {refused} refused"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

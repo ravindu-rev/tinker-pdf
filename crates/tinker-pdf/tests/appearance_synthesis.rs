@@ -17,6 +17,7 @@
 //! is flipped onto the bitmap here, once.
 
 mod render_support;
+mod written_support;
 
 use std::sync::Arc;
 
@@ -93,6 +94,7 @@ fn synthesized_in(annotation: &str, catalog_extra: &str, objects: &[&[u8]]) -> S
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
+    written_support::rewritten("synthesized in", doc.bytes(), &saved);
 
     let reopened = Document::open(saved).expect("the saved file opens");
     let page = reopened.page(0).expect("the page");

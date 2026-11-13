@@ -34,6 +34,7 @@
 //! two empty documents agree perfectly.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::book::one_face_book;
 use epub_support::layout::{column, document, lay_out, lines, Line};
@@ -725,7 +726,7 @@ const RTL_LINE: &str = "\u{628}\u{62D}\u{645} \u{645}\u{62D}\u{628}";
 fn drawn(body: &str) -> Vec<String> {
     let face = Face::new("Fixture Arabic", RTL_COVERS).with_joining(Joining { script: *b"arab" });
     let book = one_face_book("Fixture Arabic", &face.build(), 24, body);
-    let doc = Document::open(book).expect("a book");
+    let doc = converted("drawn", Document::open(book).expect("a book"));
     let cos = doc.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
@@ -1027,7 +1028,10 @@ fn rendered(style: &str, body: &str) -> Vec<u8> {
         OcfEntry::deflated("EPUB/ch1.xhtml", chapter.as_bytes()),
     ];
     let directory: Vec<usize> = (0..entries.len()).collect();
-    let doc = Document::open(ocf_zip(&entries, &directory)).expect("the book opens");
+    let doc = converted(
+        "rendered",
+        Document::open(ocf_zip(&entries, &directory)).expect("the book opens"),
+    );
     doc.page(0)
         .expect("a page")
         .render(&tinker_pdf::RenderOptions::default())
@@ -1433,4 +1437,16 @@ fn a_positioned_box_inside_a_line_is_taken_out_of_it() {
         r#"<p>aa <span>bb<span class="a">cc</span>dd</span> ee</p>"#
     ));
     assert!(warned(r#"<p><span class="s">cc</span>aa bb</p>"#));
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

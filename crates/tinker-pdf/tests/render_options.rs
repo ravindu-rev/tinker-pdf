@@ -26,6 +26,7 @@
 //! not to be edited to make it go away.
 
 mod render_support;
+mod written_support;
 
 use render_support::{blend_grid_page, curvy_font};
 use tinker_pdf::{
@@ -129,7 +130,7 @@ fn ink_page() -> Vec<u8> {
         page.raw(b"0 1 0 0 k 14 10 50 14 re f");
         page.raw(b"Q");
     });
-    builder.finish()
+    built("ink page", builder)
 }
 
 // ---- CMYK page output --------------------------------------------------------
@@ -207,7 +208,10 @@ fn a_device_cmyk_colour_reaches_an_ink_page_unchanged() {
         page.raw(b"BT /F0 30 Tf 1 1 1 1 k 85 5 Td (A) Tj ET");
     });
     let ink = render(
-        builder.finish(),
+        built(
+            "a device cmyk colour reaches an ink page unchanged",
+            builder,
+        ),
         &RenderOptions {
             format: PixelFormat::CmykA8,
             allow_cmyk: true,
@@ -264,7 +268,10 @@ fn a_device_cmyk_colour_reaches_an_ink_page_unchanged() {
             builder.add_page(30.0, 10.0, |page| {
                 page.raw(b"/DeviceCMYK cs 0 0 10 10 re f");
             });
-            builder.finish()
+            built(
+                "a device cmyk colour reaches an ink page unchanged",
+                builder,
+            )
         },
         &RenderOptions::default(),
     );
@@ -298,7 +305,7 @@ fn a_stencil_mask_paints_the_fill_colour_s_own_ink() {
         page.raw(&stencil(30));
     });
     let ink = render(
-        builder.finish(),
+        built("a stencil mask paints the fill colour s own ink", builder),
         &RenderOptions {
             format: PixelFormat::CmykA8,
             allow_cmyk: true,
@@ -446,7 +453,10 @@ fn a_rich_black_edge_composited_over_ink_is_not_the_light_edge() {
             // covered, columns 5 to 13 wholly.
             page.raw(b"1 1 1 1 k 4.5 5 10 10 re f");
         });
-        builder.finish()
+        built(
+            "a rich black edge composited over ink is not the light edge",
+            builder,
+        )
     };
     let ink = render(
         page(),
@@ -659,7 +669,7 @@ fn layer_page() -> Vec<u8> {
         page.raw(b"0.6 0.3 0.1 rg 40 4 m 80 2 90 30 60 22 c 45 30 l h f");
         page.raw(b"Q");
     });
-    builder.finish()
+    built("layer page", builder)
 }
 
 fn layer(format: PixelFormat, premultiplied: bool) -> RenderOptions {
@@ -905,7 +915,7 @@ fn hard_edge_page() -> Vec<u8> {
         // An image's edge, rotated so none of it is axis-aligned, in green.
         page.raw(b"q 20 12 -12 20 95 5 cm /Im0 Do Q");
     });
-    builder.finish()
+    built("hard edge page", builder)
 }
 
 /// The colours a hard-edged render of [`hard_edge_page`] may hold.
@@ -1225,4 +1235,13 @@ fn hard_edged_output_is_pinned() {
             want,
         );
     }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

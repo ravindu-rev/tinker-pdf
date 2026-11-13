@@ -50,6 +50,8 @@
 //!
 //! The corpora supply bytes; every number here is this engine reading them.
 
+mod written_support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -773,7 +775,7 @@ fn ruled_and_tagged(cells: &[&[(&str, u32, bool)]], second_with_fill: bool) -> D
             }
         }
     });
-    open(builder.finish()).expect("the fixture opens")
+    open(built("ruled and tagged", builder)).expect("the fixture opens")
 }
 
 /// The one page of `doc`, scored as the census scores it.
@@ -831,4 +833,13 @@ fn the_census_reads_header_evidence_off_the_table_found() {
     ));
     assert_eq!(totals.found, 1);
     assert_eq!((totals.headed, totals.header_evidence), (1, 0));
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

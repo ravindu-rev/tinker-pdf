@@ -57,6 +57,8 @@
 //! no opinion about whether it should have. A pair that could catch it would be
 //! a pair with a budget, and a budget is what this file exists not to have.
 
+mod written_support;
+
 use tinker_pdf::{
     DeviceSpace, DocumentBuilder, FormXObject, Function, Shading, ShadingPattern, TilingPattern,
     TilingType,
@@ -122,7 +124,10 @@ fn a_tiling_pattern_draws_what_its_cells_unrolled_draw() {
         assert!(page.set_fill_pattern(b"P0"));
         page.raw(format!("0 0 {SIZE} {SIZE} re f").as_bytes());
     });
-    let built = render(builder.finish());
+    let built = render(built(
+        "a tiling pattern draws what its cells unrolled draw",
+        builder,
+    ));
 
     // The lattice runs while a cell can still meet the page: at a step of five
     // that is columns 0 to 3, whose cells cover 0-4, 5-9, 10-14 and 15-19, the
@@ -177,7 +182,10 @@ fn a_form_xobject_draws_what_its_operators_inlined_draw() {
     builder.add_page(SIZE, SIZE, |page| {
         assert!(page.form(b"Fm0"));
     });
-    let built = render(builder.finish());
+    let built = render(built(
+        "a form xobject draws what its operators inlined draw",
+        builder,
+    ));
 
     // 8.10.1: the matrix maps form space into the space in force, and the box
     // is a clip *in form space*, so it is stated after the `cm` and before the
@@ -266,7 +274,10 @@ fn a_shading_pattern_fill_draws_what_sh_draws_in_the_same_region() {
         assert!(page.set_fill_pattern(b"P0"));
         page.raw(format!("{REGION} f").as_bytes());
     });
-    let built = render(builder.finish());
+    let built = render(built(
+        "a shading pattern fill draws what sh draws in the same region",
+        builder,
+    ));
 
     let mut by_hand = DocumentBuilder::new();
     assert!(by_hand.add_shading(b"Sh0", &axial()));
@@ -355,4 +366,13 @@ fn a_type3_glyph_draws_what_the_same_path_draws() {
 
     both_drew(&glyph, &path, 64, "a Type 3 glyph");
     same_picture(glyph, path, "a Type 3 glyph against the same path");
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

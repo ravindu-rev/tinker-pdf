@@ -4,20 +4,18 @@
 //! level-6 size bound").
 //!
 //! The counts are committed beside the generators in
-//! `benches/support/inputs.rs`, each with the length and SHA-256 of the bytes
+//! `benches/support/samples.rs`, each with the length and SHA-256 of the bytes
 //! it was taken on, which the generator asserts of its own output. No level-6
 //! encoder runs here or anywhere in the tree: a count states a target and
 //! judges no output, and the bound is held in integers.
 
-/// The benchmark set's generators: two of them are read here.
-#[allow(
-    dead_code,
-    reason = "two of the benchmark set's generators are read here"
-)]
-#[path = "../benches/support/inputs.rs"]
-mod inputs;
+/// The benchmark set's raw samples and their counts: two generators are read
+/// here, and no document is written.
+#[allow(dead_code, reason = "two of the benchmark set's samples are read here")]
+#[path = "../benches/support/samples.rs"]
+mod samples;
 
-use inputs::{LevelSix, PAGE_LIKE_LEVEL_SIX, PHOTO_LIKE_LEVEL_SIX};
+use samples::{LevelSix, PAGE_LIKE_LEVEL_SIX, PHOTO_LIKE_LEVEL_SIX};
 use tinker_pdf_filters::{deflate_at, inflate_raw, DeflateLevel, Limits};
 
 /// `input` at the ratio level, at most 1.02 times `count`'s bytes and
@@ -42,6 +40,6 @@ fn holds(name: &str, input: &[u8], count: &LevelSix) {
 
 #[test]
 fn the_ratio_level_holds_level_six_size() {
-    holds("page-like", &inputs::page_like(), &PAGE_LIKE_LEVEL_SIX);
-    holds("photo-like", &inputs::photo_like(), &PHOTO_LIKE_LEVEL_SIX);
+    holds("page-like", &samples::page_like(), &PAGE_LIKE_LEVEL_SIX);
+    holds("photo-like", &samples::photo_like(), &PHOTO_LIKE_LEVEL_SIX);
 }

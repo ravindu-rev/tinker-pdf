@@ -30,6 +30,7 @@
 
 #[path = "epub_support/mod.rs"]
 mod epub_support;
+mod written_support;
 
 use epub_support::conservation::conservation;
 use epub_support::{ocf_zip, OcfEntry};
@@ -123,8 +124,11 @@ fn a_gloss_after_a_forced_break_reads_where_it_was_written() {
     let bytes = glossed_book();
     for tenths in 16..=30 {
         let height = f64::from(tenths) * 10.0;
-        let doc = Document::open_with(bytes.clone(), &OpenOptions::at_page(200.0, height))
-            .expect("the book opens");
+        let doc = converted(
+            "a gloss after a forced break reads where it was written",
+            Document::open_with(bytes.clone(), &OpenOptions::at_page(200.0, height))
+                .expect("the book opens"),
+        );
         let verdict = conservation(&bytes, &doc);
         assert!(
             verdict.holds(),
@@ -145,7 +149,10 @@ fn a_gloss_after_a_forced_break_reads_where_it_was_written() {
 #[test]
 fn the_gloss_is_drawn_on_its_own_chapters_page() {
     let bytes = glossed_book();
-    let doc = Document::open_with(bytes, &OpenOptions::at_page(200.0, 180.0)).expect("a book");
+    let doc = converted(
+        "the gloss is drawn on its own chapters page",
+        Document::open_with(bytes, &OpenOptions::at_page(200.0, 180.0)).expect("a book"),
+    );
     let pages: Vec<String> = (0..doc.page_count())
         .map(|at| doc.page(at).expect("a page").text().plain_text())
         .collect();
@@ -163,4 +170,16 @@ fn the_gloss_is_drawn_on_its_own_chapters_page() {
         !flat(heading - 1).contains("glossofONE"),
         "the gloss is on the page before its chapter, which is the defect: {pages:?}"
     );
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

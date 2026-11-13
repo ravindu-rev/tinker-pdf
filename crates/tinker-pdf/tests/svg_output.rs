@@ -17,6 +17,8 @@
 //! factor is read off the scene (`size` against the written width) and
 //! checked to be exactly that, once, rather than assumed.
 
+mod written_support;
+
 use tinker_pdf::{
     Bitmap, Document, DocumentBuilder, Rasterised, RenderWarning, Svg, SvgOptions, SvgWarning,
 };
@@ -880,7 +882,7 @@ fn text_is_written_as_the_glyphs_outlines() {
     builder.add_page(200.0, 100.0, |page| {
         page.text(b"F0", 20.0, 10.0, 30.0, "ab c")
     });
-    let svg = svg_of(builder.finish());
+    let svg = svg_of(built("text is written as the glyphs outlines", builder));
     assert!(svg.warnings.is_empty(), "{:?}", svg.warnings);
     let (scene, k) = read_back(&svg);
 
@@ -1663,4 +1665,13 @@ fn a_hostile_page_never_panics_the_writer() {
         written > 30,
         "the campaign reached the writer {written} times"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

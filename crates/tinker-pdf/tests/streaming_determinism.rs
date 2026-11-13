@@ -13,6 +13,8 @@
 //! streamed render against the buffered one, and each fixture is held to a
 //! floor of ink first, because two blank pages are equal too.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf::{
@@ -44,7 +46,7 @@ fn curves_page() -> Vec<u8> {
               10.5 12.25 m 190.75 18.5 l 150.5 88.125 l h f\n",
         );
     });
-    builder.finish()
+    built("curves page", builder)
 }
 
 /// Two pages, so the second one's objects live past whatever the first one
@@ -57,7 +59,7 @@ fn two_page_document() -> Vec<u8> {
     builder.add_page(200.0, 100.0, |page| {
         page.raw(b"0.75 0.15 0.35 rg\n25 25 m 60 85 120 15 175 75 c 110 12 l h f\n");
     });
-    builder.finish()
+    built("two page document", builder)
 }
 
 /// Four pages saved linearized (Annex F), so the page requested is found
@@ -85,13 +87,15 @@ fn linearized_pages() -> Vec<u8> {
             );
         });
     }
-    let base = Document::open(builder.finish()).expect("it opens");
-    base.editor().save(&WriteOptions {
+    let base = Document::open(built("linearized pages", builder)).expect("it opens");
+    let out = base.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         linearize: true,
         object_streams: false,
         ..WriteOptions::default()
-    })
+    });
+    written_support::rewritten("linearized pages", base.cos().bytes(), &out);
+    out
 }
 
 /// One fixture: how to build it, which page is rendered, and the fewest
@@ -262,4 +266,13 @@ fn counting_the_reads_changes_none_of_them() {
     );
     assert!(counter.bytes_read() > 0, "something was read");
     assert!(counter.reads() > 0);
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

@@ -40,6 +40,8 @@
 //! Every fixture is built here from ISO/IEC 15948's own field layouts, and the
 //! expected pixel values are written out rather than read back.
 
+mod written_support;
+
 use tinker_pdf::{Bitmap, Document, RenderOptions};
 use tinker_pdf_cos::{
     png_image, CompressedImage, DocumentBuilder, ImageColorSpace, ImageData, PngRoute,
@@ -198,7 +200,7 @@ fn page_of(image: &ImageData<'_>, width: u32, height: u32) -> Vec<u8> {
     assert!(builder.add_image(b"Im0", image), "the builder took it");
     let (w, h) = (f64::from(width), f64::from(height));
     builder.add_page(w, h, |page| page.image(b"Im0", 0.0, 0.0, w, h));
-    builder.finish()
+    built("page of", builder)
 }
 
 /// The pass-through route: `png_image`, whatever it chose.
@@ -797,4 +799,13 @@ fn an_interlaced_png_and_its_twin_are_one_picture() {
     assert_eq!(woven_route, PngRoute::Decoded, "Adam7 has no pass-through");
     assert_painted(&woven, 9, "the interlaced image");
     assert_same_picture(&woven, &through, "Adam7 against its non-interlaced twin");
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

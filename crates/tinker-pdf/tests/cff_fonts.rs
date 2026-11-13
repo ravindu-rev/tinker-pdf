@@ -16,6 +16,8 @@
 //! Every byte of every font here is built in this file: `testdata/` is four
 //! self-authored PDFs and none of them embeds a CFF.
 
+mod written_support;
+
 use tinker_pdf::{Bitmap, Document, RenderOptions, RenderWarning};
 
 // ---------------------------------------------------------------------------
@@ -678,7 +680,9 @@ fn written(program: &[u8], glyph: u16, text: &str) -> Vec<u8> {
             &[tinker_pdf::Glyph { id: glyph, text }]
         ));
     });
-    builder.finish_reporting().0
+    let (bytes, _) = builder.finish_reporting();
+    written_support::authored("written", &bytes);
+    bytes
 }
 
 /// The writer's half of the two tests above: a composite font over a

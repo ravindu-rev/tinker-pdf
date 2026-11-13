@@ -20,9 +20,11 @@
 use tinker_pdf::{Document, FindingKind, PdfACoverage};
 
 // A face with real `cmap`, `glyf` and `hmtx` tables, for the width rule,
-// which has to reach a glyph through the program's own mapping.
-#[path = "epub_support/mod.rs"]
-mod epub_support;
+// which has to reach a glyph through the program's own mapping: the font
+// builder of the EPUB fixtures, and nothing that builds or opens a book.
+#[allow(dead_code, reason = "the font builder alone is read here")]
+#[path = "epub_support/typeface.rs"]
+mod typeface;
 
 // ---- building a document at the edge of a clause --------------------------
 
@@ -1066,7 +1068,7 @@ fn a_symbolic_subset_reads_each_code_through_its_own_cmap() {
 /// dictionary's `/Widths` for code 65.
 fn measured(part: &str, advance: u16, widths: &str) -> Fixture {
     let mut fixture = Fixture::new(part, Some("B"));
-    let program = epub_support::typeface::Face::new("Acme", "A")
+    let program = typeface::Face::new("Acme", "A")
         .with_advance(advance)
         .build();
     fixture.program = Some((String::new(), program));
@@ -1144,9 +1146,7 @@ fn a_code_reached_by_guess_is_not_judged() {
     let mut unstated = measured("2", 600, "600");
     unstated.program = Some((
         String::new(),
-        epub_support::typeface::Face::new("Acme", "AB")
-            .with_advance(600)
-            .build(),
+        typeface::Face::new("Acme", "AB").with_advance(600).build(),
     ));
     unstated.content = "BT /F1 12 Tf 10 10 Td (AB) Tj ET".to_string();
     assert_eq!(widths_of(&unstated), []);
@@ -1164,7 +1164,7 @@ fn a_composite_width_written_as_ranges_is_judged_per_cid() {
         let mut fixture = composite_in(part, "/Identity-H");
         fixture.program = Some((
             String::new(),
-            epub_support::typeface::Face::new("Acme", "ABCDE")
+            typeface::Face::new("Acme", "ABCDE")
                 .with_advance(600)
                 .build(),
         ));

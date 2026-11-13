@@ -32,6 +32,7 @@
 //! would break.
 
 mod epub_support;
+mod written_support;
 
 use std::sync::{Arc, Mutex};
 
@@ -309,7 +310,10 @@ fn a_run_needing_three_faces_becomes_three_text_objects() {
         r#""Alpha", "Beta", "Gamma""#,
         THREE_FACE_TEXT,
     );
-    let doc = Document::open(bytes).expect("a book");
+    let doc = converted(
+        "a run needing three faces becomes three text objects",
+        Document::open(bytes).expect("a book"),
+    );
     assert_eq!(
         face_warnings(&doc),
         Vec::new(),
@@ -401,7 +405,10 @@ fn one_face_that_covers_the_whole_run_is_one_text_object() {
         r#""Whole""#,
         THREE_FACE_TEXT,
     );
-    let doc = Document::open(bytes).expect("a book");
+    let doc = converted(
+        "one face that covers the whole run is one text object",
+        Document::open(bytes).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(
@@ -440,7 +447,10 @@ fn a_declared_family_that_covers_nothing_is_stepped_over() {
         r#""Empty", "Whole""#,
         THREE_FACE_TEXT,
     );
-    let doc = Document::open(bytes).expect("a book");
+    let doc = converted(
+        "a declared family that covers nothing is stepped over",
+        Document::open(bytes).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(objects.len(), 1, "{content}");
@@ -487,7 +497,10 @@ fn an_embedded_faces_baseline_is_placed_by_its_own_hhea() {
             r#""One""#,
             "ABCDE",
         );
-        let doc = Document::open(bytes).expect("a book");
+        let doc = converted(
+            "an embedded faces baseline is placed by its own hhea",
+            Document::open(bytes).expect("a book"),
+        );
         let content = page_content(&doc);
         let objects = text_objects(&content);
         assert_eq!(objects.len(), 1, "one face, one object: {content}");
@@ -553,7 +566,10 @@ fn a_face_the_family_list_never_mentions_is_still_the_system_fallback() {
         "serif",
         "\u{65e5}\u{672c}",
     );
-    let doc = Document::open(bytes).expect("a book");
+    let doc = converted(
+        "a face the family list never mentions is still the system fallback",
+        Document::open(bytes).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert_eq!(objects.len(), 1, "{content}");
@@ -591,15 +607,18 @@ fn an_unrecognised_format_hint_does_not_refuse_a_perfectly_good_file() {
         "{}p {{ font-family: \"vend\"; }}",
         font_face("vend", r#"url(fonts/a.ttf) format("supertype-2")"#)
     );
-    let doc = Document::open(book(
-        &package(
-            IDENTIFIER,
-            r#"<item id="f1" href="fonts/a.ttf" media-type="font/ttf"/>"#,
-        ),
-        &chapter(&style, "ABC"),
-        &[("EPUB/fonts/a.ttf", covering("vend", "ABC"))],
-    ))
-    .expect("a book");
+    let doc = converted(
+        "an unrecognised format hint does not refuse a perfectly good file",
+        Document::open(book(
+            &package(
+                IDENTIFIER,
+                r#"<item id="f1" href="fonts/a.ttf" media-type="font/ttf"/>"#,
+            ),
+            &chapter(&style, "ABC"),
+            &[("EPUB/fonts/a.ttf", covering("vend", "ABC"))],
+        ))
+        .expect("a book"),
+    );
 
     assert_eq!(
         face_warnings(&doc),
@@ -671,7 +690,10 @@ fn a_face_declared_in_every_chapter_is_loaded_once_and_every_rule_is_counted() {
         OcfEntry::deflated("EPUB/fonts/a.woff2", b"wOF2 and nothing this build reads"),
     ];
     let directory: Vec<usize> = (0..entries.len()).collect();
-    let doc = Document::open(ocf_zip(&entries, &directory)).expect("a book");
+    let doc = converted(
+        "a face declared in every chapter is loaded once and every rule is counted",
+        Document::open(ocf_zip(&entries, &directory)).expect("a book"),
+    );
     assert_eq!(doc.page_count(), 2, "both chapters are in the spine");
 
     let warnings = face_warnings(&doc);
@@ -765,7 +787,10 @@ fn a_character_no_face_covers_is_named_rather_than_left_blank() {
     // much of this book is missing"* wants, and the two differ by exactly one
     // here.
     let bytes = three_face_book(&[], "serif", "ok\u{65e5}\u{672c}\u{8a9e}\u{65e5}");
-    let doc = Document::open(bytes).expect("a book");
+    let doc = converted(
+        "a character no face covers is named rather than left blank",
+        Document::open(bytes).expect("a book"),
+    );
     let warnings = doc.archive().expect("a report").warnings().to_vec();
     assert!(
         warnings.contains(&ArchiveWarning::UncoveredCharacters { characters: 4 }),
@@ -806,7 +831,10 @@ fn an_embedded_face_removes_the_overflow_ceiling_and_the_warning() {
         .collect();
 
     // The control: the same text with no face for it at all.
-    let bare = Document::open(three_face_book(&[], "serif", &text)).expect("a book");
+    let bare = converted(
+        "an embedded face removes the overflow ceiling and the warning",
+        Document::open(three_face_book(&[], "serif", &text)).expect("a book"),
+    );
     let warnings = bare.archive().expect("a report").warnings().to_vec();
     assert!(
         warnings.contains(&ArchiveWarning::UnrepresentedCharacters { characters: 76 }),
@@ -823,7 +851,10 @@ fn an_embedded_face_removes_the_overflow_ceiling_and_the_warning() {
         r#""Cjk", serif"#,
         &text,
     );
-    let doc = Document::open(bytes).expect("a book");
+    let doc = converted(
+        "an embedded face removes the overflow ceiling and the warning",
+        Document::open(bytes).expect("a book"),
+    );
     let warnings = doc.archive().expect("a report").warnings().to_vec();
     assert!(
         !warnings.iter().any(|w| matches!(
@@ -909,15 +940,18 @@ fn a_woff_and_a_woff2_are_unpacked_and_set_the_book() {
             "{}p {{ font-family: \"{family}\", serif; }}",
             font_face(&family.to_ascii_lowercase(), src)
         );
-        let doc = Document::open(book(
-            &package(
-                IDENTIFIER,
-                r#"<item id="f1" href="fonts/a.woff" media-type="font/woff"/>"#,
-            ),
-            &chapter(&style, "ABC"),
-            &[("EPUB/fonts/a.woff", bytes)],
-        ))
-        .expect("a book");
+        let doc = converted(
+            "a woff and a woff2 are unpacked and set the book",
+            Document::open(book(
+                &package(
+                    IDENTIFIER,
+                    r#"<item id="f1" href="fonts/a.woff" media-type="font/woff"/>"#,
+                ),
+                &chapter(&style, "ABC"),
+                &[("EPUB/fonts/a.woff", bytes)],
+            ))
+            .expect("a book"),
+        );
 
         let warnings = face_warnings(&doc);
         assert!(
@@ -977,15 +1011,18 @@ fn a_container_that_will_not_unpack_is_refused_with_the_reason() {
             "{}p {{ font-family: \"{family}\", serif; }}",
             font_face(&family.to_ascii_lowercase(), "url(fonts/a.woff)")
         );
-        let doc = Document::open(book(
-            &package(
-                IDENTIFIER,
-                r#"<item id="f1" href="fonts/a.woff" media-type="font/woff"/>"#,
-            ),
-            &chapter(&style, "Words."),
-            &[("EPUB/fonts/a.woff", bytes)],
-        ))
-        .expect("a book");
+        let doc = converted(
+            "a container that will not unpack is refused with the reason",
+            Document::open(book(
+                &package(
+                    IDENTIFIER,
+                    r#"<item id="f1" href="fonts/a.woff" media-type="font/woff"/>"#,
+                ),
+                &chapter(&style, "Words."),
+                &[("EPUB/fonts/a.woff", bytes)],
+            ))
+            .expect("a book"),
+        );
 
         let warnings = face_warnings(&doc);
         let described = warnings
@@ -1114,15 +1151,18 @@ fn the_format_hint_still_refuses_the_two_formats_with_no_reader() {
                 &format!("url(fonts/a.woff) format(\"{keyword}\")")
             )
         );
-        let doc = Document::open(book(
-            &package(
-                IDENTIFIER,
-                r#"<item id="f1" href="fonts/a.woff" media-type="font/woff"/>"#,
-            ),
-            &chapter(&style, "Words."),
-            &[("EPUB/fonts/a.woff", covering("Real", "ABC"))],
-        ))
-        .expect("a book");
+        let doc = converted(
+            "the format hint still refuses the two formats with no reader",
+            Document::open(book(
+                &package(
+                    IDENTIFIER,
+                    r#"<item id="f1" href="fonts/a.woff" media-type="font/woff"/>"#,
+                ),
+                &chapter(&style, "Words."),
+                &[("EPUB/fonts/a.woff", covering("Real", "ABC"))],
+            ))
+            .expect("a book"),
+        );
         let warnings = face_warnings(&doc);
         assert!(
             warnings
@@ -1151,21 +1191,24 @@ fn a_src_list_is_walked_past_a_refused_entry_and_the_refusal_is_still_named() {
             r#"url(fonts/a.woff2) format("woff2"), url(fonts/a.ttf) format("truetype")"#
         )
     );
-    let doc = Document::open(book(
-        &package(
-            IDENTIFIER,
-            concat!(
-                r#"<item id="f1" href="fonts/a.woff2" media-type="font/woff2"/>"#,
-                r#"<item id="f2" href="fonts/a.ttf" media-type="font/ttf"/>"#
+    let doc = converted(
+        "a src list is walked past a refused entry and the refusal is still named",
+        Document::open(book(
+            &package(
+                IDENTIFIER,
+                concat!(
+                    r#"<item id="f1" href="fonts/a.woff2" media-type="font/woff2"/>"#,
+                    r#"<item id="f2" href="fonts/a.ttf" media-type="font/ttf"/>"#
+                ),
             ),
-        ),
-        &chapter(&style, "ABC"),
-        &[
-            ("EPUB/fonts/a.woff2", b"wOF2 not a font at all".to_vec()),
-            ("EPUB/fonts/a.ttf", covering("pref", "ABC")),
-        ],
-    ))
-    .expect("a book");
+            &chapter(&style, "ABC"),
+            &[
+                ("EPUB/fonts/a.woff2", b"wOF2 not a font at all".to_vec()),
+                ("EPUB/fonts/a.ttf", covering("pref", "ABC")),
+            ],
+        ))
+        .expect("a book"),
+    );
 
     let warnings = face_warnings(&doc);
     assert_eq!(
@@ -1200,12 +1243,15 @@ fn a_local_source_is_refused_under_its_own_name() {
         "{}p {{ font-family: \"loc\", serif; }}",
         font_face("loc", r#"local("Palatino")"#)
     );
-    let doc = Document::open(book(
-        &package(IDENTIFIER, ""),
-        &chapter(&style, "Words."),
-        &[],
-    ))
-    .expect("a book");
+    let doc = converted(
+        "a local source is refused under its own name",
+        Document::open(book(
+            &package(IDENTIFIER, ""),
+            &chapter(&style, "Words."),
+            &[],
+        ))
+        .expect("a book"),
+    );
     let defects: Vec<FaceDefect> = face_warnings(&doc).into_iter().map(|(_, d, _)| d).collect();
     assert!(
         defects.contains(&FaceDefect::LocalUnavailable),
@@ -1569,11 +1615,14 @@ fn a_provider_is_asked_per_family_and_the_three_generics_arrive_by_name() {
     // The fixture wraps its body in one `<p>`, so this closes it, writes the
     // three paragraphs the test is about, and opens an empty one to be closed.
     let body = r#"</p><p class="s">Serif.</p><p class="n">Sans.</p><p class="m">Mono.</p><p>"#;
-    let doc = Document::open_with(
-        book(&package(IDENTIFIER, ""), &chapter(style, body), &[]),
-        &OpenOptions::default().with_fonts(provider.clone()),
-    )
-    .expect("a book");
+    let doc = converted(
+        "a provider is asked per family and the three generics arrive by name",
+        Document::open_with(
+            book(&package(IDENTIFIER, ""), &chapter(style, body), &[]),
+            &OpenOptions::default().with_fonts(provider.clone()),
+        )
+        .expect("a book"),
+    );
     let _ = doc
         .page(0)
         .expect("a page")
@@ -1623,9 +1672,15 @@ fn the_page_count_does_not_depend_on_whether_a_provider_is_attached() {
             .join(name);
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {name}: {e}"));
 
-        let bare = Document::open(bytes.clone()).expect("a book");
-        let with = Document::open_with(bytes, &OpenOptions::default().with_fonts(provider.clone()))
-            .expect("a book");
+        let bare = converted(
+            "the page count does not depend on whether a provider is attached",
+            Document::open(bytes.clone()).expect("a book"),
+        );
+        let with = converted(
+            "the page count does not depend on whether a provider is attached",
+            Document::open_with(bytes, &OpenOptions::default().with_fonts(provider.clone()))
+                .expect("a book"),
+        );
 
         assert_eq!(
             bare.page_count(),
@@ -1756,7 +1811,10 @@ fn the_font_census_is_the_one_the_record_states() {
     let mut measured = Vec::new();
     let mut uncovered_total = 0usize;
     for name in COMMITTED {
-        let doc = Document::open(corpus_book(name)).expect(name);
+        let doc = converted(
+            "the font census is the one the record states",
+            Document::open(corpus_book(name)).expect(name),
+        );
         let warnings = doc.archive().expect("a report").warnings().to_vec();
         let count = |pick: fn(&ArchiveWarning) -> Option<usize>| -> usize {
             warnings.iter().filter_map(pick).sum()
@@ -1798,17 +1856,19 @@ fn the_font_census_is_the_one_the_record_states() {
 #[test]
 fn the_notdef_count_is_a_property_of_the_book_and_not_a_constant() {
     let uncovered = |name: &str| -> usize {
-        Document::open(corpus_book(name))
-            .expect(name)
-            .archive()
-            .expect("a report")
-            .warnings()
-            .iter()
-            .filter_map(|w| match w {
-                ArchiveWarning::UncoveredCharacters { characters } => Some(*characters),
-                _ => None,
-            })
-            .sum()
+        converted(
+            "the notdef count is a property of the book and not a constant",
+            Document::open(corpus_book(name)).expect(name),
+        )
+        .archive()
+        .expect("a report")
+        .warnings()
+        .iter()
+        .filter_map(|w| match w {
+            ArchiveWarning::UncoveredCharacters { characters } => Some(*characters),
+            _ => None,
+        })
+        .sum()
     };
     assert_eq!(
         uncovered("pandoc-plates.epub"),
@@ -1948,7 +2008,10 @@ fn the_face_in_both_books_is_the_vendored_file() {
 /// they are registered in is `@font-face` order, which is calibre's to change.
 #[test]
 fn the_real_books_bold_heading_and_prose_use_two_different_embedded_faces() {
-    let doc = Document::open(corpus_book("calibre-embedded-font.epub")).expect("a book");
+    let doc = converted(
+        "the real books bold heading and prose use two different embedded faces",
+        Document::open(corpus_book("calibre-embedded-font.epub")).expect("a book"),
+    );
     let content = page_content(&doc);
     let objects = text_objects(&content);
     assert!(
@@ -2020,7 +2083,10 @@ fn the_glyphs_on_the_page_are_the_embedded_faces_own() {
     assert_ne!(u32::from(glyph('A')), 'A' as u32);
 
     for (name, _) in WITH_A_FACE {
-        let doc = Document::open(corpus_book(name)).expect(name);
+        let doc = converted(
+            "the glyphs on the page are the embedded faces own",
+            Document::open(corpus_book(name)).expect(name),
+        );
         let content = page_content(&doc);
         let drawn: String = text_objects(&content)
             .iter()
@@ -2057,7 +2123,10 @@ fn the_glyphs_on_the_page_are_the_embedded_faces_own() {
 /// what says the rule as a whole succeeded; and the face is on the page anyway.
 #[test]
 fn the_real_books_second_src_entry_is_reached_after_the_first_fails() {
-    let doc = Document::open(corpus_book("pandoc-embedded-font.epub")).expect("a book");
+    let doc = converted(
+        "the real books second src entry is reached after the first fails",
+        Document::open(corpus_book("pandoc-embedded-font.epub")).expect("a book"),
+    );
     let defects = face_warnings(&doc);
     assert_eq!(
         defects,
@@ -2083,7 +2152,10 @@ fn the_real_books_second_src_entry_is_reached_after_the_first_fails() {
     // other book's rules have one entry each and report **nothing**. A build
     // that reported `LocalUnavailable` for every rule would pass the assertion
     // above and fail this one.
-    let calibre = Document::open(corpus_book("calibre-embedded-font.epub")).expect("a book");
+    let calibre = converted(
+        "the real books second src entry is reached after the first fails",
+        Document::open(corpus_book("calibre-embedded-font.epub")).expect("a book"),
+    );
     assert_eq!(
         face_warnings(&calibre),
         vec![],
@@ -2135,7 +2207,10 @@ fn the_two_producers_declare_the_same_face_under_two_media_types() {
     // And both faces still reach a page, which is the point: the media type is
     // a declaration and the bytes are the fact.
     for (name, _) in WITH_A_FACE {
-        let doc = Document::open(corpus_book(name)).expect(name);
+        let doc = converted(
+            "the two producers declare the same face under two media types",
+            Document::open(corpus_book(name)).expect(name),
+        );
         assert!(
             page_content(&doc).contains("BT /Bf"),
             "{name}: the declared face did not draw anything"
@@ -2160,7 +2235,10 @@ fn the_two_producers_declare_the_same_face_under_two_media_types() {
 fn the_uncovered_characters_are_the_japanese_and_the_text_still_holds_them() {
     const LINE: &str = "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{7d44}\u{7248}";
     for (name, _) in WITH_A_FACE {
-        let doc = Document::open(corpus_book(name)).expect(name);
+        let doc = converted(
+            "the uncovered characters are the japanese and the text still holds them",
+            Document::open(corpus_book(name)).expect(name),
+        );
         let reported = doc.archive().expect("a report").warnings().to_vec();
         let uncovered: usize = reported
             .iter()
@@ -2191,5 +2269,17 @@ fn the_uncovered_characters_are_the_japanese_and_the_text_still_holds_them() {
             squashed.contains(LINE),
             "{name}: the uncovered phrase is not in the extracted text"
         );
+    }
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
     }
 }

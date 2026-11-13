@@ -22,6 +22,8 @@
 //! false-positive bar, and for the 2003 levels it is empty until a file that
 //! claims one is pinned.
 
+mod written_support;
+
 use tinker_pdf::{
     ConformanceFinding, Document, FindingKind, PdfXAbstentionClass, PdfXCoverage, PdfXFlavour,
 };
@@ -351,6 +353,11 @@ fn an_encrypted_file_is_reported() {
             }),
             ..tinker_pdf::WriteOptions::default()
         });
+        written_support::expecting(
+            "the baseline, encrypted",
+            &bytes,
+            &[written_support::Expected::PdfX(FindingKind::Encrypted)],
+        );
         let document = Document::open(bytes).expect("it opens");
         document
             .authenticate("")

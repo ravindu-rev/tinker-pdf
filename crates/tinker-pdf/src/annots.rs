@@ -542,8 +542,17 @@ mod tests {
 
         let mut builder = DocumentBuilder::new();
         builder.add_page(100.0, 100.0, |_| {});
-        let blank =
-            Arc::new(CosDocument::open(builder.finish()).expect("the blank document opens"));
+        let blank = Arc::new(
+            CosDocument::open({
+                let bytes = builder.finish();
+                crate::subset::tests_support::written_support::authored(
+                    "an annotation added by the editor renders",
+                    &bytes,
+                );
+                bytes
+            })
+            .expect("the blank document opens"),
+        );
 
         let mut editor = DocumentEditor::new(Arc::clone(&blank));
         editor
@@ -566,6 +575,11 @@ mod tests {
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
+        crate::subset::tests_support::written_support::rewritten(
+            "an annotation added by the editor renders",
+            editor.document().bytes(),
+            &bytes,
+        );
         let doc = crate::Document::open(bytes).expect("it reopens");
         let page = doc.page(0).expect("the page is there");
 
@@ -620,7 +634,17 @@ mod tests {
 
         let mut builder = DocumentBuilder::new();
         builder.add_page(100.0, 100.0, |_| {});
-        let blank = Arc::new(CosDocument::open(builder.finish()).expect("the document opens"));
+        let blank = Arc::new(
+            CosDocument::open({
+                let bytes = builder.finish();
+                crate::subset::tests_support::written_support::authored(
+                    "a hidden annotation draws nothing",
+                    &bytes,
+                );
+                bytes
+            })
+            .expect("the document opens"),
+        );
 
         let mut square = annot::square(
             &blank,
@@ -642,6 +666,11 @@ mod tests {
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
+        crate::subset::tests_support::written_support::rewritten(
+            "a hidden annotation draws nothing",
+            editor.document().bytes(),
+            &bytes,
+        );
 
         let doc = crate::Document::open(bytes).expect("it reopens");
         let bitmap = doc

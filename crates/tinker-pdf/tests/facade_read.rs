@@ -27,6 +27,8 @@
 //! a change that made one of them rebuild the document would show up here as
 //! the others disagreeing with it.
 
+mod written_support;
+
 use tinker_pdf::{AnnotationKind, Document, FontKind, ProgramKey};
 
 /// A one-page document carrying two fonts, two layers and five annotations.
@@ -268,10 +270,19 @@ fn an_arc_handed_to_open_is_not_copied() {
     builder.add_page(200.0, 100.0, |page| {
         page.raw(b"0 0 10 10 re f");
     });
-    let bytes: std::sync::Arc<[u8]> = builder.finish().into();
+    let bytes: std::sync::Arc<[u8]> = built("an arc handed to open is not copied", builder).into();
     let document = Document::open(std::sync::Arc::clone(&bytes)).expect("it opens");
     assert!(
         std::ptr::eq(document.cos().bytes().as_ptr(), bytes.as_ptr()),
         "the document reads the caller's allocation"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

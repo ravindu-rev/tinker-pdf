@@ -56,6 +56,7 @@
 //! program's verdict about it.
 
 mod reading_order_support;
+mod written_support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -500,7 +501,7 @@ fn furniture_drawn_out_of_place(marked: bool) -> Document {
             furniture(page, "Header", 72.0, 760.0, "A Treatise On Columns");
         });
     }
-    open(builder.finish()).expect("the fixture opens")
+    open(built("furniture drawn out of place", builder)).expect("the fixture opens")
 }
 
 /// One page drawing a long paragraph low on the page before a short one
@@ -525,7 +526,7 @@ fn a_lower_paragraph_drawn_first() -> Document {
             page.text(b"F1", 10.0, 72.0, 600.0, "The upper one.");
         });
     });
-    open(builder.finish()).expect("the fixture opens")
+    open(built("a lower paragraph drawn first", builder)).expect("the fixture opens")
 }
 
 /// The characters of `doc`'s inferred orders, with the tree hidden, in
@@ -620,4 +621,13 @@ fn what_moved_is_counted_under_the_block_it_was_read_in() {
     assert_eq!(what.by_role, BTreeMap::from([("Body".to_string(), upper)]));
     assert_eq!((what.claimed, what.unclaimed, what.artifact), (upper, 0, 0));
     assert!(totals.moved_pages.is_empty(), "listed only when asked");
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

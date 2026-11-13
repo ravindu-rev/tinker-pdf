@@ -47,6 +47,8 @@
 //! misreading shared by both is invisible here — `docs/verification.md` says so
 //! in its own voice, and that is the property the retired oracles had.
 
+mod written_support;
+
 use tinker_pdf::{BlendMode, DocumentBuilder, ExtGState};
 
 mod render_support;
@@ -286,7 +288,10 @@ fn every_separable_blend_mode_is_the_expression_the_clause_publishes() {
                     page.set_fill_rgb(source, source, source);
                     page.raw(format!("0 0 {SIZE} {SIZE} re f").as_bytes());
                 });
-                let bitmap = render(builder.finish());
+                let bitmap = render(built(
+                    "every separable blend mode is the expression the clause publishes",
+                    builder,
+                ));
 
                 // **Both operands are the page's bytes, not the numbers that
                 // painted them.** The canvas is eight-bit, so the blend
@@ -433,4 +438,13 @@ fn an_image_scaled_by_a_whole_number_is_blocks_of_its_samples() {
             );
         }
     }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

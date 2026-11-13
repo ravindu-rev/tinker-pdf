@@ -6,6 +6,8 @@
 //! was documented and unit-tested, and was called by nothing outside its own
 //! test.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf::{Document, RenderOptions, SimpleFontProvider};
@@ -72,7 +74,7 @@ fn render(content: &str) -> tinker_pdf::Bitmap {
         page.raw(content.as_bytes());
     });
 
-    Document::open(builder.finish())
+    Document::open(built("render", builder))
         .expect("it opens")
         .with_fonts(Arc::new(SimpleFontProvider::new(boxy_font())))
         .page(0)
@@ -244,4 +246,13 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
         "and it says so, because a blank region is not obviously deliberate: {:?}",
         bitmap.warnings
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

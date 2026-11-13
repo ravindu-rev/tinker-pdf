@@ -38,6 +38,8 @@
 //! What it decides with the numbers is plain functions, tested on every
 //! target.
 
+mod written_support;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -250,6 +252,7 @@ fn write_open_input(dir: &Path, bytes: Arc<[u8]>) {
     let pages = tinker_pdf::Document::open(Arc::clone(&bytes))
         .expect("the open case's file opens")
         .page_count();
+    written_support::authored("the open case's file", Arc::clone(&bytes));
     write_input(dir, OPEN_FILE, &bytes);
     write_input(dir, OPEN_PAGES, pages.to_string().as_bytes());
 }
@@ -267,7 +270,10 @@ fn open_pages(dir: &Path) -> u32 {
 /// Writes `case`'s input files into `dir`, from the benchmark set's
 /// generators.
 fn write_inputs(case: &str, dir: &Path) {
-    let write = |name: &str, bytes: &[u8]| write_input(dir, name, bytes);
+    let write = |name: &str, bytes: &[u8]| {
+        written_support::authored(name, bytes);
+        write_input(dir, name, bytes);
+    };
     match case {
         "png-300" => write("png-300.pdf", &inputs::dense(1, 0)),
         "jpeg-300" => write("jpeg-300.pdf", &inputs::jpeg_page()),
@@ -283,6 +289,13 @@ fn write_inputs(case: &str, dir: &Path) {
                     &inputs::dense(100, seed),
                 );
             }
+            // The merge the child measures, made and held here, where no peak
+            // is read: the save is the same bytes in either process.
+            written_support::rewritten(
+                "the four parts merged",
+                read_input(dir, "merge-4x100-0.pdf"),
+                merged(dir),
+            );
         }
         OPEN => write_open_input(dir, inputs::image_file()),
         "hold-64-mib" => {}
@@ -389,8 +402,7 @@ fn in_waves(pages: u32, workers: u32, draw: impl Fn(u32, u32) + Sync) {
 /// The operation `case` names, on the input its parent wrote into `dir`.
 fn perform(case: &str, dir: &Path) {
     use std::hint::black_box;
-    use tinker_pdf::write::{self, FontPolicy, ImagePolicy, SaveOptions};
-    use tinker_pdf::{Document, RenderOptions, WriteMode, WriteOptions};
+    use tinker_pdf::{Document, RenderOptions};
 
     let open = |name: &str| Document::open(read_input(dir, name)).expect("the input opens");
     let png = |doc: &Document, index: u32, dpi: f64| {
@@ -440,29 +452,7 @@ fn perform(case: &str, dir: &Path) {
         // editor, every page of the others imported after its own, saved with
         // stream deduplication and the programs kept as they are.
         "merge-4x100" => {
-            let parts: Vec<Document> = (0..4)
-                .map(|seed| open(&format!("merge-4x100-{seed}.pdf")))
-                .collect();
-            let mut editor = parts[0].editor();
-            for part in &parts[1..] {
-                for page in 0..part.page_count() {
-                    let at = editor.page_refs().len() as u32;
-                    editor
-                        .import_page(part.cos(), page, at)
-                        .expect("the page imports");
-                }
-            }
-            let options = SaveOptions {
-                write: WriteOptions {
-                    mode: WriteMode::Rewrite,
-                    deduplicate_streams: true,
-                    ..WriteOptions::default()
-                },
-                fonts: FontPolicy::Keep,
-                images: ImagePolicy::Keep,
-                ..SaveOptions::default()
-            };
-            black_box(write::save(&mut editor, &options).bytes);
+            black_box(merged(dir));
         }
         // What `tpdf info` does to its file: the CLI's own open, which keeps
         // the document streamed only when it answers as a buffered open of the
@@ -791,4 +781,40 @@ fn the_committed_table_names_only_builds_and_cases() {
             figure.case
         );
     }
+}
+
+/// `tpdf merge`'s shape, as the write group times it, over the four parts the
+/// parent wrote into `dir`: the first file's editor, every page of the others
+/// imported after its own, saved with stream deduplication and the programs
+/// kept as they are.
+fn merged(dir: &Path) -> Vec<u8> {
+    use tinker_pdf::write::{self, FontPolicy, ImagePolicy, SaveOptions};
+    use tinker_pdf::{Document, WriteMode, WriteOptions};
+
+    let parts: Vec<Document> = (0..4)
+        .map(|seed| {
+            Document::open(read_input(dir, &format!("merge-4x100-{seed}.pdf")))
+                .expect("the input opens")
+        })
+        .collect();
+    let mut editor = parts[0].editor();
+    for part in &parts[1..] {
+        for page in 0..part.page_count() {
+            let at = editor.page_refs().len() as u32;
+            editor
+                .import_page(part.cos(), page, at)
+                .expect("the page imports");
+        }
+    }
+    let options = SaveOptions {
+        write: WriteOptions {
+            mode: WriteMode::Rewrite,
+            deduplicate_streams: true,
+            ..WriteOptions::default()
+        },
+        fonts: FontPolicy::Keep,
+        images: ImagePolicy::Keep,
+        ..SaveOptions::default()
+    };
+    write::save(&mut editor, &options).bytes
 }

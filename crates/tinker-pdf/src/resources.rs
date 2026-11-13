@@ -7218,7 +7218,17 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
         builder.add_page(100.0, 100.0, |page| {
             page.fill_rect(10.0, 10.0, 20.0, 20.0, 0.0);
         });
-        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+        let doc = Arc::new(
+            CosDocument::open({
+                let bytes = builder.finish();
+                crate::subset::tests_support::written_support::authored(
+                    "resources over an editors view resolve what it allocated",
+                    &bytes,
+                );
+                bytes
+            })
+            .expect("it opens"),
+        );
         let mut editor = DocumentEditor::new(Arc::clone(&doc));
 
         let form = editor.allocate();

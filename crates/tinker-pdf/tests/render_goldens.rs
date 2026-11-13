@@ -106,6 +106,8 @@
 //! well as their own fixture, which is the regression half of what a golden is
 //! for.
 
+mod written_support;
+
 use std::path::{Path, PathBuf};
 
 use tinker_pdf::{
@@ -234,7 +236,7 @@ struct Family {
 fn page(content: &str) -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
     builder.add_page(SIZE, SIZE, |page| page.raw(content.as_bytes()));
-    builder.finish()
+    built("page", builder)
 }
 
 /// 8.5.3.3.2: the nonzero winding rule and the even-odd rule over one path.
@@ -351,7 +353,7 @@ fn text_page() -> Vec<u8> {
         // exists to catch, and the first one it caught.
         page.raw(b"BT /F0 11 Tf 100 Tz 1 Tr 0.6 w 0.8 0 0 RG 4 6 Td 3 Ts (Abc) Tj ET\n");
     });
-    builder.finish()
+    built("text page", builder)
 }
 
 /// 9.6.5: a glyph whose procedure is a content stream.
@@ -414,7 +416,7 @@ fn image_page() -> Vec<u8> {
         // around it rather than an operand.
         page.raw(b"q 12 12 -12 12 6 2 cm /Im0 Do Q\n");
     });
-    builder.finish()
+    built("image page", builder)
 }
 
 /// 8.7.4.5.3 and 8.7.4.5.4: the two shading types on one page.
@@ -455,7 +457,7 @@ fn shading_page() -> Vec<u8> {
         assert!(page.shading(b"Sh1"));
         page.raw(b"Q");
     });
-    builder.finish()
+    built("shading page", builder)
 }
 
 /// 8.7.3 and 8.7.4.5.5: a tiling pattern and a shading pattern as colours.
@@ -499,7 +501,7 @@ fn pattern_page() -> Vec<u8> {
         assert!(page.set_fill_pattern(b"P1"));
         page.raw(b"4 4 40 18 re f\n");
     });
-    builder.finish()
+    built("pattern page", builder)
 }
 
 /// 11.3.5, 11.6.4.4 and 11.6.6: a blend, a constant alpha and a group.
@@ -555,7 +557,7 @@ fn transparency_page() -> Vec<u8> {
         assert!(page.form(b"Fm0"));
         page.raw(b"Q\n");
     });
-    builder.finish()
+    built("transparency page", builder)
 }
 
 // ---- the golden file format -------------------------------------------------
@@ -707,4 +709,13 @@ fn write_the_goldens() {
             ink(&bitmap)
         );
     }
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

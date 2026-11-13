@@ -56,6 +56,8 @@
 //! may paint and is checked against it before it is hashed. A page that
 //! stops drawing fails here rather than quietly becoming the new baseline.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf::{
@@ -132,13 +134,22 @@ fn book_face() -> Arc<SimpleFontProvider> {
 /// A fixture's document, opened as [`Open`] says, and the page it hashes.
 fn opened(fixture: &Fixture) -> (Document, u32) {
     match fixture.open {
-        Open::Closed => (Document::open((fixture.build)()).expect("it opens"), 0),
+        Open::Closed => (
+            converted(
+                "opened",
+                Document::open((fixture.build)()).expect("it opens"),
+            ),
+            0,
+        ),
         Open::Book { page, at } => (
-            Document::open_with(
-                (fixture.build)(),
-                &OpenOptions::at_page(page.0, page.1).with_fonts(book_face()),
-            )
-            .expect("it opens"),
+            converted(
+                "opened",
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::at_page(page.0, page.1).with_fonts(book_face()),
+                )
+                .expect("it opens"),
+            ),
             at,
         ),
     }
@@ -221,7 +232,7 @@ fn text_page() -> Vec<u8> {
         page.text(b"F0", 14.0, 10.0, 60.0, "Determinism, and the");
         page.text(b"F0", 9.0, 10.5, 40.0, "quick brown fox jumps 0123456789");
     });
-    builder.finish()
+    built("text page", builder)
 }
 
 /// The `text` page with each line's font selected by a graphics state
@@ -297,10 +308,12 @@ fn gs_text_page() -> Vec<u8> {
             data: moved.into_bytes(),
         },
     );
-    editor.save(&WriteOptions {
+    let out = editor.save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
-    })
+    });
+    written_support::rewritten("gs text page", doc.bytes(), &out);
+    out
 }
 
 /// Curves and strokes at an angle, where flattening tolerance and the
@@ -3423,11 +3436,14 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     // So the page a caller is handed is asserted to be the page a caller asked
     // for, in both directions, which is the assertion that defect fails.
     for (box_, pages) in [(BOOK_BOX, 7u32), (OTHER_BOOK_BOX, 6)] {
-        let document = Document::open_with(
-            epub_book(),
-            &OpenOptions::at_page(box_.0, box_.1).with_fonts(book_face()),
-        )
-        .expect("it opens");
+        let document = converted(
+            "a book is stable at each page box and the two boxes differ",
+            Document::open_with(
+                epub_book(),
+                &OpenOptions::at_page(box_.0, box_.1).with_fonts(book_face()),
+            )
+            .expect("it opens"),
+        );
         assert_eq!(
             document.page_count(),
             pages,
@@ -3472,4 +3488,25 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
         at_default, at_other,
         "page 3 renders identically at two page boxes"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

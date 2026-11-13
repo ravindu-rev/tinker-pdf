@@ -990,8 +990,10 @@ to it in the commit that adds the capability.
 crates/tinker-pdf/benches/
   support/mod.rs     the harness: each group's sampling, the iteration shapes,
                      what an operation declares, and count mode
-  support/inputs.rs  every generator, the store every input is read
-                     through, and the two level-6 byte counts
+  support/inputs.rs  every generator, and the store every input is read
+                     through
+  support/samples.rs the raw samples, which write no document, and the two
+                     level-6 byte counts beside them; inputs.rs re-exports it
   support/list.rs    the reader of baseline.json's lists
   support/cli.rs     the one spawner: this revision's tpdf, as a child
   open.rs  text.rs  analysis.rs  render.rs  encode.rs  decode.rs  write.rs
@@ -1004,9 +1006,10 @@ crates/tinker-pdf/benches/
 One `[[bench]]` per group file, `harness = false`. `inputs.rs`
 holds no criterion type, no clock and no spawn, so a test reaches it by path
 alone — MS-05's probe, `tests/peak_memory.rs`, for its cases, and
-`tests/level_six_counts.rs` and P-04.4's `deflate_size.rs` for the level-6
-counts, and `tests/bench_inputs.rs` for the store — without compiling the
-harness or the child; `list.rs` holds none either, and that test reaches it
+`tests/bench_inputs.rs` for the store — without compiling the harness or the
+child, and `samples.rs` holds no generator that writes a document, so
+`tests/level_six_counts.rs` and P-04.4's `deflate_size.rs` reach the level-6
+counts through it alone; `list.rs` holds none either, and that test reaches it
 the same way. `cli.rs` is the only file here that calls `Command::new`, so it is the
 one `SPAWNERS` row `cargo xtask oracles` needs (`xtask/src/main.rs:984-1048`,
 `:1076-1079`). Every input is generated in memory except what `data/` and
@@ -1129,9 +1132,9 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 | `three_pages()` | the document `open/open a 3-page document` opens | `support/inputs.rs` | — |
 | `report(n)` | n A4 pages of two columns of body text in the embedded face, a running head and foot, a page number and one ruled table each; untagged | the builder | "5 text pages", "5 pages" of the analysis rows |
 | `claiming(n)` | `report(n)` tagged (`PageBuilder::tagged`, `build.rs:2980`) under `DocumentBuilder::archival` (`:9047`), claiming PDF/A-2b, PDF/UA-1 and PDF/X-1a:2003 (`set_info`'s `GTS_PDFXVersion`, `:7744`; an output intent, `:3306`, carrying `fuzz/corpus/icc_profile/cmyk-lut.icc`), so each validator runs its rules rather than reporting no claim | the builder | "5 pages" of the validation row |
-| `photo(w, h, seed)` | RGB samples by formula: smooth fields, hard edges and a few levels of seeded noise | `inputs.rs` | the photographic content of every image input |
-| `page_like()` | 1240×1755 RGB (6 528 600 bytes) of text-like marks on white, about a tenth of the pixels inked, by formula — never a render, so it cannot move with the renderer | `inputs.rs`; its length and SHA-256 pinned beside the level-6 counts | "page-like data" |
-| `photo_like()` | `photo(1240, 1755, 0)`, 6 528 600 bytes, pinned the same way | `inputs.rs` | "photo-like data" |
+| `photo(w, h, seed)` | RGB samples by formula: smooth fields, hard edges and a few levels of seeded noise | `samples.rs` | the photographic content of every image input |
+| `page_like()` | 1240×1755 RGB (6 528 600 bytes) of text-like marks on white, about a tenth of the pixels inked, by formula — never a render, so it cannot move with the renderer | `samples.rs`; its length and SHA-256 pinned beside the level-6 counts | "page-like data" |
+| `photo_like()` | `photo(1240, 1755, 0)`, 6 528 600 bytes, pinned the same way | `samples.rs` | "photo-like data" |
 | `noise()` | 6 528 600 seeded bytes whose deflate stream is between 90 % and 100 % of their length, so inflate decodes coded literals, not stored blocks (asserted) | `inputs.rs` | "incompressible data" |
 | `lzw(bytes)` | 7.4.4's LZW, 9- to 12-bit codes, early change 1, a clear code at 4 096 | an encoder in `inputs.rs`, about sixty lines, round-tripped through `lzw_decode` (`crates/tinker-pdf-filters/src/lib.rs:821`) whenever it runs | LZW-coded page-like data; the filters crate's test encoder packs the codes it is given and builds no dictionary from its input (`crates/tinker-pdf-filters/src/tiff/tests.rs:397`) |
 | `baseline_jpeg()`, `baseline_jpeg_part(d)` | `photo(2480, 3508, 0)` as a baseline JPEG, Annex K's tables; and `photo` at `scan_part(d)`'s size, 2480×3508 a d-th each way, the same way | `jpeg_encode` (`crates/tinker-pdf-filters/src/jpeg/encode.rs:819`) | "JPEG decode 1240×1754, baseline" (`baseline_jpeg_part(2)`); the JPEG page `tests/peak_memory.rs` holds the peak of (`baseline_jpeg()`) |
@@ -1628,7 +1631,7 @@ Tier P holds the deflate ratio level to 1.02 times the size level 6's
 parameters give each of the two inputs, exactly: a planning number, computed
 once by a reference deflate outside the engine and never measured again
 against a build (`docs/roadmap/P.md:96-97`, `:137-141`; ruling 17). They live
-in `benches/support/inputs.rs` as `PAGE_LIKE_LEVEL_SIX` and
+in `benches/support/samples.rs` as `PAGE_LIKE_LEVEL_SIX` and
 `PHOTO_LIKE_LEVEL_SIX`, two `LevelSix` constants beside `page_like()` and
 `photo_like()`. Each holds the length of the raw RFC 1951 stream level 6's
 parameters give on its input — a 32 KiB window, memory level 8 and the
@@ -3004,8 +3007,8 @@ rendering at 300 dpi to PNG holds the process's peak (P-04.8).
 Tier P holds the ratio level to 1.02 × the byte counts level 6's parameters
 give MS-04's page-like and photo-like inputs, exactly: a byte count on
 generated inputs. P-04.4's `crates/tinker-pdf/tests/deflate_size.rs` reaches
-MS-04's generators by path, as `tests/peak_memory.rs` does
-(`#[path = "../benches/support/inputs.rs"]`), builds `page_like()` and
+MS-04's raw samples by path, as `tests/peak_memory.rs` reaches its generators
+(`#[path = "../benches/support/samples.rs"]`), builds `page_like()` and
 `photo_like()` — each asserting its own length and SHA-256 — deflates each at
 the ratio level through `tinker_pdf_filters`, and asserts
 `100 × len ≤ 102 × count` in integers against the two counts committed beside

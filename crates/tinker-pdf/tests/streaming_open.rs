@@ -12,6 +12,8 @@
 //! produce the same bytes on every target, which is what `determinism.rs`
 //! pins for the writer already.
 
+mod written_support;
+
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,13 +48,15 @@ fn a_small_linearized_document(pages: usize) -> Vec<u8> {
             );
         });
     }
-    let base = Document::open(builder.finish()).expect("it opens");
-    base.editor().save(&WriteOptions {
+    let base = Document::open(built("a small linearized document", builder)).expect("it opens");
+    let out = base.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         linearize: true,
         object_streams: false,
         ..WriteOptions::default()
-    })
+    });
+    written_support::rewritten("a small linearized document", base.cos().bytes(), &out);
+    out
 }
 
 /// The same document with every page's `/MediaBox` moved up to the page tree
@@ -77,7 +81,7 @@ fn a_linearized_document_with_inherited_boxes(pages: usize) -> Vec<u8> {
             );
         });
     }
-    let mut raw = builder.finish();
+    let mut raw = built("a linearized document with inherited boxes", builder);
 
     // Every `/MediaBox [...]` blanked where it stands, so the patch changes no
     // length and no other object moves.
@@ -105,12 +109,18 @@ fn a_linearized_document_with_inherited_boxes(pages: usize) -> Vec<u8> {
     patched.extend_from_slice(&raw[kids..]);
 
     let base = Document::open(patched).expect("the patched document still parses");
-    base.editor().save(&WriteOptions {
+    let out = base.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         linearize: true,
         object_streams: false,
         ..WriteOptions::default()
-    })
+    });
+    written_support::rewritten(
+        "a linearized document with inherited boxes",
+        base.cos().bytes(),
+        &out,
+    );
+    out
 }
 
 /// A document of `pages` pages, each carrying a content stream of a few tens
@@ -142,7 +152,7 @@ fn a_large_document(pages: usize) -> Vec<u8> {
             page.raw(&ops);
         });
     }
-    builder.finish()
+    built("a large document", builder)
 }
 
 /// The content stream of a page in the middle of the document, reached
@@ -269,13 +279,15 @@ fn pages_saved(pages: usize, linearize: bool) -> Vec<u8> {
             page.raw(&ops);
         });
     }
-    let base = Document::open(builder.finish()).expect("it opens");
-    base.editor().save(&WriteOptions {
+    let base = Document::open(built("pages saved", builder)).expect("it opens");
+    let out = base.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         linearize,
         object_streams: false,
         ..WriteOptions::default()
-    })
+    });
+    written_support::rewritten("pages saved", base.cos().bytes(), &out);
+    out
 }
 
 /// Pixels that are not the white the page started as.
@@ -1661,4 +1673,13 @@ fn a_linearized_file_behind_leading_junk_still_opens_from_its_head() {
 /// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
 fn required() -> bool {
     std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

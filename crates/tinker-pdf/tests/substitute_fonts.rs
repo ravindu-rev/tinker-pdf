@@ -11,6 +11,8 @@
 //! is identical on every platform and the repository carries no font anyone
 //! has to licence.
 
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf::{Document, FontProvider, FontRequest, RenderOptions, SimpleFontProvider};
@@ -93,7 +95,7 @@ fn document() -> Vec<u8> {
     builder.add_page(200.0, 100.0, |page| {
         page.text(b"F0", 24.0, 20.0, 40.0, "HELLO");
     });
-    builder.finish()
+    built("document", builder)
 }
 
 fn ink(bitmap: &tinker_pdf::Bitmap) -> usize {
@@ -247,7 +249,7 @@ fn the_provider_is_told_which_font_is_wanted() {
     });
 
     let records = Arc::new(Records(Mutex::new(Vec::new())));
-    let doc = Document::open(builder.finish())
+    let doc = Document::open(built("substitute", builder))
         .expect("it opens")
         .with_fonts(records.clone());
     let _ = doc
@@ -614,7 +616,11 @@ fn a_symbolic_font_is_declined_by_the_bundled_faces_too() {
         page.text(b"F0", 24.0, 20.0, 40.0, "abgd");
     });
 
-    let doc = Document::open(builder.finish()).expect("it opens");
+    let doc = Document::open(built(
+        "a symbolic font is declined by the bundled faces too",
+        builder,
+    ))
+    .expect("it opens");
     let bitmap = doc
         .page(0)
         .expect("a page")
@@ -627,4 +633,13 @@ fn a_symbolic_font_is_declined_by_the_bundled_faces_too() {
         "and says so: {:?}",
         bitmap.warnings
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

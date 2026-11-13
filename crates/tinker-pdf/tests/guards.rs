@@ -17,12 +17,13 @@
 
 mod guard_support;
 mod render_support;
+mod written_support;
 
 use std::collections::BTreeSet;
 
 use guard_support::{content, deflated, document, face, line, object, pdf, stream, A2_PAGES};
 use tinker_pdf::write::{
-    save, BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions,
+    BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions,
 };
 use tinker_pdf::{Document, RenderOptions, Stats, TextOptions};
 use tinker_pdf_cos::Object;
@@ -974,7 +975,7 @@ fn the_tally_counts_the_same_on_every_target() {
 
     // The image pass alone, which walks the tree to place the image, reads
     // the content to find it, and reads the samples to weigh them.
-    let saved = save(
+    let saved = held_save(
         &mut document.editor(),
         &SaveOptions {
             fonts: FontPolicy::Keep,
@@ -1098,7 +1099,7 @@ fn a2_render_all_at_36_dpi_is_linear_in_pages() {
 #[test]
 fn a2_rewrite_is_linear_in_pages() {
     a2("rewrite", |document| {
-        save(
+        held_save(
             &mut document.editor(),
             &SaveOptions {
                 write: tinker_pdf::WriteOptions {
@@ -1120,7 +1121,7 @@ fn a2_rewrite_is_linear_in_pages() {
 #[test]
 fn a2_subset_is_linear_in_pages() {
     a2("subset", |document| {
-        save(
+        held_save(
             &mut document.editor(),
             &SaveOptions {
                 stats: true,
@@ -1199,7 +1200,7 @@ fn a2_split_is_linear_in_pages() {
             let mut editor = document.editor();
             editor.count_work();
             assert!(editor.keep_pages(&half), "the half is kept");
-            total += save(
+            total += held_save(
                 &mut editor,
                 &SaveOptions {
                     write: tinker_pdf::WriteOptions {
@@ -1582,7 +1583,7 @@ fn a5_glyphs_shown() -> u64 {
 #[test]
 fn a5_a_save_decodes_each_stream_at_most_once() {
     let document = Document::open(a5_document()).expect("the A5 document opens");
-    let saved = save(
+    let saved = held_save(
         &mut document.editor(),
         &SaveOptions {
             stats: true,
@@ -1725,7 +1726,7 @@ fn merged() -> tinker_pdf::write::Saved {
                 .expect("the page imports");
         }
     }
-    save(
+    held_save(
         &mut editor,
         &SaveOptions {
             fonts: FontPolicy::Keep,
@@ -2251,4 +2252,17 @@ fn a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads() {
         "guard-a9-pages: RAN {compared} walked pages, each byte-identical to its serial \
          render with the same warnings, {warned} of the serial renders warning"
     );
+}
+
+/// The facade's save door, what it wrote held to the validate-on-save helper as
+/// a rewrite of the bytes the editor was opened over. The save's own tally is
+/// taken before the hold, which reads its own copies.
+#[track_caller]
+fn held_save(
+    editor: &mut tinker_pdf::DocumentEditor,
+    options: &tinker_pdf::write::SaveOptions,
+) -> tinker_pdf::write::Saved {
+    let saved = tinker_pdf::write::save(editor, options);
+    written_support::rewritten("a save", editor.document().bytes(), &saved.bytes);
+    saved
 }

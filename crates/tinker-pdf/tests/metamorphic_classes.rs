@@ -127,6 +127,8 @@
 //! results are asserted below rather than deleted, because the day one of them
 //! starts moving pixels is a rasteriser change worth knowing about.
 //!
+mod written_support;
+
 use tinker_pdf::{
     Bitmap, DeviceSpace, Document, DocumentBuilder, ExtGState, FormXObject, Function, ImageData,
     PixelFormat, RenderOptions, Shading, TilingPattern, TilingType, TransparencyGroup,
@@ -234,7 +236,7 @@ fn plain_page_at(size: f64) -> Vec<u8> {
         page.raw(format!("0 0 {size} {size} re f\n").as_bytes());
         page.raw(SHAPES.as_bytes());
     });
-    builder.finish()
+    built("plain page at", builder)
 }
 
 /// Diagonal edges over a *whole* page, at any size.
@@ -260,7 +262,7 @@ fn covered_page_at(size: f64) -> Vec<u8> {
     }
     let mut builder = DocumentBuilder::new();
     builder.add_page(size, size, |page| page.raw(content.as_bytes()));
-    builder.finish()
+    built("covered page at", builder)
 }
 
 /// The same two shapes inside an isolated transparency group at half alpha.
@@ -294,7 +296,7 @@ fn group_page() -> Vec<u8> {
         assert!(page.form(b"Fm0"));
         page.raw(b"Q\n");
     });
-    builder.finish()
+    built("group page", builder)
 }
 
 /// **The `dpi` relation is an edge measurement, and a transparency group is
@@ -353,7 +355,7 @@ fn rectangle_page() -> Vec<u8> {
 ",
         );
     });
-    builder.finish()
+    built("rectangle page", builder)
 }
 
 /// An axial shading, which is evaluated at each pixel's own centre -- and the
@@ -379,7 +381,7 @@ fn shading_page() -> Vec<u8> {
         assert!(page.shading(b"Sh0"));
         page.raw(b"Q");
     });
-    builder.finish()
+    built("shading page", builder)
 }
 
 /// A small image at a scale that is not a whole number of source pixels per
@@ -415,7 +417,7 @@ fn image_page() -> Vec<u8> {
         // scale and 14.8 at two, so neither grid lands on a sample boundary.
         page.image(b"Im0", 9.0, 9.0, 37.0, 37.0);
     });
-    builder.finish()
+    built("image page", builder)
 }
 
 /// Text in the face this repository writes for itself. A glyph outline is
@@ -438,7 +440,7 @@ fn text_page() -> Vec<u8> {
         page.text(b"F0", 13.0, 4.0, 40.0, "Abcde");
         page.text(b"F0", 9.0, 4.0, 20.0, "fghijkl");
     });
-    builder.finish()
+    built("text page", builder)
 }
 
 /// A page *filled* with 11-point text, at any size.
@@ -472,7 +474,7 @@ fn text_filled_page_at(size: f64) -> Vec<u8> {
             y -= leading;
         }
     });
-    builder.finish()
+    built("text filled page at", builder)
 }
 
 /// `tpdf probe`'s `rotate` relation, transcribed for the same reason.
@@ -494,7 +496,9 @@ fn rotate_relation(bytes: Vec<u8>) -> (u64, u64) {
 
     let mut editor = document.editor();
     assert!(editor.rotate_page(0, 90), "the fixture rotates");
-    let turned = Document::open(editor.save(&WriteOptions::default())).expect("it reopens");
+    let saved = editor.save(&WriteOptions::default());
+    written_support::rewritten("rotate relation", editor.document().bytes(), &saved);
+    let turned = Document::open(saved).expect("it reopens");
     let rotated = turned.page(0).expect("a page").render(&options);
     assert_eq!(
         (rotated.width, rotated.height),
@@ -543,7 +547,9 @@ fn crop_relation(bytes: Vec<u8>) -> (u64, u64) {
         editor.set_crop_box(0, x0 + inset, y0 + inset, x1 - inset, y1 - inset),
         "the fixture crops"
     );
-    let cropped = Document::open(editor.save(&WriteOptions::default())).expect("it reopens");
+    let saved = editor.save(&WriteOptions::default());
+    written_support::rewritten("crop relation", editor.document().bytes(), &saved);
+    let cropped = Document::open(saved).expect("it reopens");
     let small = cropped.page(0).expect("a page").render(&options);
 
     let (left, top) = (inset as u32, inset as u32);
@@ -600,7 +606,7 @@ fn tiling_page() -> Vec<u8> {
             .as_bytes(),
         );
     });
-    builder.finish()
+    built("tiling page", builder)
 }
 
 /// The construct the reported-breakage corpus's `issue2177.pdf` draws
@@ -626,7 +632,7 @@ fn skewed_tiling_page() -> Vec<u8> {
         assert!(page.set_fill_pattern(b"P1"));
         page.raw(b"0 0 225 225 re f\n");
     });
-    builder.finish()
+    built("skewed tiling page", builder)
 }
 
 /// **A skewed tiling pattern holds under a change of scale** (MS-18). Its
@@ -988,7 +994,8 @@ fn the_dpi_residue_is_edges_and_not_area() {
         page.set_fill_rgb(0.2, 0.4, 0.9);
         page.raw(b"8 8 32 32 re f\n");
     });
-    let (flat_moved, flat_total) = dpi_relation(builder.finish());
+    let (flat_moved, flat_total) =
+        dpi_relation(built("the dpi residue is edges and not area", builder));
 
     println!(
         "  diagonal edges {edges_moved} of {edges_total}, axis-aligned {flat_moved} of {flat_total}"
@@ -1001,4 +1008,13 @@ fn the_dpi_residue_is_edges_and_not_area() {
         edges_moved, 0,
         "and neither does a diagonal one -- which is the negative result this          test exists to keep: {edges_moved} moved"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

@@ -8,6 +8,8 @@
 //! These drive it from PDF content rather than from `StrokeStyle`, which is
 //! the part that was missing.
 
+mod written_support;
+
 use tinker_pdf::{Document, RenderOptions};
 use tinker_pdf_cos::DocumentBuilder;
 
@@ -18,7 +20,7 @@ fn stroked(setup: &str) -> tinker_pdf::Bitmap {
         page.raw(format!("0 0 0 RG\n{setup}\n10 20 m 90 20 l S\n").as_bytes());
     });
 
-    Document::open(builder.finish())
+    Document::open(built("stroked", builder))
         .expect("it opens")
         .page(0)
         .expect("a page")
@@ -137,7 +139,7 @@ fn joins_change_the_corner() {
         builder.add_page(60.0, 60.0, |page| {
             page.raw(format!("0 0 0 RG\n{setup}\n10 10 m 30 45 l 50 10 l S\n").as_bytes());
         });
-        Document::open(builder.finish())
+        Document::open(built("joins change the corner", builder))
             .expect("it opens")
             .page(0)
             .expect("a page")
@@ -203,7 +205,7 @@ fn ink(size: u32, content: &str) -> impl Fn(u32, u32) -> f64 {
     builder.add_page(f64::from(size), f64::from(size), |page| {
         page.raw(content.as_bytes());
     });
-    let bitmap = Document::open(builder.finish())
+    let bitmap = Document::open(built("ink", builder))
         .expect("it opens")
         .page(0)
         .expect("a page")
@@ -337,4 +339,13 @@ fn a_pen_under_a_large_stretch_is_flattened_at_the_device_tolerance() {
         worst.2,
         worst.0
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

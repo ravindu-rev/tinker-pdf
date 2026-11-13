@@ -83,6 +83,7 @@
 //! feature's correctness and neither is counted as if it were.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::{Document, RenderOptions};
@@ -134,7 +135,10 @@ fn book(style: &str, body: &str) -> Vec<u8> {
 /// Where the lines fell is a different claim, and one
 /// [`a_block_generated_box_takes_its_own_line`] makes deliberately.
 fn text_of(style: &str, body: &str) -> String {
-    let doc = Document::open(book(style, body)).expect("a book");
+    let doc = converted(
+        "text of",
+        Document::open(book(style, body)).expect("a book"),
+    );
     doc.page(0)
         .expect("a page")
         .text()
@@ -144,7 +148,10 @@ fn text_of(style: &str, body: &str) -> String {
 
 /// The same, keeping the lines.
 fn lines_of(style: &str, body: &str) -> Vec<String> {
-    let doc = Document::open(book(style, body)).expect("a book");
+    let doc = converted(
+        "lines of",
+        Document::open(book(style, body)).expect("a book"),
+    );
     doc.page(0)
         .expect("a page")
         .text()
@@ -263,7 +270,10 @@ fn the_refused_content_families_are_named() {
         "counters(section, \".\", armenian)",
     ] {
         let source = format!("p::before {{ content: {value} }}");
-        let doc = Document::open(book(&source, "<p>body</p>")).expect("a book");
+        let doc = converted(
+            "the refused content families are named",
+            Document::open(book(&source, "<p>body</p>")).expect("a book"),
+        );
         let warnings = doc.archive().expect("a report").warnings().to_vec();
         assert!(
             warnings.iter().any(|w| matches!(
@@ -292,7 +302,10 @@ fn the_refused_content_families_are_named() {
 #[test]
 fn a_quote_keyword_under_quotes_auto_is_a_gap_in_quotes() {
     use tinker_pdf::ArchiveWarning;
-    let doc = Document::open(book("p { margin: 0 }", "<p><q>body</q></p>")).expect("a book");
+    let doc = converted(
+        "a quote keyword under quotes auto is a gap in quotes",
+        Document::open(book("p { margin: 0 }", "<p><q>body</q></p>")).expect("a book"),
+    );
     let warnings = doc.archive().expect("a report").warnings().to_vec();
     assert!(
         warnings.iter().any(|w| matches!(
@@ -364,14 +377,20 @@ fn generated_content_is_extra_and_the_harness_says_so() {
     let control = book("p { color: #000000 }", "<p>body</p>");
     let generated = book("p::before { content: \"XX\" }", "<p>body</p>");
 
-    let control_doc = Document::open(control.clone()).expect("a book");
+    let control_doc = converted(
+        "generated content is extra and the harness says so",
+        Document::open(control.clone()).expect("a book"),
+    );
     let verdict = compare(&spine_text(&control), &paginated_text(&control_doc));
     assert!(
         verdict.holds(),
         "the control book does not conserve, so the comparison below says nothing: {verdict:?}"
     );
 
-    let generated_doc = Document::open(generated.clone()).expect("a book");
+    let generated_doc = converted(
+        "generated content is extra and the harness says so",
+        Document::open(generated.clone()).expect("a book"),
+    );
     let verdict = compare(&spine_text(&generated), &paginated_text(&generated_doc));
     assert_eq!(
         verdict.extra, 2,
@@ -398,11 +417,26 @@ fn every_shape_here_renders() {
         ),
         ("* ::before { content: \"z\" }", "<p>body</p>"),
     ] {
-        let doc = Document::open(book(style, body)).expect("a book");
+        let doc = converted(
+            "every shape here renders",
+            Document::open(book(style, body)).expect("a book"),
+        );
         for index in 0..doc.page_count() {
             let page = doc.page(index).expect("a page");
             let _ = page.text().plain_text();
             let _ = page.render(&RenderOptions::default());
         }
+    }
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
     }
 }

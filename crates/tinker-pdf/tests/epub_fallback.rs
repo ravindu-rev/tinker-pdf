@@ -18,6 +18,7 @@
 //! build has a number to report and the bundled one has a number to beat.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::book::{faces_book, styled_book};
 use epub_support::conservation::{conservation, conservation_in_logical_order};
@@ -111,7 +112,10 @@ fn the_text_is_what_the_row_says_it_is() {
 #[cfg(feature = "bundled-fonts")]
 #[test]
 fn past_the_simple_font_limit_the_fallback_is_cid_keyed() {
-    let doc = Document::open(book()).expect("the book opens");
+    let doc = converted(
+        "past the simple font limit the fallback is cid keyed",
+        Document::open(book()).expect("the book opens"),
+    );
     assert_eq!(unrepresented(&doc), 0, "characters were lost");
     assert_eq!(uncovered(&doc), 0, "characters were drawn as a notdef");
     let extracted: String = text(&doc).chars().filter(|c| !c.is_whitespace()).collect();
@@ -144,7 +148,10 @@ fn past_the_simple_font_limit_the_fallback_is_cid_keyed() {
 #[cfg(not(feature = "bundled-fonts"))]
 #[test]
 fn past_the_simple_font_limit_the_excess_is_counted() {
-    let doc = Document::open(book()).expect("the book opens");
+    let doc = converted(
+        "past the simple font limit the excess is counted",
+        Document::open(book()).expect("the book opens"),
+    );
     let distinct = characters().len();
     assert_eq!(unrepresented(&doc), distinct - 224);
     assert_eq!(uncovered(&doc), 224);
@@ -242,7 +249,10 @@ fn a_standard_14_mark_is_measured_at_no_advance() {
         "",
         &format!("<p dir=\"rtl\">{AMALIYYAN}</p><p>a\u{3099}\u{3042}</p>"),
     );
-    let doc = Document::open(book).expect("the book opens");
+    let doc = converted(
+        "a standard 14 mark is measured at no advance",
+        Document::open(book).expect("the book opens"),
+    );
     let page = doc.page(0).expect("a page");
     let drawn = page.text_with(&TextOptions {
         content_order: true,
@@ -324,7 +334,10 @@ fn a_standard_14_hebrew_word_extracts_as_written() {
          <i>Greek</i>.<br/>CETUS, <i>Latin</i>.<br/></p>"
     );
     let bytes = styled_book("en", "", &body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 hebrew word extracts as written",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
 
     let (vav, het) = (drawn_at(&doc, "\u{5D5}"), drawn_at(&doc, "\u{5D7}"));
     assert!(
@@ -365,7 +378,10 @@ fn a_standard_14_hebrew_word_extracts_as_written() {
 fn a_standard_14_right_to_left_paragraph_extracts_as_written() {
     let body = format!("<p dir=\"rtl\">\u{5D7}\u{200D}\u{5D5} {VAV_HET}, ok.</p>");
     let bytes = styled_book("he", "", &body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 right to left paragraph extracts as written",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     for verdict in [
         conservation(&bytes, &doc),
         conservation_in_logical_order(&bytes, &doc),
@@ -498,12 +514,18 @@ fn reads_as_written(book: &[u8], doc: &Document, expected: &str) {
 #[test]
 fn a_standard_14_pointed_hebrew_word_keeps_each_point_on_its_letter() {
     let melekh = styled_book("en", "", &format!("<p>{MELEKH}, <i>Hebrew</i>.</p>"));
-    let doc = Document::open(melekh.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 pointed hebrew word keeps each point on its letter",
+        Document::open(melekh.clone()).expect("the book opens"),
+    );
     reads_as_written(&melekh, &doc, &format!("{MELEKH}, Hebrew."));
     marks_ride_on_their_letters(&doc);
 
     let shalom = styled_book("en", "", &format!("<p>{SHALOM}, <i>Hebrew</i>.</p>"));
-    let doc = Document::open(shalom.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 pointed hebrew word keeps each point on its letter",
+        Document::open(shalom.clone()).expect("the book opens"),
+    );
     let drawn = drawn_text(&doc);
     assert!(
         drawn.contains(SHALOM_DRAWN),
@@ -517,7 +539,10 @@ fn a_standard_14_pointed_hebrew_word_keeps_each_point_on_its_letter() {
         "",
         &format!("<p dir=\"rtl\">{HASHABBAT} {SHALOM}.</p>"),
     );
-    let doc = Document::open(hashabbat.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 pointed hebrew word keeps each point on its letter",
+        Document::open(hashabbat.clone()).expect("the book opens"),
+    );
     reads_as_written(&hashabbat, &doc, &format!("{HASHABBAT} {SHALOM}."));
     marks_ride_on_their_letters(&doc);
 }
@@ -543,7 +568,10 @@ const HASHABBAT: &str = "\u{5D4}\u{5B7}\u{5E9}\u{5BC}\u{5C1}\u{5B7}\u{5D1}\u{5BC
 fn a_standard_14_arabic_word_keeps_each_haraka_on_its_letter() {
     let body = format!("<p dir=\"rtl\">{KATABA} \u{643}\u{62A}\u{628}.</p>");
     let bytes = styled_book("ar", "", &body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 arabic word keeps each haraka on its letter",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
 
     let drawn = drawn_text(&doc);
     assert!(
@@ -614,7 +642,10 @@ fn a_standard_14_arabic_letter_with_two_marks_keeps_both() {
         ),
     ] {
         let bytes = styled_book(language, "", &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a standard 14 arabic letter with two marks keeps both",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         reads_as_written(&bytes, &doc, &expected);
         marks_ride_on_their_letters(&doc);
     }
@@ -659,7 +690,10 @@ fn a_standard_14_overflow_letter_at_code_32_takes_no_word_spacing() {
         ),
     ] {
         let bytes = styled_book(language, style, &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a standard 14 overflow letter at code 32 takes no word spacing",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         assert_eq!(
             doc.page(0).expect("a page").text().plain_text(),
             format!("{expected}\n"),
@@ -690,7 +724,10 @@ fn a_standard_14_overflow_letter_at_code_32_takes_no_word_spacing() {
             ("ar", format!("<p dir=\"rtl\">{unpointed}</p>"), unpointed),
         ] {
             let bytes = styled_book(language, &style, &body);
-            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let doc = converted(
+                "a standard 14 overflow letter at code 32 takes no word spacing",
+                Document::open(bytes.clone()).expect("the book opens"),
+            );
             reads_as_written(&bytes, &doc, expected);
             let over = overprinted(&doc);
             assert!(
@@ -703,7 +740,10 @@ fn a_standard_14_overflow_letter_at_code_32_takes_no_word_spacing() {
     for style in ["p { word-spacing: -2px }", "p { word-spacing: 4px }"] {
         let body = format!("<p>{HET_VAV} x <b>\u{3B1}\u{3BB}\u{3C6}\u{3B1}\u{301}</b>y z.</p>");
         let bytes = styled_book("en", style, &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a standard 14 overflow letter at code 32 takes no word spacing",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         reads_as_written(
             &bytes,
             &doc,
@@ -792,7 +832,10 @@ fn a_standard_14_pointed_arabic_letter_is_not_drawn_over_the_next_under_word_spa
             format!("<p dir=\"rtl\">{AMALIYYAN} {AMALIYYAN} {AMALIYYAN}</p>"),
         ] {
             let bytes = styled_book("ar", style, &body);
-            let doc = Document::open(bytes).expect("the book opens");
+            let doc = converted(
+                "a standard 14 pointed arabic letter is not drawn over the next under word spacing",
+                Document::open(bytes).expect("the book opens"),
+            );
             let over = overprinted(&doc);
             assert!(
                 over.is_empty(),
@@ -845,7 +888,10 @@ fn a_standard_14_decomposed_accent_keeps_to_its_letter() {
         ),
     ] {
         let bytes = styled_book(language, "", &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a standard 14 decomposed accent keeps to its letter",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         reads_as_written(&bytes, &doc, &expected);
         marks_ride_on_their_letters(&doc);
     }
@@ -878,7 +924,10 @@ fn a_standard_14_accent_drawn_apart_from_its_letter_keeps_to_it() {
         (own_face, format!("cafe\u{301} {HET_VAV} na\u{308}ive.")),
         (styled, format!("{HET_VAV} xe\u{301}x a\u{308}y.")),
     ] {
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a standard 14 accent drawn apart from its letter keeps to it",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         reads_as_written(&bytes, &doc, &expected);
         marks_ride_on_their_letters(&doc);
     }
@@ -897,7 +946,10 @@ fn a_standard_14_accent_drawn_apart_from_its_letter_keeps_to_it() {
 fn a_standard_14_right_to_left_mark_styled_apart_reads_with_its_letter() {
     let body = "<p dir=\"rtl\">\u{5D0} <b>\u{5D7}</b>\u{5B8}\u{5D5} \u{5D1}.</p>";
     let bytes = styled_book("he", "", body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 right to left mark styled apart reads with its letter",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     reads_as_written(&bytes, &doc, "\u{5D0} \u{5D7}\u{5B8}\u{5D5} \u{5D1}.");
     let cos = doc.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
@@ -1016,7 +1068,10 @@ fn a_standard_14_mark_reads_with_its_letter_at_every_size_and_spacing() {
     for (style, wide) in sizes.chain(spacings) {
         for (language, body, expected) in &books {
             let bytes = styled_book(language, &style, body);
-            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let doc = converted(
+                "a standard 14 mark reads with its letter at every size and spacing",
+                Document::open(bytes.clone()).expect("the book opens"),
+            );
             let text = doc.page(0).expect("a page").text().plain_text();
             if wide {
                 assert!(
@@ -1086,7 +1141,10 @@ fn a_standard_14_pointed_word_under_letter_spacing_reads_on_one_line() {
         ),
     ] {
         let bytes = styled_book(language, "p { letter-spacing: 5px }", &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a standard 14 pointed word under letter spacing reads on one line",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let text = doc.page(0).expect("a page").text().plain_text();
         assert_eq!(text, expected, "the line was cut");
         reads_as_written(&bytes, &doc, &expected);
@@ -1121,7 +1179,10 @@ fn a_standard_14_decomposed_accent_is_found_under_letter_spacing() {
         "p { letter-spacing: 5px }",
     ] {
         let bytes = styled_book("vi", style, &format!("<p>{SENTENCE}</p>"));
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a standard 14 decomposed accent is found under letter spacing",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let page = doc.page(0).expect("a page");
         let text = page.text();
         assert_eq!(
@@ -1167,7 +1228,10 @@ fn a_standard_14_letter_and_its_marks_are_spaced_once() {
                 "p { letter-spacing: 4px }",
                 &format!("<p>a {word} b.</p>"),
             );
-            let doc = Document::open(bytes).expect("the book opens");
+            let doc = converted(
+                "a standard 14 letter and its marks are spaced once",
+                Document::open(bytes).expect("the book opens"),
+            );
             (drawn_at(&doc, first), drawn_at(&doc, "b"))
         };
         let ((pointed_first, pointed_b), (plain_first, plain_b)) = (at(pointed), at(plain));
@@ -1272,7 +1336,10 @@ fn a_standard_14_run_ending_on_a_mark_keeps_to_what_follows_to_half_an_em() {
     for (style, exactly_half) in spacings {
         for (body, expected, across) in &books {
             let bytes = styled_book("en", style, body);
-            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let doc = converted(
+                "a standard 14 run ending on a mark keeps to what follows to half an em",
+                Document::open(bytes.clone()).expect("the book opens"),
+            );
             for verdict in [
                 conservation(&bytes, &doc),
                 conservation_in_logical_order(&bytes, &doc),
@@ -1301,7 +1368,10 @@ fn a_standard_14_run_ending_on_a_mark_keeps_to_what_follows_to_half_an_em() {
             let shin =
                 "<p>a <b>\u{5E9}\u{5BC}\u{5C1}\u{5B8}\u{591}</b>\u{5DC}\u{5B5}\u{5DD} b.</p>";
             let bytes = styled_book("en", style, shin);
-            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let doc = converted(
+                "a standard 14 run ending on a mark keeps to what follows to half an em",
+                Document::open(bytes.clone()).expect("the book opens"),
+            );
             reads_as_written(&bytes, &doc, &format!("a {CANTILLATED} b."));
             marks_ride_on_their_letters(&doc);
         }
@@ -1361,7 +1431,10 @@ fn a_standard_14_run_ending_on_a_mark_is_cut_past_half_an_em_as_its_letter_is() 
                 ),
             ] {
                 let bytes = styled_book("en", style, &body);
-                let doc = Document::open(bytes).expect("the book opens");
+                let doc = converted(
+                    "a standard 14 run ending on a mark is cut past half an em as its letter is",
+                    Document::open(bytes).expect("the book opens"),
+                );
                 assert_eq!(
                     doc.page(0).expect("a page").text().plain_text(),
                     expected,
@@ -1410,7 +1483,10 @@ fn kataba_paragraph(first: &str) -> String {
 fn a_standard_14_right_to_left_line_at_exactly_half_an_em_reads_whole() {
     let read = |style: &str, first: &str| {
         let bytes = styled_book("ar", style, &kataba_paragraph(first));
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a standard 14 right to left line at exactly half an em reads whole",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let holds = conservation(&bytes, &doc).holds()
             && conservation_in_logical_order(&bytes, &doc).holds();
         let page = doc.page(0).expect("a page");
@@ -1479,7 +1555,10 @@ fn a_narrower_pointed_word_breaks_its_line_where_the_unpointed_word_does() {
     let read = |latin: &str| {
         let body = format!("<p dir=\"rtl\">{HET_VAV} {latin} {HET_VAV}.</p>");
         let bytes = styled_book("he", style, &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a narrower pointed word breaks its line where the unpointed word does",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let holds = conservation(&bytes, &doc).holds()
             && conservation_in_logical_order(&bytes, &doc).holds();
         let text: String = doc
@@ -1535,7 +1614,10 @@ fn a_letter_spaced_book_with_no_mark_is_written_as_at_cd407d5() {
         "body { letter-spacing: 0.3em }",
         &format!("<p>{body}</p>"),
     );
-    let doc = Document::open(bytes).expect("the book opens");
+    let doc = converted(
+        "a letter spaced book with no mark is written as at cd407d5",
+        Document::open(bytes).expect("the book opens"),
+    );
     let cos = doc.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let page = pages.first().expect("one page");
@@ -1571,7 +1653,10 @@ fn a_standard_14_neutral_line_at_a_right_to_left_level_reads_as_written() {
         ("<p dir=\"rtl\">?! 12</p>", "?! 12"),
     ] {
         let bytes = styled_book("he", "", body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a standard 14 neutral line at a right to left level reads as written",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         reads_as_written(&bytes, &doc, expected);
     }
 }
@@ -1588,7 +1673,10 @@ fn a_standard_14_neutral_line_at_a_right_to_left_level_reads_as_written() {
 fn a_standard_14_neutral_line_above_a_right_to_left_line_reads_as_written() {
     let body = format!("<p dir=\"rtl\">?!<br/>{HET_VAV}</p>");
     let bytes = styled_book("he", "", &body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 neutral line above a right to left line reads as written",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     reads_as_written(&bytes, &doc, &format!("?!\n{HET_VAV}"));
 }
 
@@ -1614,7 +1702,10 @@ fn a_standard_14_neutral_line_above_a_right_to_left_line_reads_as_written() {
 fn a_standard_14_punctuation_run_between_right_to_left_words_reads_as_written() {
     let body = format!("<p dir=\"rtl\"><i>{HET_VAV}</i>.,<i>{VAV_HET}</i></p>");
     let bytes = styled_book("he", "", &body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 punctuation run between right to left words reads as written",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let (comma, stop) = (drawn_at(&doc, ","), drawn_at(&doc, "."));
     assert!(
         comma < stop,
@@ -1628,7 +1719,10 @@ fn a_standard_14_punctuation_run_between_right_to_left_words_reads_as_written() 
         "body { font-family: sans-serif }",
         &format!("<p dir=\"rtl\">{arabic}</p>"),
     );
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a standard 14 punctuation run between right to left words reads as written",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let (open, close) = (drawn_at(&doc, "("), drawn_at(&doc, ")"));
     assert!(
         close < open,
@@ -1657,7 +1751,10 @@ fn a_run_of_neutrals_in_an_embedding_with_no_right_to_left_letter_reads_as_typed
         ("&#x2067;", "&#x2069;"),
     ] {
         let bytes = styled_book("en", "", &format!("<p>x {control}?!{closer} y</p>"));
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a run of neutrals in an embedding with no right to left letter reads as typed",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let text = doc.page(0).expect("a page").text().plain_text();
         assert!(text.contains("?!"), "{control}: {text:?}");
         for verdict in [
@@ -1686,7 +1783,10 @@ fn a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed() {
         format!("<p dir=\"rtl\">?! {SHALOM}</p>"),
     ] {
         let bytes = styled_book("he", "", &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a run of neutrals opening a right to left line is drawn as typed",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let (question, bang) = (drawn_at(&doc, "?"), drawn_at(&doc, "!"));
         assert!(
             bang < question,
@@ -1730,7 +1830,10 @@ fn a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed() {
 fn a_run_of_neutrals_a_reader_cannot_undo_is_drawn_as_typed() {
     let money = "<p dir=\"rtl\">عوامل عدّة ($1,234.56). وقد أصبحنا نعرف.</p>".to_owned();
     let bytes = styled_book("ar", "p { margin: 0 38% }", &money);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a run of neutrals a reader cannot undo is drawn as typed",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let text = doc.page(0).expect("a page").text().plain_text();
     for verdict in [
         conservation(&bytes, &doc),
@@ -1744,7 +1847,10 @@ fn a_run_of_neutrals_a_reader_cannot_undo_is_drawn_as_typed() {
                 للأسيتيل، مخفّفة بذلك من نموّ الأورام.</p>";
     let style = "body { font-family: sans-serif } p { text-align: justify; margin: 0 15% }";
     let bytes = styled_book("ar", style, year);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a run of neutrals a reader cannot undo is drawn as typed",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let text = doc.page(0).expect("a page").text().plain_text();
     for verdict in [
         conservation(&bytes, &doc),
@@ -1756,7 +1862,10 @@ fn a_run_of_neutrals_a_reader_cannot_undo_is_drawn_as_typed() {
     let spaced = format!("<p dir=\"rtl\">{SHALOM} <i>?!</i> \u{5E2}\u{5D5}\u{5DC}\u{5DD}</p>");
     let style = "p { font-family: monospace; letter-spacing: 8px }";
     let bytes = styled_book("he", style, &spaced);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a run of neutrals a reader cannot undo is drawn as typed",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let text = doc.page(0).expect("a page").text().plain_text();
     assert!(text.contains("?!"), "{spaced}: {text:?}");
     let logical = conservation_in_logical_order(&bytes, &doc);
@@ -1797,7 +1906,10 @@ fn a_run_of_neutrals_its_word_spaces_part_is_drawn_as_typed() {
         ] {
             for body in [body.clone(), unpointed(&body)] {
                 let bytes = styled_book("ar", style, &body);
-                let doc = Document::open(bytes.clone()).expect("the book opens");
+                let doc = converted(
+                    "a run of neutrals its word spaces part is drawn as typed",
+                    Document::open(bytes.clone()).expect("the book opens"),
+                );
                 let text = doc.page(0).expect("a page").text().plain_text();
                 assert!(text.contains("?!"), "{style}, {body}: {text:?}");
                 for verdict in [
@@ -1855,7 +1967,10 @@ fn a_word_spaced_slice_reading_alike_is_drawn_with_its_space_first() {
     ] {
         for body in [body.clone(), unpointed(&body)] {
             let bytes = styled_book("ar", style, &body);
-            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let doc = converted(
+                "a word spaced slice reading alike is drawn with its space first",
+                Document::open(bytes.clone()).expect("the book opens"),
+            );
             let text = doc.page(0).expect("a page").text().plain_text();
             for verdict in [
                 conservation(&bytes, &doc),
@@ -1883,7 +1998,10 @@ fn a_word_spaced_slice_not_reading_alike_is_drawn_in_its_levels_order() {
     let body = "<p dir=\"rtl\">عوامل<i> ?!</i> عدّة وقد أصبحنا</p>";
     let style = "p { word-spacing: 0.3em; letter-spacing: 0.1em }";
     let bytes = styled_book("ar", style, body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "a word spaced slice not reading alike is drawn in its levels order",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let text = doc.page(0).expect("a page").text().plain_text();
     for verdict in [
         conservation(&bytes, &doc),
@@ -1943,7 +2061,10 @@ fn a_number_in_word_spaced_right_to_left_text_is_not_drawn_over_its_bracket() {
     for (style, text, expected, times) in books {
         let body = format!("<p dir=\"rtl\">{text}</p>");
         let bytes = styled_book("he", style, &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a number in word spaced right to left text is not drawn over its bracket",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         reads_as_written(&bytes, &doc, expected);
         let page = doc.page(0).expect("a page");
         assert_eq!(
@@ -2001,7 +2122,10 @@ fn a_word_spaced_right_to_left_cell_after_a_latin_word_reads_whole() {
             );
             for body in [table.clone(), unpointed(&table)] {
                 let bytes = styled_book("ar", style, &body);
-                let doc = Document::open(bytes.clone()).expect("the book opens");
+                let doc = converted(
+                    "a word spaced right to left cell after a latin word reads whole",
+                    Document::open(bytes.clone()).expect("the book opens"),
+                );
                 let page = doc.page(0).expect("a page");
                 let text = page.text().plain_text();
                 for verdict in [
@@ -2076,7 +2200,10 @@ fn a_styled_neutral_glued_to_a_word_under_word_spacing_keeps_it_searchable() {
         let style = format!("p {{ word-spacing: {spacing}; margin: 0 20% }}");
         for (language, body, words) in &books {
             let bytes = styled_book(language, &style, body);
-            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let doc = converted(
+                "a styled neutral glued to a word under word spacing keeps it searchable",
+                Document::open(bytes.clone()).expect("the book opens"),
+            );
             let page = doc.page(0).expect("a page");
             let text = page.text().plain_text();
             for word in words {
@@ -2131,7 +2258,10 @@ fn a_non_winansi_neutral_after_a_word_space_reads_with_its_number() {
             format!("<p dir=\"rtl\">{text}</p>"),
         ] {
             let bytes = styled_book("ar", &style, &body);
-            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let doc = converted(
+                "a non winansi neutral after a word space reads with its number",
+                Document::open(bytes.clone()).expect("the book opens"),
+            );
             let page = doc.page(0).expect("a page");
             let read = page.text().plain_text();
             for verdict in [
@@ -2218,7 +2348,10 @@ fn the_inside_of_a_spaced_slice_is_one_text_object() {
     ];
     for (language, style, body, words) in books {
         let bytes = styled_book(language, style, body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "the inside of a spaced slice is one text object",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let page = doc.page(0).expect("a page");
         let text = page.text().plain_text();
         for verdict in [
@@ -2308,7 +2441,10 @@ fn a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole() {
     }
     for (language, style, body) in &conserving {
         let bytes = styled_book(language, style, body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a spaced slice is one text object only where its line reads it whole",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let text = doc.page(0).expect("a page").text().plain_text();
         for verdict in [
             conservation(&bytes, &doc),
@@ -2329,7 +2465,10 @@ fn a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole() {
     let style = "p { word-spacing: 1em; margin: 0 20% }";
     let body = format!("<p dir=\"rtl\">{overridden}</p>");
     let bytes = styled_book("he", style, &body);
-    let doc = Document::open(bytes).expect("the book opens");
+    let doc = converted(
+        "a spaced slice is one text object only where its line reads it whole",
+        Document::open(bytes).expect("the book opens"),
+    );
     let page = doc.page(0).expect("a page");
     let text = page.text().plain_text();
     for word in HE.iter().copied().chain(["ab", "cd"]) {
@@ -2346,7 +2485,10 @@ fn a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole() {
                    \u{646}\u{648}\u{631}";
     for style in ["", "p { word-spacing: 4px }"] {
         let bytes = styled_book("ar", style, &format!("<p>{neutral}</p>"));
-        let doc = Document::open(bytes).expect("the book opens");
+        let doc = converted(
+            "a spaced slice is one text object only where its line reads it whole",
+            Document::open(bytes).expect("the book opens"),
+        );
         let cos = doc.cos();
         let pages = tinker_pdf_cos::pages::collect(cos);
         let page = pages.first().expect("one page");
@@ -2393,7 +2535,10 @@ fn a_right_to_left_cell_touching_a_left_to_right_one_is_left_in_pieces() {
                  <tr><td>{cell}</td><td>abc (x).</td></tr></table>"
             );
             let bytes = styled_book(language, style, &body);
-            let doc = Document::open(bytes).expect("the book opens");
+            let doc = converted(
+                "a right to left cell touching a left to right one is left in pieces",
+                Document::open(bytes).expect("the book opens"),
+            );
             let text = doc.page(0).expect("a page").text().plain_text();
             let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
             for whole in ["abc (x).", cell] {
@@ -2410,7 +2555,10 @@ fn a_right_to_left_cell_touching_a_left_to_right_one_is_left_in_pieces() {
 /// another, for one book.
 fn conserves_drawn_apart(language: &str, style: &str, body: &str) {
     let bytes = styled_book(language, style, body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let doc = converted(
+        "conserves drawn apart",
+        Document::open(bytes.clone()).expect("the book opens"),
+    );
     let text = doc.page(0).expect("a page").text().plain_text();
     for verdict in [
         conservation(&bytes, &doc),
@@ -2745,7 +2893,10 @@ fn a_letter_spaced_arabic_line_reads_its_full_stop_with_its_word() {
             style,
             &format!("<p>{MUDDA_MUALLIM} {MUDDA_MUALLIM}.</p>"),
         );
-        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let doc = converted(
+            "a letter spaced arabic line reads its full stop with its word",
+            Document::open(bytes.clone()).expect("the book opens"),
+        );
         let text = doc.page(0).expect("a page").text().plain_text();
         let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
@@ -2785,7 +2936,10 @@ fn a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left() {
          <tr><td>\u{3F0}\u{3B7}\u{3C4}\u{3BF}\u{3C2},</td><td><i>Greek</i>.</td></tr>\
          <tr><td>CETUS,</td><td><i>Latin</i>.</td></tr></table>"
     );
-    let doc = Document::open(styled_book("en", "", &body)).expect("the book opens");
+    let doc = converted(
+        "a standard 14 hebrew word alone on its line is drawn right to left",
+        Document::open(styled_book("en", "", &body)).expect("the book opens"),
+    );
 
     let (vav, het) = (drawn_at(&doc, "\u{5D5}"), drawn_at(&doc, "\u{5D7}"));
     assert!(
@@ -4719,7 +4873,10 @@ fn two_cells_are_read_back_as_a_reader_parts_them_on_the_page() {
 /// The span of the glyphs on page one of `book` that draw any of `letters`,
 /// left edge to right edge, in content order.
 fn span_of(book: &[u8], letters: &str) -> Option<(f64, f64)> {
-    let doc = Document::open(book.to_vec()).expect("the book opens");
+    let doc = converted(
+        "span of",
+        Document::open(book.to_vec()).expect("the book opens"),
+    );
     let drawn = doc.page(0).expect("a page").text_with(&TextOptions {
         content_order: true,
         ..Default::default()
@@ -4798,4 +4955,16 @@ fn an_atomic_inline_is_one_unit_of_its_line_wherever_layout_set_it() {
         other => wrong.push(format!("Latin, a line of two blocks alone: {other:?}")),
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

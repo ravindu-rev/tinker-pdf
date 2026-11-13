@@ -10,6 +10,8 @@
 //! compares against goldens that would have to be regenerated against this
 //! engine, which is integration work rather than parity work.
 
+mod written_support;
+
 use std::path::PathBuf;
 
 use tinker_pdf::{AuthError, AuthLevel, Destination, Document};
@@ -382,7 +384,8 @@ fn a_rendered_page_actually_has_marks_on_it() {
     builder.add_page(100.0, 100.0, |page| {
         page.fill_rect(10.0, 10.0, 50.0, 30.0, 0.0);
     });
-    let doc = Document::open(builder.finish()).expect("the built document opens");
+    let doc = Document::open(built("a rendered page actually has marks on it", builder))
+        .expect("the built document opens");
 
     let bitmap = doc
         .page(0)
@@ -480,4 +483,13 @@ fn extraction_of_a_sound_page_reports_nothing() {
     let text = open("simple-text.pdf").page(0).expect("a page").text();
     assert!(!text.plain_text().is_empty());
     assert!(text.warnings.is_empty(), "got {:?}", text.warnings);
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

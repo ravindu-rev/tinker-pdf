@@ -30,6 +30,8 @@
 //! this file owns is the **format mapping**, which PngSuite cannot see: PngSuite
 //! has no `Bitmap` and no `PixelFormat`.
 
+mod written_support;
+
 use tinker_pdf::{Bitmap, Document, DocumentBuilder, PixelFormat, RenderOptions};
 use tinker_pdf_filters::{png_decode, png_scan, Limits, PngColour};
 
@@ -339,7 +341,8 @@ fn the_same_page_writes_the_same_png_twice() {
         page.fill_rect(8.0, 8.0, 30.0, 20.0, 0.0);
         page.fill_rect(40.0, 20.0, 20.0, 20.0, 0.5);
     });
-    let doc = Document::open(builder.finish()).expect("a document");
+    let doc = Document::open(built("the same page writes the same png twice", builder))
+        .expect("a document");
     let page = doc.page(0).expect("one page");
 
     let first = page.render(&RenderOptions::at_dpi(72.0));
@@ -362,4 +365,13 @@ fn the_same_page_writes_the_same_png_twice() {
         dark > 200,
         "only {dark} dark samples: the page drew nothing"
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
 }

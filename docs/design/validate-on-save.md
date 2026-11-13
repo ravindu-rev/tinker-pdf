@@ -348,7 +348,7 @@ entry point:
 | the cos crate's lower entry points | `incremental_update(` or `linearize::linearize` |
 | the C ABI | `tpdf_builder_finish` or `tpdf_editor_save` |
 | the CLI | a writing command of `tools/tpdf/src/writing.rs` — `merge`, `split`, `rotate`, `encrypt`, `decrypt`, `attach`, `stamp`, `sanitise` — called through `writing::`, or as a free call, not a method of the same name, from that file's own test module |
-| a conversion | `open_markdown`, `.archive()`, or a conversion fixture module: `epub_support`, `xps_support`, `cbz_support` |
+| a conversion | `open_markdown`, `.archive()`, or a conversion fixture module — `epub_support`, `xps_support`, `cbz_support` — in a unit that names `Document` |
 
 The entry points are the public functions that hand back a document's
 bytes: `DocumentBuilder::finish`, `finish_reporting` and `finish_archival`
@@ -373,8 +373,16 @@ report, and the modules that build EPUB, XPS and comic containers.
 `.archive()` is also the name of the XPS and EPUB package readers' accessor
 for their ZIP (`crates/tinker-pdf/src/xps/opc.rs:855`,
 `crates/tinker-pdf/src/epub/ocf.rs:798`), which only a conversion's own
-tests reach. `DocumentBuilder::from_html` hands back a builder and is
-counted by the builder row.
+tests reach. A fixture module counts beside the `Document` a conversion
+opens its container as: a unit that takes one for its parts — a stylesheet
+a book holds, a layout of markup — and names no `Document` converts
+nothing. A fixture module that converts on its tests' behalf and reads the
+report holds what it converts itself, as `epub_support`'s `todays_answer`
+does, through the facade reading it takes by `#[path]`, and so does a
+support module that builds documents for its tests, as `render_support`
+does.
+`DocumentBuilder::from_html` hands back a builder and is counted by the
+builder row.
 
 **What counts as calling the helper.** The unit names `written_support` —
 in a `mod`, a `use` or a `#[path]` — and calls a door, through it or
@@ -537,7 +545,7 @@ path is outside the agreement.
 | Writer, reader and validator share one reading of ISO 32000, so a clause misread in all three passes on every writer path at once | Not mitigated here, and said so in *What a clean verdict proves* and in `docs/verification.md`'s list of what first-party verification cannot prove. What narrows it is the part of the suite that answers to something other than this engine |
 | A file calls the helper once and writes other documents it never holds, and the lint passes it | The unit is a file, as the row's exit is. Each migration's exit is every document its files write, and the doors hand back what they are given, so the held write is the shortest one to spell |
 | Matching by name misses a write — a builder made in one unit and finished in another — or counts something that is not one | The entry points are one closed table in `written.rs`, each row pinned by a unit test; `.finish(` and `.save(` count only beside their writer's type; a misfire is fixed by refining a row with its test, never by listing the file |
-| A conversion whose test builds its input without the three fixture modules and never reads `Document::archive()` escapes the conversion row | A new conversion's design adds its entry point to the row, as `open_markdown` is there; every conversion that exists is reached by the row as written |
+| A conversion whose test builds its input without the three fixture modules and never reads `Document::archive()`, or takes a fixture module and names no `Document`, escapes the conversion row | A new conversion's design adds its entry point to the row, as `open_markdown` is there; every test in the tree that converts through a fixture module's opener names `Document` or reads the report, or the opener holds what it converts, as `todays_answer` does; every conversion that exists is reached by the row as written |
 | A new writing test is put on the pending list instead of calling the helper | The list is K-03.3's snapshot and every later change to it is a deletion; adding to it weakens a check, which `AGENTS.md` forbids; K-03.8 deletes it, and then there is nothing to add to |
 | The cos reading's claim test misses a packet that spells the identification only through character references or in UTF-32, and passes a claim it cannot hold | No writer in this tree emits one; the test reads the identification schemas' own spellings in UTF-8 and in both UTF-16 orders; a test that writes a claim belongs in the facade tree, where each validator's own reading applies |
 | Holding a rewrite by class lets it cure one defect and introduce another of the same kind | Stated. The class is the unit renumbering leaves, and with a clean input the rewrite form is the authored form, so it is loose only where the input was already wrong |

@@ -28,6 +28,7 @@
 //! milestone that implements a property has to say so in the same commit.
 
 mod epub_support;
+mod written_support;
 
 use std::collections::BTreeSet;
 
@@ -329,7 +330,10 @@ fn without_the_ua_stylesheet_a_book_has_no_block_structure_at_all() {
 /// `display` would pass the first and fail this.
 #[test]
 fn a_real_book_has_block_structure_a_heading_and_no_head_text() {
-    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
+    let doc = converted(
+        "a real book has block structure a heading and no head text",
+        Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book"),
+    );
     let text = pages_text(&doc).join("\n");
 
     // (3) `<head>` is not in the flow: the `<title>` of every content document
@@ -389,7 +393,10 @@ fn font_sizes(doc: &Document) -> BTreeSet<u32> {
 /// a `contains` test on each.
 #[test]
 fn a_page_reports_its_words_in_reading_order() {
-    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
+    let doc = converted(
+        "a page reports its words in reading order",
+        Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book"),
+    );
     let text: String = pages_text(&doc)
         .join(" ")
         .split_whitespace()
@@ -422,7 +429,10 @@ fn a_page_reports_its_words_in_reading_order() {
 /// a chapter split over four pages is still on exactly one of them.
 #[test]
 fn a_chapter_takes_as_many_pages_as_its_text_needs() {
-    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
+    let doc = converted(
+        "a chapter takes as many pages as its text needs",
+        Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book"),
+    );
     let report = doc.archive().expect("a report");
     let ch1: Vec<usize> = report
         .pages()
@@ -462,14 +472,20 @@ fn the_japanese_line_survives_the_encoding() {
         "pandoc-book-epub2.epub",
         "pandoc-book-nocover.epub",
     ] {
-        let doc = Document::open(corpus_book(name)).expect(name);
+        let doc = converted(
+            "the japanese line survives the encoding",
+            Document::open(corpus_book(name)).expect(name),
+        );
         let text: String = pages_text(&doc).join(" ").split_whitespace().collect();
         assert!(text.contains(LINE), "{name} lost its Japanese line");
     }
     // And the one book that has no Japanese in it does not gain any, which is
     // what says the assertion above is about the book rather than about a
     // constant this test carries.
-    let plates = Document::open(corpus_book("pandoc-plates.epub")).expect("plates");
+    let plates = converted(
+        "the japanese line survives the encoding",
+        Document::open(corpus_book("pandoc-plates.epub")).expect("plates"),
+    );
     let text: String = pages_text(&plates).join(" ");
     assert!(!text.contains(LINE));
 }
@@ -482,7 +498,10 @@ fn the_japanese_line_survives_the_encoding() {
 /// build that simply did not draw markers would pass the second.
 #[test]
 fn a_list_marker_is_drawn_and_is_not_extracted() {
-    let doc = Document::open(corpus_book("calibre-book-cover.epub")).expect("a book");
+    let doc = converted(
+        "a list marker is drawn and is not extracted",
+        Document::open(corpus_book("calibre-book-cover.epub")).expect("a book"),
+    );
     let text = pages_text(&doc).join(" ");
     assert!(
         text.contains("the order the entries were"),
@@ -545,7 +564,10 @@ fn a_real_books_doctype_is_skipped_here_and_refused_by_the_default_mode() {
 
     // And the mode milestone 2 added, through the door a host uses: the
     // chapter's own words are on the book's pages.
-    let doc = Document::open(bytes).expect("a book");
+    let doc = converted(
+        "a real books doctype is skipped here and refused by the default mode",
+        Document::open(bytes).expect("a book"),
+    );
     let text: String = pages_text(&doc).join(" ").split_whitespace().collect();
     assert!(
         text.contains("Acontainerisafilethatisotherfiles"),
@@ -568,7 +590,10 @@ fn a_real_books_doctype_is_skipped_here_and_refused_by_the_default_mode() {
 fn a_cross_reference_becomes_a_link_to_the_page_its_target_is_on() {
     use tinker_pdf_cos::dest::{Action, Destination};
 
-    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
+    let doc = converted(
+        "a cross reference becomes a link to the page its target is on",
+        Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book"),
+    );
     let mut targets: Vec<(u32, Option<u32>)> = Vec::new();
     for at in 0..doc.page_count() {
         for link in doc.page(at).expect("a page").links() {
@@ -614,7 +639,10 @@ fn a_cross_reference_becomes_a_link_to_the_page_its_target_is_on() {
 /// than the measure.
 #[test]
 fn a_links_rectangle_is_over_the_words_that_are_the_link() {
-    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
+    let doc = converted(
+        "a links rectangle is over the words that are the link",
+        Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book"),
+    );
     let mut checked = 0usize;
     for at in 0..doc.page_count() {
         let page = doc.page(at).expect("a page");
@@ -683,7 +711,10 @@ fn every_book_gets_an_outline_from_whichever_toc_it_has() {
         ("pandoc-plates.epub", "nav.xhtml", 3, 0),
     ];
     for (name, source, top_level, nested) in expected {
-        let doc = Document::open(corpus_book(name)).expect(name);
+        let doc = converted(
+            "every book gets an outline from whichever toc it has",
+            Document::open(corpus_book(name)).expect(name),
+        );
         let outline = doc.outline();
         let titles: Vec<&str> = outline.iter().map(|entry| entry.title.as_str()).collect();
         assert_eq!(
@@ -714,7 +745,10 @@ fn every_book_gets_an_outline_from_whichever_toc_it_has() {
 /// list of everything is a different document from the one the book wrote.
 #[test]
 fn an_outline_keeps_the_nesting_the_book_wrote() {
-    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
+    let doc = converted(
+        "an outline keeps the nesting the book wrote",
+        Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book"),
+    );
     let outline = doc.outline();
     let nested: usize = outline.iter().map(|entry| entry.children.len()).sum();
     assert_eq!(
@@ -770,7 +804,10 @@ fn a_same_document_reference_reaches_the_page_it_points_at() {
         OcfEntry::deflated("c1.xhtml", chapter.as_bytes()),
     ];
     let directory: Vec<usize> = (0..entries.len()).collect();
-    let doc = Document::open(ocf_zip(&entries, &directory)).expect("a book");
+    let doc = converted(
+        "a same document reference reaches the page it points at",
+        Document::open(ocf_zip(&entries, &directory)).expect("a book"),
+    );
     assert!(
         doc.page_count() >= 3,
         "the fixture fits on {} pages, so nothing crosses a boundary",
@@ -827,7 +864,10 @@ fn the_unsupported_census_is_the_one_the_record_states() {
 
     let mut measured = Vec::new();
     for name in COMMITTED {
-        let doc = Document::open(corpus_book(name)).expect(name);
+        let doc = converted(
+            "the unsupported census is the one the record states",
+            Document::open(corpus_book(name)).expect(name),
+        );
         let entries = census(&doc);
         println!("  {name}");
         for (property, elements) in &entries {
@@ -922,7 +962,10 @@ fn the_unsupported_census_is_the_one_the_record_states() {
 /// three header cells. A build that counted at parse time would say two.
 #[test]
 fn the_census_counts_elements_and_not_declarations() {
-    let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
+    let doc = converted(
+        "the census counts elements and not declarations",
+        Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book"),
+    );
     let entries = census(&doc);
     let ruled = entries
         .iter()
@@ -955,7 +998,10 @@ fn the_census_counts_elements_and_not_declarations() {
 #[test]
 fn no_committed_book_has_a_placeholder_page() {
     for name in COMMITTED {
-        let doc = Document::open(corpus_book(name)).expect(name);
+        let doc = converted(
+            "no committed book has a placeholder page",
+            Document::open(corpus_book(name)).expect(name),
+        );
         let placeholders: Vec<(u32, SpineDefect)> = doc
             .archive()
             .expect("a report")
@@ -978,18 +1024,24 @@ fn no_committed_book_has_a_placeholder_page() {
 #[test]
 fn the_callers_base_font_size_changes_the_pagination() {
     let bytes = corpus_book("pandoc-book-cover.epub");
-    let small = Document::open_with(bytes.clone(), &{
-        let mut options = OpenOptions::default();
-        options.font_size = 8.0;
-        options
-    })
-    .expect("a book");
-    let large = Document::open_with(bytes, &{
-        let mut options = OpenOptions::default();
-        options.font_size = 18.0;
-        options
-    })
-    .expect("a book");
+    let small = converted(
+        "the callers base font size changes the pagination",
+        Document::open_with(bytes.clone(), &{
+            let mut options = OpenOptions::default();
+            options.font_size = 8.0;
+            options
+        })
+        .expect("a book"),
+    );
+    let large = converted(
+        "the callers base font size changes the pagination",
+        Document::open_with(bytes, &{
+            let mut options = OpenOptions::default();
+            options.font_size = 18.0;
+            options
+        })
+        .expect("a book"),
+    );
     assert!(
         large.page_count() > small.page_count(),
         "a book set at 18pt is not longer than the same book at 8pt: {} against {}",
@@ -1000,4 +1052,16 @@ fn the_callers_base_font_size_changes_the_pagination() {
     let small_text: String = pages_text(&small).join(" ").split_whitespace().collect();
     let large_text: String = pages_text(&large).join(" ").split_whitespace().collect();
     assert_eq!(small_text, large_text);
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }

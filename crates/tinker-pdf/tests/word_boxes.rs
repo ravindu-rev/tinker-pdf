@@ -18,6 +18,7 @@
 //! two, so a whole-pixel box agrees exactly or not at all.
 
 mod epub_support;
+mod written_support;
 
 use epub_support::typeface::Face;
 use tinker_pdf::{
@@ -131,21 +132,27 @@ fn document(pages: &[Vec<Run>]) -> Vec<u8> {
         }
         builder.add_page(PAGE.0, PAGE.1, |page| page.raw(&content));
     }
-    builder.finish()
+    built("document", builder)
 }
 
 /// Three pages: the left-to-right page, the right-to-left page, and the
 /// left-to-right page again under `/Rotate 90` and a crop box.
 fn fixture() -> Document {
     let bytes = document(&[latin_runs(), hebrew_runs(), latin_runs()]);
-    let built = Document::open(bytes).expect("the fixture opens");
+    let built = converted("fixture", Document::open(bytes).expect("the fixture opens"));
     let mut editor = built.editor();
     assert!(editor.rotate_page(2, 90), "the third page turns");
     assert!(
         editor.set_crop_box(2, CROP.0, CROP.1, CROP.2, CROP.3),
         "the third page crops"
     );
-    Document::open(editor.save(&WriteOptions::default())).expect("the edited fixture opens")
+    let saved = editor.save(&WriteOptions::default());
+    written_support::rewritten(
+        "the turned and cropped fixture",
+        built.cos().bytes(),
+        &saved,
+    );
+    Document::open(saved).expect("the edited fixture opens")
 }
 
 // ---- the expectation, from the text model --------------------------------
@@ -633,4 +640,25 @@ fn a_word_holding_a_tab_or_line_break_stays_in_its_row() {
         texts,
         ["a b", "c d", "e  f", "g h", "i j", "k l", "m n", "o p"]
     );
+}
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
+fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
+
+/// `document`, and what `Document::open` synthesised for it held to the
+/// validate-on-save helper. A PDF is opened, not written, and is handed back
+/// as it is.
+#[track_caller]
+fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Document {
+    if document.archive().is_some() {
+        written_support::synthesised(label, document)
+    } else {
+        document
+    }
 }
