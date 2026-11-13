@@ -740,11 +740,15 @@ struct SampleLayout<'a> {
 /// paths share.
 ///
 /// An 8-bit device image is its own colour and is copied rather than read
-/// ([`identity_pixels`]); everything else is read sample by sample
-/// ([`general_pixels`]).
+/// ([`identity_pixels`]); a one-bit image of one component is expanded a byte
+/// at a time from its two outcomes ([`one_bit_pixels`]); everything else is
+/// read sample by sample ([`general_pixels`]).
 fn image_pixels(data: &[u8], layout: &SampleLayout<'_>) -> (Vec<u8>, Vec<u8>) {
     if let Some(rgb) = identity_pixels(data, layout) {
         return (rgb, Vec::new());
+    }
+    if let Some(pixels) = one_bit_pixels(data, layout) {
+        return pixels;
     }
     general_pixels(data, layout)
 }
@@ -791,6 +795,93 @@ fn identity_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<Vec<u8>> {
     }
     rgb.resize(length, 0);
     Some(rgb)
+}
+
+/// A one-component, one-bit image — a fax, a JBIG2 region, a one-bit Flate or
+/// uncompressed stream, an `/ImageMask` — expanded a byte at a time through a
+/// table, or `None` where the loop has to read the samples.
+///
+/// Such an image has two samples, and everything the loop makes of one is a
+/// function of its bit: the component through `/Decode` by [`component`], the
+/// colour through `ColorSpace::to_rgb`, a mask's paint as that component
+/// below one half (8.9.6.2), and a colour key's test, which is on the raw bit
+/// (8.9.6.4). So the two outcomes are worked out once, by those same
+/// expressions, and a 256-entry table holds each byte's eight samples. A row
+/// begins on a byte (8.9.3), so a row reads `ceil(w / 8)` bytes and keeps its
+/// first `w` samples, and a byte past the stream's end reads as zero, as
+/// [`read_bits`] reads it.
+fn one_bit_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<(Vec<u8>, Vec<u8>)> {
+    let SampleLayout {
+        width,
+        height,
+        bpc,
+        n,
+        space,
+        decode,
+        mask,
+        color_key,
+    } = *layout;
+    if bpc != 1 || n != 1 {
+        return None;
+    }
+
+    // The two outcomes, a sample of 0 and a sample of 1: its colour, and its
+    // alpha where the image carries one.
+    let outcome = |bit: u32| -> ([u8; 3], u8) {
+        let value = component(space, decode, 0, bit, 1.0);
+        if mask {
+            return ([0, 0, 0], if value < 0.5 { 255 } else { 0 });
+        }
+        let (r, g, b) = converted(space, &[value]);
+        let keyed = color_key.is_some_and(|ranges| {
+            // An absent range can never match, as in the general loop.
+            let (lo, hi) = ranges.first().copied().unwrap_or((1, 0));
+            bit >= lo && bit <= hi
+        });
+        ([r, g, b], if keyed { 0 } else { 255 })
+    };
+    let outcomes = [outcome(0), outcome(1)];
+    let with_alpha = mask || color_key.is_some();
+
+    // Each byte's eight samples, the most significant bit first.
+    let mut colours = vec![[0u8; 24]; 256];
+    let mut alphas = vec![[0u8; 8]; 256];
+    for (byte, (colour, alpha)) in colours.iter_mut().zip(alphas.iter_mut()).enumerate() {
+        for (sample, (pixel, opacity)) in
+            colour.chunks_exact_mut(3).zip(alpha.iter_mut()).enumerate()
+        {
+            let (rgb, a) = outcomes[(byte >> (7 - sample)) & 1];
+            pixel.copy_from_slice(&rgb);
+            *opacity = a;
+        }
+    }
+
+    let (width, height) = (width as usize, height as usize);
+    let row_bytes = width.div_ceil(8);
+    let mut rgb = Vec::with_capacity(width.saturating_mul(height).saturating_mul(3));
+    let mut alpha = Vec::with_capacity(if with_alpha {
+        width.saturating_mul(height)
+    } else {
+        0
+    });
+    for row in 0..height {
+        let mut left = width;
+        for at in 0..row_bytes {
+            let byte = row
+                .checked_mul(row_bytes)
+                .and_then(|start| start.checked_add(at))
+                .and_then(|index| data.get(index))
+                .copied()
+                .unwrap_or(0);
+            let take = left.min(8);
+            rgb.extend_from_slice(&colours[usize::from(byte)][..take * 3]);
+            if with_alpha {
+                alpha.extend_from_slice(&alphas[usize::from(byte)][..take]);
+            }
+            left -= take;
+        }
+    }
+    Some((rgb, alpha))
 }
 
 /// The sample loop, a sample at a time: each component read through
@@ -5880,8 +5971,17 @@ fn apply_soft_mask(image: &mut DecodedImage, mask: &DecodedImage) {
     image.alpha = alpha;
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Calls of [`read_bits`] on this thread: what
+    /// `one_bit_samples_expand_through_the_table` counts.
+    static BITS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Reads `bits` bits starting at bit offset `at`, big-endian.
 fn read_bits(data: &[u8], at: usize, bits: u32) -> u32 {
+    #[cfg(test)]
+    BITS_READ.with(|count| count.set(count.get() + 1));
     let mut value = 0u32;
     for i in 0..bits.min(16) {
         let index = at + i as usize;
@@ -6279,6 +6379,71 @@ mod tests {
             assert_eq!(conversions() - before, 256, "the loop reads each of these");
             assert_eq!(read, general_pixels(&grey, &layout));
         }
+    }
+
+    /// **A one-bit image expands through its table to the samples the bit
+    /// loop reads.**
+    ///
+    /// Every byte value, laid out as rows of every width from one sample to
+    /// seventeen — so most rows end inside a byte — with one row more than
+    /// the stream holds, which reads as zeros; DeviceGray and a two-colour
+    /// palette; `/Decode` absent, `[1 0]` and written out as `[0 1]`; as an
+    /// image and as a mask, whose two `/Decode`s are its two polarities; and
+    /// with no colour key and keys selecting 0, 1 and both. Each comes out as
+    /// the general loop gives it, and not one bit is read on its own.
+    #[test]
+    fn one_bit_samples_expand_through_the_table() {
+        use super::{general_pixels, image_pixels, SampleLayout, BITS_READ};
+        let bits_read = || BITS_READ.with(std::cell::Cell::get);
+
+        let bytes: Vec<u8> = (0..=255).collect();
+        let palette = ColorSpace::Indexed {
+            base: Box::new(ColorSpace::DeviceRgb),
+            lookup: vec![31, 58, 147, 242, 201, 76],
+            high: 1,
+        };
+        let spaces = [ColorSpace::DeviceGray, palette];
+        let decodes: [&[(f64, f64)]; 3] = [&[], &[(1.0, 0.0)], &[(0.0, 1.0)]];
+        let keys: [Option<&[(u32, u32)]>; 4] =
+            [None, Some(&[(0, 0)]), Some(&[(1, 1)]), Some(&[(0, 1)])];
+        let mut compared = 0usize;
+        for width in 1..=17u32 {
+            let row_bytes = width.div_ceil(8) as usize;
+            let height = (bytes.len() / row_bytes) as u32 + 1;
+            for space in &spaces {
+                for decode in decodes {
+                    for mask in [false, true] {
+                        for color_key in keys {
+                            let layout = SampleLayout {
+                                width,
+                                height,
+                                bpc: 1,
+                                n: 1,
+                                space,
+                                decode,
+                                mask,
+                                color_key,
+                            };
+                            let before = bits_read();
+                            let table = image_pixels(&bytes, &layout);
+                            assert_eq!(
+                                bits_read(),
+                                before,
+                                "width {width}: the table read a bit on its own"
+                            );
+                            let read = general_pixels(&bytes, &layout);
+                            assert!(
+                                table == read,
+                                "width {width}, {space:?}, /Decode {decode:?}, mask {mask}, \
+                                 key {color_key:?}: the table and the bit loop part"
+                            );
+                            compared += read.0.len() / 3;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 500_000, "{compared} samples compared");
     }
 
     fn expand(dict: &str) -> String {

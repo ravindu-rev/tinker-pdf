@@ -190,8 +190,13 @@ An image XObject and an inline image are read by one sample loop. An 8-bit
 DeviceGray or DeviceRGB image whose `/Decode` pairs are each `[0 1]` or
 absent, with no colour key and no `/ImageMask`, is its own colour: its
 samples are copied, a grey replicated to three, and none is converted
-(`an_eight_bit_device_image_converts_by_identity`); every other image is read
-a sample at a time through its space.
+(`an_eight_bit_device_image_converts_by_identity`). A one-bit image of one
+component — a fax, a JBIG2 region, a one-bit Flate or uncompressed stream, an
+`/ImageMask` — has two samples: what each becomes through `/Decode`, its
+space and a colour key, or a mask's paint, is worked out once, and the image
+is expanded a byte at a time through a 256-entry table of eight samples
+(`one_bit_samples_expand_through_the_table`). Every other image is read a
+sample at a time through its space.
 
 **JPEG and JPEG 2000 images** are drawn in the `/ColorSpace` their
 dictionary names (8.9.5) — a codestream's own colour specification gives way
