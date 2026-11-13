@@ -91,11 +91,21 @@ space the group machinery handles.
 `crates/tinker-pdf/tests/icc_census.rs` reads the header and tag table of every
 ICC profile in the corpora — bytes only, sharing no code with the colour
 crate, so it cannot agree with a parser that is wrong — and counts them by
-kind (matrix/TRC, grey, LUT), device class and version;
-`what_the_parser_makes_of_the_corpus_profiles` then hands them to the parser.
-A file that carries a profile stream is not a file that paints through an
-`ICCBased` space: a PDF/A file's `/OutputIntent` declares the space it was
-prepared for whether or not any content is painted through it.
+kind (matrix/TRC, grey, LUT), device class and version; the structure at
+every table tag (`A2B*`, `B2A*`, `D2B*`, `B2D*`, `gamt`); and the profiles
+of class `link` and `nmcl`, those carrying `gamt` or `ncl2`, and those of
+version 5 with each tag's structure.
+`what_the_parser_makes_of_the_corpus_profiles` then hands them to the parser
+and holds its answer as a ratchet: `STREAMS` exact, being the lock file's
+population, `COMPILED` a floor and `REFUSED_SHAPES` a ceiling, so a run that
+compiles more prints the gain to record, and one that compiles fewer, or
+refuses a profile in a shape not listed, fails. Each refused profile is
+printed whole: its version, class and spaces, and each tag with its
+structure. `a_census_that_compiles_more_is_a_gain_and_less_a_failure` holds
+the comparison on every run, the corpus fetched or not. A file that carries
+a profile stream is not a file that paints through an `ICCBased` space: a
+PDF/A file's `/OutputIntent` declares the space it was prepared for whether
+or not any content is painted through it.
 
 ### Stage 1: transparency-group colour spaces
 
@@ -1192,7 +1202,8 @@ intent's forward transform now.
 
 ##### The census
 
-`icc_census.rs` becomes a ratchet (RC-20.2): `COMPILED` a floor and
+`icc_census.rs` is a ratchet (RC-20.2, [What the corpus
+carries](#what-the-corpus-carries)): `COMPILED` a floor and
 `REFUSED_SHAPES` a ceiling, so a parser that reads one more corpus profile
 records a gain and one that reads fewer fails; `STREAMS` stays exact, the
 lock file's population. The censuses print each refused profile's version,

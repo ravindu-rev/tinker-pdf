@@ -17,6 +17,15 @@
 //! it cannot agree with a parser that is wrong; a census taken with the
 //! decoder's own reader would confirm whatever that reader believed.
 //!
+//! `what_the_parser_makes_of_the_corpus_profiles` then asks the parser and
+//! holds its answer as a ratchet: [`STREAMS`] exact, being the lock file's
+//! population, [`COMPILED`] a floor and [`REFUSED_SHAPES`] a ceiling. A run
+//! that compiles more, or refuses no profile in one of the listed shapes,
+//! prints the gain to record; one that compiles fewer, or refuses a profile
+//! in a shape the list does not hold, fails.
+//! `a_census_that_compiles_more_is_a_gain_and_less_a_failure` holds that
+//! comparison on every run, with a corpus or without one.
+//!
 //! ```sh
 //! cargo test -p tinker-pdf --test icc_census -- --ignored --nocapture
 //! ```
@@ -27,10 +36,11 @@ use std::path::{Path, PathBuf};
 use tinker_pdf::Document;
 use tinker_pdf_cos::{ObjRef, XrefEntry};
 
-/// A four-byte ICC signature, as text.
+/// A four-byte ICC signature, as text: empty where the four bytes are not
+/// all inside `bytes`.
 fn sig(bytes: &[u8], at: usize) -> String {
     bytes
-        .get(at..at + 4)
+        .get(at..at.saturating_add(4))
         .map(|s| String::from_utf8_lossy(s).trim_end().to_string())
         .unwrap_or_default()
 }
@@ -48,10 +58,34 @@ struct Profile {
     pcs: String,
     version: u32,
     tags: Vec<String>,
+    /// The type signature each tag's data starts with, in `tags`' order: the
+    /// structure a table tag holds (`mft2`, `mAB`, `mpet`, …), empty where the
+    /// tag's offset falls outside the profile.
+    kinds: Vec<String>,
     size: usize,
 }
 
 impl Profile {
+    /// The version as ICC.1 7.2.4 writes it: the major revision, then the
+    /// minor and bug-fix revisions a nibble each, `4.3.0`.
+    fn version_text(&self) -> String {
+        format!(
+            "{}.{}.{}",
+            self.version >> 24,
+            (self.version >> 20) & 0xF,
+            (self.version >> 16) & 0xF
+        )
+    }
+
+    /// Each tag with the structure its data holds, `A2B0=mft2`.
+    fn tag_kinds(&self) -> Vec<String> {
+        self.tags
+            .iter()
+            .zip(&self.kinds)
+            .map(|(tag, kind)| format!("{tag}={kind}"))
+            .collect()
+    }
+
     /// Whether the three matrix columns and three tone curves are all present,
     /// which is what a transform can be built from without any LUT.
     fn is_matrix_trc(&self) -> bool {
@@ -99,12 +133,18 @@ fn read_profile(bytes: &[u8]) -> Option<Profile> {
         return None;
     }
     let mut tags = Vec::with_capacity(count);
+    let mut kinds = Vec::with_capacity(count);
     for i in 0..count {
         let at = 132 + i * 12;
         if bytes.len() < at + 12 {
             break;
         }
         tags.push(sig(bytes, at));
+        // A tag table entry is its signature, its data's offset and its size
+        // (ICC.1 7.3, Table 24); the data starts with its type's signature.
+        let kind =
+            u32_at(bytes, at + 4).map_or_else(String::new, |offset| sig(bytes, offset as usize));
+        kinds.push(kind);
     }
     Some(Profile {
         class: sig(bytes, 12),
@@ -112,6 +152,7 @@ fn read_profile(bytes: &[u8]) -> Option<Profile> {
         pcs: sig(bytes, 20),
         version: u32_at(bytes, 8)?,
         tags,
+        kinds,
         size: bytes.len(),
     })
 }
@@ -284,6 +325,64 @@ fn census_of_the_corpus_icc_profiles() {
         println!("  {count:>6}  {kind}");
     }
 
+    // What the rest of the format brings the corpus: the classes, tags and
+    // version the output direction, links, the gamut tag, named colours and
+    // ICC.2 add (`docs/design/icc.md`, "ICC engine completion").
+    let of_class = |class: &str| all.iter().filter(|p| p.class == class).count();
+    let carrying = |tag: &str| {
+        all.iter()
+            .filter(|p| p.tags.iter().any(|have| have == tag))
+            .count()
+    };
+    let carrying_one_of = |prefix: &str| {
+        all.iter()
+            .filter(|p| p.tags.iter().any(|have| have.starts_with(prefix)))
+            .count()
+    };
+    println!("\n--- beyond the input direction ---");
+    println!(
+        "profiles of class link                {:>6}",
+        of_class("link")
+    );
+    println!(
+        "profiles of class nmcl                {:>6}",
+        of_class("nmcl")
+    );
+    println!(
+        "profiles carrying a B2A* tag          {:>6}",
+        carrying_one_of("B2A")
+    );
+    println!(
+        "profiles carrying a D2B* tag          {:>6}",
+        carrying_one_of("D2B")
+    );
+    println!(
+        "profiles carrying a B2D* tag          {:>6}",
+        carrying_one_of("B2D")
+    );
+    println!(
+        "profiles carrying gamt                {:>6}",
+        carrying("gamt")
+    );
+    println!(
+        "profiles carrying ncl2                {:>6}",
+        carrying("ncl2")
+    );
+    let v5: Vec<&Profile> = all.iter().filter(|p| p.version >> 24 == 5).collect();
+    println!("version 5 profiles                    {:>6}", v5.len());
+    let mut v5_tags: BTreeMap<String, u32> = BTreeMap::new();
+    for profile in &v5 {
+        for tag in profile.tag_kinds() {
+            *v5_tags.entry(tag).or_default() += 1;
+        }
+    }
+    if !v5_tags.is_empty() {
+        println!("their tags, each with the structure it holds:");
+        for (tag, count) in &v5_tags {
+            println!("  {count:>6}  {tag}");
+        }
+    }
+
     let show = |name: &str, map: &BTreeMap<String, u32>| {
         println!("\n{name}:");
         let mut rows: Vec<(&String, &u32)> = map.iter().collect();
@@ -368,6 +467,7 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
     let mut parsed_no_transform = 0u32;
     let mut refused: BTreeMap<String, u32> = BTreeMap::new();
     let mut shapes: Vec<String> = Vec::new();
+    let mut refused_profiles: BTreeMap<String, u32> = BTreeMap::new();
     for bytes in &streams {
         match IccProfile::parse(bytes) {
             Ok(profile) => {
@@ -387,6 +487,22 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
                     sig(bytes, 20)
                 );
                 shapes.push(format!("{error:?}: {shape}"));
+                // And the whole of it, read from the bytes as the first census
+                // reads them: its version, and each tag with the structure its
+                // data holds, so a table tag says which of `mft1`, `mft2`,
+                // `mAB`, `mBA` or `mpet` it is.
+                let detail = match read_profile(bytes) {
+                    Some(found) => format!(
+                        "{error:?}: v{} {} {} -> {}: {}",
+                        found.version_text(),
+                        found.class,
+                        found.space,
+                        found.pcs,
+                        found.tag_kinds().join(" ")
+                    ),
+                    None => format!("{error:?}: {shape}: no tag table to read"),
+                };
+                *refused_profiles.entry(detail).or_default() += 1;
                 let name = match error {
                     IccError::TooShort => "TooShort",
                     IccError::NotAProfile => "NotAProfile",
@@ -431,30 +547,222 @@ what each refused profile is (class, data space, PCS):"
     for shape in &shapes {
         println!("  {shape}");
     }
+    println!(
+        "
+each refused profile (version, class, data space -> PCS, each tag=its structure):"
+    );
+    for (detail, count) in &refused_profiles {
+        println!("  {count:>6}  {detail}");
+    }
 
-    // Pinned against `corpus/corpora.lock` as it stands, September 2026.
+    // The population is the lock file's, so it is exact; what the parser
+    // makes of it is the ratchet.
     assert_eq!(total, STREAMS, "the corpus's profile population moved");
-    assert_eq!(compiled, COMPILED, "the compiled count moved");
+    match ratchet(compiled, &shapes, COMPILED, &REFUSED_SHAPES) {
+        Ok(gain) => {
+            if gain.compiled > 0 {
+                println!(
+                    "\ngain: {compiled} compile, {} more than COMPILED's {COMPILED}; \
+                     raise it to record them",
+                    gain.compiled
+                );
+            }
+            for shape in &gain.cleared {
+                println!("gain: no profile is refused as `{shape}`; take it out of REFUSED_SHAPES");
+            }
+        }
+        Err(losses) => panic!("icc-reality: {}", losses.join("; ")),
+    }
+}
+
+/// What a census run gained against the pins: [`ratchet`]'s answer when it
+/// lost nothing.
+#[derive(Debug, PartialEq, Eq)]
+struct Gain {
+    /// How many more profiles compiled than the floor.
+    compiled: u32,
+    /// The ceiling's shapes no profile was refused in, in the ceiling's order.
+    cleared: Vec<String>,
+}
+
+/// **The ratchet.** A run's compiled count against a floor and its refused
+/// shapes against a ceiling: what it gained, or else each thing it lost — a
+/// compiled count under the floor, and every refused shape the ceiling does
+/// not hold. A gain is never a failure, so a parser that reads one more
+/// corpus profile keeps the census green, and the commit that records the run
+/// raises the floor to it and narrows the ceiling.
+fn ratchet(
+    compiled: u32,
+    shapes: &[String],
+    floor: u32,
+    ceiling: &[&str],
+) -> Result<Gain, Vec<String>> {
+    let mut losses = Vec::new();
+    if compiled < floor {
+        losses.push(format!(
+            "the compiled count fell from {floor} to {compiled}"
+        ));
+    }
+    for shape in shapes {
+        if !ceiling.contains(&shape.as_str()) {
+            losses.push(format!(
+                "a profile is refused as `{shape}`, a shape REFUSED_SHAPES does not hold"
+            ));
+        }
+    }
+    if !losses.is_empty() {
+        return Err(losses);
+    }
+    let cleared = ceiling
+        .iter()
+        .filter(|pinned| !shapes.iter().any(|shape| shape.as_str() == **pinned))
+        .map(|pinned| (*pinned).to_string())
+        .collect();
+    Ok(Gain {
+        compiled: compiled - floor,
+        cleared,
+    })
+}
+
+/// **The ratchet, on counts and shapes made up here.** It needs no corpus, so
+/// the comparison the parser census rests on is held on every run of the
+/// suite, where the census itself is ignored.
+#[test]
+fn a_census_that_compiles_more_is_a_gain_and_less_a_failure() {
+    fn owned(list: &[&str]) -> Vec<String> {
+        list.iter().map(|shape| (*shape).to_string()).collect()
+    }
+    const LAB: &str = "UnsupportedSpace: mntr LAB -> XYZ";
+    const INK: &str = "UnsupportedSpace: prtr CMYK -> Lab";
+    const NEW: &str = "MissingTags: scnr RGB -> XYZ";
+    let ceiling = [LAB, INK];
+    let held = Gain {
+        compiled: 0,
+        cleared: Vec::new(),
+    };
+
+    // As pinned: nothing gained and nothing lost.
+    assert_eq!(ratchet(100, &owned(&[LAB, INK]), 100, &ceiling), Ok(held));
+    // More compiled is a gain, and so is a listed shape no profile has now.
     assert_eq!(
-        shapes, REFUSED_SHAPES,
-        "the set of profiles this build cannot make a transform of changed"
+        ratchet(103, &owned(&[LAB]), 100, &ceiling),
+        Ok(Gain {
+            compiled: 3,
+            cleared: owned(&[INK]),
+        })
+    );
+    assert_eq!(
+        ratchet(100, &[], 100, &ceiling),
+        Ok(Gain {
+            compiled: 0,
+            cleared: owned(&[LAB, INK]),
+        })
+    );
+    // Fewer compiled fails, whatever else improved.
+    assert_eq!(
+        ratchet(99, &[], 100, &ceiling),
+        Err(owned(&["the compiled count fell from 100 to 99"]))
+    );
+    // A refused shape the ceiling does not hold fails, even beside a gain.
+    let refused = ratchet(120, &owned(&[LAB, NEW]), 100, &ceiling).unwrap_err();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(refused[0].contains(NEW), "{refused:?}");
+    // Both at once: each loss is named.
+    let both = ratchet(98, &owned(&[NEW, INK]), 100, &ceiling).unwrap_err();
+    assert_eq!(both.len(), 2, "{both:?}");
+    assert!(both[0].contains("fell from 100 to 98"), "{both:?}");
+    assert!(both[1].contains(NEW), "{both:?}");
+    // The file's own pins hold against themselves.
+    assert_eq!(
+        ratchet(COMPILED, &owned(&REFUSED_SHAPES), COMPILED, &REFUSED_SHAPES),
+        Ok(Gain {
+            compiled: 0,
+            cleared: Vec::new(),
+        })
     );
 }
 
-/// Profile streams across the five corpora.
+/// **The censuses' byte reader, on a profile made up here**: the version as
+/// ICC writes it, each tag with the structure its data starts with — none for
+/// a tag whose offset is past the end — and the families the LUT census groups
+/// table tags into. These are what the refused profiles' lines and the counts
+/// beyond the input direction are made of, so they are held without a corpus.
+#[test]
+fn the_byte_reader_names_each_tag_and_the_structure_it_holds() {
+    let table = 132 + 3 * 12;
+    let mut bytes = vec![0u8; table + 8];
+    bytes[8..12].copy_from_slice(&[0x04, 0x30, 0x00, 0x00]);
+    bytes[12..16].copy_from_slice(b"prtr");
+    bytes[16..20].copy_from_slice(b"CMYK");
+    bytes[20..24].copy_from_slice(b"Lab ");
+    bytes[36..40].copy_from_slice(b"acsp");
+    bytes[128..132].copy_from_slice(&3u32.to_be_bytes());
+    let entries: [(&[u8; 4], usize); 3] =
+        [(b"A2B0", table), (b"B2A0", table + 4), (b"gamt", 10_000)];
+    for (i, (name, offset)) in entries.iter().enumerate() {
+        let at = 132 + i * 12;
+        bytes[at..at + 4].copy_from_slice(*name);
+        bytes[at + 4..at + 8].copy_from_slice(&(*offset as u32).to_be_bytes());
+        bytes[at + 8..at + 12].copy_from_slice(&4u32.to_be_bytes());
+    }
+    bytes[table..table + 4].copy_from_slice(b"mft2");
+    bytes[table + 4..table + 8].copy_from_slice(b"mBA ");
+
+    let profile = read_profile(&bytes).expect("the header and tag table read");
+    assert_eq!(profile.version_text(), "4.3.0");
+    assert_eq!(
+        (
+            profile.class.as_str(),
+            profile.space.as_str(),
+            profile.pcs.as_str()
+        ),
+        ("prtr", "CMYK", "Lab")
+    );
+    assert_eq!(profile.tag_kinds(), ["A2B0=mft2", "B2A0=mBA", "gamt="]);
+    let families: Vec<Option<&str>> = profile
+        .tags
+        .iter()
+        .map(|tag| table_family(tag.as_str()))
+        .collect();
+    assert_eq!(families, [Some("A2B*"), Some("B2A*"), Some("gamt")]);
+    assert_eq!(table_family("D2B3"), Some("D2B*"));
+    assert_eq!(table_family("B2D0"), Some("B2D*"));
+    assert_eq!(table_family("rXYZ"), None);
+    assert_eq!(table_family("A2"), None);
+    // A version 2 header, its minor and bug-fix nibbles, and a stream without
+    // the profile magic.
+    bytes[8..12].copy_from_slice(&[0x02, 0x10, 0x00, 0x00]);
+    assert_eq!(
+        read_profile(&bytes).expect("a profile").version_text(),
+        "2.1.0"
+    );
+    bytes[9] = 0x42;
+    assert_eq!(
+        read_profile(&bytes).expect("a profile").version_text(),
+        "2.4.2"
+    );
+    bytes[36..40].copy_from_slice(b"none");
+    assert!(read_profile(&bytes).is_none(), "no acsp, no profile");
+}
+
+/// Profile streams across the five corpora: the population
+/// `corpus/corpora.lock` fetches, so a census that finds another number has
+/// read another corpus.
 const STREAMS: u32 = 3235;
 
-/// Of those, the ones that compile to a transform.
-///
-/// It was 3 227 before Tier 2: the v4 `mAB ` tag and a grey profile with a Lab
-/// connection space are the two that joined.
+/// Of those, the fewest that may compile to a transform: a floor. A run that
+/// compiles more prints the gain, and the commit recording that run raises
+/// the floor to it; one that compiles fewer fails.
 const COMPILED: u32 = 3229;
 
-/// **Every profile left, and why each is refused.**
+/// **The shapes a refused profile may have**: a ceiling. A run in which no
+/// profile is refused in one of these prints that as a gain, and the commit
+/// recording it takes the shape out; a profile refused in any other shape
+/// fails the census.
 ///
 /// All three shapes are profiles that contradict themselves rather than
 /// capabilities this build lacks, which is the distinction the roadmap row
-/// wanted and the reason this list is the exit criterion rather than a count:
+/// wanted and the reason this list is an exit criterion rather than a count:
 ///
 /// - `mntr LAB -> XYZ` carries `rXYZ`/`gXYZ`/`bXYZ` columns, and a matrix
 ///   applies to linear RGB. Lab is not that, and multiplying it by one
@@ -463,6 +771,11 @@ const COMPILED: u32 = 3229;
 ///   so nothing says what its components mean.
 /// - `prtr CMYK -> Lab` reaches the grey branch, which means it carries a
 ///   single `kTRC` and no matrix — one curve for four channels of ink.
+///
+/// A table beside such a model is what the profile converts through
+/// (`docs/design/icc.md`, "The table each intent compiles"), so a profile of
+/// one of these shapes carrying an `A2B*` table that reads compiles, and its
+/// shape clears as a gain.
 const REFUSED_SHAPES: [&str; 3] = [
     "UnsupportedSpace: mntr LAB -> XYZ",
     "UnsupportedSpace: mntr YYY -> XYZ",
@@ -477,6 +790,11 @@ const REFUSED_SHAPES: [&str; 3] = [
 /// `mBA ` are v4's, which add per-channel curves either side and carry their
 /// own offsets. Which of the four the corpus actually uses decides whether this
 /// is one structure or four.
+///
+/// Every table tag is counted so, by [`table_family`]: the forward `A2B*`, the
+/// inverse `B2A*` an output transform reads, the multi-process `D2B*` and
+/// `B2D*`, and the gamut tag `gamt` (`docs/design/icc.md`, "ICC engine
+/// completion").
 #[test]
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn census_of_the_lut_profiles() {
@@ -493,10 +811,10 @@ fn census_of_the_lut_profiles() {
     pdfs_under(&root, &mut files);
     files.sort();
 
-    let mut kinds: BTreeMap<String, u32> = BTreeMap::new();
+    let mut tags: BTreeMap<&str, u32> = BTreeMap::new();
+    let mut kinds: BTreeMap<(&str, String), u32> = BTreeMap::new();
     let mut shapes: BTreeMap<String, u32> = BTreeMap::new();
-    let mut grids: BTreeMap<u8, u32> = BTreeMap::new();
-    let mut seen = 0u32;
+    let mut grids: BTreeMap<(&str, u8), u32> = BTreeMap::new();
 
     for path in &files {
         let Ok(bytes) = std::fs::read(path) else {
@@ -532,45 +850,64 @@ fn census_of_the_lut_profiles() {
                     break;
                 }
                 let name = sig(&data, at);
-                if !name.starts_with("A2B") {
+                let Some(family) = table_family(&name) else {
                     continue;
-                }
+                };
                 let Some(offset) = u32_at(&data, at + 4).map(|v| v as usize) else {
                     continue;
                 };
-                if data.len() < offset + 12 {
+                if data.len().saturating_sub(12) < offset {
                     continue;
                 }
-                seen += 1;
+                *tags.entry(family).or_default() += 1;
                 let kind = sig(&data, offset);
-                *kinds.entry(kind.clone()).or_default() += 1;
                 if kind == "mft1" || kind == "mft2" {
                     let inputs = data[offset + 8];
                     let outputs = data[offset + 9];
                     let grid = data[offset + 10];
                     *shapes
-                        .entry(format!("{kind} {inputs}->{outputs}"))
+                        .entry(format!("{family} {kind} {inputs}->{outputs}"))
                         .or_default() += 1;
-                    *grids.entry(grid).or_default() += 1;
+                    *grids.entry((family, grid)).or_default() += 1;
                 }
+                *kinds.entry((family, kind)).or_default() += 1;
             }
         }
     }
 
-    println!("lut-census: RAN\n{seen} A2B* tags\n");
-    println!("structure at the tag:");
-    for (kind, count) in &kinds {
-        println!("  {count:>5}  {kind}");
+    println!("lut-census: RAN");
+    for (family, count) in &tags {
+        println!("{count} {family} tags");
+    }
+    println!("\nstructure at the tag:");
+    for ((family, kind), count) in &kinds {
+        println!("  {count:>5}  {family} {kind}");
     }
     println!("\nshape (v2 tags only):");
     let mut rows: Vec<(&String, &u32)> = shapes.iter().collect();
     rows.sort_by(|a, b| b.1.cmp(a.1));
-    for (shape, count) in rows.iter().take(10) {
+    for (shape, count) in rows.iter().take(16) {
         println!("  {count:>5}  {shape}");
     }
-    println!("\nCLUT grid points per axis:");
-    for (grid, count) in &grids {
-        println!("  {count:>5}  {grid}");
+    println!("\nCLUT grid points per axis (v2 tags only):");
+    for ((family, grid), count) in &grids {
+        println!("  {count:>5}  {family} {grid}");
+    }
+}
+
+/// The table tags [`census_of_the_lut_profiles`] reads the structure of, by
+/// family: the forward and inverse tables of ICC.1 9.2, the multi-process
+/// tags beside them, and the gamut tag.
+fn table_family(tag: &str) -> Option<&'static str> {
+    if tag == "gamt" {
+        return Some("gamt");
+    }
+    match tag.get(..3)? {
+        "A2B" => Some("A2B*"),
+        "B2A" => Some("B2A*"),
+        "D2B" => Some("D2B*"),
+        "B2D" => Some("B2D*"),
+        _ => None,
     }
 }
 
