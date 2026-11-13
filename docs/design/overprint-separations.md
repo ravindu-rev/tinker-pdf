@@ -373,3 +373,352 @@ is the owner's (H-81), and `tpdf render --overprint` is the tool for it.
 | A `k` colour under `/DefaultCMYK` overprints differently from what 8.6.5.6's note reads | 8.6.5.7 and H-135 decide it, stated above; RC-03.5's twin pins it |
 | A page names more spots than the canvas can carry | RC-04's cap and its warning: the spots past it composite through their alternates, named |
 | A non-separable mode on ink approximates through light | As today on `CmykA8`, counted and reported (`RenderWarning::ApproximatedGroupBlend`); spots take `Normal` there (11.7.4.2) and are not approximated |
+
+## Separations
+
+RC-04: a page rendered to its plates — one image of ink per colorant — on the
+canvas the overprint simulation draws on, and the inventory of spot colorants
+a page names.
+
+### Scope
+
+- **The page's spot-colorant inventory**: a facade query listing, once each,
+  every spot colorant the page's resource scopes name.
+- **The CMYK-plus-spot format** of `Canvas` in `tinker-pdf-raster`: four
+  process channels and a channel per spot beside an alpha, the format RC-03
+  composites overprint on.
+- **A plate plan**: the process plates and the inventory's spots, each drawn
+  as its own plate, composited through its alternate onto the process plates,
+  or disabled.
+- **Every paint reaching plates**: flat colours, glyphs, stencil masks,
+  images of any component count, shadings, meshes, coloured and uncoloured
+  patterns, groups and soft masks.
+- **Plates handed out** as one-channel images of ink with their colorant's
+  name and kind, for the separations writers (FO-03, FO-04).
+- **At least 64 spot plates**, under a byte bound a page's plates may not
+  pass.
+
+### Non-goals
+
+- **Writing separations files**: FO-03 and FO-04 write them, from what this
+  hands them.
+- **Halftoning a plate**, transfer functions, black generation and
+  undercolour removal (RC-08), and **trapping** (FO-24).
+- **A `/DeviceN`'s `/MixingHints`** — `/Solidities`, `/PrintingOrder`,
+  `/DotGain`. 8.6.6.5 says a processor need not use them, and a composite
+  through the tint transform is what every other path here does.
+- **An output intent's colorants** (14.11.5) as the process set. The process
+  plates are always the four of a CMYK device.
+- **Overprint**: plates are drawn with knockout, every channel a paint does
+  not name erased, as 8.6.7 does with overprint off; RC-03 applies `/OP`,
+  `/op` and `/OPM` on these plates.
+
+### Design
+
+**The format.** `PixelFormat::Plates { spots }` — cyan, magenta, yellow,
+black, then `spots` spot channels in the plan's order, then an alpha,
+interleaved per pixel: `5 + spots` bytes. Every channel is a tint,
+subtractive, complemented through 11.3.5's blend functions as `CmykA8`'s are,
+so four process channels and no spots composite byte for byte as `CmykA8`
+does — RC-04.3's twin. The five formats there are today keep the five-byte
+compositing word they composite through (`encode`, `source_from`, `blend`),
+untouched: a plate paint builds a word of its own width once per paint, a
+slice of `4 + spots` tints, and composites through it, so no light or ink
+render runs a line it did not run before. A canvas is allocated for the
+spots the page's inventory names, never for the cap. `Channels`, RC-03's
+mask, is a set wide enough for every channel the cap admits.
+
+**The plate plan.** The four process plates and the inventory's spots, in
+that order, each with a behaviour:
+
+- **Spot**: its own plate. Every colorant's default.
+- **Composite**: no plate of its own; its paints reach the process plates
+  through its alternate space (*Colours on plates*). Asked of a process
+  colorant, it is read as Spot: the process plates are what a composite lands
+  on.
+- **Disabled**: the colorant keeps its plate while the page is drawn — so it
+  knocks out, and is knocked out by, every other paint exactly as a Spot plate
+  is — and the plate is left out of what is handed back, and out of RC-03's
+  composite.
+
+The overprint simulation draws with every spot a Spot plate.
+
+**Names on plates** (8.6.6.4, 8.6.6.5):
+
+- `Cyan`, `Magenta`, `Yellow` and `Black` are reserved for the process
+  colorants of a CMYK device: in a `/Separation` or a `/DeviceN` they name the
+  process plates, never a spot plate of the same name, and the inventory leaves
+  them out.
+- **`/All`** applies its tint to every colorant available on the device, the
+  process colorants included (8.6.6.4): every plate the canvas carries, Spot
+  or Disabled. A Composite spot has no plate and is not a colorant the device
+  has, so `/All` gives it nothing. `/All` is a `/Separation` name only —
+  8.6.6.5 forbids it in a `/DeviceN` — and a `/DeviceN` naming it reverts to
+  its alternate. Inside a group whose `/CS` is not DeviceCMYK, where the
+  canvas's plates are not the group's colorants (11.7.3's note 2), it is drawn
+  as the group's light draws it.
+- **`/None`** marks nothing (8.6.6.4); a `/DeviceN`'s `/None` components are
+  discarded when it paints its colorants directly, and a `/DeviceN` whose
+  names are all `/None` never paints and never reverts (8.6.6.5).
+- **Available.** A `/Separation` or a plain `/DeviceN` paints its colorants
+  directly when every name it gives, `/None` aside, is available — a process
+  name, or a spot whose plan behaviour is Spot or Disabled — and otherwise
+  reverts to its alternate as a whole. An `NChannel` space is read component
+  by component (8.6.6.5): each component the device has paints its plate, and
+  each it has not — a Composite spot — reaches the process plates through its
+  own alternate, its `/Colorants` entry.
+- **An `NChannel`'s `/Process`.** Components of a CMYK process space — the
+  four reserved names, or the names `/Components` gives a DeviceCMYK or a
+  four-component CMYK `ICCBased` process space — paint the process plates. The
+  components of any other process space are converted together through that
+  space, with the components the names array leaves out at the space's initial
+  values, to light, and the light to ink on the process plates.
+
+**Blend modes on spot plates** (11.7.3, 11.7.4.2): a spot colorant blends
+under a separable, white-preserving mode only — every separable mode but
+`Difference` and `Exclusion`. Under those two and the four non-separable
+modes the mode applies to the process plates alone, the non-separable ones
+through light as on `CmykA8` (`approximated_blends`), and every spot plate
+takes `Normal`. The format knows which of its channels are spots, so the
+substitution is the leaf's.
+
+**Colours on plates.** `ColorSpace::Separation` keeps the colorant names its
+`/Separation` or `/DeviceN` array gives — bytes, `/All` and `/None` told apart
+from a colorant named `All` — and a `/DeviceN`'s `/Subtype`, `/Colorants` and
+`/Process`, and `parse_space` fills them as `describe_space` already reads
+them for `Page::images`. A colour carries its colorants (*A colour carries its
+colorants*, above): `GraphicsState` gains `fill_colorants` and
+`stroke_colorants`, an `Option<Arc<Colorants>>` each — the space's kind, each
+named colorant's tint as a byte, and, for a spot the plan composites, the
+alternate's process values — from `FontSource::colorants`, which generalises
+`resolve_ink` and is asked only by a device that composites plates. The
+renderer maps them by the plan: a Spot or Disabled colorant to its channel, a
+Composite one through its alternate's process values onto the process
+channels, a process name to its process channel, `/All` to every channel and
+`/None` to none; a colour of process kind, which carries no colorants, is its
+light turned into ink (`rgb_to_cmyk`). A DeviceCMYK colour under
+`/DefaultCMYK` keeps its own components there, as *The colorants a paint
+names* settles. A recorded event counts its colorants in `kept_bytes`, so
+`MAX_DISPLAY_LIST_BYTES` still bounds what a recording holds.
+
+**Images on plates.** An image or inline image in DeviceCMYK, `/Separation`,
+`/DeviceN` or an `/Indexed` space over one of them keeps each sample's
+colorant tints through decode beside `DecodedImage`'s light — for a plates
+render alone, so a light render decodes as it does today — and a `/DeviceN`
+image's distinct colours are converted once each through the 4 096-slot table
+its light already goes through. `draw_image`'s policy — the unit square's
+coverage through `fill`, `Area` and `Bilinear` sampling by ratio, the pyramid
+past 128:1 — samples N components onto the plates format with integer weights
+(ruling 4), each plate as the one-component image of its colorant alone would
+be sampled, and a run of abutting plate images is accumulated per plate as a
+light run is per colour, so no seam opens between them. An image in any other
+space reaches the process plates as its light turned into ink. A stencil mask
+paints the fill colour's colorants.
+
+**Shadings on plates.** An axial, radial or function-based shading, painted by
+`sh` or as a shading pattern, in DeviceCMYK, `/Separation` or `/DeviceN`,
+evaluates its function to colorant tints per pixel — from the same evaluation
+`Shading::color_at` converts to light, before `to_rgb`, so the light path keeps
+its bits. A mesh (types 4 to 7) interpolates each colorant tint per pixel in a
+mesh buffer of N components, with the one seamless fill and the fringe spread
+exactly as for light. Any other space is light turned into ink.
+
+**Patterns on plates.** A coloured tiling pattern's cell (`/PaintType 1`) is
+drawn in the page's plates format and tiled channel for channel from the
+page-frame lattice (ruling 5), as `CmykA8` tiles today. An uncoloured one
+(`/PaintType 2`) paints the colorants of the colour its `scn` gave.
+
+**Groups on plates.** A group whose `/CS` is DeviceCMYK, or absent, composites
+in a plates buffer of its own, carrying the page's spots: isolated, or
+non-isolated — adopting its parent's channels as its backdrop and removing
+them at the close, as `adopt_backdrop` and `remove_backdrop` do for ink
+(11.4.4, 11.4.7.2) — and knockout (11.4.5). A spot painted inside it keeps its
+plate (11.7.3's first option: "the spot colour passes directly through the
+group hierarchy"). A group whose `/CS` is another space composites in that
+space with every spot through its alternate (11.7.3's second option), and its
+buffer composites onto the plates as light turned into ink, every spot channel
+under its shape at no ink: a group paints every component (Table 146's last
+row). The group budget, `MAX_GROUP_BUFFERS`, counts a plates buffer as one
+group; its bytes are charged with the page's plates against the byte bound
+below, and a group that would pass it composites as a group of another space
+does, its spots through their alternates, under the cap's warning.
+
+**Soft masks on plates.** A soft mask's group renders in its own space and is
+read as a luminosity or an alpha, as on a light page — 11.7.3 substitutes the
+alternate space for every spot in it — and the mask scales every plate alike.
+
+**The inventory.** `Page::spot_colorants()` lists each spot colorant once, as
+a `SpotColorant` carrying its name, in the order the page's scopes first name
+it: the scope walk `crates/tinker-pdf/src/fontlist.rs` makes (`walk`, and
+`annotation_resources` for the normal appearances), a `/Resources`
+dictionary's entries in the order it holds them — its `/ColorSpace` entries,
+the spaces of its images, shadings, patterns and groups, an `/Indexed` space's
+base, a `/Pattern` space's underlying space, each form's, tiling pattern's,
+Type 3 font's and soft-mask group's own resources where the walk enters them,
+then each annotation's appearance — and within a `/DeviceN` its names in
+array order, then its `/Colorants` keys. It reads spaces with `describe_space`
+(`crates/tinker-pdf/src/resources.rs`), which already keeps the names for
+`Page::images`, rather than a fourth reader. Process names, `/All` and `/None`
+are left out. A scope already walked is not walked again, so a resource cycle
+ends; the walk's own bounds end a walk past them with what was read (ruling
+1); and listing records nothing in `Document::warnings`.
+
+**Plates handed out.** `Page::separations(&SeparationOptions)` renders through
+`render_layer_with`'s one pipeline (ruling 5) — the region, the scale, the
+rotation, antialiasing and every warning as for `Page::render` — on the plates
+format, and hands back `Separations`: each plate the plan does not disable, the
+process plates first and then the spots in inventory order, as a `Plate` with
+its colorant's name, its kind (process or spot) and its tints, one byte a
+pixel, 0 no ink and 255 solid. A plate is not a `Bitmap`: a one-channel bitmap
+reads as grey, light, and a consumer that read a plate as one would invert
+it. With `RenderOptions::transparent` the page's alpha comes back beside the
+plates. `SeparationOptions` carries the `RenderOptions` and each colorant's
+behaviour by name, every one Spot by default.
+
+**The cap, and what it costs.** `MAX_SPOT_PLATES` is 64: 68 colour channels
+and an alpha, 69 bytes a pixel. At `MAX_PAGE_PIXELS` (2^26, in
+`crates/tinker-pdf-render/src/lib.rs`) those are 69 × 2^26 bytes, 4.3 GiB,
+which no render may ask for, so the plates are bounded in bytes as well:
+`MAX_PLATE_BYTES` is 2^30, 1 GiB, every plates buffer live at once counted —
+the page's and each open group's. A spot page at A4 and 300 dpi, 2 480 × 3 508
+pixels, keeps all 64 spot plates in 600 MB; a page at `MAX_PAGE_PIXELS` keeps
+16 bytes a pixel, the four process plates, the alpha and eleven spots. Past
+either cap the spots past it in inventory order are drawn as Composite, and the
+render carries `RenderWarning::PlatesCapped { named, kept }` (ruling 10); the
+overprint simulation does the same. Both caps join `bounds_ledger.rs`.
+`MAX_SPOT_PLATES`'s comic and book columns are zero — a comic archive is
+images, and a book's CSS colours are sRGB, so neither synthesises a
+`/Separation` or a `/DeviceN` — and its fixed-document column is 28: an XPS
+`ContextColor` of 2 and of 5 to 8 channels is synthesised as a `/DeviceN`
+named after its channel count (`crates/tinker-pdf/src/xps/profiles.rs`), and
+2 + 5 + 6 + 7 + 8 names is the most one page can hold. `MAX_PLATE_BYTES`'s
+columns are those plates at each format's page size at 150 dpi, the dpi
+`MAX_PAGE_PIXELS`'s row is at: 5 bytes a pixel for the comic's
+4 167 × 6 250 and the book's 900 × 1 350, and 33 for the fixed document's
+1 275 × 1 650.
+
+**What a light render pays.** Nothing per paint: no colorant is asked for, and
+the two state fields are `None`, a word each, which a `q` copies. The light and
+ink formats composite through their own paths, byte for byte, and every
+fingerprint stands. `PixelFormat` gains a variant, so a `match` over it gains
+an arm; `page_format` hands a caller asking for it `Rgba8`, as it does
+`CmykA8` without `allow_cmyk` and `LabA8`.
+
+**The plates' sum.** A page drawn with every spot Composite paints each spot's
+alternate onto the process plates, and the same page drawn to plates paints it
+on its own plate and erases the process plates there. Folding each spot plate
+back through its tint transform and adding it to the process plates gives the
+composite: byte for byte where every pixel is wholly covered (antialiasing
+off), every paint is opaque and `Normal`, every tint the file states is a whole
+level (`k/255`), and each spot's tint transform is linear from no ink into
+DeviceCMYK — a type 2 function with `N` 1, `C0` all zero and each `C1`
+component 0 or 1 — because then the plate's byte and the composite's are one
+rounding of one number; and within one level of 255 per channel otherwise,
+where a partly covered pixel is two roundings on plates and one in the
+composite. RC-04.10's test holds that equality.
+
+**The seam RC-03 takes.** RC-03 composites on this format through `Channels`:
+the renderer turns a colour's kind, its colorants and the state's flags into
+the set of channels a paint marks, by RC-03's table and this plan, and the
+leaf composites the rest as the backdrop.
+
+### Milestones
+
+1. **RC-04.2 — the inventory.** `separations.rs` (new):
+   `the_colorant_inventory_is_every_spot_its_resources_name` — over fixtures
+   putting spots in each scope and each space kind, the inventory equals the
+   set the test reads from the fixture's own resource dictionaries, each once,
+   in the walk's order; a spot only an unreachable object names is absent; a
+   resource cycle and a walk past its bound end with what was read; listing
+   adds nothing to `Document::warnings`; the `render_page` fuzz target calls
+   it.
+2. **RC-04.3 — the format.** `canvas.rs`:
+   `four_process_channels_composite_as_cmyka8_does` (the same masks, inks,
+   alphas and separable modes give C, M, Y, K and alpha byte-identical to a
+   `CmykA8` canvas), `a_paint_knocks_out_the_channels_it_does_not_name`,
+   `sixty_eight_channels_each_keep_their_own_ink` and
+   `a_canvas_past_the_channel_cap_is_refused_by_name`; every existing
+   `canvas.rs` test unchanged.
+3. **RC-04.4 — transparency on plates.** `canvas.rs`:
+   `spot_groups_composite_as_cmyk_groups_do` (isolated, non-isolated and
+   knockout groups of process ink give `CmykA8`'s bytes, backdrop removal
+   included), `a_spot_under_a_non_isolated_group_comes_back_as_it_went_in`,
+   and `non_separable_modes_reach_spot_channels_as_transcribed` (`Normal` on
+   every spot channel under `Difference`, `Exclusion` and the non-separable
+   modes, the mode on the process channels).
+4. **RC-04.5 — names in the colour model.** `tinker-pdf-color`'s
+   `a_separation_keeps_its_colorant_names` and `resources.rs`'s
+   `parse_space_and_describe_space_read_the_same_names` (a `/Separation`, a
+   `/DeviceN` with attributes, `/All`, `/None`, a colorant named `All` inside a
+   `/DeviceN`, and an `/Indexed` over a `/DeviceN`); `colour_spaces.rs`,
+   `writer_tints.rs` and every fingerprint unchanged.
+5. **RC-04.6 — a colour carries its colorants.** `interpret.rs`:
+   `a_colour_carries_the_colorants_its_space_answers` (each operator path
+   records them; `cs` resets them to the space's initial tints; `rg` and `g`
+   carry none; `Q` restores them; a device that composites no plates asks for
+   none).
+6. **RC-04.7 — the resources answer.** `resources.rs`:
+   `the_seam_answers_each_spaces_colorants` (DeviceCMYK, a `/Separation`, a
+   `/DeviceN` naming a process colorant, `/All`, `/None`, an `NChannel` with a
+   CMYK and an RGB `/Process`, an `/Indexed` over a `/DeviceN` and a `k`
+   colour under `/DefaultCMYK`); `display.rs`:
+   `a_recorded_state_counts_its_colorants`.
+7. **RC-04.8 — flat colours on plates.** `tinker-pdf-render`:
+   `a_spot_paint_lands_on_its_plate_and_knocks_out_the_rest` (fills, strokes,
+   a glyph and a stencil in a `/Separation`, a `/DeviceN` and DeviceCMYK put
+   exactly their tints on their plates and none on the others) and
+   `process_plates_draw_as_the_ink_canvas_does` (a page in DeviceCMYK,
+   DeviceGray and DeviceRGB draws C, M, Y and K byte-identical to its
+   `CmykA8` render).
+8. **RC-04.9 — groups and coloured patterns.** `tinker-pdf-render`:
+   `a_group_on_plates_composites_as_a_cmyk_group_does`,
+   `a_spot_inside_a_group_keeps_its_plate` (and through an RGB group, its
+   alternate on the process plates), `a_coloured_cell_tiles_its_plates`.
+9. **RC-04.10 — separations on the facade.** `separations.rs`:
+   `n_spots_render_n_plus_four_plates_whose_sums_reproduce_the_composite` —
+   for 1, 2 and 8 spots in `/Separation` and `/DeviceN`, DeviceCMYK
+   alternates, beside process fills and text, the plates' sum equals the page
+   drawn with every spot Composite by *The plates' sum*;
+   `each_plate_behaviour_paints_as_it_says` (Spot, Composite, Disabled, and
+   Composite asked of a process colorant); `render_regions.rs`'s
+   `separation_tiles_are_the_page_s_plates`; both builds.
+10. **RC-04.11 — images of any component count.** `image.rs`:
+    `each_plate_of_an_image_samples_as_its_one_component_image` (1:1, 2:1 and
+    3.7:1 down, 4× up with and without interpolation, past 128:1) and
+    `a_run_of_abutting_plate_images_leaves_no_seam`.
+11. **RC-04.12 — an image's samples on plates.** `separations.rs`:
+    `an_image_in_each_ink_space_lands_on_its_plates` (stored and inline, at
+    1:1 and 2:1, the tints from the samples, `/Decode` and the palette).
+12. **RC-04.13 — shadings on plates.** `separations.rs`:
+    `a_shading_in_each_ink_space_lands_on_its_plates` (types 1, 2 and 3, the
+    tint the shading's own function gives at each pixel centre).
+13. **RC-04.14 — meshes on plates.** `mesh.rs`:
+    `an_n_component_mesh_interpolates_each_component_as_light_does`;
+    `separations.rs`: `a_mesh_in_each_ink_space_lands_on_its_plates`.
+14. **RC-04.15 — the cap, shown.** `separations.rs`:
+    `sixty_four_spots_render_sixty_eight_plates` and
+    `a_page_past_the_plate_cap_reports_what_it_left` (past `MAX_SPOT_PLATES`,
+    and past `MAX_PLATE_BYTES` at a page the byte bound reaches first: the
+    spots kept, the rest Composite, `RenderWarning::PlatesCapped` naming both
+    counts); `bounds_ledger.rs` holds a row for each cap with the columns
+    above.
+15. **RC-04.16 — fingerprints.** `separations.rs`:
+    `separations_are_stable_across_targets` — the SHA-256 of every plate of a
+    fixture with spots in fills, text, a group, an image, a shading and a mesh,
+    its text in an embedded face so one hash serves both builds, entered in the
+    determinism roster.
+16. **RC-04.17a and RC-04.17b — the speed rows.** The separations fixture's
+    plates at 150 dpi and the 64-spot page's 68 plates at 72 dpi in MS-04's
+    render group, landed unmeasured and timed in the end phase; no target is
+    set for them here.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A plate render's memory: 69 bytes a pixel at 64 spots is 17 times an `Rgba8` page | Planes only for the spots the page names; `MAX_PLATE_BYTES` over every live plates buffer, the page's and its groups'; past it, Composite spots and a named warning, in the ledger with a test that fires it |
+| A light or ink render moves | The five formats keep their compositing word and paths; colorants are asked for only by a plates device; RC-04.3 and RC-04.8 hold `CmykA8` to its bytes and every fingerprint stands |
+| `PartialEq` on `ColorSpace` starts telling two spaces apart by a colorant's name | RC-04.5 reads every comparison of spaces in the tree before it lands |
+| A spot named twice with two different alternates | One plate per name, which is what a name means (8.6.6.4); its colour alone is the first definition the inventory meets |
+| Plates are read as light | A `Plate` is tints with a name and a kind, not a `Bitmap`; the composite of plates is RC-03's closed form, not a reading of plate bytes as grey |
+| A spot inside a group of another space loses its plate | 11.7.3's second option, stated and tested (RC-04.9); a group of DeviceCMYK, or of none, keeps it |
