@@ -1595,6 +1595,18 @@ alone timed is reported, not judged; a missing round, or a round sampled
 otherwise, is refused; and an operation whose list carries no `paired` band
 is reported, never failed.
 
+**The suite's geometric mean is reported, never gated.** Each pair's report
+ends with the geometric mean of every operation's median paired ratio, banded
+or not — the exponential of their logarithms' mean, so a ratio and its
+inverse cancel and a suite whose every operation gained 5 % reads 0.95 — head
+over base for `--paired`, and head over the planning baseline for
+`--planning`, there over the operations held against the planning
+baseline's own figure for them, a floor or held, the operation a
+`paired_with` names standing in; a calibrated target and a relation, held
+against other figures, are left out of it. Each operation is still judged by
+its own median and sign test; the mean is the figure the release profile's
+rule reads, a profile adopted only at 5 % or more on it (P-20).
+
 **Each operation carries its gate against the planning baseline.** Tier P
 states every target against `61adcde`, the planning baseline, and its Gate
 column says how each is checked ([roadmap/P.md](roadmap/P.md)); each

@@ -2765,6 +2765,25 @@ fn median(ratios: &[f64]) -> f64 {
     }
 }
 
+/// The geometric mean of `ratios`, the `n`-th root of their product, taken
+/// as the exponential of their logarithms' mean so that no product leaves
+/// `f64`'s range: a ratio and its inverse cancel, so a suite whose operations
+/// all gained 5 % reads 0.95 however long the suite is. `None` for no ratio,
+/// or for one that is not a positive finite number, which no ratio of two
+/// figures a round reads can be.
+#[must_use]
+pub fn geometric_mean(ratios: &[f64]) -> Option<f64> {
+    if ratios.is_empty()
+        || ratios
+            .iter()
+            .any(|ratio| !(ratio.is_finite() && *ratio > 0.0))
+    {
+        return None;
+    }
+    let logarithms: f64 = ratios.iter().map(|ratio| ratio.ln()).sum();
+    Some((logarithms / ratios.len() as f64).exp())
+}
+
 impl Pair {
     /// The median of the ratios: the mean of the two middle ones of an even
     /// count, so of the fifth and the sixth of ten.
@@ -2802,6 +2821,19 @@ pub struct Paired {
     pub base_only: Vec<String>,
     /// Ids the head timed and the base did not.
     pub head_only: Vec<String>,
+}
+
+impl Paired {
+    /// The suite's geometric mean of every operation's median paired ratio,
+    /// head over base, banded or not: the figure P-20's rule reads to decide
+    /// a build profile. Reported and never gated, since each operation is
+    /// judged by its own median and the sign test; `None` when the sides
+    /// share no operation.
+    #[must_use]
+    pub fn geometric_mean(&self) -> Option<f64> {
+        let medians: Vec<f64> = self.pairs.iter().map(Pair::median).collect();
+        geometric_mean(&medians)
+    }
 }
 
 /// Pairs `base` with `head` round by round, each operation's band read from
@@ -2885,6 +2917,11 @@ pub struct Judged {
     /// relation's is the wider of its two operations' bands, and it has
     /// none until both have one.
     pub band_percent: Option<f64>,
+    /// Whether the ratios are the operation's own over the planning
+    /// baseline's figure for it — a floor or held, the operation its gate
+    /// pairs it with standing in — which the suite's geometric mean reads;
+    /// a calibrated target and a relation hold it against another figure.
+    pub own: bool,
 }
 
 impl Judged {
@@ -2933,6 +2970,29 @@ pub struct Planned {
     /// Ids the planning baseline timed that no floor and no calibration
     /// reads.
     pub unread: Vec<String>,
+}
+
+impl Planned {
+    /// The suite's geometric mean, head over the planning baseline, of the
+    /// median ratio of every operation held against the planning baseline's
+    /// own figure for it ([`Judged::own`]): the figure P-20's rule reads.
+    /// Reported and never gated; `None` when no gate is one.
+    #[must_use]
+    pub fn geometric_mean(&self) -> Option<f64> {
+        let medians: Vec<f64> = self
+            .judged
+            .iter()
+            .filter(|judged| judged.own)
+            .map(Judged::median)
+            .collect();
+        geometric_mean(&medians)
+    }
+
+    /// How many gates the geometric mean reads.
+    #[must_use]
+    pub fn own(&self) -> usize {
+        self.judged.iter().filter(|judged| judged.own).count()
+    }
 }
 
 /// Holds the head's rounds to the planning baseline's by each operation's
@@ -3020,6 +3080,7 @@ pub fn against_planning(
                 ratios: ratios((head, &id), (planning, &against)),
                 bound,
                 band_percent: operation.paired_band,
+                own: against == id,
             });
             read.push(against);
             for relation in &gate.relations {
@@ -3054,6 +3115,7 @@ pub fn against_planning(
                         (Some(one), Some(two)) => Some(one.max(two)),
                         _ => None,
                     },
+                    own: false,
                 });
             }
         }
@@ -3115,6 +3177,14 @@ fn run_planning(planning: &Path, head: &Path) -> Result<(), String> {
     for id in &planned.unread {
         println!("  the {PLANNING}'s alone, reported, not judged: {id}");
     }
+    println!(
+        "  {}",
+        mean_line(
+            planned.geometric_mean(),
+            planned.own(),
+            &format!("head over the {PLANNING}")
+        )
+    );
     let failing: Vec<&Judged> = planned.judged.iter().filter(|j| j.fails()).collect();
     if failing.is_empty() {
         return Ok(());
@@ -3228,6 +3298,20 @@ pub fn read_side(dir: &Path) -> Result<(Side, Vec<Group>), String> {
     Ok((side, lists))
 }
 
+/// The report's line for a suite's geometric mean over `operations`
+/// operations' median ratios, `which` naming the pair.
+#[must_use]
+pub fn mean_line(mean: Option<f64>, operations: usize, which: &str) -> String {
+    match mean {
+        Some(mean) => format!(
+            "geometric mean of {operations} operations' median ratios, {which}: {mean:.4} \
+             ({:+.2} %), reported, not gated",
+            (mean - 1.0) * 100.0
+        ),
+        None => format!("geometric mean, {which}: no operation to take it over"),
+    }
+}
+
 /// `bench-check --paired BASE HEAD`: the head's rounds against the base's,
 /// each operation judged on its median paired ratio and the sign test, its
 /// band read from the head's lists. Nothing is timed a second time.
@@ -3269,6 +3353,14 @@ fn run_paired(base: &Path, head: &Path) -> Result<(), String> {
     for id in &paired.base_only {
         println!("  the base's alone, reported, not judged: {id}");
     }
+    println!(
+        "  {}",
+        mean_line(
+            paired.geometric_mean(),
+            paired.pairs.len(),
+            "head over base"
+        )
+    );
     let failing: Vec<&Pair> = paired.pairs.iter().filter(|pair| pair.fails()).collect();
     if failing.is_empty() {
         return Ok(());
@@ -5451,6 +5543,89 @@ fn render(c: &mut Criterion) {
         assert_eq!(run_paired(&base, &head), Ok(()));
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&head).ok();
+    }
+
+    /// **The geometric mean of known ratios is their geometric mean**: the
+    /// root of their product, which a ratio and its inverse leave alone, as
+    /// an operation whose ratio is 1 does — not their arithmetic mean — over
+    /// a suite of any length, and none at all for no ratio or for one no
+    /// round can read.
+    #[test]
+    fn the_geometric_mean_of_known_ratios_is_their_geometric_mean() {
+        let close = |ratios: &[f64], want: f64| {
+            let mean = geometric_mean(ratios).expect("a mean");
+            assert!(
+                (mean - want).abs() < 1e-12,
+                "{ratios:?}: {mean}, not {want}"
+            );
+        };
+        close(&[1.0], 1.0);
+        close(&[4.0], 4.0);
+        close(&[1.0, 4.0], 2.0);
+        close(&[2.0, 8.0], 4.0);
+        close(&[0.5, 2.0], 1.0);
+        close(&[0.25, 4.0, 1.0], 1.0);
+        close(&[1.0, 2.0, 4.0], 2.0);
+        close(&[3.0, 9.0, 27.0], 9.0);
+        close(&[0.9, 1.1], (0.9f64 * 1.1).sqrt());
+        // Not the arithmetic mean, which 1 and 4 put at 2.5.
+        let mean = geometric_mean(&[1.0, 4.0]).expect("a mean");
+        assert!((mean - 2.5).abs() > 0.4, "{mean}");
+        // Eight hundred ratios whose running product would pass f64's
+        // range: four hundred of 10, then four hundred of 0.1.
+        let long: Vec<f64> = (0..800).map(|i| if i < 400 { 10.0 } else { 0.1 }).collect();
+        close(&long, 1.0);
+        let unreadable: [&[f64]; 5] = [
+            &[],
+            &[1.0, 0.0],
+            &[1.0, -2.0],
+            &[f64::NAN],
+            &[f64::INFINITY, 1.0],
+        ];
+        for ratios in unreadable {
+            assert_eq!(geometric_mean(ratios), None, "{ratios:?}");
+        }
+    }
+
+    /// **A uniform five per cent gain reads as 0.95**, through the pairing
+    /// itself: a head at 0.95 of its base in every round of every operation,
+    /// banded or not, pairs to a suite mean of 0.95, and the report says so;
+    /// a head at 0.95 of the planning baseline on every operation held
+    /// against its own figure there reads 0.95 too, the calibrated targets
+    /// and the relations, held against other figures, left out of it. A
+    /// pair of no operation has no mean, and says so.
+    #[test]
+    fn a_uniform_five_percent_gain_reads_as_0_95() {
+        let (verdict, paired) = compared("gain", |id, round| {
+            base_nanos(id, round).map(|nanos| nanos * 0.95)
+        });
+        assert_eq!(verdict, Ok(()), "a gain fails nothing");
+        let paired = paired.expect("the sides pair");
+        assert_eq!(paired.pairs.len(), 3);
+        let mean = paired.geometric_mean().expect("a mean");
+        assert!((mean - 0.95).abs() < 1e-12, "{mean}");
+        let line = mean_line(Some(mean), paired.pairs.len(), "head over base");
+        assert!(
+            line.contains("3 operations' median ratios, head over base: 0.9500 (-5.00 %)"),
+            "{line}"
+        );
+
+        let planned = planned_with(planning_figure, |id, round| match id {
+            CMYK | LZW => holding(id, round),
+            _ => planning_figure(id, round) * 0.95,
+        })
+        .expect("the sides are judged");
+        // The six operations the planning baseline times are each held
+        // against their own figure there; the two calibrated targets and
+        // the three relations over the rounds are not.
+        assert_eq!(planned.judged.len(), 11, "{:?}", planned.judged);
+        assert_eq!(planned.own(), 6, "{:?}", planned.judged);
+        let mean = planned.geometric_mean().expect("a mean");
+        assert!((mean - 0.95).abs() < 1e-12, "{mean}");
+
+        assert_eq!(Paired::default().geometric_mean(), None);
+        assert_eq!(Planned::default().geometric_mean(), None);
+        assert!(mean_line(None, 0, "head over base").contains("no operation"));
     }
 
     // ---- the gates against the planning baseline ------------------------------

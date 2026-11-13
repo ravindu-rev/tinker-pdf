@@ -158,7 +158,9 @@ bindings-parity options:
   cargo xtask bench-check --paired BASE HEAD
                                          hold the head's ten rounds to the base's:
                                          the median paired ratio against 1 + the
-                                         band, and eight slower rounds of ten
+                                         band, and eight slower rounds of ten;
+                                         and report, not gate, the suite's
+                                         geometric mean of the median ratios
   cargo xtask bench-check --paired --planning PLANNING HEAD
                                          hold the head's ten rounds to the planning
                                          baseline's by each operation's gate in
@@ -168,7 +170,10 @@ bindings-parity options:
                                          between two of the head's operations; the
                                          median beyond the bound by more than the
                                          band, eight rounds of ten beyond it, and
-                                         tier P's reading beside it
+                                         tier P's reading beside it; and report,
+                                         not gate, the suite's geometric mean of
+                                         the median ratios of the operations held
+                                         against their own planning figures
   cargo xtask bench-count --group NAME [--part K/N] [--base REV] [--head REV]
                                          count the group's operations, or every
                                          N-th of its list from the K-th, at the
