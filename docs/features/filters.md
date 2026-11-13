@@ -24,7 +24,11 @@ input bytes and 258 bytes of output room remain, literals, lengths, distances
 and copies decode in one loop that refills the bit accumulator eight bytes at
 a time and passes through no state between symbols; the resumable state
 machine keeps a stream's tail, a stream that needs more input and the output
-ceiling, and either way the decode stops on the same bit. The encoder exists
+ceiling, and either way the decode stops on the same bit. A match is held to
+the output ceiling once and copied eight bytes at a time where its distance
+is eight or more, into room reserved for it once; a closer one copies its
+period and then the span already copied, doubling it each copy, so no match
+is copied a byte at a time. The encoder exists
 too: `deflate.rs` is a hash-chain LZ77 match finder whose chains live in two
 tables of one window's entries, a bucket's
 newest position and a ring of each position's predecessor, so what it holds

@@ -8,7 +8,9 @@
 //! hands the state machine back exactly where it stopped, wherever the input
 //! was cut. Back-references read the output `Vec` directly: the one-shot read
 //! decodes to memory, so its output doubles as the 32 KB window, and the
-//! streamed one keeps that window and lets the rest go.
+//! streamed one keeps that window and lets the rest go. A match is copied
+//! eight bytes at a time, or by doubling its period where that is shorter
+//! than eight ([`copy_match`]), never a byte at a time.
 
 use crate::{Limits, Tail, Warning, Warnings};
 
@@ -601,7 +603,7 @@ impl Inflate {
                         self.state = State::Copy(len as u16, distance as u16);
                         break;
                     }
-                    copy_back(out, out.len() - distance as usize, len as usize);
+                    copy_match(out, out.len() - distance as usize, len as usize);
                     // The length, its extra bits, the distance, its extra
                     // bits and the copy.
                     self.turned(5);
@@ -876,7 +878,7 @@ impl Inflate {
                     let room = max_output.saturating_sub(out.len());
                     let want = len as usize;
                     let n = want.min(room);
-                    copy_back(out, start, n);
+                    copy_match(out, start, n);
                     if n < want {
                         return Progress::OutputCap;
                     }
@@ -887,16 +889,49 @@ impl Inflate {
     }
 }
 
-/// Appends the `n` bytes of `out` from `start` on, a byte at a time, so a
-/// byte the copy itself wrote is copied again where the distance is shorter
-/// than the length (3.2.3). `start` is inside `out`, which only grows, so
-/// every byte read is there.
-fn copy_back(out: &mut Vec<u8>, start: usize, n: usize) {
-    for k in 0..n {
-        if let Some(&byte) = out.get(start + k) {
-            out.push(byte);
+/// Appends the `n` bytes of `out` from `start` on, as 3.2.3 copies a match:
+/// where the distance is shorter than the length, the copy reads bytes it
+/// wrote itself. The room is reserved once and no byte is pushed alone, and
+/// the caller has already held `n` to the output ceiling, once for the match.
+///
+/// A distance of eight or more is copied eight bytes a turn: each word is
+/// read from at least eight bytes behind the output's end, so from bytes
+/// already written, and the last is copied whole too and the bytes past the
+/// match cut off again. A closer one copies its period and then, a turn at a
+/// time, the whole span written from `start` on, which doubles it: that span
+/// is always a whole number of periods, so the copy carries on the period
+/// from where it ends. `start` is inside `out` and `out` only grows, which is
+/// what keeps every range read inside it.
+fn copy_match(out: &mut Vec<u8>, start: usize, n: usize) {
+    let distance = out.len().saturating_sub(start);
+    let end = out.len() + n;
+    if distance >= 8 {
+        out.reserve(n.next_multiple_of(8));
+        let mut from = start;
+        // `from + 8 <= out.len()` at every turn: the two start `distance`
+        // apart, at least eight, and move eight together.
+        while out.len() < end {
+            out.extend_from_within(from..from + 8);
+            copied();
+            from += 8;
+        }
+        out.truncate(end);
+    } else if distance > 0 {
+        out.reserve(n);
+        // `start + span <= out.len()`: what stands after `start` is the
+        // period and everything copied since.
+        while out.len() < end {
+            let span = (out.len() - start).min(end - out.len());
+            out.extend_from_within(start..start + span);
+            copied();
         }
     }
+}
+
+/// One copy a match makes, a word or a doubled span, counted under test.
+fn copied() {
+    #[cfg(test)]
+    tests::COPIES.with(|copies| copies.set(copies.get() + 1));
 }
 
 /// Whether [`Inflate::fast`] runs. Always, but under the test that turns it
@@ -1209,6 +1244,9 @@ mod tests {
         /// the state machine.
         pub(super) static STATE_MACHINE_ONLY: std::cell::Cell<bool> =
             const { std::cell::Cell::new(false) };
+        /// Every copy [`copy_match`] has made on this thread, a word or a
+        /// doubled span each.
+        pub(super) static COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
     const CAP: Limits = Limits::new(1 << 20);
@@ -1782,6 +1820,148 @@ mod tests {
             }
         }
         assert_eq!(turns, [3, 3], "the turns grew with the symbols");
+    }
+
+    /// The copy as it was, kept to hold [`copy_match`] to: a byte at a time,
+    /// so a byte the copy wrote is copied again where the distance is shorter
+    /// than the length (3.2.3).
+    fn copy_a_byte_at_a_time(out: &mut Vec<u8>, start: usize, n: usize) {
+        for k in 0..n {
+            let byte = out[start + k];
+            out.push(byte);
+        }
+    }
+
+    /// `len` bytes, any 256 in a row of them distinct: 151 is odd, so
+    /// `151 i + 7` takes every value mod 256 once a cycle, and a copy that read
+    /// from the wrong place would write a byte the right one does not.
+    fn distinct(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 151 + 7) as u8).collect()
+    }
+
+    /// The copies a match of `length` from `distance` back takes: a word
+    /// for each eight bytes from eight back or more, and closer, one for each
+    /// doubling of the span from the match's source, which after k copies
+    /// covers `distance × (2^k − 1)` bytes of the match.
+    fn copies_for(distance: usize, length: usize) -> u64 {
+        if distance >= 8 {
+            return length.div_ceil(8) as u64;
+        }
+        let (mut covered, mut copies) = (0usize, 0u64);
+        while covered < length {
+            covered = 2 * covered + distance;
+            copies += 1;
+        }
+        copies
+    }
+
+    /// **Overlapping matches copy their period at every distance and
+    /// length.**
+    ///
+    /// Every distance from 1 to 40, the periods shorter than a word, a word's
+    /// and past it, with every length 3.2.5 codes, 3 to 258, copied after
+    /// sixty-four distinct bytes, writes what the byte-at-a-time copy writes.
+    /// And each such match, coded in a block of fixed codes after those bytes
+    /// as literals, decodes to the bytes the byte-at-a-time copy makes of it
+    /// through the fast loop and through the state machine alone, and, under a
+    /// ceiling that cuts the match, to those bytes cut at the ceiling with the
+    /// ceiling as the outcome: the cut falls at a different byte of the match
+    /// for each distance and length, and at its last byte.
+    #[test]
+    fn overlapping_matches_copy_their_period_at_every_distance_and_length() {
+        let window = distinct(64);
+        for distance in 1..=40usize {
+            for length in 3..=258usize {
+                let case = format!("distance {distance}, length {length}");
+                let mut ours = window.clone();
+                copy_match(&mut ours, window.len() - distance, length);
+                let mut theirs = window.clone();
+                copy_a_byte_at_a_time(&mut theirs, window.len() - distance, length);
+                assert_eq!(ours, theirs, "{case}");
+
+                let mut tokens: Vec<Token> = window.iter().map(|&b| Token::Literal(b)).collect();
+                tokens.push(Token::Match(length, distance));
+                let (mut stream, data) = fixed_block(&tokens);
+                assert_eq!(data, theirs, "{case}: the test's own coder");
+                // Room for the fast loop to reach the match: eight input
+                // bytes past anything the accumulator holds.
+                stream.extend_from_slice(&[0; 16]);
+                for fast in [true, false] {
+                    let (out, progress, _, _) =
+                        decode_split(&stream, stream.len(), data.len() + 258, fast);
+                    assert_eq!(
+                        (progress, out.as_slice()),
+                        (Progress::Finished, data.as_slice()),
+                        "{case}, fast loop {fast}"
+                    );
+                }
+                let cut = 1 + (distance * 7 + length * 3) % (length - 1);
+                for ceiling in [window.len() + cut, window.len() + length - 1] {
+                    let (out, progress, _, _) = decode_split(&stream, stream.len(), ceiling, true);
+                    assert_eq!(
+                        (progress, out.as_slice()),
+                        (Progress::OutputCap, &data[..ceiling]),
+                        "{case}, ceiling {ceiling}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A match is copied in words.**
+    ///
+    /// Counted through [`COPIES`]: a match from eight bytes back or more
+    /// takes at most a copy for each eight bytes, `ceil(length / 8)`, and a
+    /// closer one a copy for each doubling of its period, never a copy a
+    /// byte — at every length 3 to 258, from 1 to 40 back, from either side
+    /// of 256 and 4 096, and from the far end of the window. A block of fixed
+    /// codes decoded through the fast loop or the state machine alone makes
+    /// the copies its matches add up to, so the decoder copies no other way.
+    #[test]
+    fn a_match_is_copied_in_words() {
+        let mut out = distinct(WINDOW + 64);
+        let base = out.len();
+        for distance in (1..=40usize).chain([255, 256, 257, 4_095, 4_096, 4_097, WINDOW]) {
+            for length in 3..=258usize {
+                out.truncate(base);
+                COPIES.with(|copies| copies.set(0));
+                copy_match(&mut out, base - distance, length);
+                let copies = COPIES.with(std::cell::Cell::get);
+                let case = format!("distance {distance}, length {length}");
+                assert_eq!(out.len(), base + length, "{case}");
+                if distance >= 8 {
+                    assert!(
+                        copies <= length.div_ceil(8) as u64,
+                        "{case}: {copies} copies"
+                    );
+                } else {
+                    assert_eq!(copies, copies_for(distance, length), "{case}");
+                }
+                assert!(copies < length as u64, "{case}: a copy a byte");
+            }
+        }
+
+        let tokens = tokens(20_000, 5);
+        let expected: u64 = tokens
+            .iter()
+            .map(|&token| match token {
+                Token::Match(length, distance) => copies_for(distance, length),
+                Token::Literal(_) => 0,
+            })
+            .sum();
+        assert!(expected > 0, "the stream coded no match");
+        let (mut stream, data) = fixed_block(&tokens);
+        stream.extend_from_slice(&[0; 16]);
+        for fast in [true, false] {
+            COPIES.with(|copies| copies.set(0));
+            let (decoded, progress, _, _) = decode_split(&stream, stream.len(), 1 << 20, fast);
+            assert_eq!((progress, decoded == data), (Progress::Finished, true));
+            assert_eq!(
+                COPIES.with(std::cell::Cell::get),
+                expected,
+                "fast loop {fast}"
+            );
+        }
     }
 
     #[test]
