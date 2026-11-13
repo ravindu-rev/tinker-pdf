@@ -420,7 +420,7 @@ architecture's note that `filters` depends on nothing then names `pool`,
 which does not depend on anything. The decoder charges
 its work budget for every block in index order before any block is decoded,
 so a refusal names the same block at every thread count, and joins results in
-index order (P-10's design, `docs/design/jpx-speed.md`).
+index order ([jpx-speed](jpx-speed.md)).
 
 ### wasm
 
