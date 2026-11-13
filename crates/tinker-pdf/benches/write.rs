@@ -286,6 +286,36 @@ fn write(c: &mut Criterion) {
         });
     });
 
+    // An editor that changes nothing, saved as an incremental update: the
+    // original bytes and what an update with nothing in it appends, 2 000
+    // times an iteration.
+    group.operation("no-op incremental save of 100 pages", |op| {
+        let original = small_bytes(100);
+        let doc = Document::open(original.clone()).expect("the small pages open");
+        let incremental = WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        };
+        let saved = doc.editor().save(&incremental);
+        assert!(
+            saved.starts_with(&original),
+            "an incremental save keeps the original bytes as its prefix"
+        );
+        assert_eq!(
+            Document::open(saved)
+                .expect("the update reopens")
+                .page_count(),
+            100,
+            "the update reopens with the original's pages"
+        );
+        op.per(Per::Pages(2000 * 100));
+        op.iter(move || {
+            for _ in 0..2000 {
+                black_box(doc.editor().save(&incremental));
+            }
+        });
+    });
+
     // ---- through the CLI -----------------------------------------------
     //
     // `tpdf` has no rewrite command: `merge` given one input writes it again

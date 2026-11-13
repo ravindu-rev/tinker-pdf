@@ -1195,7 +1195,7 @@ cargo bench -p tinker-pdf -- --baseline before
 
 and `--bench <group>` narrows either to one group's file.
 
-Twenty-seven operations time `tpdf` itself: those tier P marks CLI, and the
+Twenty-eight operations time `tpdf` itself: those tier P marks CLI, and the
 `threads` group's four, which time the CLI's pool, `tpdf render --jobs`, on
 1, 2, 4 and 8 jobs over one input, so that how the pool scales is a ratio
 between operations of one run. Their figures include the process, and

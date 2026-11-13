@@ -22,6 +22,7 @@
   ],
   "excluded": [
     { "id": "open/open and count the 23 MB image file, CLI", "why": "a child process" },
+    { "id": "open/open a small file, CLI", "why": "a child process" },
     { "id": "text/text of 5 dense pages, CLI", "why": "a child process" },
     { "id": "text/text of 1000 small pages, CLI", "why": "a child process" },
     { "id": "text/text of 4000 small pages, CLI", "why": "a child process" },

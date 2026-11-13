@@ -16,9 +16,11 @@ mod support;
 
 use std::cell::LazyCell;
 use std::hint::black_box;
+use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use support::{inputs, Group, Per};
+use tinker_pdf::Document;
 use tinker_pdf_filters::{
     ccitt_decode, deflate, inflate_raw, jbig2_decode, jpeg_decode, jpx_decode, lzw_decode,
     CcittParams, Jbig2Params, Limits,
@@ -56,6 +58,16 @@ fn jbig2_params(width: u32, height: u32) -> Jbig2Params<'static> {
         width,
         height,
     }
+}
+
+/// The images the first page of the document `bytes` holds draws, their
+/// samples as decoded and unconverted.
+fn extracted(bytes: &Arc<[u8]>) -> Vec<tinker_pdf::PageImage> {
+    Document::open(Arc::clone(bytes))
+        .expect("the page opens")
+        .page(0)
+        .expect("the page")
+        .images()
 }
 
 /// A strip decode's image gathered whole, as a caller that holds the
@@ -292,6 +304,28 @@ fn decode(c: &mut Criterion) {
                 black_box(ccitt_decode(g4, params, CEILING));
             }
         });
+    });
+
+    // The page's image extracted raw through `Page::images`, the document
+    // opened from its bytes each iteration: the Flate stream inflated and
+    // its PNG predictor rows unfiltered, nothing converted.
+    group.operation("extract a Flate image with predictors", |op| {
+        let page: Arc<[u8]> = store
+            .bytes("predicted-1240x1754.pdf", || inputs::predicted_page(2))
+            .into();
+        let (width, height) = jpeg_size;
+        let images = extracted(&page);
+        let [image] = &images[..] else {
+            panic!("the page draws one image, not {}", images.len());
+        };
+        assert_eq!((image.width, image.height), (width, height));
+        assert_eq!((image.bits_per_component, image.components), (8, 3));
+        assert!(
+            image.samples == inputs::photo(width, height, 2),
+            "the extracted samples are the predicted rows unfiltered, exactly"
+        );
+        op.per(Per::Pixels(area(jpeg_size)));
+        op.iter(move || black_box(extracted(&page)));
     });
 
     group.finish();

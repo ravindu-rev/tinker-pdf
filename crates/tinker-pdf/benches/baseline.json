@@ -71,6 +71,8 @@
             { "to": "every page's size, 3000 pages", "at_most": 3.6 } ] } },
         { "name": "open and count the 23 MB image file, CLI", "unit": "bytes",
           "per_iteration": 557510376, "calls": 24, "gate": { "floor": 1 } },
+        { "name": "open a small file, CLI", "unit": "bytes",
+          "per_iteration": 13680, "calls": 10, "gate": { "held": true } },
         { "name": "first page of the 60-page linearized fixture over a slow link",
           "unit": "pages", "per_iteration": 1, "calls": 1, "gate": { "floor": 1 } }
       ]
@@ -221,6 +223,8 @@
             { "to": "edit an annotation, save, reopen, 10 pages", "at_most": 2 } ] } },
         { "name": "edit an annotation, save, reopen, 10 pages", "unit": "pages",
           "per_iteration": 27000, "calls": 2700, "gate": { "floor": 1 } },
+        { "name": "no-op incremental save of 100 pages", "unit": "pages",
+          "per_iteration": 200000, "calls": 2000, "gate": { "held": true } },
         { "name": "rewrite 100 pages, CLI", "unit": "pages",
           "per_iteration": 2600, "calls": 26, "gate": { "floor": 1 } },
         { "name": "rewrite 1000 pages, CLI", "unit": "pages",
@@ -411,7 +415,9 @@
         { "name": "decode the JBIG2 generic page", "unit": "pixels",
           "per_iteration": 8702320, "calls": 1, "gate": { "floor": 1 } },
         { "name": "decode the CCITT G4 page", "unit": "pixels",
-          "per_iteration": 17404640, "calls": 2, "gate": { "floor": 1 } }
+          "per_iteration": 17404640, "calls": 2, "gate": { "floor": 1 } },
+        { "name": "extract a Flate image with predictors", "unit": "pixels",
+          "per_iteration": 2174960, "calls": 1, "gate": { "held": true } }
       ]
     },
     {
@@ -486,6 +492,7 @@
         "open/every page's size, 3000 pages",
         "open/every page's size, 10000 pages",
         "open/open and count the 23 MB image file, CLI",
+        "open/open a small file, CLI",
         "open/first page of the 60-page linearized fixture over a slow link",
         "text/text of 5 dense pages",
         "text/text of 20 standard-14 pages",
@@ -541,6 +548,7 @@
         "write/AES-256-CBC encrypt 2.5 MB",
         "write/edit an annotation, save, reopen, 1000 pages",
         "write/edit an annotation, save, reopen, 10 pages",
+        "write/no-op incremental save of 100 pages",
         "write/rewrite 100 pages, CLI",
         "write/rewrite 1000 pages, CLI",
         "write/subset-on-save of 4 pages, CLI",
@@ -610,6 +618,7 @@
         "decode/reversible JPEG 2000 310x438",
         "decode/decode the JBIG2 generic page",
         "decode/decode the CCITT G4 page",
+        "decode/extract a Flate image with predictors",
         "sign/RSA-2048 private-key operation",
         "sign/verify an RSA-2048 signature over 10 MB",
         "sign/SHA-256 of 10 MB",

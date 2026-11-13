@@ -113,6 +113,33 @@ fn open(c: &mut Criterion) {
         });
     });
 
+    // A small committed file through the CLI, held to the planning
+    // baseline: ten children an iteration, so the figure a call is the
+    // process's own and the iteration sits inside the window.
+    group.operation("open a small file, CLI", |op| {
+        let simple =
+            inputs::store().bytes("simple-text.pdf", || inputs::testdata("simple-text.pdf"));
+        let simple_pdf = inputs::store().file("simple-text.pdf", || simple.clone());
+        let pages = Document::open(simple.clone())
+            .expect("the small file opens")
+            .page_count();
+        assert!(pages > 0, "the small file has a page");
+        let info = Cli::new("open-small-info");
+        let ran = info.clone();
+        op.per(Per::Bytes(10 * simple.len() as u64));
+        op.iter(move || {
+            for _ in 0..10 {
+                info.run(&[&"info", &simple_pdf]);
+            }
+        });
+        op.after(move || {
+            assert!(
+                ran.stdout().contains(&format!("  pages       {pages}\n")),
+                "tpdf info opens the small file with its {pages} pages"
+            );
+        });
+    });
+
     // Tier P's time to first page over a slow link (MS-08): each iteration
     // opens the fixture over a fresh counting source and renders page one,
     // and its time is that work plus the link time of what it read, at 50 ms

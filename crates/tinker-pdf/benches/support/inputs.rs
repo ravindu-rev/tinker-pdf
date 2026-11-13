@@ -1591,6 +1591,14 @@ pub fn committed_data(name: &str) -> Vec<u8> {
         .unwrap_or_else(|error| panic!("the committed file {}: {error}", path.display()))
 }
 
+/// One of the documents committed under the repository's `testdata/`, by
+/// its file name.
+pub fn testdata(name: &str) -> Vec<u8> {
+    let path = in_tree("../../testdata").join(name);
+    std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("the committed document {}: {error}", path.display()))
+}
+
 /// A scan: the dense text page rendered at 300 dpi and thresholded to one
 /// bit a pixel, rows packed from the most significant bit, **0 for black**
 /// as a one-bit `/DeviceGray` sample is. Its width, height and bytes.
@@ -1721,6 +1729,80 @@ pub fn flate_page(divisor: u32) -> Vec<u8> {
         }),
         divisor,
     )
+}
+
+/// A page a `divisor`th of A4 each way covered by [`photo`] at
+/// [`scan_part`]'s size, seed 2, its rows run through PNG's five filters in
+/// turn — None, Sub, Up, Average and Paeth, each row tagged with its own
+/// (PNG 9.2) — and Flate-coded under predictor 15 (7.4.4.4), so a decode
+/// unfilters every kind of row.
+pub fn predicted_page(divisor: u32) -> Vec<u8> {
+    let (width, height) = scan_part(divisor);
+    let rows = png_filtered(&photo(width, height, 2), width as usize * 3, 3);
+    let coded = tinker_pdf_filters::zlib_compress(&rows);
+    image_page_part(
+        &ImageData::Compressed(CompressedImage {
+            width,
+            height,
+            bits_per_component: 8,
+            color_space: ImageColorSpace::DeviceRgb,
+            filter: Some(ImageFilter::FlatePngPredictor {
+                colors: 3,
+                bits_per_component: 8,
+                columns: width,
+            }),
+            data: &coded,
+            color_key_mask: None,
+            soft_mask: None,
+        }),
+        divisor,
+    )
+}
+
+/// `samples`, rows of `stride` bytes at `bpp` bytes a pixel, each row
+/// filtered by PNG 9.2's filter `row % 5` and prefixed with its type: the
+/// difference, modulo 256, from nothing, the byte a pixel to the left (`a`),
+/// the byte above (`b`), their mean rounded down, or Paeth's pick of `a`, `b`
+/// and the byte above and to the left (`c`), each `0` off the image.
+fn png_filtered(samples: &[u8], stride: usize, bpp: usize) -> Vec<u8> {
+    let zeros = vec![0u8; stride];
+    let mut out = Vec::with_capacity(samples.len() + samples.len() / stride.max(1));
+    for (index, row) in samples.chunks(stride).enumerate() {
+        let above = match index {
+            0 => &zeros[..],
+            _ => &samples[(index - 1) * stride..index * stride],
+        };
+        let kind = (index % 5) as u8;
+        out.push(kind);
+        for (at, &x) in row.iter().enumerate() {
+            let a = if at >= bpp { row[at - bpp] } else { 0 };
+            let b = above[at];
+            let c = if at >= bpp { above[at - bpp] } else { 0 };
+            let predicted = match kind {
+                0 => 0,
+                1 => a,
+                2 => b,
+                3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                _ => {
+                    let p = i16::from(a) + i16::from(b) - i16::from(c);
+                    let (pa, pb, pc) = (
+                        (p - i16::from(a)).abs(),
+                        (p - i16::from(b)).abs(),
+                        (p - i16::from(c)).abs(),
+                    );
+                    if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    }
+                }
+            };
+            out.push(x.wrapping_sub(predicted));
+        }
+    }
+    out
 }
 
 /// A page a `divisor`th of A4 each way covered by [`photo`] at

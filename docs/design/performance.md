@@ -1179,6 +1179,7 @@ and the figures their fifteen dispatches recorded until MS-04.10 retires them
 | `open/every page's size, 3000 pages` | pages · 12 × 3 000 | `small(3000)`, `page(i)` then `Page::size` (`lib.rs:1773`, `:2198`) for every i | 2 569 → 3; 856× | ×12 | built |
 | `open/every page's size, 10000 pages` | pages · 4 × 10 000 | `small(10000)` | Θ(n²), about 28 500 from the 3 000-page figure → 10; relation ≤ 3.6 × 3 000 | ×4 | built |
 | `open/open and count the 23 MB image file, CLI` | bytes · 24 files | `tpdf info` | 36 → 6; 6× | ×24 | built |
+| `open/open a small file, CLI` | bytes · 10 files | `testdata/simple-text.pdf`, `tpdf info`, its page count read back | 4–5 → 5; held | ×10 | built |
 
 **text**
 
@@ -1283,6 +1284,7 @@ size the set.
 | `decode/reversible JPEG 2000 310x438` | pixels · 310×438 | `data/reversible-310x438.jp2` | 102 → 42.2, rescaled from 2480×3508's 6 516 → 2 700; 2.41× | in | built |
 | `decode/decode the JBIG2 generic page` | pixels · `scan()`'s | `jbig2_generic_encode(scan())` (`jbig2/encode.rs:251`) | 255 → 60; 4.25× | in | built |
 | `decode/decode the CCITT G4 page` | pixels · 2 × `scan()`'s | `ccitt_g4_encode(scan())` | 46 → 25; 1.84× | ×2 | built |
+| `decode/extract a Flate image with predictors` | pixels · 1240×1754 | `predicted_page(2)`: `photo(1240, 1754, 2)`, each row under PNG's five filters in turn, Flate-coded under predictor 15; the document opened and `Page::images` read, the samples held to the photo exactly | 276 → 280; held | in | built |
 
 **write** — a rewrite is the editor's save under `WriteMode::Rewrite`, as
 `write/rewrite a document`'s is (`benches/write.rs`); merge and subset-on-save go through
@@ -1302,6 +1304,7 @@ size the set.
 | `write/AES-256-CBC encrypt 2.5 MB` | bytes · the file | the same plain bytes, `cbc_encrypt_with_iv_prefix` (`:289`) | 57 → 80 MB/s (about 43.8 → 31.2); 1.4× | in | built |
 | `write/edit an annotation, save, reopen, 1000 pages` | pages · 170 × 1 000 | `annotated(small(1000))`: the appearance replaced (`DocumentEditor::put_stream`, `edit/mod.rs:395`), saved under `WriteMode::Incremental`, the bytes reopened | not measured → ≤ 2 plus output bytes; relation ≤ 2 × the 10-page one | ×170 | built |
 | `write/edit an annotation, save, reopen, 10 pages` | pages · 2 700 × 10 | `annotated(small(10))` | the relation's other side | ×2 700 | built |
+| `write/no-op incremental save of 100 pages` | pages · 2 000 × 100 | `small(100)`, its editor saved unchanged under `WriteMode::Incremental`, the original bytes its prefix | 0.015 → 0.02; held | ×2 000 | built |
 | `write/rewrite 100 pages, CLI` | pages · 26 × 100 | `tpdf merge`, one input | 14.8 → 8; 1.85× | ×26 | built |
 | `write/rewrite 1000 pages, CLI` | pages · 6 × 1 000 | `tpdf merge`, one input | 668 → 60; 11.1× | ×6 | built |
 | `write/subset-on-save of 4 pages, CLI` | pages · 4 | `tpdf merge --font-policy subset` | 48.3 → 4.8, rescaled from 100 pages' 1 208 → 120; 10× | in | built |
@@ -1675,7 +1678,6 @@ the set's are. Tier P's table and the Item name these:
 | P-10, P-10.4 | `decode/irreversible JPEG 2000, two levels discarded`, `decode/reversible JPEG 2000, two levels discarded`, and a window decode of each | decode | 25.6× and 36.2×, paired with the baseline's full decode; the windows recorded ungated (H-77) |
 | P-10, P-10.12 | `decode/irreversible JPEG 2000 620x877 on 4 threads` | decode | 7.33×, paired with the baseline's one-thread decode |
 | MS-08, MS-08.4 | `open/first page of the 60-page linearized fixture over a slow link` | open | counted; the time follows from MS-08.3's counts, never slept |
-| P-21, P-21.1 | `open/open a small file, CLI`; `decode/extract a Flate image with predictors`; `write/no-op incremental save of 100 pages` | open, decode, write | held |
 
 Tier P's "Time to first page over a source with 50 ms latency at 10 Mbit/s,
 the 60-page linearized fixture" cannot be a name — it holds a `/` and runs
