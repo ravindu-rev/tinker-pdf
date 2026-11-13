@@ -26,3 +26,11 @@ default-run = "xtask"
 # primitives, would be the wrong way round. `cargo xtask dag` allows this one
 # edge by name.
 tinker-pdf-crypto = { workspace = true }
+# `cargo xtask fuzz --service-out` reads a fuzzing service's seed archives
+# back through the repository's own reader rather than trusting the tool that
+# packed them, every entry's CRC-32 checked.
+tinker-pdf-zip = { workspace = true }
+
+[dev-dependencies]
+# The CRC-32 the ZIP reader checks, for the archives that check's tests write.
+tinker-pdf-filters = { workspace = true }

@@ -20,6 +20,7 @@ pub mod face;
 pub mod fetch;
 pub mod footprint;
 pub mod fuzzaudit;
+pub mod fuzzservice;
 pub mod json;
 pub mod lock;
 pub mod names;

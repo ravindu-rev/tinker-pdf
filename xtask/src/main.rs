@@ -9,8 +9,8 @@ use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
 use xtask::{
-    bench, corpus, count, determinism, diff, fetch, footprint, fuzzaudit, names, parity, peaks,
-    release, repo_root, version,
+    bench, corpus, count, determinism, diff, fetch, footprint, fuzzaudit, fuzzservice, names,
+    parity, peaks, release, repo_root, version,
 };
 
 const USAGE: &str = "\
@@ -27,6 +27,13 @@ usage:
                         `publish = false` where publishing would be wrong
   cargo xtask fuzz      check the fuzz roster against `fuzz_targets`, the seed
                         corpora and `fuzz/Cargo.toml`, which must agree
+  cargo xtask fuzz --service-out DIR
+                        check what the continuous-fuzzing service's build
+                        (fuzz/service/build.sh) wrote to DIR: every target's
+                        binary an ELF file, its seed archive exactly the
+                        files of fuzz/corpus/<target>/, and its options the
+                        local sessions' timeout of {session} seconds. Reads
+                        files and spawns nothing; not part of `check`
   cargo xtask baseline  check the speed baseline's list for each group against
                         its file `benches/<group>.rs` and its `[[bench]]`
   cargo xtask footprint check that every figure in bindings/js/footprint.json
@@ -217,6 +224,10 @@ fn usage() -> String {
         .replace("{timeout}", &corpus::DEFAULT_TIMEOUT_SECONDS.to_string())
         .replace("{work}", count::WORK_DIR)
         .replace("{rise}", &count::RISE_PERCENT.to_string())
+        .replace(
+            "{session}",
+            &fuzzservice::SESSION_TIMEOUT_SECONDS.to_string(),
+        )
 }
 
 fn main() -> ExitCode {
@@ -230,7 +241,8 @@ fn main() -> ExitCode {
         "oracles" => report("oracles", check_oracles()),
         "vendor" => report("vendor", check_vendor()),
         "conflicts" => report("conflicts", check_conflicts()),
-        "fuzz" => report("fuzz", fuzzaudit::run(&repo_root()).map(|_| ())),
+        "fuzz" if rest.is_empty() => report("fuzz", fuzzaudit::run(&repo_root()).map(|_| ())),
+        "fuzz" => report("fuzz", fuzzservice::run(&repo_root(), rest)),
         "versions" => report("versions", version::check(&repo_root())),
         "baseline" => report("baseline", bench::check(&repo_root())),
         "determinism" => report("determinism", determinism::check(&repo_root())),
@@ -949,7 +961,13 @@ const ALLOWED: &[(&str, &[&str])] = &[
 const TOOLS: &[(&str, &[&str])] = &[
     ("tools/pdfcmp", &["tinker-pdf"]),
     ("tools/tpdf", &["tinker-pdf"]),
-    ("xtask", &["tinker-pdf-crypto"]),
+    // The service build's check reads its seed archives through the
+    // repository's own ZIP reader, and its tests write them with
+    // `tinker_pdf_filters::crc32`, the CRC-32 that reader checks.
+    (
+        "xtask",
+        &["tinker-pdf-crypto", "tinker-pdf-zip", "tinker-pdf-filters"],
+    ),
 ];
 
 /// Prints a task's outcome and turns it into an exit code.
@@ -1708,6 +1726,20 @@ mod tests {
             !text.contains("{timeout}"),
             "a placeholder is left unfilled"
         );
+    }
+
+    /// `fuzz --service-out`'s usage text names the option and the session
+    /// timeout the check holds options files to, read from the constant the
+    /// check uses, and no placeholder is left unfilled.
+    #[test]
+    fn the_usage_text_names_the_service_build_check() {
+        let text = usage();
+        assert!(text.contains("cargo xtask fuzz --service-out DIR"));
+        assert!(text.contains(&format!(
+            "timeout of {} seconds",
+            fuzzservice::SESSION_TIMEOUT_SECONDS
+        )));
+        assert!(!text.contains("{session}"), "{{session}} is left unfilled");
     }
 
     /// `bench-count`'s usage text names the task, the directory it checks

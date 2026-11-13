@@ -779,6 +779,8 @@ name = "xtask"
 version = "0.0.1"
 dependencies = [
  "tinker-pdf-crypto",
+ "tinker-pdf-filters",
+ "tinker-pdf-zip",
 ]
 
 [[package]]

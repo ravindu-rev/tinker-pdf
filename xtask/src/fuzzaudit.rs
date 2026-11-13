@@ -277,7 +277,10 @@ fn control_prefix(source: &str) -> usize {
     digits.parse().unwrap_or(0)
 }
 
-fn seeds_in(dir: &Path) -> Vec<PathBuf> {
+/// The seeds of one corpus directory: every file directly in it, in path
+/// order. A directory inside it is no seed, and a corpus that is not there has
+/// none.
+pub fn seeds_in(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -298,6 +301,29 @@ fn matches(data: &[u8], offset: usize, sigs: &[Signature]) -> bool {
     })
 }
 
+/// The fuzz targets, by name: the stem of every `.rs` file in
+/// `fuzz/fuzz_targets/`, sorted.
+///
+/// The roster is this directory and nothing else, so no list of names is
+/// written anywhere: the audit, the service build (`fuzz/service/build.sh`)
+/// and its check (`fuzzservice`) all read it here.
+pub fn roster(root: &Path) -> Result<Vec<String>, String> {
+    let targets_dir = root.join("fuzz/fuzz_targets");
+    let entries = std::fs::read_dir(&targets_dir)
+        .map_err(|e| format!("fuzz/fuzz_targets is unreadable: {e}"))?;
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "rs") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                names.push(stem.to_string());
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 /// Walks `fuzz/` and reports one row per target.
 pub fn survey(root: &Path) -> Result<Vec<Target>, Vec<String>> {
     let targets_dir = root.join("fuzz/fuzz_targets");
@@ -305,24 +331,7 @@ pub fn survey(root: &Path) -> Result<Vec<Target>, Vec<String>> {
     let mut problems = Vec::new();
     let sigs = signatures();
 
-    let mut names: Vec<String> = Vec::new();
-    match std::fs::read_dir(&targets_dir) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "rs") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        names.push(stem.to_string());
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            problems.push(format!("fuzz/fuzz_targets is unreadable: {e}"));
-            return Err(problems);
-        }
-    }
-    names.sort();
+    let names = roster(root).map_err(|e| vec![e])?;
 
     let unsigned: BTreeMap<&str, &str> = UNSIGNED.iter().copied().collect();
     let mut rows = Vec::new();
