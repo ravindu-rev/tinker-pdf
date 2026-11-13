@@ -537,6 +537,38 @@ hidden content holds it, never a soft mask — and the replay's disagreement
 handling is what makes declining a mask that the recording accepted skip the
 mask's content rather than paint it.
 
+**A form's drawing can be kept and replayed.** A `FontSource` that answers
+`form_recording_bytes` with more than nothing is asked, at every form the
+device enters, for a recording of that form drawn under the same key
+(`kept_form`), and told how each form was drawn (`form_drawn`): replayed,
+interpreted, or interpreted after it held none, with what was recorded. The
+source keeps the recordings; the interpreter holds no cache. The key,
+`FormInvocation`, is the form's identity and everything the interpreter
+carries into a form and does not reset there, written exactly, every number
+by its bits: the whole graphics state, a clip waiting for a path, the operands
+left before `Do`, the depth, the streams running around the form and which
+device spaces the scope remaps — a state holding a stored function or a
+halftone has none, and its forms are interpreted. The scope a form without
+resources of its own resolves its names in is the source's to add. A
+recording is the calls the device was handed between `begin_form` and
+`end_form`, made through a tape that copies each call with the device's own
+answer as the device is handed it; what the drawing spent of the budgets for
+nested content, in order; and where it left the current point, the subpath's
+start and a waiting clip, which a form does not restore. The text matrix, the
+line matrix, the current point and the subpath's start are not in the key,
+since a page leaves them wherever its last text object and path did: a
+recording notes each one its drawing read before it set its own — a `Tj`
+with no `BT`, a `v` from the point it was invoked at — and is replayed only
+where those are what they were. A recording is replayed only where the device
+would give every answer it records (`Device::answers_alike`, `false` by
+default, so a device that cannot say is never handed one) and where what it
+spent fits the budgets as they stand, and a replay spends it; otherwise the
+form is interpreted. A drawing that depends on more than its key is never
+offered: one the device cancelled, one inside which a form, a mask or a glyph
+was refused for depth, a cycle or a budget, and one past
+`form_recording_bytes`, counted by `Event::kept_bytes`, the count the
+retained page's cap uses.
+
 ## API
 
 Everything is on the facade (ruling 11): `Page::text()` returns a
@@ -1179,7 +1211,20 @@ convention, render-mode predicates).
 
 Every test in `interpret.rs` drives `RecordingDevice`; the hidden-image test
 asserts that the interpreter hands a hidden image to the device inside a
-hidden scope.
+hidden scope. The kept form recordings' are
+`a_kept_form_recording_replays_as_the_form_interprets` — a form under three
+transforms, under inherited colours and line widths, nested in another, a
+transparency group under a state's alpha and blend mode, a form whose content
+sets a soft mask and text in an inherited font and text matrix, each page
+interpreted twice over a source that keeps drawings and held call for call and
+state for state to an interpretation over one that keeps none, with groups and
+masks declined and accepted — and `a_kept_form_is_interpreted_once_per_key`,
+which counts recordings and replays and the tokens a replay does not read;
+beside them a nested form kept inside its outer one and for itself, the text
+matrix and the current point counting only where a drawing reads them, a
+cycle, a recording past its bound, a cancelled drawing and a form with no key
+never kept, a device that would answer otherwise handed an interpretation, and
+the group and nested-content budgets a replay must fit.
 
 `crates/tinker-pdf-content/tests/uax29_conformance.rs` runs every case of
 `WordBreakTest.txt` against the segmenter `words()` calls; the case count is

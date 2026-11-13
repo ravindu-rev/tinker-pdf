@@ -21,9 +21,9 @@ pub mod words;
 
 pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 pub use interpret::{
-    interpret, interpret_counted, DeviceDefaults, FontSource, Form, Group, GroupSpace, Layer,
-    MaskGroup, SoftMask, StateParameters, Type3Glyph, MAX_GROUP_RUNS, NESTED_RUN_COST,
-    NESTED_WORK_FLOOR, NESTED_WORK_RATE,
+    interpret, interpret_counted, DeviceDefaults, FontSource, Form, FormDrawn, FormInvocation,
+    FormRecording, Group, GroupSpace, Layer, MaskGroup, SoftMask, StateParameters, Type3Glyph,
+    MAX_GROUP_RUNS, NESTED_RUN_COST, NESTED_WORK_FLOOR, NESTED_WORK_RATE,
 };
 pub use plain::{HyphenCounts, PlainText, PlainTextOptions};
 pub use record::{Answers, Capture, Event, EventKind, MarkedScope, RecordingDevice};

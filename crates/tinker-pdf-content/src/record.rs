@@ -472,6 +472,90 @@ impl Event {
             _ => None,
         }
     }
+
+    /// What this event holds, in bytes: its own size, and everything it
+    /// copied to the heap — the state it carries with that state's heap
+    /// parts, its path at `size_of::<PathSegment>()` a segment, and every
+    /// name, string, inline image and mask-group stream it copies. The
+    /// stored parameters a state shares are not its own, and are not
+    /// counted.
+    ///
+    /// The one count both bounds a recording keeps by: a retained page's
+    /// (`tinker-pdf-render`'s `MAX_DISPLAY_LIST_BYTES`) and a kept form's
+    /// ([`crate::FontSource::form_recording_bytes`]).
+    #[must_use]
+    pub fn kept_bytes(&self) -> usize {
+        use core::mem::size_of;
+        let text = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+        let bytes = |s: &Option<Vec<u8>>| s.as_ref().map_or(0, Vec::len);
+        // A colour's source is shared between the states that carry the colour,
+        // and counted with each, as a name the state copies is.
+        let source = |s: &Option<std::sync::Arc<crate::ColorSource>>| {
+            s.as_deref().map_or(0, |source| {
+                size_of::<crate::ColorSource>()
+                    .saturating_add(source.components.len().saturating_mul(size_of::<f64>()))
+            })
+        };
+        let state = |s: &Option<Box<GraphicsState>>| {
+            s.as_deref().map_or(0, |s| {
+                size_of::<GraphicsState>()
+                    .saturating_add(s.dashes.len().saturating_mul(size_of::<f64>()))
+                    .saturating_add(bytes(&s.fill_space))
+                    .saturating_add(bytes(&s.stroke_space))
+                    .saturating_add(bytes(&s.fill_pattern))
+                    .saturating_add(bytes(&s.stroke_pattern))
+                    .saturating_add(bytes(&s.text.font))
+                    .saturating_add(source(&s.fill_source))
+                    .saturating_add(source(&s.stroke_source))
+            })
+        };
+        let path = |p: &[PathSegment]| p.len().saturating_mul(size_of::<PathSegment>());
+        let own = match self {
+            Event::ShowGlyph { glyph, state: s } => glyph.text.len().saturating_add(state(s)),
+            Event::FillPath {
+                path: p, state: s, ..
+            }
+            | Event::StrokePath { path: p, state: s }
+            | Event::ClipPath {
+                path: p, state: s, ..
+            } => path(p).saturating_add(state(s)),
+            Event::DrawImage { image, state: s } => image
+                .name
+                .len()
+                .saturating_add(image.inline_dict.len())
+                .saturating_add(image.inline_data.len())
+                .saturating_add(state(s)),
+            Event::DrawShading { name, state: s } => name.len().saturating_add(state(s)),
+            Event::BeginMarkedContent(scope) => {
+                let props = scope.props.as_ref().map_or(0, |p| {
+                    size_of::<MarkedProps>()
+                        .saturating_add(text(&p.actual_text))
+                        .saturating_add(text(&p.alt))
+                        .saturating_add(text(&p.lang))
+                        .saturating_add(text(&p.expansion))
+                        .saturating_add(p.associated_files.as_ref().map_or(0, Vec::len))
+                });
+                scope
+                    .tag
+                    .len()
+                    .saturating_add(text(&scope.hidden_layer))
+                    .saturating_add(props)
+            }
+            Event::BeginForm { name, .. } => name.len(),
+            Event::BeginGroup { state: s, .. } => state(s),
+            Event::BeginSoftMask {
+                mask,
+                bbox,
+                state: s,
+                ..
+            } => size_of::<MaskGroup>()
+                .saturating_add(mask.form.content.len())
+                .saturating_add(path(bbox))
+                .saturating_add(state(s)),
+            _ => 0,
+        };
+        size_of::<Event>().saturating_add(own)
+    }
 }
 
 /// A [`Device`] that keeps every call, in order.
@@ -552,6 +636,16 @@ impl RecordingDevice {
     #[must_use]
     pub fn into_events(self) -> Vec<Event> {
         self.events
+    }
+
+    /// The events from `at` on, taken out of the recorder, which keeps the
+    /// ones before: what a tape hands over when the recording it kept from
+    /// `at` closes. Nothing for an `at` past the end.
+    pub fn split_off(&mut self, at: usize) -> Vec<Event> {
+        if at >= self.events.len() {
+            return Vec::new();
+        }
+        self.events.split_off(at)
     }
 
     /// What was captured.
@@ -861,6 +955,19 @@ impl Device for RecordingDevice {
 
     fn is_cancelled(&self) -> bool {
         self.answers.cancelled
+    }
+
+    /// A recorder's answers are its [`Answers`], whatever was asked before,
+    /// so a recording replays as it was made exactly where every question in
+    /// it was answered as this recorder answers its kind.
+    fn answers_alike(&self, events: &[Event]) -> bool {
+        !self.answers.cancelled
+            && events.iter().all(|event| match event {
+                Event::BeginForm { entered, .. } => *entered == self.answers.forms,
+                Event::BeginGroup { entered, .. } => *entered == self.answers.groups,
+                Event::BeginSoftMask { entered, .. } => *entered == self.answers.soft_masks,
+                _ => true,
+            })
     }
 }
 

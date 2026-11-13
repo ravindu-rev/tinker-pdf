@@ -369,6 +369,29 @@ pub trait Device {
     fn is_cancelled(&self) -> bool {
         false
     }
+
+    /// Whether this device, asked now, would give every answer `events`
+    /// records — each [`Event::BeginForm`], [`Event::BeginGroup`] and
+    /// [`Event::BeginSoftMask`]'s `entered`, in order, with the
+    /// marked-content scopes and the brackets between them as they stand —
+    /// worked out without asking it anything.
+    ///
+    /// The question the interpreter puts before it replays a recording of a
+    /// form's drawing kept from another invocation
+    /// ([`crate::FontSource::kept_form`]): a recording is what interpreting
+    /// the form gives only where the device answers as it answered then, since
+    /// the interpreter acts on each answer. `false`, the default, is never
+    /// wrong — the form is then interpreted, as it always is — and a device
+    /// answers `true` only where its answers are a function of what it can
+    /// work out here.
+    ///
+    /// [`Event::BeginForm`]: crate::record::Event::BeginForm
+    /// [`Event::BeginGroup`]: crate::record::Event::BeginGroup
+    /// [`Event::BeginSoftMask`]: crate::record::Event::BeginSoftMask
+    fn answers_alike(&self, events: &[crate::record::Event]) -> bool {
+        let _ = events;
+        false
+    }
 }
 
 /// One piece of a path, in device space.

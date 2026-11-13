@@ -6,6 +6,8 @@
 //! of the page.
 
 use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
+use crate::record::{Answers, Event, RecordingDevice};
+use crate::replay::replay;
 use crate::state::{
     BlackPointCompensation, BlendMode, ColorFamily, ColorSource, GraphicsState, Halftone, LineCap,
     LineJoin, Matrix, RenderingIntent, Rgb, TextRenderMode, Transfer,
@@ -427,6 +429,45 @@ pub trait FontSource {
         None
     }
 
+    /// The most bytes, as [`crate::record::Event::kept_bytes`] counts them, a
+    /// recording of one form's drawing may hold for this source to be offered
+    /// it ([`FontSource::form_drawn`]); `0`, the default, keeps none, and the
+    /// interpreter then records nothing and asks nothing of the two methods
+    /// below.
+    ///
+    /// **The source decides whether to keep recordings, and keeps them**: the
+    /// interpreter holds no cache of its own. It asks for a recording at every
+    /// form it enters and offers each one it makes.
+    fn form_recording_bytes(&self) -> usize {
+        0
+    }
+
+    /// The recording this source kept of the form `name` drawn under
+    /// `invocation`, from an earlier invocation — `None` for one it has
+    /// none of. Asked only where [`FontSource::form_recording_bytes`] is not
+    /// `0`, and only after the device has entered the form.
+    ///
+    /// `invocation` is everything of the interpretation the form's drawing
+    /// can read ([`FormInvocation`]); the source adds what only it knows,
+    /// which for a form that brings no resources of its own is the scope its
+    /// names resolve in, and must hand back a recording only under a key
+    /// holding both. The interpreter replays a recording handed back in
+    /// place of interpreting the form where the device would give every
+    /// answer it records ([`crate::Device::answers_alike`]) and the
+    /// interpretation's budgets allow what it spent; otherwise it interprets
+    /// the form, as it does where there is none.
+    fn kept_form(&self, name: &[u8], invocation: &FormInvocation) -> Option<Arc<FormRecording>> {
+        let _ = (name, invocation);
+        None
+    }
+
+    /// How the form `name` was drawn, said once for each form the
+    /// interpreter enters, after it ends, where
+    /// [`FontSource::form_recording_bytes`] is not `0` ([`FormDrawn`]).
+    fn form_drawn(&self, name: &[u8], drawn: FormDrawn) {
+        let _ = (name, drawn);
+    }
+
     /// A Type 3 glyph procedure, with the font's `/FontMatrix` and the
     /// procedure's identity (9.6.5).
     ///
@@ -581,6 +622,397 @@ pub trait FontSource {
     }
 }
 
+/// What a form's drawing can read of the interpretation it is invoked in, as
+/// one key: the form, and the invoking state written exactly
+/// (`docs/design/performance.md`, P-16, "A hit is the bytes a miss
+/// computes").
+///
+/// The state is everything the interpreter carries into a form and does not
+/// reset there: the whole graphics state — the transform, the colours and
+/// their spaces' names, the pen, the text state and its font's name, the
+/// alphas, the blend mode and the stored parameters — the text and line
+/// matrices, the current point and the subpath's start, a clip waiting for a
+/// path, the operands left on the stack before `Do`, how deep the form is
+/// and the streams running around it, and which device spaces the scope in
+/// force remaps. Every number is its bits, so two invocations are one key
+/// exactly when nothing a form could read differs. A state holding a
+/// function or a halftone (`StoredParameters`' transfer, generation,
+/// removal and halftone) has no key, and its forms are interpreted.
+///
+/// What it does not hold is the scope: a form that brings no resources of
+/// its own resolves its names in the invoking scope, which only the source
+/// knows ([`FontSource::kept_form`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FormInvocation {
+    /// The form, as [`Form::stream`] names it: never `0`, since a form
+    /// reached without a reference has no identity to keep a drawing under.
+    pub stream: u64,
+    /// The invoking state, written exactly.
+    state: Vec<u8>,
+}
+
+impl FormInvocation {
+    /// How many bytes the written state holds, for a source that charges a
+    /// key.
+    #[must_use]
+    pub fn written_len(&self) -> usize {
+        self.state.len()
+    }
+}
+
+/// How the interpreter drew a form it entered ([`FontSource::form_drawn`]).
+#[derive(Clone, Debug)]
+pub enum FormDrawn {
+    /// Replayed from the recording [`FontSource::kept_form`] handed back:
+    /// nothing of the form was interpreted.
+    Replayed,
+    /// Interpreted, with nothing recorded: the invocation's state has no key
+    /// ([`FormInvocation`]), or the form has no identity, or the source held
+    /// a recording this invocation could not replay.
+    Interpreted,
+    /// Interpreted after [`FontSource::kept_form`] held no recording for
+    /// `invocation`: what was recorded of the drawing, or `None` where it is
+    /// not one to keep — the device was cancelled; a nested form, mask or
+    /// glyph was refused for depth, for a cycle or for a budget, which
+    /// depends on more than the key; or the recording passed
+    /// [`FontSource::form_recording_bytes`].
+    Recorded {
+        /// The key the recording was made under.
+        invocation: FormInvocation,
+        /// The recording.
+        recording: Option<FormRecording>,
+    },
+}
+
+/// One form invocation's drawing, recorded to be replayed in place of
+/// interpreting the form again under the same key ([`FontSource::kept_form`]).
+///
+/// The calls the device was handed from the one after `begin_form` to the
+/// one before `end_form`, each with the state it saw and the device's answer
+/// to each of its questions, as a page's display list records them; what the
+/// drawing spent of the interpretation's budgets for nested content, in the
+/// order it spent it; and where it left the current point and a clip waiting
+/// for a path, which a form does not restore. Nothing in it is a pixel.
+#[derive(Clone, Debug)]
+pub struct FormRecording {
+    events: Vec<Event>,
+    spent: Vec<Spent>,
+    after: After,
+    needs: Needs,
+    bytes: usize,
+}
+
+impl FormRecording {
+    /// The calls the drawing made, in order.
+    #[must_use]
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+
+    /// What the recording holds, in bytes: its events as
+    /// [`Event::kept_bytes`] counts them, its budget operations and its own
+    /// size.
+    #[must_use]
+    pub fn kept_bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+/// Where a form's drawing left what the interpreter does not restore after
+/// it.
+#[derive(Clone, Copy, Debug)]
+struct After {
+    current: (f64, f64),
+    start: (f64, f64),
+    pending_clip: Option<bool>,
+    /// Whether the drawing set the current point, and the subpath's start.
+    set_current: bool,
+    set_start: bool,
+}
+
+/// What a form's drawing read of the interpretation it was invoked in beside
+/// its key: the text matrix, the line matrix, the current point and the
+/// subpath's start, each where the drawing read the value it was invoked with
+/// before it set its own, and `None` where it did not.
+///
+/// Not in the key, because a page leaves them wherever its last text object
+/// and its last path did, which differs from page to page while a form that
+/// sets its own — a `BT`, an `m` — draws the same: a replay asks for them to
+/// be what they were only where the drawing read them
+/// ([`Interpreter::replays`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct Needs {
+    text: Option<Matrix>,
+    line: Option<Matrix>,
+    current: Option<(f64, f64)>,
+    start: Option<(f64, f64)>,
+}
+
+/// Which of the interpretation's four unrestored values a nested stream's run
+/// has set since it began, for a recording around it to tell its reads of
+/// what it was invoked with from reads of what it set itself
+/// ([`Needs`]): the text and line matrices, which the run saves and restores.
+#[derive(Clone, Copy, Debug, Default)]
+struct RunMarks {
+    text: bool,
+    line: bool,
+}
+
+/// One thing a drawing spent of the interpretation's budgets for nested
+/// content, in the order it spent them: what a replay checks and spends
+/// again, where the budgets stand then.
+#[derive(Clone, Copy, Debug)]
+enum Spent {
+    /// [`Interpreter::group_run_left`] answered yes.
+    GroupCheck,
+    /// A group or a mask's group ran, spending one of [`MAX_GROUP_RUNS`].
+    GroupRun,
+    /// [`Interpreter::nested_work_left`] answered yes for `len` bytes of
+    /// `stream`.
+    NestedCheck { stream: u64, len: u64 },
+    /// A nested run spent `len` bytes and [`NESTED_RUN_COST`].
+    NestedSpend { len: u64 },
+}
+
+/// A [`FormInvocation`]'s state as it is written: every number by its bits,
+/// every byte string after its length, every enum by its name.
+struct Exact(Vec<u8>);
+
+impl Exact {
+    fn num(&mut self, value: f64) {
+        self.0.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+
+    fn word(&mut self, value: u64) {
+        self.0.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn flag(&mut self, value: bool) {
+        self.0.push(u8::from(value));
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.word(value.len() as u64);
+        self.0.extend_from_slice(value);
+    }
+
+    fn maybe_bytes(&mut self, value: Option<&[u8]>) {
+        match value {
+            None => self.0.push(0),
+            Some(value) => {
+                self.0.push(1);
+                self.bytes(value);
+            }
+        }
+    }
+
+    fn maybe_num(&mut self, value: Option<f64>) {
+        match value {
+            None => self.0.push(0),
+            Some(value) => {
+                self.0.push(1);
+                self.num(value);
+            }
+        }
+    }
+
+    /// A fieldless enum, by the name its `Debug` gives it: two values are one
+    /// name exactly when they are one variant.
+    fn named(&mut self, value: &impl core::fmt::Debug) {
+        self.bytes(format!("{value:?}").as_bytes());
+    }
+
+    fn matrix(&mut self, m: &Matrix) {
+        for value in [m.a, m.b, m.c, m.d, m.e, m.f] {
+            self.num(value);
+        }
+    }
+
+    fn token(&mut self, token: &Token) {
+        match token {
+            Token::Number(value) => {
+                self.0.push(0);
+                self.num(*value);
+            }
+            Token::String(bytes) => {
+                self.0.push(1);
+                self.bytes(bytes);
+            }
+            Token::Name(bytes) => {
+                self.0.push(2);
+                self.bytes(bytes);
+            }
+            Token::ArrayOpen => self.0.push(3),
+            Token::ArrayClose => self.0.push(4),
+            Token::DictOpen => self.0.push(5),
+            Token::DictClose => self.0.push(6),
+            Token::Bool(value) => {
+                self.0.push(7);
+                self.flag(*value);
+            }
+            Token::Null => self.0.push(8),
+            Token::Operator(bytes) => {
+                self.0.push(9);
+                self.bytes(bytes);
+            }
+        }
+    }
+
+    /// The whole graphics state, or `None` where it holds a function or a
+    /// halftone, which no key writes. Every field is named, so a field the
+    /// state gains is a field this must write before it compiles.
+    fn state(&mut self, state: &GraphicsState) -> Option<()> {
+        let GraphicsState {
+            ctm,
+            text,
+            fill_alpha,
+            stroke_alpha,
+            fill_color,
+            stroke_color,
+            fill_ink,
+            stroke_ink,
+            fill_family,
+            stroke_family,
+            line_width,
+            line_cap,
+            line_join,
+            miter_limit,
+            dashes,
+            dash_phase,
+            fill_space,
+            stroke_space,
+            fill_pattern,
+            blend,
+            stroke_pattern,
+            stored,
+            fill_source,
+            stroke_source,
+        } = state;
+        self.matrix(ctm);
+        let crate::state::TextState {
+            size,
+            char_spacing,
+            word_spacing,
+            horizontal_scale,
+            leading,
+            rise,
+            render_mode,
+            font,
+        } = text;
+        for value in [
+            *size,
+            *char_spacing,
+            *word_spacing,
+            *horizontal_scale,
+            *leading,
+            *rise,
+        ] {
+            self.num(value);
+        }
+        self.named(render_mode);
+        self.maybe_bytes(font.as_deref());
+        self.num(*fill_alpha);
+        self.num(*stroke_alpha);
+        for colour in [fill_color, stroke_color] {
+            self.0.extend_from_slice(&[colour.r, colour.g, colour.b]);
+        }
+        for ink in [fill_ink, stroke_ink] {
+            match ink {
+                None => self.0.push(0),
+                Some(ink) => {
+                    self.0.push(1);
+                    self.0.extend_from_slice(ink);
+                }
+            }
+        }
+        self.named(fill_family);
+        self.named(stroke_family);
+        // What each colour resolves again from when the intent changes.
+        for source in [fill_source, stroke_source] {
+            match source.as_deref() {
+                None => self.0.push(0),
+                Some(crate::state::ColorSource { family, components }) => {
+                    self.0.push(1);
+                    self.maybe_bytes(*family);
+                    self.word(components.len() as u64);
+                    for component in components {
+                        self.num(*component);
+                    }
+                }
+            }
+        }
+        self.num(*line_width);
+        self.named(line_cap);
+        self.named(line_join);
+        self.num(*miter_limit);
+        self.word(dashes.len() as u64);
+        for dash in dashes {
+            self.num(*dash);
+        }
+        self.num(*dash_phase);
+        self.maybe_bytes(fill_space.as_deref());
+        self.maybe_bytes(stroke_space.as_deref());
+        self.maybe_bytes(fill_pattern.as_deref());
+        self.named(blend);
+        self.maybe_bytes(stroke_pattern.as_deref());
+        match stored.as_deref() {
+            None => self.0.push(0),
+            Some(stored) => {
+                let crate::state::StoredParameters {
+                    rendering_intent,
+                    black_point_compensation,
+                    stroke_overprint,
+                    fill_overprint,
+                    overprint_mode,
+                    alpha_is_shape,
+                    text_knockout,
+                    flatness,
+                    smoothness,
+                    stroke_adjustment,
+                    black_generation,
+                    undercolor_removal,
+                    transfer,
+                    halftone,
+                    halftone_origin,
+                } = stored;
+                if black_generation.is_some()
+                    || undercolor_removal.is_some()
+                    || transfer.is_some()
+                    || halftone.is_some()
+                {
+                    return None;
+                }
+                self.0.push(1);
+                self.named(rendering_intent);
+                self.named(black_point_compensation);
+                self.flag(*stroke_overprint);
+                self.flag(*fill_overprint);
+                self.word(*overprint_mode as u64);
+                self.flag(*alpha_is_shape);
+                self.flag(*text_knockout);
+                self.maybe_num(*flatness);
+                self.maybe_num(*smoothness);
+                match stroke_adjustment {
+                    None => self.0.push(0),
+                    Some(value) => {
+                        self.0.push(1);
+                        self.flag(*value);
+                    }
+                }
+                match halftone_origin {
+                    None => self.0.push(0),
+                    Some([x, y]) => {
+                        self.0.push(1);
+                        self.num(*x);
+                        self.num(*y);
+                    }
+                }
+            }
+        }
+        Some(())
+    }
+}
+
 /// How deep form XObjects may nest before recursion is refused (8.10).
 const MAX_FORM_DEPTH: u32 = 16;
 
@@ -644,6 +1076,20 @@ pub const NESTED_WORK_RATE: u64 = 4096;
 /// stream's length: a run is a lookup, a decode and a saved state before its
 /// first byte, so a tree of empty forms is bounded too.
 pub const NESTED_RUN_COST: u64 = 256;
+
+/// Whether a run of `len` bytes fits the nested-content budget an
+/// interpretation that has spent `spent` and reached `reached` bytes has:
+/// [`NESTED_WORK_FLOOR`] and [`NESTED_WORK_RATE`] for every byte reached.
+fn nested_fits(spent: u64, reached: u64, len: u64) -> bool {
+    let budget = NESTED_WORK_FLOOR.saturating_add(reached.saturating_mul(NESTED_WORK_RATE));
+    nested_after(spent, len) <= budget
+}
+
+/// What a run of `len` bytes leaves spent of the nested-content budget after
+/// `spent`.
+fn nested_after(spent: u64, len: u64) -> u64 {
+    spent.saturating_add(len).saturating_add(NESTED_RUN_COST)
+}
 
 /// A `BDC`'s property list, in the two forms 14.6.2 gives it.
 ///
@@ -820,33 +1266,7 @@ fn interpret_steps<D: Device, F: FontSource>(
     device: &mut D,
     fonts: &F,
 ) -> Steps {
-    let mut interp = Interpreter {
-        device,
-        fonts: Scope::Borrowed(fonts),
-        defaults: fonts.device_defaults(),
-        stack: Vec::new(),
-        gs: GraphicsState::new(initial),
-        saved: Vec::new(),
-        text_matrix: Matrix::IDENTITY,
-        line_matrix: Matrix::IDENTITY,
-        path: Vec::new(),
-        current: (0.0, 0.0),
-        start: (0.0, 0.0),
-        depth: 0,
-        pending_clip: None,
-        marked: 0,
-        marked_over_cap: 0,
-        streams: Vec::new(),
-        group_runs: 0,
-        group_budget_told: false,
-        procedures: Vec::new(),
-        recursion_told: false,
-        reached_streams: BTreeSet::new(),
-        reached: u64::try_from(content.len()).unwrap_or(u64::MAX),
-        nested_spent: 0,
-        nested_budget_told: false,
-        steps: Steps::default(),
-    };
+    let mut interp = Interpreter::new(device, fonts, initial, content.len());
     interp.run(content);
     // 14.6.2: a stream may end with scopes still open, and a device left
     // inside one would treat everything after it as part of that layer.
@@ -858,8 +1278,387 @@ fn interpret_steps<D: Device, F: FontSource>(
     interp.steps
 }
 
-struct Interpreter<'d, D: Device, F: FontSource> {
+/// The device the interpreter talks to, and the tape a form's drawing is
+/// recorded on while a recording is open ([`FontSource::form_drawn`]): every
+/// call the device is handed is copied onto the tape with the answer the
+/// device gave, so a recording is what this device was told.
+struct Out<'d, D: Device> {
     device: &'d mut D,
+    tape: Tape,
+}
+
+/// The recordings of forms' drawings being made, one inside another as forms
+/// nest, over one run of calls.
+#[derive(Default)]
+struct Tape {
+    /// The calls made since the outermost open recording began.
+    recorder: RecordingDevice,
+    /// What the calls hold, by [`Event::kept_bytes`], with the budget
+    /// operations beside them.
+    bytes: usize,
+    /// The budget operations the open recordings spent, in order.
+    spent: Vec<Spent>,
+    /// The recordings open, outermost first.
+    open: Vec<Opened>,
+    /// Whether the run passed the bound of a recording open over it: nothing
+    /// more is kept until the outermost closes.
+    overflowed: bool,
+}
+
+/// One recording open on the [`Tape`].
+struct Opened {
+    /// Where its calls begin on the tape.
+    events: usize,
+    /// Where its budget operations begin.
+    spent: usize,
+    /// The most it may hold.
+    limit: usize,
+    /// Whether it is not one to keep.
+    spoiled: bool,
+    /// The run its form's content is: the index the form's [`RunMarks`]
+    /// takes.
+    run: usize,
+    /// The four unrestored values the form was invoked with.
+    invoked: After,
+    text: Matrix,
+    line: Matrix,
+    /// What the drawing read of them before it set its own.
+    needs: Needs,
+    /// Whether the current point and the subpath's start are still the ones
+    /// the form was invoked with: nothing since it began has set them.
+    current_kept: bool,
+    start_kept: bool,
+}
+
+impl Tape {
+    /// Whether a call made now is recorded.
+    fn taping(&self) -> bool {
+        !self.overflowed && self.open.iter().any(|opened| !opened.spoiled)
+    }
+
+    /// Marks every open recording as not one to keep: something it holds
+    /// depends on more than its key.
+    fn spoil(&mut self) {
+        for opened in &mut self.open {
+            opened.spoiled = true;
+        }
+    }
+
+    /// Counts what the call just recorded holds, and stops the tape where
+    /// the run passes the least bound of the recordings open over it.
+    fn counted(&mut self, bytes: usize) {
+        self.bytes = self.bytes.saturating_add(bytes);
+        let limit = self.open.iter().map(|opened| opened.limit).min();
+        if limit.is_some_and(|limit| self.bytes > limit) {
+            self.spoil();
+            self.overflowed = true;
+            self.recorder = RecordingDevice::new();
+            self.spent = Vec::new();
+            self.bytes = 0;
+        }
+    }
+
+    /// Counts the call the recorder just kept.
+    fn record(&mut self) {
+        let bytes = self.recorder.events().last().map_or(0, Event::kept_bytes);
+        self.counted(bytes);
+    }
+
+    /// Notes one budget operation for every open recording.
+    fn spend(&mut self, spent: Spent) {
+        if self.taping() {
+            self.spent.push(spent);
+            self.counted(core::mem::size_of::<Spent>());
+        }
+    }
+
+    /// Opens a recording of at most `limit` bytes, of a form whose run
+    /// takes the index `run` and is invoked with `invoked`, `text` and
+    /// `line`.
+    fn open(&mut self, limit: usize, run: usize, invoked: After, text: Matrix, line: Matrix) {
+        self.open.push(Opened {
+            events: self.recorder.events().len(),
+            spent: self.spent.len(),
+            limit,
+            spoiled: self.overflowed,
+            run,
+            invoked,
+            text,
+            line,
+            needs: Needs::default(),
+            current_kept: true,
+            start_kept: true,
+        });
+    }
+
+    /// Closes the innermost recording, handing it back where it is one to
+    /// keep, with `after` as where it leaves the interpretation.
+    fn close(&mut self, after: After) -> Option<FormRecording> {
+        let opened = self.open.pop()?;
+        let after = After {
+            set_current: !opened.current_kept,
+            set_start: !opened.start_kept,
+            ..after
+        };
+        let outermost = self.open.is_empty();
+        let kept = if opened.spoiled {
+            None
+        } else {
+            let (events, spent) = if outermost {
+                (
+                    self.recorder.split_off(opened.events),
+                    self.spent.split_off(opened.spent.min(self.spent.len())),
+                )
+            } else {
+                (
+                    self.recorder
+                        .events()
+                        .get(opened.events..)
+                        .map(<[Event]>::to_vec)
+                        .unwrap_or_default(),
+                    self.spent
+                        .get(opened.spent..)
+                        .map(<[Spent]>::to_vec)
+                        .unwrap_or_default(),
+                )
+            };
+            let bytes = events
+                .iter()
+                .map(Event::kept_bytes)
+                .fold(core::mem::size_of::<FormRecording>(), usize::saturating_add)
+                .saturating_add(spent.len().saturating_mul(core::mem::size_of::<Spent>()));
+            (bytes <= opened.limit).then_some(FormRecording {
+                events,
+                spent,
+                after,
+                needs: opened.needs,
+                bytes,
+            })
+        };
+        if outermost {
+            *self = Tape::default();
+        }
+        kept
+    }
+}
+
+impl<D: Device> Out<'_, D> {
+    /// Sets the tape's answers to the device's before a question is copied.
+    fn answered(&mut self, change: impl FnOnce(&mut Answers)) {
+        let mut answers = self.tape.recorder.answers();
+        change(&mut answers);
+        self.tape.recorder.set_answers(answers);
+    }
+}
+
+impl<D: Device> Device for Out<'_, D> {
+    fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        self.device.show_glyph(glyph, state);
+        if self.tape.taping() {
+            self.tape.recorder.show_glyph(glyph, state);
+            self.tape.record();
+        }
+    }
+
+    fn begin_text(&mut self) {
+        self.device.begin_text();
+        if self.tape.taping() {
+            self.tape.recorder.begin_text();
+            self.tape.record();
+        }
+    }
+
+    fn end_text(&mut self) {
+        self.device.end_text();
+        if self.tape.taping() {
+            self.tape.recorder.end_text();
+            self.tape.record();
+        }
+    }
+
+    fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        self.device.fill_path(path, state, even_odd);
+        if self.tape.taping() {
+            self.tape.recorder.fill_path(path, state, even_odd);
+            self.tape.record();
+        }
+    }
+
+    fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
+        self.device.stroke_path(path, state);
+        if self.tape.taping() {
+            self.tape.recorder.stroke_path(path, state);
+            self.tape.record();
+        }
+    }
+
+    fn clip_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        self.device.clip_path(path, state, even_odd);
+        if self.tape.taping() {
+            self.tape.recorder.clip_path(path, state, even_odd);
+            self.tape.record();
+        }
+    }
+
+    fn save_state(&mut self) {
+        self.device.save_state();
+        if self.tape.taping() {
+            self.tape.recorder.save_state();
+            self.tape.record();
+        }
+    }
+
+    fn restore_state(&mut self) {
+        self.device.restore_state();
+        if self.tape.taping() {
+            self.tape.recorder.restore_state();
+            self.tape.record();
+        }
+    }
+
+    fn draw_image(&mut self, image: &ImageRef, state: &GraphicsState) {
+        self.device.draw_image(image, state);
+        if self.tape.taping() {
+            self.tape.recorder.draw_image(image, state);
+            self.tape.record();
+        }
+    }
+
+    fn draw_shading(&mut self, name: &[u8], state: &GraphicsState) {
+        self.device.draw_shading(name, state);
+        if self.tape.taping() {
+            self.tape.recorder.draw_shading(name, state);
+            self.tape.record();
+        }
+    }
+
+    fn begin_marked_content(
+        &mut self,
+        tag: &[u8],
+        visible: bool,
+        hidden_layer: Option<&str>,
+        props: Option<&MarkedProps>,
+    ) {
+        self.device
+            .begin_marked_content(tag, visible, hidden_layer, props);
+        if self.tape.taping() {
+            self.tape
+                .recorder
+                .begin_marked_content(tag, visible, hidden_layer, props);
+            self.tape.record();
+        }
+    }
+
+    fn end_marked_content(&mut self) {
+        self.device.end_marked_content();
+        if self.tape.taping() {
+            self.tape.recorder.end_marked_content();
+            self.tape.record();
+        }
+    }
+
+    fn begin_form(&mut self, id: u64, name: &[u8]) -> bool {
+        let entered = self.device.begin_form(id, name);
+        if self.tape.taping() {
+            self.answered(|answers| answers.forms = entered);
+            self.tape.recorder.begin_form(id, name);
+            self.tape.record();
+        }
+        entered
+    }
+
+    fn end_form(&mut self, id: u64) {
+        self.device.end_form(id);
+        if self.tape.taping() {
+            self.tape.recorder.end_form(id);
+            self.tape.record();
+        }
+    }
+
+    fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {
+        let entered = self.device.begin_group(group, state);
+        if self.tape.taping() {
+            self.answered(|answers| answers.groups = entered);
+            self.tape.recorder.begin_group(group, state);
+            self.tape.record();
+        }
+        entered
+    }
+
+    fn end_group(&mut self) {
+        self.device.end_group();
+        if self.tape.taping() {
+            self.tape.recorder.end_group();
+            self.tape.record();
+        }
+    }
+
+    fn begin_soft_mask(
+        &mut self,
+        mask: &MaskGroup,
+        bbox: &[PathSegment],
+        state: &GraphicsState,
+    ) -> bool {
+        let entered = self.device.begin_soft_mask(mask, bbox, state);
+        if self.tape.taping() {
+            self.answered(|answers| answers.soft_masks = entered);
+            self.tape.recorder.begin_soft_mask(mask, bbox, state);
+            self.tape.record();
+        }
+        entered
+    }
+
+    fn end_soft_mask(&mut self) {
+        self.device.end_soft_mask();
+        if self.tape.taping() {
+            self.tape.recorder.end_soft_mask();
+            self.tape.record();
+        }
+    }
+
+    fn clear_soft_mask(&mut self) {
+        self.device.clear_soft_mask();
+        if self.tape.taping() {
+            self.tape.recorder.clear_soft_mask();
+            self.tape.record();
+        }
+    }
+
+    fn group_budget_spent(&mut self) {
+        self.device.group_budget_spent();
+        if self.tape.taping() {
+            self.tape.recorder.group_budget_spent();
+            self.tape.record();
+        }
+    }
+
+    fn recursion_refused(&mut self) {
+        self.device.recursion_refused();
+        if self.tape.taping() {
+            self.tape.recorder.recursion_refused();
+            self.tape.record();
+        }
+    }
+
+    fn nested_budget_spent(&mut self) {
+        self.device.nested_budget_spent();
+        if self.tape.taping() {
+            self.tape.recorder.nested_budget_spent();
+            self.tape.record();
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.device.is_cancelled()
+    }
+
+    fn answers_alike(&self, events: &[Event]) -> bool {
+        self.device.answers_alike(events)
+    }
+}
+
+struct Interpreter<'d, D: Device, F: FontSource> {
+    device: Out<'d, D>,
     fonts: Scope<'d, F>,
     /// What [`FontSource::device_defaults`] answered for the scope in force,
     /// asked when the scope came into force and never per operator (8.6.5.6).
@@ -912,14 +1711,55 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     /// What this run has read, nested content included: the counts
     /// [`interpret_counted`] hands to its tally.
     steps: Steps,
+    /// The nested streams running, innermost last, and which of the text and
+    /// line matrices each has set since it began ([`RunMarks`]).
+    runs: Vec<RunMarks>,
 }
 
-impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
+impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
+    /// An interpretation of a stream of `len` bytes into `device` over
+    /// `fonts`, from the initial state under `initial`.
+    fn new(device: &'d mut D, fonts: &'d F, initial: Matrix, len: usize) -> Self {
+        Interpreter {
+            device: Out {
+                device,
+                tape: Tape::default(),
+            },
+            fonts: Scope::Borrowed(fonts),
+            defaults: fonts.device_defaults(),
+            stack: Vec::new(),
+            gs: GraphicsState::new(initial),
+            saved: Vec::new(),
+            text_matrix: Matrix::IDENTITY,
+            line_matrix: Matrix::IDENTITY,
+            path: Vec::new(),
+            current: (0.0, 0.0),
+            start: (0.0, 0.0),
+            depth: 0,
+            pending_clip: None,
+            marked: 0,
+            marked_over_cap: 0,
+            streams: Vec::new(),
+            group_runs: 0,
+            group_budget_told: false,
+            procedures: Vec::new(),
+            recursion_told: false,
+            reached_streams: BTreeSet::new(),
+            reached: u64::try_from(len).unwrap_or(u64::MAX),
+            nested_spent: 0,
+            nested_budget_told: false,
+            steps: Steps::default(),
+            runs: Vec::new(),
+        }
+    }
+
     fn run(&mut self, content: &[u8]) {
         let mut tokens = Tokenizer::new(content);
 
         while let Some(token) = tokens.next_token() {
             if self.device.is_cancelled() {
+                // A drawing cut short is never kept.
+                self.device.tape.spoil();
                 return;
             }
             self.steps.tokens = self.steps.tokens.saturating_add(1);
@@ -1189,6 +2029,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             b"BT" => {
                 self.text_matrix = Matrix::IDENTITY;
                 self.line_matrix = Matrix::IDENTITY;
+                self.set_text(true);
                 self.device.begin_text();
             }
             b"ET" => self.device.end_text(),
@@ -1236,15 +2077,19 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             // 9.4.2 text positioning
             b"Td" => {
                 if let (Some(tx), Some(ty)) = (self.num(1), self.num(0)) {
+                    self.read_line();
                     self.line_matrix = Matrix::translate(tx, ty).then(&self.line_matrix);
                     self.text_matrix = self.line_matrix;
+                    self.set_text(true);
                 }
             }
             b"TD" => {
                 if let (Some(tx), Some(ty)) = (self.num(1), self.num(0)) {
                     self.gs.text.leading = -ty;
+                    self.read_line();
                     self.line_matrix = Matrix::translate(tx, ty).then(&self.line_matrix);
                     self.text_matrix = self.line_matrix;
+                    self.set_text(true);
                 }
             }
             b"Tm" => {
@@ -1260,6 +2105,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     if m.is_finite() {
                         self.line_matrix = m;
                         self.text_matrix = m;
+                        self.set_text(true);
                     }
                 }
             }
@@ -1296,6 +2142,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     let p = self.gs.ctm.apply(x, y);
                     self.current = p;
                     self.start = p;
+                    self.set_point(true, true);
                     self.push_segment(PathSegment::MoveTo { x: p.0, y: p.1 });
                 }
             }
@@ -1303,6 +2150,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 if let (Some(x), Some(y)) = (self.num(1), self.num(0)) {
                     let p = self.gs.ctm.apply(x, y);
                     self.current = p;
+                    self.set_point(true, false);
                     self.push_segment(PathSegment::LineTo { x: p.0, y: p.1 });
                 }
             }
@@ -1319,6 +2167,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     let b = self.gs.ctm.apply(x2, y2);
                     let c = self.gs.ctm.apply(x3, y3);
                     self.current = c;
+                    self.set_point(true, false);
                     self.push_segment(PathSegment::CurveTo {
                         x1: a.0,
                         y1: a.1,
@@ -1333,10 +2182,12 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 if let (Some(x2), Some(y2), Some(x3), Some(y3)) =
                     (self.num(3), self.num(2), self.num(1), self.num(0))
                 {
+                    self.read_current();
                     let a = self.current;
                     let b = self.gs.ctm.apply(x2, y2);
                     let c = self.gs.ctm.apply(x3, y3);
                     self.current = c;
+                    self.set_point(true, false);
                     self.push_segment(PathSegment::CurveTo {
                         x1: a.0,
                         y1: a.1,
@@ -1354,6 +2205,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     let a = self.gs.ctm.apply(x1, y1);
                     let c = self.gs.ctm.apply(x3, y3);
                     self.current = c;
+                    self.set_point(true, false);
                     self.push_segment(PathSegment::CurveTo {
                         x1: a.0,
                         y1: a.1,
@@ -1365,7 +2217,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 }
             }
             b"h" => {
+                self.read_start();
                 self.current = self.start;
+                self.set_point(true, false);
                 self.push_segment(PathSegment::Close);
             }
             b"re" => {
@@ -1383,6 +2237,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     self.push_segment(PathSegment::Close);
                     self.current = p0;
                     self.start = p0;
+                    self.set_point(true, true);
                 }
             }
 
@@ -1907,13 +2762,29 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     /// telling the device, the first time it has none.
     fn group_run_left(&mut self) -> bool {
         if self.group_runs < MAX_GROUP_RUNS {
+            self.device.tape.spend(Spent::GroupCheck);
             return true;
         }
+        // A refusal depends on what ran before the form, not on its key.
+        self.device.tape.spoil();
         if !self.group_budget_told {
             self.group_budget_told = true;
             self.device.group_budget_spent();
         }
         false
+    }
+
+    /// A group's or a mask's group's content runs, spending one of
+    /// [`MAX_GROUP_RUNS`].
+    fn run_group(&mut self) {
+        self.group_runs += 1;
+        self.device.tape.spend(Spent::GroupRun);
+    }
+
+    /// A depth past [`MAX_FORM_DEPTH`] refused a nested stream: what a form
+    /// around it drew depends on how deep it was invoked.
+    fn too_deep(&mut self) {
+        self.device.tape.spoil();
     }
 
     /// Whether `stream` is already running in the ancestry of what runs now —
@@ -1928,6 +2799,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         if stream == 0 || !(self.streams.contains(&stream) || self.procedures.contains(&stream)) {
             return false;
         }
+        self.device.tape.spoil();
         if !self.recursion_told {
             self.recursion_told = true;
             self.device.recursion_refused();
@@ -1944,15 +2816,12 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         if stream != 0 && self.reached_streams.insert(stream) {
             self.reached = self.reached.saturating_add(len);
         }
-        let budget =
-            NESTED_WORK_FLOOR.saturating_add(self.reached.saturating_mul(NESTED_WORK_RATE));
-        let after = self
-            .nested_spent
-            .saturating_add(len)
-            .saturating_add(NESTED_RUN_COST);
-        if after <= budget {
+        if nested_fits(self.nested_spent, self.reached, len) {
+            self.device.tape.spend(Spent::NestedCheck { stream, len });
             return true;
         }
+        // A refusal depends on what ran before the form, not on its key.
+        self.device.tape.spoil();
         if !self.nested_budget_told {
             self.nested_budget_told = true;
             self.device.nested_budget_spent();
@@ -1962,10 +2831,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
 
     /// Spends a run of `len` bytes from the nested-content budget.
     fn spend_nested_work(&mut self, len: usize) {
-        self.nested_spent = self
-            .nested_spent
-            .saturating_add(u64::try_from(len).unwrap_or(u64::MAX))
-            .saturating_add(NESTED_RUN_COST);
+        let len = u64::try_from(len).unwrap_or(u64::MAX);
+        self.nested_spent = nested_after(self.nested_spent, len);
+        self.device.tape.spend(Spent::NestedSpend { len });
     }
 
     /// Hands a recorded `W`/`W*` to the device, now that the path has ended.
@@ -2130,8 +2998,10 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
 
     fn next_line(&mut self) {
         let leading = self.gs.text.leading;
+        self.read_line();
         self.line_matrix = Matrix::translate(0.0, -leading).then(&self.line_matrix);
         self.text_matrix = self.line_matrix;
+        self.set_text(true);
     }
 
     fn do_xobject(&mut self, name: &[u8]) {
@@ -2170,6 +3040,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         };
 
         if self.depth >= MAX_FORM_DEPTH {
+            self.too_deep();
             return;
         }
         // 8.10: a form that names itself while it runs — directly, or through
@@ -2195,9 +3066,23 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             return;
         }
         if group_form {
-            self.group_runs += 1;
+            self.run_group();
         }
         self.spend_nested_work(form.content.len());
+        // A source that keeps forms' drawings is asked for this one's, and
+        // offered it where it has none (`FontSource::form_drawn`).
+        match self.fonts.form_recording_bytes() {
+            0 => self.draw_form(&form, nested),
+            limit => self.draw_kept_form(name, &form, nested, limit),
+        }
+        self.device.end_form(id);
+    }
+
+    /// Draws a form the device entered: its scope, its state saved, its box
+    /// clipped, its group offered, its content run, and everything restored
+    /// but the current point, the subpath's start and a clip waiting for a
+    /// path, which a form leaves where it left them.
+    fn draw_form(&mut self, form: &Form, nested: Option<Arc<F>>) {
         let outer = nested.map(|scope| mem::replace(&mut self.fonts, Scope::Owned(scope)));
         // 8.6.5.6 reads a default in "the current resource dictionary", which
         // inside a form with resources of its own is those: the page's
@@ -2213,6 +3098,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         let saved_path = std::mem::take(&mut self.path);
         let saved_text = self.text_matrix;
         let saved_line = self.line_matrix;
+        self.runs.push(RunMarks::default());
         // 14.6.2: marked content nests within one stream. A form that leaves
         // a scope open must not leave its caller inside it, and an `EMC` it
         // has no `BDC` for must not close one of the caller's — so the count
@@ -2283,13 +3169,274 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.path = saved_path;
         self.text_matrix = saved_text;
         self.line_matrix = saved_line;
+        self.runs.pop();
         if let Some(outer) = outer {
             self.fonts = outer;
         }
         if let Some(outer) = outer_defaults {
             self.defaults = outer;
         }
-        self.device.end_form(id);
+    }
+
+    /// Draws a form the device entered for a source that keeps forms'
+    /// drawings ([`FontSource::kept_form`]): from the recording kept under
+    /// this invocation's key, where there is one this device and these
+    /// budgets replay as it was made; by interpreting it, recording what it
+    /// draws on the tape and offering the recording, where there is none;
+    /// and by interpreting it alone where the invocation has no key or the
+    /// recording kept will not replay here. `limit` is the most a recording
+    /// may hold.
+    fn draw_kept_form(&mut self, name: &[u8], form: &Form, nested: Option<Arc<F>>, limit: usize) {
+        let Some(invocation) = self.form_invocation(form) else {
+            self.draw_form(form, nested);
+            self.fonts.form_drawn(name, FormDrawn::Interpreted);
+            return;
+        };
+        match self.fonts.kept_form(name, &invocation) {
+            Some(kept) if self.replays(&kept) => {
+                self.replay_form(&kept);
+                self.fonts.form_drawn(name, FormDrawn::Replayed);
+            }
+            Some(_) => {
+                self.draw_form(form, nested);
+                self.fonts.form_drawn(name, FormDrawn::Interpreted);
+            }
+            None => {
+                let invoked = After {
+                    current: self.current,
+                    start: self.start,
+                    pending_clip: self.pending_clip,
+                    set_current: false,
+                    set_start: false,
+                };
+                let run = self.runs.len();
+                self.device
+                    .tape
+                    .open(limit, run, invoked, self.text_matrix, self.line_matrix);
+                self.draw_form(form, nested);
+                let after = After {
+                    current: self.current,
+                    start: self.start,
+                    pending_clip: self.pending_clip,
+                    set_current: false,
+                    set_start: false,
+                };
+                let recording = self.device.tape.close(after);
+                self.fonts.form_drawn(
+                    name,
+                    FormDrawn::Recorded {
+                        invocation,
+                        recording,
+                    },
+                );
+            }
+        }
+    }
+
+    /// The key a recording of `form`'s drawing is kept under here
+    /// ([`FormInvocation`]), or `None` where the form has no identity or the
+    /// state holds what no key writes: a stored function or halftone.
+    fn form_invocation(&self, form: &Form) -> Option<FormInvocation> {
+        if form.stream == 0 {
+            return None;
+        }
+        let mut out = Exact(Vec::with_capacity(512));
+        out.word(u64::from(self.depth));
+        out.flag(self.defaults.gray);
+        out.flag(self.defaults.rgb);
+        out.flag(self.defaults.cmyk);
+        out.0.push(match self.pending_clip {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        });
+        out.word(self.stack.len() as u64);
+        for token in &self.stack {
+            out.token(token);
+        }
+        out.word(self.streams.len() as u64);
+        for stream in &self.streams {
+            out.word(*stream);
+        }
+        out.word(self.procedures.len() as u64);
+        for procedure in &self.procedures {
+            out.word(*procedure);
+        }
+        out.state(&self.gs)?;
+        Some(FormInvocation {
+            stream: form.stream,
+            state: out.0,
+        })
+    }
+
+    /// Whether `kept` replays here as interpreting the form would draw: the
+    /// device would give every answer it records, and what it spent of the
+    /// budgets for nested content fits what is left of them now.
+    fn replays(&self, kept: &FormRecording) -> bool {
+        let point = |point: (f64, f64)| (point.0.to_bits(), point.1.to_bits());
+        let matrix = |m: &Matrix| [m.a, m.b, m.c, m.d, m.e, m.f].map(f64::to_bits);
+        let needs = &kept.needs;
+        if needs
+            .text
+            .is_some_and(|text| matrix(&text) != matrix(&self.text_matrix))
+            || needs
+                .line
+                .is_some_and(|line| matrix(&line) != matrix(&self.line_matrix))
+            || needs
+                .current
+                .is_some_and(|current| point(current) != point(self.current))
+            || needs
+                .start
+                .is_some_and(|start| point(start) != point(self.start))
+        {
+            return false;
+        }
+        if !self.device.answers_alike(&kept.events) {
+            return false;
+        }
+        let mut group_runs = self.group_runs;
+        let mut reached = self.reached;
+        let mut nested = self.nested_spent;
+        let mut first: BTreeSet<u64> = BTreeSet::new();
+        for spent in &kept.spent {
+            match *spent {
+                Spent::GroupCheck => {
+                    if group_runs >= MAX_GROUP_RUNS {
+                        return false;
+                    }
+                }
+                Spent::GroupRun => group_runs = group_runs.saturating_add(1),
+                Spent::NestedCheck { stream, len } => {
+                    if stream != 0
+                        && !self.reached_streams.contains(&stream)
+                        && first.insert(stream)
+                    {
+                        reached = reached.saturating_add(len);
+                    }
+                    if !nested_fits(nested, reached, len) {
+                        return false;
+                    }
+                }
+                Spent::NestedSpend { len } => nested = nested_after(nested, len),
+            }
+        }
+        true
+    }
+
+    /// Draws `kept` in place of interpreting its form: its calls replayed to
+    /// the device, its budget operations spent again, and the current point,
+    /// the subpath's start and a waiting clip left where its drawing left
+    /// them.
+    fn replay_form(&mut self, kept: &FormRecording) {
+        let done = replay(&kept.events, &mut self.device);
+        if done.cancelled || done.disagreed > 0 {
+            self.device.tape.spoil();
+        }
+        for spent in &kept.spent {
+            match *spent {
+                Spent::GroupCheck => {}
+                Spent::GroupRun => self.group_runs = self.group_runs.saturating_add(1),
+                Spent::NestedCheck { stream, len } => {
+                    if stream != 0 && self.reached_streams.insert(stream) {
+                        self.reached = self.reached.saturating_add(len);
+                    }
+                }
+                Spent::NestedSpend { len } => {
+                    self.nested_spent = nested_after(self.nested_spent, len);
+                }
+            }
+            // A recording open around this form spends what this one did.
+            self.device.tape.spend(*spent);
+        }
+        // What the drawing read is read here too, for a recording open around
+        // this form; what it set of the point is set, and its matrices are
+        // the form's own, restored after it.
+        if kept.needs.text.is_some() {
+            self.read_text();
+        }
+        if kept.needs.line.is_some() {
+            self.read_line();
+        }
+        if kept.needs.current.is_some() {
+            self.read_current();
+        }
+        if kept.needs.start.is_some() {
+            self.read_start();
+        }
+        self.set_point(kept.after.set_current, kept.after.set_start);
+        self.current = kept.after.current;
+        self.start = kept.after.start;
+        self.pending_clip = kept.after.pending_clip;
+    }
+
+    /// The text matrix is read: by a recording whose form's run, and every
+    /// run inside it, has not set it, as the value its form was invoked with.
+    fn read_text(&mut self) {
+        let runs = &self.runs;
+        for opened in &mut self.device.tape.open {
+            if opened.needs.text.is_none()
+                && runs
+                    .get(opened.run..)
+                    .is_some_and(|inside| inside.iter().all(|run| !run.text))
+            {
+                opened.needs.text = Some(opened.text);
+            }
+        }
+    }
+
+    /// The line matrix is read, as [`Interpreter::read_text`] reads the text
+    /// matrix.
+    fn read_line(&mut self) {
+        let runs = &self.runs;
+        for opened in &mut self.device.tape.open {
+            if opened.needs.line.is_none()
+                && runs
+                    .get(opened.run..)
+                    .is_some_and(|inside| inside.iter().all(|run| !run.line))
+            {
+                opened.needs.line = Some(opened.line);
+            }
+        }
+    }
+
+    /// The text matrix, and the line matrix where `line`, are set in the run
+    /// in force.
+    fn set_text(&mut self, line: bool) {
+        if let Some(run) = self.runs.last_mut() {
+            run.text = true;
+            run.line |= line;
+        }
+    }
+
+    /// The current point is read: by every recording since whose form began
+    /// nothing has set it, as the point its form was invoked with. The point
+    /// is not restored after a nested stream, so a recording's is set
+    /// wherever it is set inside it.
+    fn read_current(&mut self) {
+        for opened in &mut self.device.tape.open {
+            if opened.current_kept && opened.needs.current.is_none() {
+                opened.needs.current = Some(opened.invoked.current);
+            }
+        }
+    }
+
+    /// The subpath's start is read, as [`Interpreter::read_current`] reads
+    /// the current point.
+    fn read_start(&mut self) {
+        for opened in &mut self.device.tape.open {
+            if opened.start_kept && opened.needs.start.is_none() {
+                opened.needs.start = Some(opened.invoked.start);
+            }
+        }
+    }
+
+    /// The current point, and the subpath's start, are set where `current`
+    /// and `start` say.
+    fn set_point(&mut self, current: bool, start: bool) {
+        for opened in &mut self.device.tape.open {
+            opened.current_kept &= !current;
+            opened.start_kept &= !start;
+        }
     }
 
     /// A form's `/BBox` as a quad in the space a `Device` receives paths in.
@@ -2333,6 +3480,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
     /// than like a bug.
     fn run_soft_mask(&mut self, mask: &MaskGroup) {
         if self.depth >= MAX_FORM_DEPTH {
+            self.too_deep();
             return;
         }
         // A mask group that sets its own mask while it runs — the shape of a
@@ -2357,6 +3505,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         let saved_path = std::mem::take(&mut self.path);
         let saved_text = self.text_matrix;
         let saved_line = self.line_matrix;
+        self.runs.push(RunMarks::default());
         let saved_marked = std::mem::replace(&mut self.marked, 0);
         let saved_over_cap = std::mem::replace(&mut self.marked_over_cap, 0);
         // 11.6.5.2's `/G` is a form XObject like any other, so 14.7.4.2's
@@ -2379,7 +3528,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             &self.gs,
         );
         if accepted {
-            self.group_runs += 1;
+            self.run_group();
             self.spend_nested_work(mask.form.content.len());
             // 8.10.2 still clips the group to its box, and 11.6.6 still
             // resets the alphas and the blend mode inside it — a mask group
@@ -2409,6 +3558,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.path = saved_path;
         self.text_matrix = saved_text;
         self.line_matrix = saved_line;
+        self.runs.pop();
     }
 
     fn show_array(&mut self) {
@@ -2442,6 +3592,8 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             match item {
                 Token::String(s) => self.show(&s),
                 Token::Number(adjust) if adjust.is_finite() => {
+                    self.read_text();
+                    self.set_text(false);
                     let ts = &self.gs.text;
                     // 9.4.4's tx carries Th and its ty does not: Th is a
                     // horizontal scaling and there is no horizontal motion to
@@ -2504,6 +3656,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             } else {
                 scale
             };
+            self.read_text();
             let transform = placed.then(&self.text_matrix).then(&self.gs.ctm);
 
             // The same point with 9.4.3's rise taken out, for a consumer that
@@ -2533,7 +3686,11 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 // A procedure that shows its own glyph while it runs, directly
                 // or through other glyphs and forms, draws once; and every run
                 // spends from the nested-content budget.
-                if self.depth < MAX_FORM_DEPTH
+                let deep = self.depth >= MAX_FORM_DEPTH;
+                if deep {
+                    self.too_deep();
+                }
+                if !deep
                     && !self.recursing(glyph.stream)
                     && self.nested_work_left(glyph.stream, glyph.content.len())
                 {
@@ -2545,6 +3702,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     let saved_gs = self.gs.clone();
                     let saved_text = self.text_matrix;
                     let saved_line = self.line_matrix;
+                    self.runs.push(RunMarks::default());
                     // A glyph procedure is a content stream like a form's,
                     // and 14.6.2's scopes are per stream in the same way.
                     let saved_marked = std::mem::replace(&mut self.marked, 0);
@@ -2570,6 +3728,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     self.gs = saved_gs;
                     self.text_matrix = saved_text;
                     self.line_matrix = saved_line;
+                    self.runs.pop();
                     if pushed {
                         self.procedures.pop();
                     }
@@ -2581,6 +3740,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 let shift =
                     advance + (ts.char_spacing + word_spacing(code, &ts)) * ts.horizontal_scale;
                 self.text_matrix = Matrix::translate(shift, 0.0).then(&self.text_matrix);
+                self.set_text(false);
                 continue;
             }
 
@@ -2621,6 +3781,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 let tx = (width / 1000.0 * ts.size + ts.char_spacing + word) * ts.horizontal_scale;
                 Matrix::translate(tx, 0.0).then(&self.text_matrix)
             };
+            self.set_text(false);
         }
     }
 }
@@ -4825,5 +5986,675 @@ mod tests {
             "the three scopes past the cap were refused, and a refused scope \
              is a visible one"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Kept form recordings (`docs/design/performance.md`, P-16).
+    // -----------------------------------------------------------------------
+
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+
+    /// How a [`Keeping`] source heard each form drawn.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Heard {
+        Replayed,
+        Interpreted,
+        Recorded,
+        Spoiled,
+    }
+
+    /// A source of forms that keeps their drawings, up to `keeps` bytes each,
+    /// by name and invocation, and remembers how each was drawn. With `keeps`
+    /// at zero it keeps none and is asked nothing, as every source that does
+    /// not opt in.
+    struct Keeping {
+        keeps: usize,
+        kept: RefCell<HashMap<(Vec<u8>, FormInvocation), Arc<FormRecording>>>,
+        heard: RefCell<Vec<(Vec<u8>, Heard)>>,
+    }
+
+    impl Keeping {
+        fn new(keeps: usize) -> Keeping {
+            Keeping {
+                keeps,
+                kept: RefCell::new(HashMap::new()),
+                heard: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// How many times `name` was drawn `how`.
+        fn heard(&self, name: &[u8], how: Heard) -> usize {
+            self.heard
+                .borrow()
+                .iter()
+                .filter(|(heard, h)| heard == name && *h == how)
+                .count()
+        }
+
+        /// How every form was drawn, in order.
+        fn hows(&self) -> Vec<Heard> {
+            self.heard.borrow().iter().map(|(_, how)| *how).collect()
+        }
+    }
+
+    /// A form of `content` with identity `stream`, its box `[0 0 10 10]`.
+    fn kept_form_of(content: &[u8], stream: u64, group: Option<Group>) -> Form {
+        Form {
+            content: content.to_vec(),
+            matrix: Matrix::IDENTITY,
+            bbox: Some([0.0, 0.0, 10.0, 10.0]),
+            group,
+            stream,
+        }
+    }
+
+    /// The forms every kept-form test draws, by name.
+    fn kept_forms(name: &[u8]) -> Option<Form> {
+        let isolated = Some(Group {
+            isolated: true,
+            knockout: false,
+            space: None,
+        });
+        Some(match name {
+            // A fill in the inherited colour and a stroke at the inherited
+            // width, through the inherited pen.
+            b"Fm" => kept_form_of(b"0 0 5 5 re f 1 1 m 4 4 l S", 7, None),
+            b"Grp" => kept_form_of(b"0 0 1 rg 1 1 3 3 re f", 8, isolated),
+            b"Outer" => kept_form_of(b"/Fm Do 2 0 0 2 0 0 cm /Fm Do", 9, None),
+            b"Masked" => kept_form_of(b"/Mask gs 0 0 8 8 re f", 10, None),
+            b"Self" => kept_form_of(b"/Self Do 0 0 1 1 re f", 12, None),
+            b"Anon" => kept_form_of(b"0 0 2 2 re f", 0, None),
+            // Text in the inherited font, size and text matrix.
+            b"Text" => kept_form_of(b"(ab) Tj", 13, None),
+            b"Pair" => kept_form_of(b"/Grp Do /Grp Do", 14, None),
+            // A fan of forms, eight wide and five deep.
+            b"F0" => kept_form_of(
+                b"/F1 Do /F1 Do /F1 Do /F1 Do /F1 Do /F1 Do /F1 Do /F1 Do",
+                20,
+                None,
+            ),
+            b"F1" => kept_form_of(
+                b"/F2 Do /F2 Do /F2 Do /F2 Do /F2 Do /F2 Do /F2 Do /F2 Do",
+                21,
+                None,
+            ),
+            b"F2" => kept_form_of(
+                b"/F3 Do /F3 Do /F3 Do /F3 Do /F3 Do /F3 Do /F3 Do /F3 Do",
+                22,
+                None,
+            ),
+            b"F3" => kept_form_of(
+                b"/F4 Do /F4 Do /F4 Do /F4 Do /F4 Do /F4 Do /F4 Do /F4 Do",
+                23,
+                None,
+            ),
+            b"F4" => kept_form_of(b"0 0 1 1 re f", 24, None),
+            _ => return None,
+        })
+    }
+
+    impl FontSource for Keeping {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn form(&self, name: &[u8]) -> Option<Form> {
+            kept_forms(name)
+        }
+        fn ext_g_state(&self, name: &[u8]) -> Option<Arc<StateParameters>> {
+            match name {
+                b"Half" => Some(Arc::new(StateParameters {
+                    fill_alpha: Some(0.5),
+                    blend: Some(BlendMode::Multiply),
+                    ..StateParameters::default()
+                })),
+                b"Mask" => Some(Arc::new(StateParameters {
+                    soft_mask: Some(SoftMask::Group(Box::new(MaskGroup {
+                        form: kept_form_of(b"1 g 0 0 4 4 re f", 11, None),
+                        luminosity: true,
+                        backdrop: None,
+                        transfer: None,
+                    }))),
+                    ..StateParameters::default()
+                })),
+                b"Identity" => Some(Arc::new(StateParameters {
+                    transfer: Some(Some(Transfer::Identity)),
+                    ..StateParameters::default()
+                })),
+                _ => None,
+            }
+        }
+        fn form_recording_bytes(&self) -> usize {
+            self.keeps
+        }
+        fn kept_form(
+            &self,
+            name: &[u8],
+            invocation: &FormInvocation,
+        ) -> Option<Arc<FormRecording>> {
+            self.kept
+                .borrow()
+                .get(&(name.to_vec(), invocation.clone()))
+                .cloned()
+        }
+        fn form_drawn(&self, name: &[u8], drawn: FormDrawn) {
+            let how = match drawn {
+                FormDrawn::Replayed => Heard::Replayed,
+                FormDrawn::Interpreted => Heard::Interpreted,
+                FormDrawn::Recorded {
+                    invocation,
+                    recording: Some(recording),
+                } => {
+                    assert!(invocation.written_len() > 0, "a key writes the state");
+                    assert!(recording.kept_bytes() >= recording.events().len());
+                    self.kept
+                        .borrow_mut()
+                        .insert((name.to_vec(), invocation), Arc::new(recording));
+                    Heard::Recorded
+                }
+                FormDrawn::Recorded {
+                    recording: None, ..
+                } => Heard::Spoiled,
+            };
+            self.heard.borrow_mut().push((name.to_vec(), how));
+        }
+    }
+
+    /// `content` interpreted into a recorder answering `answers`, over
+    /// `fonts`: every call the device was handed.
+    fn kept_drawing(content: &[u8], fonts: &Keeping, answers: Answers) -> Vec<Event> {
+        let mut device = RecordingDevice::new().answering(answers);
+        interpret(content, Matrix::IDENTITY, &mut device, fonts);
+        device.into_events()
+    }
+
+    /// Two transcripts are the same calls with the same payloads, the states
+    /// included. `Event` holds `f64`s and is compared by its debug form.
+    #[track_caller]
+    fn same_calls(a: &[Event], b: &[Event], what: &str) {
+        assert_eq!(a.len(), b.len(), "{what}: the same number of calls");
+        for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(format!("{x:?}"), format!("{y:?}"), "{what}: call {index}");
+        }
+    }
+
+    fn accepting() -> Answers {
+        Answers {
+            forms: true,
+            groups: true,
+            soft_masks: true,
+            cancelled: false,
+        }
+    }
+
+    /// The pages every kept-form test draws: one form invoked under three
+    /// transforms, the last the first's again; under inherited colours and
+    /// line widths; nested inside another; a transparency group under a
+    /// state's alpha and blend mode; a form whose content sets a soft mask;
+    /// and text in an inherited font, size and text matrix.
+    const KEPT_PAGES: [&[u8]; 6] = [
+        b"/Fm Do 1 0 0 1 20 0 cm /Fm Do 1 0 0 1 -20 0 cm /Fm Do",
+        b"1 0 0 rg 3 w /Fm Do 0 1 0 rg /Fm Do 1 0 0 rg /Fm Do",
+        b"2 w /Outer Do /Outer Do",
+        b"/Half gs /Grp Do /Grp Do",
+        b"/Masked Do /Masked Do",
+        b"BT /F1 12 Tf 5 5 Td ET /Text Do /Text Do",
+    ];
+
+    /// **A kept form recording replays as the form interprets**: every
+    /// page, interpreted twice over a source that keeps forms' drawings —
+    /// the first time recording each invocation it has not kept and
+    /// replaying the repeats, the second replaying every one — gives the
+    /// device the calls an interpretation over a source that keeps nothing
+    /// gives, event for event and state for state, with a recorder that
+    /// declines groups and masks and with one that accepts them.
+    #[test]
+    fn a_kept_form_recording_replays_as_the_form_interprets() {
+        for answers in [Answers::default(), accepting()] {
+            for page in KEPT_PAGES {
+                let what = format!("{} with {answers:?}", String::from_utf8_lossy(page));
+                let fresh = kept_drawing(page, &Keeping::new(0), answers);
+                assert!(!fresh.is_empty(), "{what}: the page draws");
+                let keeping = Keeping::new(1 << 20);
+                let first = kept_drawing(page, &keeping, answers);
+                same_calls(&first, &fresh, &format!("{what}, recording"));
+                let second = kept_drawing(page, &keeping, answers);
+                same_calls(&second, &fresh, &format!("{what}, replaying"));
+                assert!(
+                    keeping.hows().contains(&Heard::Replayed),
+                    "{what}: something was replayed: {:?}",
+                    keeping.hows()
+                );
+                assert!(
+                    !keeping.hows().contains(&Heard::Spoiled),
+                    "{what}: nothing was spoiled: {:?}",
+                    keeping.hows()
+                );
+            }
+        }
+    }
+
+    /// **A kept form is interpreted once per key**: five invocations under
+    /// one state record one drawing and replay it four times; three
+    /// transforms invoked twice each are three keys, each interpreted once;
+    /// and a later interpretation over the same source interprets none.
+    #[test]
+    fn a_kept_form_is_interpreted_once_per_key() {
+        let keeping = Keeping::new(1 << 20);
+        kept_drawing(
+            b"/Fm Do /Fm Do /Fm Do /Fm Do /Fm Do",
+            &keeping,
+            Answers::default(),
+        );
+        assert_eq!(keeping.heard(b"Fm", Heard::Recorded), 1);
+        assert_eq!(keeping.heard(b"Fm", Heard::Replayed), 4);
+
+        let keeping = Keeping::new(1 << 20);
+        let thrice = b"q /Fm Do Q q 2 0 0 2 0 0 cm /Fm Do Q q 3 0 0 3 0 0 cm /Fm Do Q";
+        let twice = [thrice.as_slice(), b" ", thrice.as_slice()].concat();
+        kept_drawing(&twice, &keeping, Answers::default());
+        assert_eq!(
+            keeping.heard(b"Fm", Heard::Recorded),
+            3,
+            "a key a transform"
+        );
+        assert_eq!(keeping.heard(b"Fm", Heard::Replayed), 3);
+        kept_drawing(thrice, &keeping, Answers::default());
+        assert_eq!(
+            keeping.heard(b"Fm", Heard::Recorded),
+            3,
+            "none recorded again"
+        );
+        assert_eq!(keeping.heard(b"Fm", Heard::Replayed), 6);
+
+        // A replay reads no token of the form: a counted interpretation of a
+        // page whose forms are all kept reads the page's own tokens alone.
+        let work = Work::new();
+        let mut device = RecordingDevice::new();
+        interpret_counted(thrice, Matrix::IDENTITY, &mut device, &keeping, &work);
+        let fresh = Work::new();
+        let mut plain = RecordingDevice::new();
+        interpret_counted(
+            thrice,
+            Matrix::IDENTITY,
+            &mut plain,
+            &Keeping::new(0),
+            &fresh,
+        );
+        let form_tokens = 13 * 3;
+        assert_eq!(
+            work.stats().content_tokens_read + form_tokens,
+            fresh.stats().content_tokens_read,
+            "the three forms' tokens are not read"
+        );
+        same_calls(device.events(), plain.events(), "the counted replay");
+    }
+
+    /// A nested form inside a kept one is replayed with it, and is a key of
+    /// its own where it is drawn: inside its outer form, at a depth and inside
+    /// the streams around it that the page's own invocation is not.
+    #[test]
+    fn a_nested_form_is_kept_inside_its_outer_form_and_for_itself() {
+        let keeping = Keeping::new(1 << 20);
+        let page = b"/Outer Do /Outer Do /Fm Do /Fm Do";
+        let first = kept_drawing(page, &keeping, Answers::default());
+        assert_eq!(keeping.heard(b"Outer", Heard::Recorded), 1);
+        assert_eq!(keeping.heard(b"Outer", Heard::Replayed), 1);
+        // The outer form's first drawing records its two inner invocations,
+        // under two transforms, and its replay replays them inside it without
+        // asking for them; the page's own two invocations are one key more.
+        assert_eq!(keeping.heard(b"Fm", Heard::Recorded), 3);
+        assert_eq!(keeping.heard(b"Fm", Heard::Replayed), 1);
+        same_calls(
+            &first,
+            &kept_drawing(page, &Keeping::new(0), Answers::default()),
+            "the page",
+        );
+    }
+
+    /// **What a page leaves behind it and a form sets for itself is not in
+    /// the key**: a form whose text sets its own text matrix and whose path
+    /// begins with its own `m`, invoked after text objects and paths that
+    /// leave the text matrix and the current point in three places, is one
+    /// key; and a form that reads the text matrix or the current point it is
+    /// invoked with is replayed only where they are what they were.
+    #[test]
+    fn the_text_matrix_and_the_current_point_count_only_where_read() {
+        struct Reading(Keeping);
+        impl FontSource for Reading {
+            fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+                self.0.decode(font, bytes)
+            }
+            fn vertical_metrics(&self, font: &[u8], code: u32) -> (f64, f64, f64) {
+                self.0.vertical_metrics(font, code)
+            }
+            fn form(&self, name: &[u8]) -> Option<Form> {
+                Some(match name {
+                    // Its own text object and its own path.
+                    b"Own" => kept_form_of(b"BT /F1 9 Tf 1 1 Td (x) Tj ET 1 1 m 3 3 l S", 30, None),
+                    // Text in the matrix it is invoked with.
+                    b"Shows" => kept_form_of(b"/F1 9 Tf (x) Tj", 31, None),
+                    // A curve from the point it is invoked with.
+                    b"Curves" => kept_form_of(b"5 5 6 6 v S", 32, None),
+                    _ => return None,
+                })
+            }
+            fn form_recording_bytes(&self) -> usize {
+                self.0.form_recording_bytes()
+            }
+            fn kept_form(
+                &self,
+                name: &[u8],
+                invocation: &FormInvocation,
+            ) -> Option<Arc<FormRecording>> {
+                self.0.kept_form(name, invocation)
+            }
+            fn form_drawn(&self, name: &[u8], drawn: FormDrawn) {
+                self.0.form_drawn(name, drawn);
+            }
+        }
+        let drawing = |page: &[u8], fonts: &Reading| {
+            let mut device = RecordingDevice::new();
+            interpret(page, Matrix::IDENTITY, &mut device, fonts);
+            device.into_events()
+        };
+        let leave = |x: u32| {
+            format!(
+                "BT /F1 12 Tf {x} {x} Td (a) Tj ET {x} {x} m {} 0 l S ",
+                x + 1
+            )
+        };
+
+        let own: String = (1..=3).map(|x| leave(x) + "/Own Do ").collect();
+        let reading = Reading(Keeping::new(1 << 20));
+        let drawn = drawing(own.as_bytes(), &reading);
+        assert_eq!(reading.0.heard(b"Own", Heard::Recorded), 1, "one key");
+        assert_eq!(reading.0.heard(b"Own", Heard::Replayed), 2);
+        same_calls(
+            &drawn,
+            &drawing(own.as_bytes(), &Reading(Keeping::new(0))),
+            "/Own",
+        );
+
+        for name in ["Shows", "Curves"] {
+            // The same left behind twice, then somewhere else: the first two
+            // are one drawing, the third reads what it was not.
+            let page: String = [1, 1, 2]
+                .into_iter()
+                .map(|x| leave(x) + &format!("/{name} Do "))
+                .collect();
+            let reading = Reading(Keeping::new(1 << 20));
+            let drawn = drawing(page.as_bytes(), &reading);
+            assert_eq!(
+                reading.0.heard(name.as_bytes(), Heard::Recorded),
+                1,
+                "{name}"
+            );
+            assert_eq!(
+                reading.0.heard(name.as_bytes(), Heard::Replayed),
+                1,
+                "{name}"
+            );
+            assert_eq!(
+                reading.0.heard(name.as_bytes(), Heard::Interpreted),
+                1,
+                "{name}: invoked elsewhere, it is drawn again"
+            );
+            same_calls(
+                &drawn,
+                &drawing(page.as_bytes(), &Reading(Keeping::new(0))),
+                name,
+            );
+        }
+    }
+
+    /// **A drawing that depends on more than its key is never kept**: a form
+    /// that draws itself is refused for its cycle, and is interpreted at
+    /// every invocation, its calls those of a source that keeps nothing.
+    #[test]
+    fn a_form_refused_for_a_cycle_inside_is_never_kept() {
+        let keeping = Keeping::new(1 << 20);
+        let page = b"/Self Do /Self Do";
+        let drawn = kept_drawing(page, &keeping, Answers::default());
+        assert_eq!(keeping.heard(b"Self", Heard::Spoiled), 2);
+        assert_eq!(keeping.heard(b"Self", Heard::Recorded), 0);
+        same_calls(
+            &drawn,
+            &kept_drawing(page, &Keeping::new(0), Answers::default()),
+            "the cycle",
+        );
+    }
+
+    /// A recording past what the source may keep is not offered, and the
+    /// form is drawn as an interpretation draws it.
+    #[test]
+    fn a_recording_past_its_bound_is_not_offered() {
+        let keeping = Keeping::new(16);
+        let page = b"/Fm Do /Fm Do";
+        let drawn = kept_drawing(page, &keeping, Answers::default());
+        assert_eq!(keeping.hows(), [Heard::Spoiled, Heard::Spoiled]);
+        same_calls(
+            &drawn,
+            &kept_drawing(page, &Keeping::new(0), Answers::default()),
+            "too large to keep",
+        );
+    }
+
+    /// **No key, no recording**: a form reached with no identity, and a form
+    /// invoked under a stored transfer function, which no key writes, are
+    /// interpreted every time and their calls are an interpretation's.
+    #[test]
+    fn a_form_with_no_key_is_interpreted() {
+        for page in [
+            b"/Anon Do /Anon Do".as_slice(),
+            b"/Identity gs /Fm Do /Fm Do",
+        ] {
+            let keeping = Keeping::new(1 << 20);
+            let drawn = kept_drawing(page, &keeping, Answers::default());
+            assert_eq!(keeping.hows(), [Heard::Interpreted, Heard::Interpreted]);
+            same_calls(
+                &drawn,
+                &kept_drawing(page, &Keeping::new(0), Answers::default()),
+                &String::from_utf8_lossy(page),
+            );
+        }
+    }
+
+    /// **A recording is replayed only to a device that answers as it was
+    /// made**: a group form recorded by a device that accepts groups is
+    /// interpreted again for one that declines them, and that device is
+    /// handed what an interpretation hands it.
+    #[test]
+    fn a_device_that_would_answer_otherwise_is_handed_an_interpretation() {
+        let keeping = Keeping::new(1 << 20);
+        kept_drawing(b"/Grp Do", &keeping, accepting());
+        assert_eq!(keeping.heard(b"Grp", Heard::Recorded), 1);
+        let declined = kept_drawing(b"/Grp Do", &keeping, Answers::default());
+        assert_eq!(keeping.heard(b"Grp", Heard::Interpreted), 1);
+        same_calls(
+            &declined,
+            &kept_drawing(b"/Grp Do", &Keeping::new(0), Answers::default()),
+            "declining groups",
+        );
+        // And the default device's own answers never replay what a source
+        // keeps: a device that cannot say how it would answer is never
+        // handed a replay.
+        struct Plain(Vec<u8>);
+        impl Device for Plain {
+            fn fill_path(&mut self, _: &[PathSegment], _: &GraphicsState, _: bool) {
+                self.0.push(b'f');
+            }
+        }
+        let mut plain = Plain(Vec::new());
+        interpret(b"/Grp Do", Matrix::IDENTITY, &mut plain, &keeping);
+        assert_eq!(plain.0, b"f", "the group's fill, interpreted");
+        assert_eq!(keeping.heard(b"Grp", Heard::Interpreted), 2);
+    }
+
+    /// A device that is cancelled while a form draws spoils its recording:
+    /// a drawing cut short is never kept.
+    #[test]
+    fn a_cancelled_drawing_is_never_kept() {
+        struct CancelAfter {
+            inner: RecordingDevice,
+            calls: Cell<usize>,
+            after: usize,
+        }
+        impl Device for CancelAfter {
+            fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+                self.calls.set(self.calls.get() + 1);
+                self.inner.fill_path(path, state, even_odd);
+            }
+            fn clip_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+                self.inner.clip_path(path, state, even_odd);
+            }
+            fn is_cancelled(&self) -> bool {
+                self.calls.get() >= self.after
+            }
+            fn answers_alike(&self, events: &[Event]) -> bool {
+                self.inner.answers_alike(events)
+            }
+        }
+        let keeping = Keeping::new(1 << 20);
+        let mut device = CancelAfter {
+            inner: RecordingDevice::new(),
+            calls: Cell::new(0),
+            after: 1,
+        };
+        interpret(b"/Fm Do /Fm Do", Matrix::IDENTITY, &mut device, &keeping);
+        assert_eq!(
+            keeping.heard(b"Fm", Heard::Spoiled),
+            1,
+            "{:?}",
+            keeping.hows()
+        );
+        assert!(keeping.kept.borrow().is_empty(), "nothing kept");
+    }
+
+    /// **A recording that would pass a budget is interpreted**: a form that
+    /// draws two transparency groups, kept from early in a page, is invoked
+    /// again with one group run left of [`MAX_GROUP_RUNS`]; its recording's
+    /// two runs do not fit, so it is interpreted, and the page is handed
+    /// exactly what an interpretation hands it — the second group refused
+    /// and the budget said spent.
+    #[test]
+    fn a_recording_that_would_pass_a_budget_is_interpreted() {
+        let mut page = b"/Pair Do ".to_vec();
+        for _ in 0..(MAX_GROUP_RUNS as usize - 3) {
+            page.extend_from_slice(b"/Grp Do ");
+        }
+        page.extend_from_slice(b"/Pair Do");
+        let keeping = Keeping::new(1 << 20);
+        let drawn = kept_drawing(&page, &keeping, accepting());
+        assert_eq!(keeping.heard(b"Pair", Heard::Recorded), 1);
+        assert_eq!(
+            keeping.heard(b"Pair", Heard::Interpreted),
+            1,
+            "the second Pair does not fit: {:?}",
+            keeping.heard(b"Pair", Heard::Replayed)
+        );
+        let fresh = kept_drawing(&page, &Keeping::new(0), accepting());
+        assert!(
+            fresh
+                .iter()
+                .any(|event| matches!(event, Event::GroupBudgetSpent)),
+            "the page runs out of group runs"
+        );
+        same_calls(&drawn, &fresh, "the page at the group budget");
+    }
+
+    /// **A recording replays only where what it spent fits what is left**,
+    /// checked against the nested-content budget and the group budget as
+    /// the interpretation stands, a stream counted as reached only the first
+    /// time; and a replay spends what it records, and reads and sets what its
+    /// drawing read and set.
+    #[test]
+    fn a_recording_replays_only_within_the_budgets_left() {
+        let keeping = Keeping::new(1 << 20);
+        let mut device = RecordingDevice::new();
+        let mut interp = Interpreter::new(&mut device, &keeping, Matrix::IDENTITY, 0);
+        let recording = |spent: Vec<Spent>, needs: Needs| FormRecording {
+            events: Vec::new(),
+            spent,
+            after: After {
+                current: (7.0, 8.0),
+                start: (7.0, 8.0),
+                pending_clip: None,
+                set_current: true,
+                set_start: true,
+            },
+            needs,
+            bytes: 0,
+        };
+        let nested = recording(
+            vec![
+                Spent::NestedCheck {
+                    stream: 99,
+                    len: 10,
+                },
+                Spent::NestedSpend { len: 10 },
+            ],
+            Needs::default(),
+        );
+        assert!(interp.replays(&nested), "room to spare");
+        // Nearly spent: reaching stream 99 for the first time raises the
+        // budget by its length at the rate, so the run fits.
+        interp.nested_spent = NESTED_WORK_FLOOR - 100;
+        assert!(interp.replays(&nested));
+        // Reached already, the run raises nothing and does not fit.
+        interp.reached_streams.insert(99);
+        assert!(!interp.replays(&nested), "the nested budget is passed");
+        interp.nested_spent = 0;
+
+        let grouped = recording(vec![Spent::GroupCheck, Spent::GroupRun], Needs::default());
+        assert!(interp.replays(&grouped));
+        interp.group_runs = MAX_GROUP_RUNS - 1;
+        assert!(interp.replays(&grouped), "one run left is enough for one");
+        let twice = recording(
+            vec![
+                Spent::GroupCheck,
+                Spent::GroupRun,
+                Spent::GroupCheck,
+                Spent::GroupRun,
+            ],
+            Needs::default(),
+        );
+        assert!(!interp.replays(&twice), "and not for two");
+        interp.group_runs = 0;
+
+        // What the drawing read must be what it was.
+        let reads = recording(
+            Vec::new(),
+            Needs {
+                current: Some((1.0, 2.0)),
+                ..Needs::default()
+            },
+        );
+        assert!(!interp.replays(&reads), "the point is (0, 0)");
+        interp.current = (1.0, 2.0);
+        assert!(interp.replays(&reads));
+        let negative = recording(
+            Vec::new(),
+            Needs {
+                current: Some((-0.0, 2.0)),
+                ..Needs::default()
+            },
+        );
+        interp.current = (0.0, 2.0);
+        assert!(!interp.replays(&negative), "a point is its bits");
+
+        // A replay spends what the recording spent, and leaves the point
+        // where the drawing left it.
+        interp.replay_form(&nested);
+        assert_eq!(interp.nested_spent, 10 + NESTED_RUN_COST);
+        interp.replay_form(&grouped);
+        assert_eq!(interp.group_runs, 1);
+        assert_eq!((interp.current, interp.start), ((7.0, 8.0), (7.0, 8.0)));
     }
 }
