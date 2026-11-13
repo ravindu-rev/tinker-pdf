@@ -170,8 +170,14 @@ initialisation vector derived from the file key and object number so
 identical plaintexts never encrypt identically; ciphertext strings are
 written in hex form. The caller supplies 48 bytes of entropy — the 32-byte
 file key and two 8-byte salts — because the engine links no random number
-generator ([encryption](encryption.md)). The `/Encrypt` dictionary and the
-cross-reference stream stay in the clear (7.6.1). A rewrite of an opened
+generator ([encryption](encryption.md)). The key is expanded once for the
+save, and the streams are sealed a window at a time — eight streams written
+serially, the pool's window on threads — side by side through the AES core, a
+stream a lane; each stream's bytes are what sealing it alone writes, so the
+file is the same bytes whichever way it is written. An update to a file
+sealed under `/AESV3` seals its streams the same way under that file's key,
+and one under RC4 or `/AESV2` an object at a time. The `/Encrypt` dictionary
+and the cross-reference stream stay in the clear (7.6.1). A rewrite of an opened
 encrypted document *without* the option decrypts on the way through and
 drops `/Encrypt`, because carrying it forward over plaintext would make
 every reader decrypt clear bytes into garbage.
@@ -415,7 +421,10 @@ stream its scopes read, a font's program and CMaps at the first page that
 reads them and a form, a procedure or a cell however many pages draw it, the
 cut reading each program from the walk's decode ([editing](editing.md)), and
 each image's samples the image pass weighs — and each stream the serializer
-decodes to compare when a rewrite deduplicates streams. A stream the editor
+decodes to compare when a rewrite deduplicates streams; and a save that
+encrypts counts the passes of the AES core its streams were sealed side by
+side in (`stream_seal_passes`), a rewrite's and an update's under an
+inherited `/AESV3` key. A stream the editor
 holds unfiltered, an import's copy, is handed back as it is and runs no chain.
 `DocumentEditor::count_work()` makes an editor hold one tally from then until
 it is dropped, which both passes count into whether or not the save was asked,

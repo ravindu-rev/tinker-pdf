@@ -309,6 +309,7 @@ impl DocumentEditor {
                 crypt: cipher.as_ref().map(|c| c as &dyn write::ObjectCipher),
                 reserved: None,
                 parallelism: options.parallelism,
+                work: self.work.as_deref(),
             },
         )
         .0
@@ -401,6 +402,7 @@ impl DocumentEditor {
                         crypt: cipher.as_ref().map(|c| c as &dyn write::ObjectCipher),
                         reserved: None,
                         parallelism: options.parallelism,
+                        work,
                     },
                 )
                 .0
@@ -508,7 +510,14 @@ impl DocumentEditor {
                     all = merged;
                     trailer = redirected;
                 }
-                write::rewrite_sealed(&all, &trailer, options, self.doc.names_table(), sealing)
+                write::rewrite_sealed(
+                    &all,
+                    &trailer,
+                    options,
+                    self.doc.names_table(),
+                    sealing,
+                    work,
+                )
             }
         }
     }

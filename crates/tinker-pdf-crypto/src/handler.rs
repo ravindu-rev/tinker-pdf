@@ -275,6 +275,37 @@ impl FileKey {
         self.encrypt(self.stream_method, num, gen, 0, data)
     }
 
+    /// Encrypts several streams, each `(num, gen, data)`, giving each the
+    /// bytes [`FileKey::encrypt_stream`] gives it alone, in the order given.
+    ///
+    /// Under `/AESV3`, whose key is the file key itself and is expanded once
+    /// (7.6.4.3.3), the streams are sealed side by side through the AES core,
+    /// a stream a lane, each with its own IV
+    /// ([`aes::Aes::cbc_encrypt_side_by_side`]), and the passes the core ran
+    /// come back beside them. Every other method seals an object at a time
+    /// and reports no pass: RC4 and `/AESV2` key each object apart (7.6.2),
+    /// `/Identity` and an AES method under a key AES does not take hand the
+    /// bytes back.
+    #[must_use]
+    pub fn encrypt_streams(&self, streams: &[(u32, u16, &[u8])]) -> aes::SideBySide {
+        match (self.stream_method, &self.aes) {
+            (CryptMethod::AesV3, Some(aes)) => {
+                let chains: Vec<([u8; 16], &[u8])> = streams
+                    .iter()
+                    .map(|&(num, gen, data)| (self.iv(num, gen, 0), data))
+                    .collect();
+                aes.cbc_encrypt_side_by_side(&chains)
+            }
+            _ => aes::SideBySide {
+                chains: streams
+                    .iter()
+                    .map(|&(num, gen, data)| self.encrypt_stream(num, gen, data))
+                    .collect(),
+                passes: 0,
+            },
+        }
+    }
+
     /// The inverse of [`FileKey::decrypt`], method for method.
     ///
     /// Written beside it deliberately: an incremental update has to reproduce
@@ -685,7 +716,6 @@ fn check_perms(params: &HandlerParams, key: &[u8], notes: &mut Vec<HandlerNote>)
     }
 }
 
-/// Comparison whose duration does not depend on where two byte strings first
 /// Everything the `/Encrypt` dictionary of a new R6 document needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltHandler {
@@ -794,6 +824,7 @@ pub fn encrypt_aes256(file_key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Vec<u8
     crate::aes::cbc_encrypt_with_iv_prefix(file_key, iv, data).unwrap_or_default()
 }
 
+/// Comparison whose duration does not depend on where two byte strings first
 /// differ.
 #[must_use]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -1066,6 +1097,115 @@ mod tests {
             crate::aes::expansions::take(),
             2,
             "AESV2: an object key an object"
+        );
+    }
+
+    /// **A file key seals streams side by side where its method allows**
+    /// (P-13.7).
+    ///
+    /// Nineteen streams of nineteen lengths, the first empty, under both
+    /// generations. Under `/AESV3` — a key handed over, and one a revision-6
+    /// file authenticated — sealed together they are each the bytes sealing
+    /// it alone gives, each decrypts back to its own, and the passes of the
+    /// core come back: no fewer than the longest stream has blocks, and
+    /// fewer than all of them have. Under `/AESV2`, RC4 and `/Identity`, and
+    /// under `/AESV3` with a key AES does not take, they are sealed an object
+    /// at a time, each as alone, and no pass is reported.
+    #[test]
+    fn streams_sealed_together_are_each_sealed_alone() {
+        let bytes: Vec<u8> = (0..32u8)
+            .map(|i| i.wrapping_mul(13).wrapping_add(5))
+            .collect();
+        let payloads: Vec<Vec<u8>> = (0..19usize)
+            .map(|at| (0..at * 23).map(|i| (i * 7 + at) as u8).collect())
+            .collect();
+        let streams: Vec<(u32, u16, &[u8])> = payloads
+            .iter()
+            .enumerate()
+            .map(|(at, payload)| (at as u32 + 3, (at % 2) as u16, payload.as_slice()))
+            .collect();
+        let blocks: Vec<u64> = payloads
+            .iter()
+            .map(|payload| (payload.len() / 16 + 1) as u64)
+            .collect();
+        let check = |file: &FileKey, side_by_side: bool, opens: bool, label: &str| {
+            let sealed = file.encrypt_streams(&streams);
+            assert_eq!(sealed.chains.len(), streams.len(), "{label}: a stream each");
+            for ((num, gen, data), out) in streams.iter().zip(&sealed.chains) {
+                assert_eq!(
+                    out,
+                    &file.encrypt_stream(*num, *gen, data),
+                    "{label}: stream {num} is its bytes sealed alone"
+                );
+                if opens {
+                    assert_eq!(
+                        &file.decrypt_stream(*num, *gen, out),
+                        data,
+                        "{label}: stream {num} opens"
+                    );
+                }
+            }
+            if side_by_side {
+                let longest = blocks.iter().copied().max().unwrap_or(0);
+                let total: u64 = blocks.iter().sum();
+                assert!(
+                    sealed.passes >= longest && sealed.passes < total,
+                    "{label}: {} passes side by side",
+                    sealed.passes
+                );
+            } else {
+                assert_eq!(sealed.passes, 0, "{label}: an object at a time");
+            }
+        };
+
+        let handed = FileKey::from_derived(
+            bytes.clone(),
+            6,
+            CryptMethod::AesV3,
+            CryptMethod::AesV3,
+            AuthOutcome::User,
+        );
+        check(&handed, true, true, "AESV3, a key handed over");
+
+        let built = build_r6(b"user", b"owner", -4, true, &[0x3c; 48]).expect("a handler");
+        let params = HandlerParams {
+            v: 5,
+            r: 6,
+            length_bits: 256,
+            o: built.o,
+            u: built.u,
+            oe: built.oe,
+            ue: built.ue,
+            perms: built.perms,
+            p: -4,
+            id_first: vec![0u8; 16],
+            encrypt_metadata: true,
+            stream_method: CryptMethod::AesV3,
+            string_method: CryptMethod::AesV3,
+        };
+        let opened = authenticate(&params, b"owner").expect("the owner password opens it");
+        check(&opened, true, true, "AESV3, a key an R6 file authenticated");
+
+        for (key, revision, method, label) in [
+            (bytes[..16].to_vec(), 4, CryptMethod::AesV2, "AESV2"),
+            (bytes[..5].to_vec(), 2, CryptMethod::Rc4, "RC4"),
+            (bytes.clone(), 4, CryptMethod::Identity, "Identity"),
+        ] {
+            let file = FileKey::from_derived(key, revision, method, method, AuthOutcome::User);
+            check(&file, false, true, label);
+        }
+        let refused = FileKey::from_derived(
+            bytes[..24].to_vec(),
+            6,
+            CryptMethod::AesV3,
+            CryptMethod::AesV3,
+            AuthOutcome::User,
+        );
+        check(
+            &refused,
+            false,
+            false,
+            "AESV3 under a key AES does not take",
         );
     }
 

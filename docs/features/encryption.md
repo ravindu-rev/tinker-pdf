@@ -104,7 +104,18 @@ and on an update under an inherited key
 (`strings_in_a_stream_dictionary_are_encrypted_too`).
 Encryption composes with object streams and with linearized output
 (Annex F) — the linearized writer encrypts each object as it serialises it
-and measures the layout from the ciphertext. A rewrite of an opened
+and measures the layout from the ciphertext. The file key is expanded once
+for the save, and the streams are sealed a window at a time, side by side:
+CBC is sequential within a stream and each stream is a chain of its own under
+its own IV, so a pass of the core takes the next block of up to eight streams,
+a lane each, and a stream that ends gives its lane to the next. A pass is one
+word while four streams or fewer are carried, so a stream alone is the
+single-chain path. Every stream's bytes are what sealing it alone writes,
+since the IVs are derived rather than drawn (ruling 4), and strings are
+sealed alone. An update to a file whose method is `/AESV3`, keyed by the file
+key itself, seals its streams side by side the same way under that key; RC4
+and `/AESV2`, which key each object apart (7.6.2), seal an object at a time.
+A rewrite of an opened
 encrypted document without the option decrypts on the way through and
 drops `/Encrypt`, because carrying it forward over plaintext would make
 every reader decrypt clear bytes into garbage.
@@ -328,6 +339,13 @@ three passes of blocks, the padding made bad three ways, ragged tails, random
 ciphertext and every length under two blocks, plaintext and notes alike — and
 `a_decrypted_block_costs_a_lane_not_a_pass` counts its passes: eight blocks a
 pass, where a block at a time and a sealed chain are a pass a block.
+`chains_sealed_side_by_side_are_each_chain_sealed_alone` holds chains sealed
+side by side — every count to past two passes' lanes, of many lengths and of
+one — to each chain sealed alone, and
+`a_chain_sealed_beside_others_costs_a_lane_not_a_pass` counts their passes
+and the words those run; `handler.rs`'s
+`streams_sealed_together_are_each_sealed_alone` holds a file key's streams to
+the same, side by side under `/AESV3` and an object at a time otherwise.
 `handler.rs` pins constant-time comparison, Algorithm 2.B termination and one
 expansion of an
 `/AESV3` file key a file (`the_aesv3_key_is_expanded_once_per_file`), and
@@ -392,7 +410,13 @@ encrypt-on-save through the engine's own reader: password required,
 content and `/Info` strings ciphertext on disk and intact after
 authentication, owner and user passwords distinguished, `/P` surviving
 the trip, identical plaintexts encrypting differently, and encryption
-composed with object streams. `crates/tinker-pdf/tests/pubsec_write.rs`
+composed with object streams;
+`streams_sealed_together_are_the_bytes_each_seals_alone` holds every stream
+of a rewrite — serial, on four threads and linearized — and of an update
+under an inherited `/AESV3` key to its plaintext sealed alone with the IV it
+carries, and `a_save_seals_its_streams_a_lane_each` counts the passes twenty
+equal streams are sealed in, at most one stream's blocks for each eight of
+them. `crates/tinker-pdf/tests/pubsec_write.rs`
 does the same for a document sealed to a certificate, its key holder a test
 `Recipient` over the committed `visible-signer-key.der`.
 `crates/tinker-pdf-cos/tests/strict_validator.rs`

@@ -13,10 +13,12 @@
 
 use std::collections::BTreeMap;
 
+use tinker_pdf_crypto::aes::Aes;
 use tinker_pdf_pool::Parallelism;
 
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, Object, PdfString};
+use crate::work::{Counter, Work};
 
 /// How a document should be written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,9 +423,13 @@ impl ObjectSet {
 /// Encrypts strings and streams on the way out (7.6.2).
 ///
 /// R6 only. Earlier revisions derive a key per object; R6 uses the file key
-/// directly, which is why nothing here needs the generation number.
+/// directly, which is why nothing here needs the generation number. The key
+/// is expanded once, as the cipher is made, for every string and stream the
+/// save seals, and the streams of a window are sealed side by side through
+/// the AES core ([`ObjectCipher::encrypt_streams`]).
 pub(crate) struct StreamCipher {
-    key: [u8; 32],
+    /// The file key, expanded.
+    aes: Aes,
     /// Seed for the per-object initialisation vectors.
     ///
     /// CBC needs a different IV per message or two identical plaintexts
@@ -434,14 +440,16 @@ pub(crate) struct StreamCipher {
 }
 
 impl StreamCipher {
-    fn new(key: [u8; 32]) -> StreamCipher {
+    /// The cipher for the file key `key`; `None` only where AES refuses the
+    /// key, which it does not for 32 bytes.
+    fn new(key: [u8; 32]) -> Option<StreamCipher> {
         let mut seed_input = Vec::with_capacity(40);
         seed_input.extend_from_slice(&key);
         seed_input.extend_from_slice(b"tpdf-iv");
-        StreamCipher {
-            key,
+        Some(StreamCipher {
+            aes: Aes::new(&key)?,
             seed: tinker_pdf_crypto::sha2::sha256(&seed_input),
-        }
+        })
     }
 
     fn iv_for(&self, num: u32, counter: u32) -> [u8; 16] {
@@ -456,7 +464,8 @@ impl StreamCipher {
     }
 
     fn seal_stream(&self, data: &[u8], num: u32) -> Vec<u8> {
-        tinker_pdf_crypto::handler::encrypt_aes256(&self.key, &self.iv_for(num, 0), data)
+        self.aes
+            .cbc_encrypt_with_iv_prefix(&self.iv_for(num, 0), data)
     }
 }
 
@@ -473,6 +482,19 @@ pub trait ObjectCipher {
     fn encrypt_stream(&self, data: &[u8], num: u32) -> Vec<u8>;
     /// A copy of `object` with every string inside it encrypted.
     fn encrypt_strings(&self, object: &Object, num: u32) -> Object;
+    /// Encrypts several streams, each `(data, num)`, giving each the bytes
+    /// [`ObjectCipher::encrypt_stream`] gives it alone, in the order given;
+    /// a cipher that seals them side by side through the AES core counts
+    /// the passes it ran into `work` ([`crate::Stats::stream_seal_passes`]).
+    /// An object at a time, counting nothing, unless the cipher says
+    /// otherwise.
+    fn encrypt_streams(&self, streams: &[(&[u8], u32)], work: Option<&Work>) -> Vec<Vec<u8>> {
+        let _ = work;
+        streams
+            .iter()
+            .map(|&(data, num)| self.encrypt_stream(data, num))
+            .collect()
+    }
 }
 
 impl ObjectCipher for StreamCipher {
@@ -483,8 +505,25 @@ impl ObjectCipher for StreamCipher {
     fn encrypt_strings(&self, object: &Object, num: u32) -> Object {
         let mut counter = 1u32;
         walk_strings(object, &mut counter, &mut |bytes, nonce| {
-            tinker_pdf_crypto::handler::encrypt_aes256(&self.key, &self.iv_for(num, nonce), bytes)
+            self.aes
+                .cbc_encrypt_with_iv_prefix(&self.iv_for(num, nonce), bytes)
         })
+    }
+
+    /// Side by side: each stream a chain of its own under its own derived
+    /// IV, through the one expanded key, a chain a lane
+    /// ([`Aes::cbc_encrypt_side_by_side`]); a lone stream is a chain alone,
+    /// the single-chain path's pass of one word a block.
+    fn encrypt_streams(&self, streams: &[(&[u8], u32)], work: Option<&Work>) -> Vec<Vec<u8>> {
+        let chains: Vec<([u8; 16], &[u8])> = streams
+            .iter()
+            .map(|&(data, num)| (self.iv_for(num, 0), data))
+            .collect();
+        let sealed = self.aes.cbc_encrypt_side_by_side(&chains);
+        if let Some(work) = work {
+            work.add(Counter::StreamSealPasses, sealed.passes);
+        }
+        sealed.chains
     }
 }
 
@@ -507,6 +546,20 @@ impl ObjectCipher for InheritedCipher<'_> {
         walk_strings(object, &mut counter, &mut |bytes, nonce| {
             self.key.encrypt_string(num, 0, nonce, bytes)
         })
+    }
+
+    /// Side by side where the file's method is `/AESV3`, whose key is the
+    /// file's own; an object at a time under RC4 and `/AESV2`, which key each
+    /// object apart (`FileKey::encrypt_streams`). Generation zero, as
+    /// [`ObjectCipher::encrypt_stream`]'s.
+    fn encrypt_streams(&self, streams: &[(&[u8], u32)], work: Option<&Work>) -> Vec<Vec<u8>> {
+        let streams: Vec<(u32, u16, &[u8])> =
+            streams.iter().map(|&(data, num)| (num, 0, data)).collect();
+        let sealed = self.key.encrypt_streams(&streams);
+        if let Some(work) = work {
+            work.add(Counter::StreamSealPasses, sealed.passes);
+        }
+        sealed.chains
     }
 }
 
@@ -581,7 +634,7 @@ pub(crate) fn build_sealing(
 ) -> Option<(Dict, StreamCipher)> {
     match sealing {
         Sealing::Password(encryption) => build_encryption(encryption, names),
-        Sealing::PublicKey(sealed) => Some(build_public_key(sealed, names)),
+        Sealing::PublicKey(sealed) => build_public_key(sealed, names),
     }
 }
 
@@ -596,7 +649,7 @@ pub(crate) fn build_sealing(
 fn build_public_key(
     sealed: &crate::pubsec::PublicKeyEncryption,
     names: &NameTable,
-) -> (Dict, StreamCipher) {
+) -> Option<(Dict, StreamCipher)> {
     let filter_name = names.intern(b"DefaultCryptFilter");
     let mut filter = Dict::new();
     filter.insert(Name::TYPE, Object::Name(names.intern(b"CryptFilter")));
@@ -643,7 +696,7 @@ fn build_public_key(
     dict.insert(names.intern(b"CF"), Object::Dict(cf));
     dict.insert(names.intern(b"StmF"), Object::Name(filter_name));
     dict.insert(names.intern(b"StrF"), Object::Name(filter_name));
-    (dict, StreamCipher::new(sealed.file_key()))
+    Some((dict, StreamCipher::new(sealed.file_key())?))
 }
 
 /// Builds the `/Encrypt` dictionary and the cipher that goes with it.
@@ -709,7 +762,7 @@ pub(crate) fn build_encryption(
     dict.insert(names.intern(b"StmF"), Object::Name(names.intern(b"StdCF")));
     dict.insert(names.intern(b"StrF"), Object::Name(names.intern(b"StdCF")));
 
-    Some((dict, StreamCipher::new(built.file_key)))
+    Some((dict, StreamCipher::new(built.file_key)?))
 }
 
 /// Compresses a stream's data and records the filter, when asked and when it
@@ -845,60 +898,133 @@ pub(crate) fn pooled(compress: bool, parallelism: Parallelism) -> bool {
 /// few enough that a window's compressed bytes are a small part of the file.
 const WINDOW_PER_WORKER: usize = 8;
 
+/// How many streams a window of a serial write that encrypts holds: as many
+/// as the AES core seals side by side in one pass, so that the window's
+/// streams fill its lanes and the extra memory is a few streams.
+pub(crate) const SEALED_TOGETHER: usize = tinker_pdf_crypto::aes::SIDE_BY_SIDE;
+
+/// How a run of numbered objects is serialised ([`write_entries`]): the
+/// names they are written with, whether their streams are compressed, the
+/// cipher that seals them, the threads compression may take, and the tally
+/// the sealing counts into.
+#[derive(Clone, Copy)]
+pub(crate) struct Serialising<'a> {
+    pub(crate) names: &'a NameTable,
+    pub(crate) compress: bool,
+    pub(crate) crypt: Option<&'a dyn ObjectCipher>,
+    pub(crate) parallelism: Parallelism,
+    pub(crate) work: Option<&'a Work>,
+}
+
 /// Writes `entries` into `out` in their order, recording where each begins in
 /// `offsets`.
 ///
-/// Serially, and for a write that compresses nothing, each object is made
-/// ready and written in turn, as [`write_entry`] writes it. On the pool
-/// ([`pooled`]) the streams are made ready a window at a time — the window's
-/// streams side by side, each into a slot of its own ([`ready_all`]), then its
-/// objects serialised in their order — so the output is the serial writer's
-/// and the extra memory one window's compressed streams. Encryption is applied
-/// as each object is serialised, in object order, whichever way.
+/// A write that neither compresses on the pool nor encrypts makes each object
+/// ready and writes it in turn, as [`write_entry`] writes it. Otherwise the
+/// entries go a window at a time: on the pool ([`pooled`]) a window holds the
+/// streams its workers take, made ready side by side, each into a slot of its
+/// own ([`ready_all`]); serially it holds [`SEALED_TOGETHER`] streams, made
+/// ready in turn. Under a cipher the window's streams are then sealed
+/// together ([`seal_window`]) — side by side through the AES core, where the
+/// cipher seals so — and its objects serialised in their order, each string
+/// sealed as it is written. Every stream's bytes are those sealing it alone
+/// writes, so the output is the serial writer's whichever way, and the extra
+/// memory one window's streams.
 fn write_entries(
     out: &mut Vec<u8>,
     offsets: &mut Vec<(u32, u64)>,
     entries: &[(u32, &Written)],
-    names: &NameTable,
-    compress: bool,
-    crypt: Option<&dyn ObjectCipher>,
-    parallelism: Parallelism,
+    how: Serialising<'_>,
 ) {
-    if !pooled(compress, parallelism) {
+    let on_pool = pooled(how.compress, how.parallelism);
+    if !on_pool && how.crypt.is_none() {
         for (num, entry) in entries {
             offsets.push((*num, out.len() as u64));
-            write_entry(out, *num, entry, names, compress, crypt);
+            write_entry(out, *num, entry, how.names, how.compress, None);
         }
         return;
     }
-    let window = parallelism
-        .workers(entries.len())
-        .max(1)
-        .saturating_mul(WINDOW_PER_WORKER);
+    let window = if on_pool {
+        how.parallelism
+            .workers(entries.len())
+            .max(1)
+            .saturating_mul(WINDOW_PER_WORKER)
+    } else {
+        SEALED_TOGETHER
+    };
     let mut rest = entries;
     while !rest.is_empty() {
-        // The window: entries up to and including its `window`th stream.
-        let mut streams = 0;
-        let mut len = 0;
-        for (_, entry) in rest {
-            len += 1;
-            if matches!(entry, Written::Stream(_)) {
-                streams += 1;
-                if streams == window {
-                    break;
-                }
-            }
-        }
+        let len = window_len(rest.iter().map(|(_, entry)| *entry), window);
         let (now, later) = rest.split_at(len.min(rest.len()));
-        let inner: Vec<&Written> = now.iter().map(|(_, entry)| *entry).collect();
-        let made = ready_all(&inner, names, compress, parallelism);
-        for ((num, entry), made) in now.iter().zip(made) {
+        let made: Vec<Ready<'_>> = if on_pool {
+            let inner: Vec<&Written> = now.iter().map(|(_, entry)| *entry).collect();
+            ready_all(&inner, how.names, how.compress, how.parallelism)
+                .into_iter()
+                .zip(now)
+                .map(|(made, (_, entry))| {
+                    made.unwrap_or_else(|| ready(entry, how.names, how.compress))
+                })
+                .collect()
+        } else {
+            now.iter()
+                .map(|(_, entry)| ready(entry, how.names, how.compress))
+                .collect()
+        };
+        let sealed = seal_window(now.iter().map(|(num, _)| *num), &made, how.crypt, how.work);
+        for (((num, _), made), sealed) in now.iter().zip(made).zip(sealed) {
             offsets.push((*num, out.len() as u64));
-            let made = made.unwrap_or_else(|| ready(entry, names, compress));
-            write_ready(out, *num, made, names, crypt);
+            write_ready(out, *num, made, how.names, how.crypt, sealed);
         }
         rest = later;
     }
+}
+
+/// How many of `entries` a window takes: those up to and including its
+/// `window`th stream, or all of them where they hold fewer.
+pub(crate) fn window_len<'a>(entries: impl Iterator<Item = &'a Written>, window: usize) -> usize {
+    let mut streams = 0;
+    let mut len = 0;
+    for entry in entries {
+        len += 1;
+        if matches!(entry, Written::Stream(_)) {
+            streams += 1;
+            if streams == window {
+                break;
+            }
+        }
+    }
+    len
+}
+
+/// The bytes each object of a window is written with where it is a stream,
+/// the window's streams sealed together by `crypt`
+/// ([`ObjectCipher::encrypt_streams`]), which counts what it ran into `work`:
+/// `numbers` are the window's object numbers and `made` its objects made
+/// ready. `None` for an object that is no stream, and for every object where
+/// nothing seals.
+pub(crate) fn seal_window(
+    numbers: impl Iterator<Item = u32>,
+    made: &[Ready<'_>],
+    crypt: Option<&dyn ObjectCipher>,
+    work: Option<&Work>,
+) -> Vec<Option<Vec<u8>>> {
+    let Some(cipher) = crypt else {
+        return made.iter().map(|_| None).collect();
+    };
+    let streams: Vec<(&[u8], u32)> = numbers
+        .zip(made)
+        .filter_map(|(num, made)| match made {
+            Ready::Stream(_, data) => Some((data.as_slice(), num)),
+            Ready::Object(_) => None,
+        })
+        .collect();
+    let mut sealed = cipher.encrypt_streams(&streams, work).into_iter();
+    made.iter()
+        .map(|made| match made {
+            Ready::Stream(..) => sealed.next(),
+            Ready::Object(_) => None,
+        })
+        .collect()
 }
 
 /// Writes one numbered object, whichever kind it is.
@@ -910,17 +1036,19 @@ fn write_entry(
     compress: bool,
     crypt: Option<&dyn ObjectCipher>,
 ) {
-    write_ready(out, num, ready(entry, names, compress), names, crypt);
+    write_ready(out, num, ready(entry, names, compress), names, crypt, None);
 }
 
 /// Writes one numbered object made ready ([`ready`]), encrypting it with
-/// `crypt` as it goes.
+/// `crypt` as it goes: a stream with `sealed`, where its window sealed it
+/// already ([`seal_window`]), and sealed alone here where not.
 fn write_ready(
     out: &mut Vec<u8>,
     num: u32,
     entry: Ready<'_>,
     names: &NameTable,
     crypt: Option<&dyn ObjectCipher>,
+    sealed: Option<Vec<u8>>,
 ) {
     out.extend_from_slice(
         format!(
@@ -943,9 +1071,10 @@ fn write_ready(
             // writer computes it rather than trusting whatever was there.
             // Encryption is the last thing applied and the first thing undone,
             // so it wraps the compressed bytes rather than the other way round.
-            let data = match crypt {
-                Some(cipher) => cipher.encrypt_stream(&data, num),
-                None => data,
+            let data = match (sealed, crypt) {
+                (Some(sealed), _) => sealed,
+                (None, Some(cipher)) => cipher.encrypt_stream(&data, num),
+                (None, None) => data,
             };
             dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
             match crypt {
@@ -1040,6 +1169,7 @@ pub fn incremental_update(
             crypt,
             reserved: None,
             parallelism: Parallelism::Serial,
+            work: None,
         },
     )
     .0
@@ -1075,6 +1205,7 @@ pub fn update_section(
             crypt,
             reserved: None,
             parallelism: Parallelism::Serial,
+            work: None,
         },
     )
     .0
@@ -1131,6 +1262,9 @@ pub(crate) struct UpdatePlan<'a> {
     /// The threads the update's compression may spend
     /// ([`WriteOptions::parallelism`]).
     pub(crate) parallelism: Parallelism,
+    /// The tally the update's sealing counts into, where the save counts
+    /// ([`crate::Stats::stream_seal_passes`]).
+    pub(crate) work: Option<&'a Work>,
 }
 
 /// [`incremental_update`], optionally appending one object whose bytes the
@@ -1208,10 +1342,13 @@ pub(crate) fn update_section_reserving(
         &mut out,
         &mut offsets,
         &entries,
-        names,
-        compress,
-        crypt,
-        plan.parallelism,
+        Serialising {
+            names,
+            compress,
+            crypt,
+            parallelism: plan.parallelism,
+            work: plan.work,
+        },
     );
     // `write_entries` places each object in the section; the table states
     // where it stands in the whole file.
@@ -1382,16 +1519,19 @@ pub fn rewrite(
         options,
         names,
         Sealing::from_options(options),
+        None,
     )
 }
 
-/// [`rewrite`], sealed with whichever handler `sealing` names.
+/// [`rewrite`], sealed with whichever handler `sealing` names, its sealing
+/// counting into `work` where the save counts.
 pub(crate) fn rewrite_sealed(
     objects: &ObjectSet,
     trailer: &Dict,
     options: &WriteOptions,
     names: &NameTable,
     sealing: Option<Sealing<'_>>,
+    work: Option<&Work>,
 ) -> Vec<u8> {
     // Before the layout is chosen, so the linearized writer receives the same
     // trailer the ordinary one would.
@@ -1423,7 +1563,7 @@ pub(crate) fn rewrite_sealed(
         // caller was told nothing: they asked for both and got an encrypted
         // file with an ordinary layout. `linearize` owns the cipher now.
         if let Some(bytes) =
-            crate::linearize::linearize_sealed(objects, trailer, options, names, sealing)
+            crate::linearize::linearize_sealed(objects, trailer, options, names, sealing, work)
         {
             return bytes;
         }
@@ -1517,10 +1657,13 @@ pub(crate) fn rewrite_sealed(
         &mut out,
         &mut offsets,
         &entries,
-        names,
-        options.compress,
-        crypt,
-        options.parallelism,
+        Serialising {
+            names,
+            compress: options.compress,
+            crypt,
+            parallelism: options.parallelism,
+            work,
+        },
     );
 
     // 7.6.1: the /Encrypt dictionary is the one object never encrypted, since
@@ -2263,6 +2406,7 @@ mod tests {
                         crypt: None,
                         reserved: None,
                         parallelism,
+                        work: None,
                     },
                 )
                 .0

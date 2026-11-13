@@ -315,6 +315,18 @@ pub struct Stats {
     ///
     /// Counted with `text_forms_built`.
     pub search_steps: u64,
+    /// Passes of the AES core that sealed a save's streams side by side,
+    /// under the key the save holds for the whole file: a rewrite's R6 key,
+    /// or the `/AESV3` key of the file an update appends to. Each pass counts
+    /// one, whatever its width and however many of its lanes it filled, so a
+    /// run of streams sealed together takes as many as their blocks need
+    /// eight lanes, a lone stream a pass a block. RC4 and `/AESV2` key each
+    /// object apart (7.6.2) and seal an object at a time, and strings are
+    /// sealed alone: neither counts.
+    ///
+    /// Counted by this crate's writer, from the passes
+    /// `tinker-pdf-crypto`'s side-by-side seal hands back as a value.
+    pub stream_seal_passes: u64,
     /// The most bytes a JPEG decode held at once beside the image it decoded
     /// into: its coefficients, its component planes and the strip it handed
     /// on, every buffer sized from the image. A maximum, as
@@ -413,6 +425,8 @@ pub enum Counter {
     OperatorsRun,
     /// [`Stats::shading_functions_evaluated`].
     ShadingFunctionsEvaluated,
+    /// [`Stats::stream_seal_passes`].
+    StreamSealPasses,
     /// [`Stats::pool_items_on_workers`].
     PoolItemsOnWorkers,
     /// [`Stats::pool_items_on_caller`].
@@ -475,6 +489,7 @@ impl Stats {
             self.text_forms_built,
             self.word_boundaries_computed,
             self.search_steps,
+            self.stream_seal_passes,
         ]
         .into_iter()
         .fold(0u64, u64::saturating_add)
@@ -514,6 +529,7 @@ impl Stats {
             Counter::ContentTokensRead => &mut self.content_tokens_read,
             Counter::OperatorsRun => &mut self.operators_run,
             Counter::ShadingFunctionsEvaluated => &mut self.shading_functions_evaluated,
+            Counter::StreamSealPasses => &mut self.stream_seal_passes,
             Counter::PoolItemsOnWorkers => &mut self.pool_items_on_workers,
             Counter::PoolItemsOnCaller => &mut self.pool_items_on_caller,
             Counter::TextFormsBuilt => &mut self.text_forms_built,
@@ -610,6 +626,9 @@ impl Add for Stats {
             shading_functions_evaluated: self
                 .shading_functions_evaluated
                 .saturating_add(other.shading_functions_evaluated),
+            stream_seal_passes: self
+                .stream_seal_passes
+                .saturating_add(other.stream_seal_passes),
             jpeg_held: self.jpeg_held.max(other.jpeg_held),
             pool_items_on_workers: self
                 .pool_items_on_workers
@@ -736,7 +755,7 @@ mod tests {
 
     /// Every counter of a step, so a test of one property covers them all;
     /// [`PLACES`] holds the two that count where a part ran.
-    const ALL: [Counter; 34] = [
+    const ALL: [Counter; 35] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::GlyphMasksRasterised,
@@ -771,6 +790,7 @@ mod tests {
         Counter::TextFormsBuilt,
         Counter::WordBoundariesComputed,
         Counter::SearchSteps,
+        Counter::StreamSealPasses,
     ];
 
     /// The counters of where a pooled operation's parts ran.

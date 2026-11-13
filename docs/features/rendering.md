@@ -858,7 +858,9 @@ of several that tie), and `bytes_decoded`, the bytes the runs returned
 ([filters](filters.md)); `jpeg_held`, the most bytes a JPEG decode held
 at once beside the image it decoded into — its coefficients, its planes and
 its strip; from `Bitmap::to_png_counted`, `png_image_scratch` and
-`png_peak`, maxima of the bytes a PNG write held; and
+`png_peak`, maxima of the bytes a PNG write held; `stream_seal_passes`, each
+pass of the AES core that sealed a save's streams side by side, which only a
+save that encrypts counts ([writing](writing.md)); and
 `pool_items_on_workers` and `pool_items_on_caller`, where a page of a page walk
 ran — on one of the pool's workers or on the caller — counted into the first
 counted operation the page makes, its render or its counted text, and never

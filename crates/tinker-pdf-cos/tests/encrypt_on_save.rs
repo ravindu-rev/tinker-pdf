@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use tinker_pdf_cos::{
     pages, AuthLevel, CosDocument, Dict, DocumentBuilder, DocumentEditor, Encryption, Object,
-    PdfString, StreamData, Work, WriteMode, WriteOptions,
+    Parallelism, PdfString, StreamData, Work, WriteMode, WriteOptions,
 };
 
 /// Forty-eight deterministic bytes. Real callers pass real randomness; a test
@@ -578,6 +578,316 @@ fn the_page_index_is_dropped_when_a_password_arrives() {
         String::from_utf8_lossy(&pages::content_bytes(&doc, &page))
             .contains("CONFIDENTIAL CONTENT"),
         "and reads decrypted"
+    );
+}
+
+/// A document of `count` pages, page `at` filling `rects(at)` rectangles, so
+/// that its content stream's length goes with the count. Its only streams
+/// are its pages' contents, as `identical_content_encrypts_differently`'s
+/// pages' are.
+fn pages_of_rectangles(
+    label: &str,
+    count: usize,
+    rects: impl Fn(usize) -> usize,
+) -> Arc<CosDocument> {
+    let mut builder = DocumentBuilder::new();
+    for at in 0..count {
+        let n = rects(at);
+        builder.add_page(100.0, 100.0, |page| {
+            for k in 0..n {
+                page.fill_rect(k as f64, 0.0, 50.0, 50.0, 0.0);
+            }
+        });
+    }
+    Arc::new(CosDocument::open(built(label, builder)).expect("it opens"))
+}
+
+/// The rewrites a save seals its streams through: serially, compressed on
+/// four threads, and linearized both ways, each to the user password
+/// `open-me`.
+fn sealed_rewrites() -> Vec<(&'static str, WriteOptions)> {
+    let sealing = |compress: bool, parallelism: Parallelism, linearize: bool| WriteOptions {
+        mode: WriteMode::Rewrite,
+        compress,
+        parallelism,
+        linearize,
+        encryption: Some(Encryption {
+            user_password: "open-me".to_string(),
+            owner_password: "owner-me".to_string(),
+            permissions: -1,
+            entropy: entropy(),
+        }),
+        ..WriteOptions::default()
+    };
+    vec![
+        ("a rewrite", sealing(false, Parallelism::Serial, false)),
+        (
+            "a rewrite compressed on four threads",
+            sealing(true, Parallelism::Threads(4), false),
+        ),
+        (
+            "a linearized rewrite",
+            sealing(false, Parallelism::Serial, true),
+        ),
+        (
+            "a linearized rewrite compressed on four threads",
+            sealing(true, Parallelism::Threads(4), true),
+        ),
+    ]
+}
+
+/// The fixture sealed under `/AESV3`, opened with its password, with
+/// `count` streams added to its first page's contents, stream `at` holding
+/// `content(at)`; and the added streams' object numbers.
+fn aes256_fixture_with_streams(
+    count: usize,
+    content: impl Fn(usize) -> String,
+) -> (Vec<u8>, DocumentEditor, Vec<u32>) {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/encrypted-aes256.pdf");
+    let original = std::fs::read(&fixture).expect("the fixture");
+    let doc = CosDocument::open(original.clone()).expect("it opens");
+    doc.authenticate("open-sesame")
+        .expect("the password opens it");
+    let doc = Arc::new(doc);
+    let page = pages::collect(&doc).into_iter().next().expect("a page");
+    let mut contents: Vec<Object> = pages::contents(&doc, &page)
+        .into_iter()
+        .map(Object::Ref)
+        .collect();
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let mut added = Vec::with_capacity(count);
+    for at in 0..count {
+        let r = editor.allocate();
+        editor.put_stream(
+            r,
+            StreamData {
+                dict: Dict::new(),
+                data: content(at).into_bytes(),
+            },
+        );
+        contents.push(Object::Ref(r));
+        added.push(r.num);
+    }
+    let mut dict = editor
+        .get(page.reference)
+        .and_then(|object| object.as_dict().cloned())
+        .expect("the page's dictionary");
+    dict.insert(tinker_pdf_cos::Name::CONTENTS, Object::Array(contents));
+    editor.put(page.reference, Object::Dict(dict));
+    (original, editor, added)
+}
+
+/// Holds each stream of `bytes` — the objects `written` numbers, which must
+/// all be streams, or every stream in the file where it is `None` — to
+/// sealing alone: its bytes as the file holds them are what AES-256-CBC
+/// writes for its plaintext under the file key with the IV it carries.
+/// Returns how many streams it held.
+#[track_caller]
+fn each_stream_is_its_plaintext_sealed_alone(
+    label: &str,
+    bytes: Vec<u8>,
+    password: &str,
+    written: Option<&[u32]>,
+) -> usize {
+    let doc = CosDocument::open(bytes).expect("it opens");
+    assert!(doc.authenticate(password).is_ok(), "{label}: it opens");
+    let file_key = doc.file_key().expect("a file key");
+    let numbers: Vec<u32> = match written {
+        Some(numbers) => numbers.to_vec(),
+        None => (1..=doc.max_object_number()).collect(),
+    };
+    let mut held = 0;
+    for num in numbers {
+        let r = tinker_pdf_cos::ObjRef::new(num, 0);
+        let Ok(sealed) = doc.stream_raw_encrypted(r) else {
+            assert!(written.is_none(), "{label}: object {num} is a stream");
+            continue;
+        };
+        let sealed = sealed.to_vec();
+        let plain = doc.stream_raw(r).expect("the stream decrypts");
+        let iv: [u8; 16] = sealed
+            .get(..16)
+            .and_then(|iv| iv.try_into().ok())
+            .expect("an IV");
+        let alone = tinker_pdf_crypto::aes::cbc_encrypt_with_iv_prefix(file_key.key(), &iv, &plain)
+            .expect("the file key seals");
+        assert_eq!(
+            alone, sealed,
+            "{label}: object {num} is its plaintext sealed alone"
+        );
+        held += 1;
+    }
+    held
+}
+
+/// **Streams sealed together are the bytes each seals alone** (P-13.7).
+///
+/// A document of twenty pages whose content streams run from one rectangle
+/// to twenty, so that their lengths cross block edges, saved encrypted as a
+/// rewrite, compressed on four threads, and linearized both ways — the
+/// writer sealing its streams a window at a time, side by side through the
+/// AES core — and an update of the AES-256 fixture that adds twenty streams
+/// of as many lengths, sealed side by side under the file's own `/AESV3`
+/// key. Every stream of each rewrite, and every stream the update added, is
+/// its plaintext sealed alone under the file key with the IV it carries, and
+/// every page of the rewrites reads back its own rectangles.
+#[test]
+fn streams_sealed_together_are_the_bytes_each_seals_alone() {
+    let label = "streams sealed together are the bytes each seals alone";
+    let source = pages_of_rectangles(label, 20, |at| at + 1);
+    let expected: Vec<Vec<u8>> = pages::collect(&source)
+        .iter()
+        .map(|page| pages::content_bytes(&source, page))
+        .collect();
+    let editor = DocumentEditor::new(Arc::clone(&source));
+    for (how, options) in sealed_rewrites() {
+        let bytes = held_save(label, &editor, &options);
+        let held = each_stream_is_its_plaintext_sealed_alone(how, bytes.clone(), "open-me", None);
+        assert!(
+            held >= 20,
+            "{how}: {held} streams, the twenty pages' among them"
+        );
+        let doc = CosDocument::open(bytes).expect("it opens");
+        assert_eq!(doc.authenticate("open-me"), Ok(AuthLevel::User), "{how}");
+        let read: Vec<Vec<u8>> = pages::collect(&doc)
+            .iter()
+            .map(|page| pages::content_bytes(&doc, page))
+            .collect();
+        assert_eq!(read, expected, "{how}: every page reads its own content");
+    }
+
+    let (original, editor, added) =
+        aes256_fixture_with_streams(20, |at| format!("q Q % {}\n", "y".repeat(7 * at)));
+    let updated = held_save_opened(
+        label,
+        &editor,
+        &WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        },
+        "open-sesame",
+    );
+    assert!(updated.starts_with(&original), "an update appends");
+    assert_eq!(
+        each_stream_is_its_plaintext_sealed_alone(
+            "an update under the inherited AESV3 key",
+            updated,
+            "open-sesame",
+            Some(&added),
+        ),
+        20
+    );
+}
+
+/// **A save seals its streams a lane each** (P-13.7).
+///
+/// Passes of the AES core are counted on the save's tally
+/// (`Stats::stream_seal_passes`). A document whose only streams are twenty
+/// equal pages' contents, saved encrypted each way `sealed_rewrites` names,
+/// and the AES-256 fixture with twenty equal streams added and saved as an
+/// update under its own key, seal their twenty streams in no more passes than
+/// one stream's blocks times the twenty over the core's lanes, rounded up —
+/// where sealing each alone takes twenty times one stream's blocks — and in
+/// some. A counted save writes the bytes an uncounted one does, and a save
+/// that does not encrypt counts no pass.
+#[test]
+fn a_save_seals_its_streams_a_lane_each() {
+    let label = "a save seals its streams a lane each";
+    let source = pages_of_rectangles(label, 20, |_| 3);
+    let streams: Vec<Vec<u8>> = (1..=source.max_object_number())
+        .filter_map(|num| source.stream_raw(tinker_pdf_cos::ObjRef::new(num, 0)).ok())
+        .collect();
+    assert_eq!(
+        streams.len(),
+        20,
+        "the document's only streams are its pages' contents"
+    );
+    assert!(
+        streams.windows(2).all(|pair| pair[0] == pair[1]),
+        "and they are equal"
+    );
+    let lanes = tinker_pdf_crypto::aes::SIDE_BY_SIDE;
+
+    // The passes of a counted save, held to the bound for twenty equal
+    // streams, `sealed` the bytes one of them seals to.
+    let hold = |how: &str, passes: u64, sealed: usize| {
+        let blocks = (sealed - 16) / 16;
+        let bound = blocks * 20usize.div_ceil(lanes);
+        assert!(
+            passes > 0 && passes as usize <= bound,
+            "{how}: {passes} passes, where one stream's {blocks} blocks times twenty over {lanes} lanes is {bound}"
+        );
+        assert!(
+            (passes as usize) < 20 * blocks,
+            "{how}: {passes} passes, fewer than sealing each alone"
+        );
+    };
+
+    let editor = DocumentEditor::new(Arc::clone(&source));
+    for (how, options) in sealed_rewrites() {
+        let work = Work::new();
+        let counted = editor.save_counted(&options, Some(&work));
+        let bytes = held_save(label, &editor, &options);
+        assert_eq!(counted, bytes, "{how}: counting moves no byte");
+        let doc = CosDocument::open(bytes).expect("it opens");
+        assert_eq!(doc.authenticate("open-me"), Ok(AuthLevel::User), "{how}");
+        let lengths: std::collections::BTreeSet<usize> = pages::collect(&doc)
+            .iter()
+            .flat_map(|page| pages::contents(&doc, page))
+            .map(|r| doc.stream_raw_encrypted(r).expect("a content stream").len())
+            .collect();
+        assert_eq!(
+            lengths.len(),
+            1,
+            "{how}: equal streams seal to one length, {lengths:?}"
+        );
+        let sealed = lengths.first().copied().unwrap_or(0);
+        hold(how, work.stats().stream_seal_passes, sealed);
+    }
+
+    let (_, editor, added) = aes256_fixture_with_streams(20, |_| "q Q % equal\n".repeat(9));
+    let options = WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    };
+    let work = Work::new();
+    let counted = editor.save_counted(&options, Some(&work));
+    let bytes = held_save_opened(label, &editor, &options, "open-sesame");
+    assert_eq!(counted, bytes, "the update: counting moves no byte");
+    let doc = CosDocument::open(bytes).expect("it opens");
+    assert!(doc.authenticate("open-sesame").is_ok());
+    let lengths: std::collections::BTreeSet<usize> = added
+        .iter()
+        .map(|num| {
+            doc.stream_raw_encrypted(tinker_pdf_cos::ObjRef::new(*num, 0))
+                .expect("an added stream")
+                .len()
+        })
+        .collect();
+    assert_eq!(
+        lengths.len(),
+        1,
+        "the update: equal streams seal to one length, {lengths:?}"
+    );
+    hold(
+        "an update under the inherited AESV3 key",
+        work.stats().stream_seal_passes,
+        lengths.first().copied().unwrap_or(0),
+    );
+
+    let work = Work::new();
+    let _ = DocumentEditor::new(source).save_counted(
+        &WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+        Some(&work),
+    );
+    assert_eq!(
+        work.stats().stream_seal_passes,
+        0,
+        "a save that does not encrypt seals nothing"
     );
 }
 

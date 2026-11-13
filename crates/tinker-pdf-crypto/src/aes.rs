@@ -17,7 +17,10 @@
 //! decides by masks. A lone chain is a pass of one word a block. CBC
 //! decryption, whose blocks are each the inverse cipher of a ciphertext block
 //! the input already holds, decrypts eight blocks a pass of two words, a
-//! shorter tail through the same pass with its other lanes empty. The core
+//! shorter tail through the same pass with its other lanes empty. CBC
+//! encryption is sequential within a chain, so several chains — a save's
+//! streams, each under its own IV — are sealed side by side, a chain a lane,
+//! each to the bytes it seals to alone. The core
 //! records, in test builds, every table it reads and every condition it
 //! tests, and two tests hold that record equal over random keys and blocks at
 //! both widths (`the_core_reads_no_secret_indexed_table_and_branches_alike`
@@ -1107,27 +1110,92 @@ pub(crate) mod expansions {
     }
 }
 
-/// Passes of the core run, counted for
-/// `a_decrypted_block_costs_a_lane_not_a_pass`: compiled only under
-/// `cfg(test)` and kept per thread, as [`expansions`] is. A pass counts one
-/// whatever its width and however many of its lanes it filled.
+/// Passes of the core run, and the words they ran, counted for
+/// `a_decrypted_block_costs_a_lane_not_a_pass` and
+/// `a_chain_sealed_beside_others_costs_a_lane_not_a_pass`: compiled only
+/// under `cfg(test)` and kept per thread, as [`expansions`] is. A pass counts
+/// one however many of its lanes it filled, and its width in words.
 #[cfg(test)]
 pub(crate) mod passes {
     use std::cell::Cell;
 
     std::thread_local! {
-        static RUN: Cell<u64> = const { Cell::new(0) };
+        static RUN: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
     }
 
-    /// One pass.
-    pub(crate) fn counted() {
-        RUN.with(|run| run.set(run.get() + 1));
+    /// One pass of `words` words.
+    pub(crate) fn counted(words: usize) {
+        RUN.with(|run| {
+            let (passes, ran) = run.get();
+            run.set((passes + 1, ran + words as u64));
+        });
     }
 
-    /// The passes counted on this thread since the last call, which starts
-    /// the count again from zero.
+    /// The passes counted on this thread since the last call to this or to
+    /// [`take_words`], which starts both counts again from zero.
     pub(crate) fn take() -> u64 {
-        RUN.with(|run| run.replace(0))
+        take_words().0
+    }
+
+    /// The passes counted on this thread since the last call to this or to
+    /// [`take`], and the words they ran, which starts both again from zero.
+    pub(crate) fn take_words() -> (u64, u64) {
+        RUN.with(|run| run.replace((0, 0)))
+    }
+}
+
+/// The most chains [`Aes::cbc_encrypt_side_by_side`] carries in one pass of
+/// the core: the lanes of the batched pass.
+pub const SIDE_BY_SIDE: usize = BATCH;
+
+/// Chains sealed side by side ([`Aes::cbc_encrypt_side_by_side`]): each
+/// one's bytes, in the order the chains were given, and the passes of the
+/// core the seal ran.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SideBySide {
+    /// Each chain's ciphertext with its IV prefixed, byte for byte what
+    /// [`Aes::cbc_encrypt_with_iv_prefix`] writes for that IV and plaintext.
+    pub chains: Vec<Vec<u8>>,
+    /// The passes of the core the seal took, each one whatever its width and
+    /// however many lanes it filled.
+    pub passes: u64,
+}
+
+/// A chain a lane carries while chains are sealed side by side: the
+/// plaintext it has still to seal, the ciphertext block before its next one,
+/// and its output.
+struct Carried<'a> {
+    rest: &'a [u8],
+    before: [u8; 16],
+    out: &'a mut Vec<u8>,
+}
+
+impl Carried<'_> {
+    /// The chain's next block XORed with the ciphertext block before it, and
+    /// whether it is the chain's last: a whole block of what is left, or —
+    /// once fewer than sixteen bytes are — what is left and its PKCS#7
+    /// padding (7.6.2), the block [`Aes::cbc_encrypt_with_iv_prefix`] ends a
+    /// chain with. Which it is turns on the length left alone.
+    fn next_block(&mut self) -> ([u8; 16], bool) {
+        let (mut block, last) = match self.rest.split_first_chunk::<16>() {
+            Some((head, tail)) => {
+                self.rest = tail;
+                (*head, false)
+            }
+            None => {
+                let pad = 16 - self.rest.len();
+                let mut padded = [pad as u8; 16];
+                if let Some(head) = padded.get_mut(..self.rest.len()) {
+                    head.copy_from_slice(self.rest);
+                }
+                self.rest = &[];
+                (padded, true)
+            }
+        };
+        for (byte, b) in block.iter_mut().zip(self.before) {
+            *byte ^= b;
+        }
+        (block, last)
     }
 }
 
@@ -1176,7 +1244,7 @@ impl Aes {
     /// single-chain path.
     fn encrypt_block(&self, block: &mut [u8; 16]) {
         #[cfg(test)]
-        passes::counted();
+        passes::counted(1);
         *block = encrypt_alone(&self.keys, *block, &mut Trace::new());
     }
 
@@ -1184,7 +1252,7 @@ impl Aes {
     /// pass: decryption block by block, which the batched path is held to.
     #[cfg(test)]
     fn decrypt_block(&self, block: &mut [u8; 16]) {
-        passes::counted();
+        passes::counted(1);
         *block = decrypt_alone(&self.keys, *block, &mut Trace::new());
     }
 
@@ -1192,7 +1260,7 @@ impl Aes {
     /// once, a block a lane.
     fn decrypt_lanes(&self, blocks: &Blocks<BATCH_WORDS>) -> Blocks<BATCH_WORDS> {
         #[cfg(test)]
-        passes::counted();
+        passes::counted(BATCH_WORDS);
         let mut trace = Trace::new();
         let mut planes = slice(blocks, &mut trace);
         decrypt_pass(&self.keys, &mut planes, &mut trace);
@@ -1234,6 +1302,105 @@ impl Aes {
             }
             out.extend_from_slice(&plain);
             before.copy_from_slice(block);
+        }
+    }
+
+    /// The first `LANES·W` of `blocks` through the cipher at once in a pass of
+    /// `W` words, a block a lane, and back in their places; a block the pass
+    /// does not carry comes back zero.
+    fn encrypt_lanes<const W: usize>(&self, blocks: &[[u8; 16]; BATCH]) -> [[u8; 16]; BATCH] {
+        #[cfg(test)]
+        passes::counted(W);
+        let mut lanes = [[[0u8; 16]; LANES]; W];
+        for (lane, block) in lanes.iter_mut().flatten().zip(blocks) {
+            *lane = *block;
+        }
+        let mut trace = Trace::new();
+        let mut planes = slice(&lanes, &mut trace);
+        encrypt_pass(&self.keys, &mut planes, &mut trace);
+        let sealed = unslice(&planes, &mut trace);
+        let mut out = [[0u8; 16]; BATCH];
+        for (slot, block) in out.iter_mut().zip(sealed.iter().flatten()) {
+            *slot = *block;
+        }
+        out
+    }
+
+    /// Several CBC chains with PKCS#7 padding, each with its IV prefixed,
+    /// sealed side by side: each chain's bytes are what
+    /// [`Aes::cbc_encrypt_with_iv_prefix`] writes for its IV and plaintext,
+    /// in the order the chains were given, and the passes of the core the
+    /// seal ran come back beside them.
+    ///
+    /// A chain is sequential — each block enters the cipher XORed with the
+    /// ciphertext of the block before — so chains, not blocks, are the lanes:
+    /// a pass takes the next block of each chain it carries, at most
+    /// [`SIDE_BY_SIDE`] of them, and a chain that ends gives its lane to the
+    /// next chain waiting. A pass is one word while four chains or fewer are
+    /// carried and two while more are, so a lone chain is the single-chain
+    /// path's pass of one word a block. What a pass carries is decided by the
+    /// chains' lengths, which are public, and nothing a pass gives decides
+    /// anything.
+    #[must_use]
+    pub fn cbc_encrypt_side_by_side(&self, chains: &[([u8; 16], &[u8])]) -> SideBySide {
+        let mut sealed: Vec<Vec<u8>> = chains
+            .iter()
+            .map(|(iv, plain)| {
+                let mut out = Vec::with_capacity(32 + plain.len() / 16 * 16);
+                out.extend_from_slice(iv);
+                out
+            })
+            .collect();
+        let mut waiting = chains
+            .iter()
+            .zip(sealed.iter_mut())
+            .map(|((iv, plain), out)| Carried {
+                rest: plain,
+                before: *iv,
+                out,
+            });
+        let mut lanes: [Option<Carried<'_>>; BATCH] = core::array::from_fn(|_| None);
+        let mut passes = 0u64;
+        loop {
+            for lane in lanes.iter_mut().filter(|lane| lane.is_none()) {
+                *lane = waiting.next();
+            }
+            let carried = lanes.iter().filter(|lane| lane.is_some()).count();
+            if carried == 0 {
+                break;
+            }
+            let mut blocks = [[0u8; 16]; BATCH];
+            let mut ends = [false; BATCH];
+            for ((block, end), chain) in blocks
+                .iter_mut()
+                .zip(ends.iter_mut())
+                .zip(lanes.iter_mut().flatten())
+            {
+                (*block, *end) = chain.next_block();
+            }
+            let out = if carried <= LANES {
+                self.encrypt_lanes::<1>(&blocks)
+            } else {
+                self.encrypt_lanes::<BATCH_WORDS>(&blocks)
+            };
+            passes += 1;
+            for ((block, end), lane) in out
+                .iter()
+                .zip(ends)
+                .zip(lanes.iter_mut().filter(|lane| lane.is_some()))
+            {
+                if let Some(chain) = lane.as_mut() {
+                    chain.out.extend_from_slice(block);
+                    chain.before = *block;
+                }
+                if end {
+                    *lane = None;
+                }
+            }
+        }
+        SideBySide {
+            chains: sealed,
+            passes,
         }
     }
 
@@ -2266,5 +2433,146 @@ mod tests {
             3,
             "seventeen blocks: two passes of eight and one of one"
         );
+    }
+
+    /// The lengths `chains_sealed_side_by_side_are_each_chain_sealed_alone`
+    /// cycles through, each a block's edge or a few blocks.
+    const CHAIN_LENGTHS: [usize; 14] = [0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 64, 100, 129, 200];
+
+    /// **Chains sealed side by side are each chain sealed alone** (P-13.7).
+    ///
+    /// Under a key of each length, every count of chains from none to past
+    /// two passes' lanes — so that lanes refill as chains end, and a pass
+    /// narrows to a word as they thin — of lengths that cycle through the
+    /// block edges and a few blocks, a random byte longer or not, and the
+    /// same counts of chains all one length: each chain's bytes are what
+    /// sealing it alone with its IV writes, the chains come back in the order
+    /// given, and each opens back to its plaintext.
+    #[test]
+    fn chains_sealed_side_by_side_are_each_chain_sealed_alone() {
+        let mut bytes = Bytes(0x7369_6465_6279_7369);
+        for length in [16usize, 32] {
+            let mut key = vec![0u8; length];
+            bytes.fill(&mut key);
+            let aes = Aes::new(&key).expect("the key expands");
+            for count in 0..=2 * SIDE_BY_SIDE + 3 {
+                for equal in [false, true] {
+                    let label = format!(
+                        "{length}-byte key, {count} chains{}",
+                        if equal { " of one length" } else { "" }
+                    );
+                    let plains: Vec<Vec<u8>> = (0..count)
+                        .map(|at| {
+                            let len = if equal {
+                                45
+                            } else {
+                                CHAIN_LENGTHS[at % CHAIN_LENGTHS.len()]
+                                    + usize::from(bytes.next() % 2)
+                            };
+                            let mut plain = vec![0u8; len];
+                            bytes.fill(&mut plain);
+                            plain
+                        })
+                        .collect();
+                    let ivs: Vec<[u8; 16]> = (0..count)
+                        .map(|_| {
+                            let mut iv = [0u8; 16];
+                            bytes.fill(&mut iv);
+                            iv
+                        })
+                        .collect();
+                    let chains: Vec<([u8; 16], &[u8])> = ivs
+                        .iter()
+                        .copied()
+                        .zip(plains.iter().map(Vec::as_slice))
+                        .collect();
+                    let sealed = aes.cbc_encrypt_side_by_side(&chains);
+                    assert_eq!(sealed.chains.len(), count, "{label}: a chain each");
+                    for (at, ((iv, plain), out)) in chains.iter().zip(&sealed.chains).enumerate() {
+                        assert_eq!(
+                            out,
+                            &aes.cbc_encrypt_with_iv_prefix(iv, plain),
+                            "{label}: chain {at} is its bytes sealed alone"
+                        );
+                        assert_eq!(
+                            aes.cbc_decrypt_with_iv_prefix(out),
+                            (plain.to_vec(), Vec::new()),
+                            "{label}: chain {at} opens"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A chain sealed beside others costs a lane, not a pass** (P-13.7).
+    ///
+    /// Passes and the words they run are counted. No chains take no pass.
+    /// `k` chains of `n` blocks each take `n` passes for each eight of them,
+    /// rounded up, at every `k` to past two passes' lanes and `n` from one
+    /// block to three, and the passes the seal hands back are the passes the
+    /// core ran; a pass carrying four chains or fewer is one word and one
+    /// carrying more is two, so a group of eight runs two words a pass and a
+    /// last group of four or fewer one. Chains of many lengths share passes —
+    /// no fewer than the longest has blocks, nor than their blocks over
+    /// eight, and fewer than their blocks. A lone chain takes a pass of one
+    /// word a block, as sealing it alone does.
+    #[test]
+    fn a_chain_sealed_beside_others_costs_a_lane_not_a_pass() {
+        let aes = Aes::new(&[0x2e; 32]).expect("a 32-byte key expands");
+        passes::take();
+        assert_eq!(aes.cbc_encrypt_side_by_side(&[]), SideBySide::default());
+        assert_eq!(passes::take(), 0, "no chains, no pass");
+
+        for n in 1..=3usize {
+            let plain = vec![0x61u8; 16 * n - 1];
+            for k in 1..=2 * SIDE_BY_SIDE + 3 {
+                let chains: Vec<([u8; 16], &[u8])> = (0..k)
+                    .map(|at| ([at as u8; 16], plain.as_slice()))
+                    .collect();
+                let sealed = aes.cbc_encrypt_side_by_side(&chains);
+                let expected = (n * k.div_ceil(SIDE_BY_SIDE)) as u64;
+                let last = match k % SIDE_BY_SIDE {
+                    0 => 0,
+                    1..=LANES => 1,
+                    _ => BATCH_WORDS,
+                };
+                let words = (n * (BATCH_WORDS * (k / SIDE_BY_SIDE) + last)) as u64;
+                assert_eq!(sealed.passes, expected, "{k} chains of {n} blocks");
+                assert_eq!(
+                    passes::take_words(),
+                    (expected, words),
+                    "{k} chains of {n} blocks: the passes the core ran, and their words"
+                );
+            }
+        }
+
+        let plains: Vec<Vec<u8>> = (0..23).map(|at| vec![0x33u8; 16 * (at % 12)]).collect();
+        let chains: Vec<([u8; 16], &[u8])> = plains
+            .iter()
+            .enumerate()
+            .map(|(at, plain)| ([at as u8; 16], plain.as_slice()))
+            .collect();
+        let sealed = aes.cbc_encrypt_side_by_side(&chains);
+        let blocks: Vec<u64> = plains.iter().map(|p| (p.len() / 16 + 1) as u64).collect();
+        let total: u64 = blocks.iter().sum();
+        let longest = blocks.iter().copied().max().unwrap_or(0);
+        assert!(
+            sealed.passes >= longest,
+            "no fewer than the longest chain's blocks"
+        );
+        assert!(
+            sealed.passes >= total.div_ceil(SIDE_BY_SIDE as u64),
+            "no fewer than the blocks over the lanes"
+        );
+        assert!(sealed.passes < total, "the chains shared passes");
+        assert_eq!(passes::take(), sealed.passes);
+
+        let plain = vec![0x7eu8; 16 * 5 + 3];
+        let sealed = aes.cbc_encrypt_side_by_side(&[([1; 16], plain.as_slice())]);
+        assert_eq!(sealed.passes, 6, "a lone chain, a pass a block");
+        assert_eq!(passes::take_words(), (6, 6), "each pass one word");
+        let _ = aes.cbc_encrypt_with_iv_prefix(&[1; 16], &plain);
+        assert_eq!(passes::take_words(), (6, 6), "as sealing it alone runs");
     }
 }

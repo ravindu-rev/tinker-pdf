@@ -123,6 +123,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object};
+use crate::work::Work;
 use crate::write::{
     write_object, ObjectCipher, ObjectSet, StreamCipher, StreamData, WriteOptions, Written,
 };
@@ -153,16 +154,19 @@ pub fn linearize(
         options,
         names,
         crate::write::Sealing::from_options(options),
+        None,
     )
 }
 
-/// [`linearize`], sealed with whichever handler `sealing` names.
+/// [`linearize`], sealed with whichever handler `sealing` names, its sealing
+/// counting into `work` where the save counts.
 pub(crate) fn linearize_sealed(
     objects: &ObjectSet,
     trailer: &Dict,
     options: &WriteOptions,
     names: &NameTable,
     sealing: Option<crate::write::Sealing<'_>>,
+    work: Option<&Work>,
 ) -> Option<Vec<u8>> {
     // The cipher is built before a single object is serialised, because every
     // length this layout depends on is a length of encrypted bytes.
@@ -177,6 +181,7 @@ pub(crate) fn linearize_sealed(
         options.compress,
         options.parallelism,
         encryption,
+        work,
     )?;
     Some(plan.emit(options, names))
 }
@@ -268,11 +273,13 @@ impl Plan {
             compress,
             tinker_pdf_pool::Parallelism::Serial,
             encryption,
+            None,
         )
     }
 
     /// The layout of `objects`, every object serialised: its streams
-    /// compressed when `compress` asks, on the threads `parallelism` names.
+    /// compressed when `compress` asks, on the threads `parallelism` names,
+    /// and sealed under `encryption`, counting into `work`.
     fn build_on(
         objects: &ObjectSet,
         trailer: &Dict,
@@ -280,6 +287,7 @@ impl Plan {
         compress: bool,
         parallelism: tinker_pdf_pool::Parallelism,
         encryption: Option<(Dict, StreamCipher)>,
+        work: Option<&Work>,
     ) -> Option<Plan> {
         let root = trailer.get_ref(Name::ROOT)?;
         let catalog = dict_of(objects, root.num)?;
@@ -501,7 +509,9 @@ impl Plan {
         // compressed before one is laid out — side by side on the pool when
         // the write asks for threads — so that each object's bytes, and so
         // every length and offset measured from them, are the serial
-        // writer's. Encryption follows, in order, as each is serialised.
+        // writer's. Encryption follows, in order, as each is serialised: the
+        // streams of a window of them sealed together, side by side through
+        // the AES core, each to the bytes it seals to alone.
         let mut renumbered = Vec::with_capacity(order.len());
         for (old, section) in &order {
             let entry = objects.get(*old)?;
@@ -517,15 +527,38 @@ impl Plan {
         } else {
             renumbered.iter().map(|_| None).collect()
         };
-        for ((number, section, entry), made) in renumbered.iter().zip(made) {
-            let made = made.unwrap_or_else(|| crate::write::ready(entry, names, compress));
-            let mut bytes = Vec::new();
-            write_indirect_ready(&mut bytes, *number, made, names, crypt);
-            ordered.push(Placed {
-                number: *number,
-                section: *section,
-                bytes,
-            });
+        let mut made = made.into_iter();
+        let cipher = crypt.map(|cipher| cipher as &dyn ObjectCipher);
+        let mut rest = renumbered.as_slice();
+        while !rest.is_empty() {
+            let len = crate::write::window_len(
+                rest.iter().map(|(_, _, entry)| entry),
+                crate::write::SEALED_TOGETHER,
+            );
+            let (now, later) = rest.split_at(len.min(rest.len()));
+            let ready: Vec<crate::write::Ready<'_>> = now
+                .iter()
+                .zip(&mut made)
+                .map(|((_, _, entry), made)| {
+                    made.unwrap_or_else(|| crate::write::ready(entry, names, compress))
+                })
+                .collect();
+            let sealed = crate::write::seal_window(
+                now.iter().map(|(number, _, _)| *number),
+                &ready,
+                cipher,
+                work,
+            );
+            for (((number, section, _), ready), sealed) in now.iter().zip(ready).zip(sealed) {
+                let mut bytes = Vec::new();
+                write_indirect_ready(&mut bytes, *number, ready, names, crypt, sealed);
+                ordered.push(Placed {
+                    number: *number,
+                    section: *section,
+                    bytes,
+                });
+            }
+            rest = later;
         }
 
         // Per-page sizes, for the page-offset hint table. A page's "length"
@@ -1400,17 +1433,20 @@ fn write_indirect(
     // compresses here, through the ordinary writer's own `ready`, or
     // `compress` would do nothing on this path.
     let made = crate::write::ready(entry, names, compress);
-    write_indirect_ready(out, number, made, names, crypt);
+    write_indirect_ready(out, number, made, names, crypt, None);
 }
 
 /// [`write_indirect`] for an object already made ready
-/// ([`crate::write::ready`]): a stream's bytes compressed as asked.
+/// ([`crate::write::ready`]): a stream's bytes compressed as asked, and
+/// written as `sealed` where its window sealed them already
+/// ([`crate::write::seal_window`]).
 fn write_indirect_ready(
     out: &mut Vec<u8>,
     number: u32,
     entry: crate::write::Ready<'_>,
     names: &NameTable,
     crypt: Option<&StreamCipher>,
+    sealed: Option<Vec<u8>>,
 ) {
     out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
     match entry {
@@ -1429,9 +1465,10 @@ fn write_indirect_ready(
             // round. /Length is then taken from the encrypted data, which is
             // both what 7.3.8.2 requires and what keeps every offset derived
             // below describing the bytes that are written.
-            let data = match crypt {
-                Some(cipher) => cipher.encrypt_stream(&data, number),
-                None => data,
+            let data = match (sealed, crypt) {
+                (Some(sealed), _) => sealed,
+                (None, Some(cipher)) => cipher.encrypt_stream(&data, number),
+                (None, None) => data,
             };
             dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
             // A stream's dictionary holds strings as any object does, and
