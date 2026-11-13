@@ -175,7 +175,9 @@ well-formed XML would stop the reader and lose the rest of the document.
 and every object form of 7.3: literal strings with all escapes and octal
 (7.3.4.2), hex strings (7.3.4.3), names with `#xx` escapes (7.3.5), numbers
 with the wild's malformations tolerated and warned (7.3.3 — clamped
-overflows, doubled signs, exponent notation), arrays and dictionaries (7.3.6,
+overflows, doubled signs, exponent notation; a decimal is an overflow only
+where rounding takes it to infinity, so one within rounding of `f64::MAX`,
+its own 309 digits among them, reads as it), arrays and dictionaries (7.3.6,
 7.3.7), streams (7.3.8) and indirect references (7.3.10). The lexer never
 fails; every leniency emits a `WarningKind` variant instead of a log line, so
 a file that parses with an empty sink is a file that obeyed 7.2 and 7.3.

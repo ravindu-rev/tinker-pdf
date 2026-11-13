@@ -100,10 +100,9 @@ fn rect_of(doc: &CosDocument, dict: &Dict) -> Option<Rect> {
 ///
 /// A coordinate past it is not one a conforming writer emits, and it is
 /// read as [`Malformed`]. That keeps everything this module computes from
-/// the dictionary far inside an `f64`, so every number it writes is one a
-/// reader takes back whole: one within a rounding of `f64::MAX`, written
-/// out in its 309 digits, is read by this crate's own lexer as an overflow
-/// (`RealOverflowClamped`).
+/// the dictionary far inside an `f64`, so no sum or product of what it reads
+/// reaches infinity, and every number it writes is one a reader takes back
+/// whole.
 const MAX_NUMBER: f64 = 3.403e38;
 
 /// Whether a number read from the dictionary is finite and within

@@ -1757,10 +1757,12 @@ mod tests {
 
     /// What is written for a real reads back as that real with no repair, at
     /// every magnitude: a hostile file's huge coordinate, rewritten, must not
-    /// read back as an integer clamped to `i64::MAX`.
+    /// read back as an integer clamped to `i64::MAX`, and the largest real,
+    /// which is what the reader clamps an overflowing one to, must not read
+    /// back as an overflow clamped again.
     #[test]
     fn a_real_past_an_integers_reach_reads_back_as_itself() {
-        for value in [1e20, -1e20, 1e308, 2f64.powi(63), 1e18] {
+        for value in [1e20, -1e20, 1e308, 2f64.powi(63), 1e18, f64::MAX, -f64::MAX] {
             let text = rendered(&Object::Real(value));
             let mut sink = crate::warn::WarningSink::new();
             let parsed = crate::parse::parse_object_at(text.as_bytes(), 0, &names(), &mut sink);

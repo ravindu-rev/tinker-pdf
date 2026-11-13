@@ -693,13 +693,75 @@ fn build_real(
         value = scale_pow10(value, scale.saturating_add(exponent));
     }
     if !value.is_finite() {
-        sink.warn(offset, WarningKind::RealOverflowClamped);
+        // The scaling multiplies by powers of ten up to 10^22 and rounds each
+        // product, so a decimal just under the largest real can pass it on the
+        // way — the 309 digits this crate's writer writes for `f64::MAX` do.
+        // Such a decimal is finite and is read as the largest real, which is
+        // what rounding it gives or within an ulp of it. Only a decimal that
+        // rounding takes to infinity is outside `f64`'s range (7.3.3), and
+        // only its clamp is a repair.
+        if rounds_to_infinity(int_digits, frac_digits, exponent) {
+            sink.warn(offset, WarningKind::RealOverflowClamped);
+        }
         value = f64::MAX;
     }
     if negative {
         -value
     } else {
         value
+    }
+}
+
+/// The digits of 2^1024 − 2^970, the largest real (2^1024 − 2^971) and half
+/// of its last place. IEEE 754's rounding to nearest takes a decimal at or
+/// past it to infinity — a tie goes to the even neighbour, 2^1024 — and a
+/// decimal below it to the largest real or under.
+const OVERFLOW_THRESHOLD: &[u8] = b"17976931348623158079372897140530341507993413271003782693617377\
+89804449682927647509466490179775872070963302864166928879109465555478519404026306574886715058206819\
+08902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168\
+444365510704342711559699508093042880177904174497792";
+
+/// Whether the decimal `int_digits.frac_digits` × 10^`exponent` is at or past
+/// [`OVERFLOW_THRESHOLD`], decided on its digits so that no rounding decides
+/// it.
+fn rounds_to_infinity(int_digits: &[u8], frac_digits: &[u8], exponent: i32) -> bool {
+    // The power of ten the first digit that is not zero stands at, before the
+    // exponent moves it.
+    let whole = int_digits.iter().skip_while(|&&b| b == b'0').count();
+    let first = if whole > 0 {
+        i64::try_from(whole).unwrap_or(i64::MAX) - 1
+    } else {
+        let zeros = frac_digits.iter().take_while(|&&b| b == b'0').count();
+        if zeros == frac_digits.len() {
+            // No digit that is not zero: the decimal is zero.
+            return false;
+        }
+        -i64::try_from(zeros).unwrap_or(i64::MAX) - 1
+    };
+    let power = first.saturating_add(i64::from(exponent));
+    // 2^1024 − 2^970 has 309 digits, so its first stands at 10^308.
+    match power.cmp(&308) {
+        core::cmp::Ordering::Less => false,
+        core::cmp::Ordering::Greater => true,
+        core::cmp::Ordering::Equal => {
+            let mut digits = int_digits
+                .iter()
+                .chain(frac_digits)
+                .skip_while(|&&b| b == b'0');
+            for &bound in OVERFLOW_THRESHOLD {
+                // A decimal shorter than the threshold reads zeros after its
+                // last digit.
+                let digit = digits.next().copied().unwrap_or(b'0');
+                match digit.cmp(&bound) {
+                    core::cmp::Ordering::Less => return false,
+                    core::cmp::Ordering::Greater => return true,
+                    core::cmp::Ordering::Equal => {}
+                }
+            }
+            // The threshold itself, or past it in a digit after its last:
+            // either rounds to infinity.
+            true
+        }
     }
 }
 
@@ -1106,6 +1168,136 @@ mod tests {
         assert_eq!(
             lex_one(b"1e-999"),
             (TokenKind::Real(0.0), vec![WarningKind::ExponentNumber])
+        );
+    }
+
+    /// **A decimal within rounding of the largest real reads as it, with no
+    /// repair.** The 309 digits this crate's writer writes for `f64::MAX` take
+    /// the scaling past it, and were read back clamped and warned, so a
+    /// rewrite of a file whose real the reader had clamped read as damaged
+    /// again. The digits decide now: `f64::MAX`'s own, signed or among zeros
+    /// or with a fraction, and the decimal just below 2^1024 − 2^970 read as
+    /// the largest real with no warning, while 2^1024 − 2^970, which rounding
+    /// takes to infinity, and anything at or past it are clamped and warned.
+    #[test]
+    fn a_decimal_within_rounding_of_the_largest_real_reads_as_it() {
+        // `build_real` holds nineteen significant digits, and the largest
+        // real's and the threshold's make one double: the decimals below share
+        // it and its scaling, which overflows, so their digits alone tell them
+        // apart.
+        let largest_head = 1_797_693_134_862_315_708_u64 as f64;
+        assert_eq!(largest_head, 1_797_693_134_862_315_807_u64 as f64);
+        assert!(
+            scale_pow10(largest_head, 290).is_infinite(),
+            "the scaling these decimals share overflows"
+        );
+        let real = |value: f64| TokenKind::Real(value);
+        let clamped = vec![WarningKind::RealOverflowClamped];
+
+        // `write_real`'s spelling of the largest real: its digits and a point.
+        let largest = format!("{:.0}.", f64::MAX);
+        assert_eq!(largest.len(), 310);
+        assert_eq!(lex_one(largest.as_bytes()), (real(f64::MAX), vec![]));
+        assert_eq!(
+            lex_one(format!("-{largest}").as_bytes()),
+            (real(-f64::MAX), vec![])
+        );
+        assert_eq!(
+            lex_one(format!("000{largest}000").as_bytes()),
+            (real(f64::MAX), vec![])
+        );
+        assert_eq!(
+            lex_one(format!("{}.5", &largest[..309]).as_bytes()),
+            (real(f64::MAX), vec![])
+        );
+
+        // Either side of the threshold, which ends in a 2.
+        let threshold = std::str::from_utf8(OVERFLOW_THRESHOLD).expect("digits");
+        assert!(threshold.ends_with('2'));
+        let below = format!("{}1.", &threshold[..308]);
+        assert_eq!(lex_one(below.as_bytes()), (real(f64::MAX), vec![]));
+        assert_eq!(
+            lex_one(format!("{}.999", &below[..309]).as_bytes()),
+            (real(f64::MAX), vec![])
+        );
+        assert_eq!(
+            lex_one(format!("{threshold}.").as_bytes()),
+            (real(f64::MAX), clamped.clone())
+        );
+        assert_eq!(
+            lex_one(format!("{threshold}.000001").as_bytes()),
+            (real(f64::MAX), clamped.clone())
+        );
+        assert_eq!(
+            lex_one(format!("-{}3.", &threshold[..308]).as_bytes()),
+            (real(-f64::MAX), clamped.clone())
+        );
+        // Ten times the largest real is past it by a whole digit.
+        assert_eq!(
+            lex_one(format!("{:.0}0.", f64::MAX).as_bytes()),
+            (real(f64::MAX), clamped)
+        );
+
+        // The exponent form: the largest real's shortest spelling reads within
+        // rounding of it, with the exponent's warning and no other, and a
+        // decimal past it is clamped as well.
+        let (token, warnings) = lex_one(b"1.7976931348623157e308");
+        assert_eq!(warnings, vec![WarningKind::ExponentNumber]);
+        let TokenKind::Real(value) = token else {
+            panic!("{token:?}")
+        };
+        assert!(
+            value <= f64::MAX && value >= f64::MAX * (1.0 - 1e-15),
+            "{value}"
+        );
+        assert_eq!(
+            lex_one(b"1.8e308"),
+            (
+                real(f64::MAX),
+                vec![
+                    WarningKind::ExponentNumber,
+                    WarningKind::RealOverflowClamped
+                ]
+            )
+        );
+    }
+
+    /// The decimal digits of `2^power × factor`, by long multiplication.
+    fn power_of_two_times(power: u32, factor: u64) -> String {
+        fn multiply(digits: &mut Vec<u8>, by: u64) {
+            let mut carry = 0u128;
+            for digit in digits.iter_mut() {
+                let value = u128::from(*digit) * u128::from(by) + carry;
+                *digit = (value % 10) as u8;
+                carry = value / 10;
+            }
+            while carry > 0 {
+                digits.push((carry % 10) as u8);
+                carry /= 10;
+            }
+        }
+        // Least significant first.
+        let mut digits = vec![1u8];
+        for _ in 0..power {
+            multiply(&mut digits, 2);
+        }
+        multiply(&mut digits, factor);
+        digits.iter().rev().map(|d| char::from(b'0' + d)).collect()
+    }
+
+    /// The threshold is what its comment says, worked out here from its
+    /// definition rather than copied: 2^1024 − 2^970 is 2^970 (2^54 − 1), and
+    /// the largest real it is half a last place above, 2^1024 − 2^971, is
+    /// 2^971 (2^53 − 1), whose digits are `f64::MAX`'s own.
+    #[test]
+    fn the_overflow_threshold_is_the_largest_real_and_half_its_last_place() {
+        assert_eq!(
+            power_of_two_times(970, (1 << 54) - 1).as_bytes(),
+            OVERFLOW_THRESHOLD
+        );
+        assert_eq!(
+            power_of_two_times(971, (1 << 53) - 1),
+            format!("{:.0}", f64::MAX)
         );
     }
 
