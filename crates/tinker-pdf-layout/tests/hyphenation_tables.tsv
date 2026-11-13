@@ -1,0 +1,30 @@
+# The compiled hyphenation tables, a row for each vendored dictionary, laid
+# out as docs/design/hyphenation.md's table format lays them out, and held to
+# the tables the build compiles by the_compiled_tables_are_the_sizes_the_design_records
+# in crates/tinker-pdf-layout/tests/hyphenation_words.rs:
+#
+#   cargo test -p tinker-pdf-layout --features hyphenation --test hyphenation_words
+#
+# Nine tab-separated fields:
+#
+#   tag       the dictionary's tag, as its file's name writes it
+#   serves    the language tag a book's language is looked up against
+#   patterns  the patterns its \patterns blocks hold
+#   words     the hyphenated words its \hyphenation blocks hold: the words it
+#             publishes
+#   letters   its alphabet: every letter of its patterns and its words
+#   nodes     the trie's nodes, the root included and the sentinel not
+#   vectors   the distinct digit vectors its patterns and words leave on nodes
+#   longest   its longest pattern, in symbols, the word boundary counted
+#   bytes     what the table adds: four bytes a letter, seven a node and seven
+#             for the sentinel, four a vector and four more, and a byte for
+#             each digit of each vector
+tag	serves	patterns	words	letters	nodes	vectors	longest	bytes
+af	af	10342	185	38	24453	308	10	175356
+cu	cu	14655	20	120	19559	215	13	139589
+en-gb	en-GB	8527	8	26	13928	399	8	101265
+ga	ga	6033	46	28	10513	464	9	78209
+nl	nl	12724	40	38	18553	506	8	134847
+pl	pl	4053	20	34	5567	336	14	43179
+pt	pt	427	2	37	508	28	6	3952
+sk	sk	2467	5	41	3923	257	11	30390
