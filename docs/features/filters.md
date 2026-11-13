@@ -16,8 +16,12 @@ build refuses by name.
 **Byte filters.** FlateDecode (7.4.4) is an own inflate — stored,
 fixed-Huffman and dynamic-Huffman blocks (RFC 1951), the zlib wrapper
 (RFC 1950) with Adler-32 verified and a raw-deflate fallback when the header
-is absent. The encoder exists too: `deflate.rs` is a hash-chain LZ77 match
-finder whose chains live in two tables of one window's entries, a bucket's
+is absent. A block's code tables hold each code's meaning in its entry — the
+literal, end-of-block, or a length's or a distance's base and extra bits
+(3.2.5) — so a code resolves in the one read of the nine-bit table that finds
+it, and a longer code in one more read, of its subtable. The encoder exists
+too: `deflate.rs` is a hash-chain LZ77 match finder whose chains live in two
+tables of one window's entries, a bucket's
 newest position and a ring of each position's predecessor, so what it holds
 is the same 256 KiB whatever the input's length. `Deflater` is the encoder,
 streaming, and `deflate` and `zlib_compress`, which compress every stream the

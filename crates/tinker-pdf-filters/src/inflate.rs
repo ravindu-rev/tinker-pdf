@@ -12,14 +12,28 @@ use crate::{Limits, Tail, Warning, Warnings};
 const PRIMARY_BITS: u32 = 9;
 const PRIMARY_SIZE: usize = 1 << PRIMARY_BITS;
 
-// Table entry layout. Bit 31 marks a subtable pointer; otherwise bits 16..21
-// hold the code length and bits 0..16 the symbol.
+// Table entry layout. Bit 31 marks a subtable pointer: bits 24..28 its index
+// width and bits 0..24 its offset. Any other entry is a code: bits 0..16 its
+// value, bits 16..21 its length, bits 21..25 the extra bits after it and bits
+// 25..28 what it means, so a code's whole meaning is one read. Zero is a hole.
 const ENTRY_SUB: u32 = 1 << 31;
 const SUB_BITS_SHIFT: u32 = 24;
 const OFFSET_MASK: u32 = 0x00ff_ffff;
 const LEN_SHIFT: u32 = 16;
 const LEN_MASK: u32 = 0x1f;
-const SYM_MASK: u32 = 0xffff;
+const VALUE_MASK: u32 = 0xffff;
+const EXTRA_SHIFT: u32 = 21;
+const EXTRA_MASK: u32 = 0xf;
+const KIND_SHIFT: u32 = 25;
+const KIND_MASK: u32 = 0x7;
+
+// What an entry's code means. None is zero, so no code is a hole.
+const KIND_LITERAL: u32 = 1;
+const KIND_END: u32 = 2;
+const KIND_LENGTH: u32 = 3;
+const KIND_DISTANCE: u32 = 4;
+const KIND_SYMBOL: u32 = 5;
+const KIND_UNUSED: u32 = 6;
 
 // 3.2.7: the code-length alphabet arrives in this order.
 const CLEN_ORDER: [usize; 19] = [
@@ -43,6 +57,86 @@ const DIST_EXTRA: [u8; 30] = [
     13,
 ];
 
+/// The alphabet a table decodes (3.2.5, 3.2.7), which says what
+/// [`Huffman::build_as`] writes into each code's entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Alphabet {
+    /// Literals, end-of-block and lengths: a code's entry holds the literal
+    /// byte, or the length's base and its extra bits.
+    LiteralLength,
+    /// Distances: a code's entry holds the distance's base and extra bits.
+    Distance,
+    /// The symbols as they are: the code-length alphabet.
+    Symbol,
+}
+
+impl Alphabet {
+    /// What `symbol` means here, as an entry's value, extra bits and kind.
+    ///
+    /// Literal/length 286 and 287 and distance 30 and 31 are in their
+    /// alphabets and never used (3.2.5), so their codes are entries that say
+    /// so, and reading one is a corrupt stream.
+    fn meaning(self, symbol: u16) -> (u32, u32, u32) {
+        let unused = (0, 0, KIND_UNUSED);
+        match self {
+            Alphabet::LiteralLength => match symbol {
+                0..=255 => (u32::from(symbol), 0, KIND_LITERAL),
+                256 => (0, 0, KIND_END),
+                _ => {
+                    let index = usize::from(symbol) - 257;
+                    match (LEN_BASE.get(index), LEN_EXTRA.get(index)) {
+                        (Some(&base), Some(&extra)) => {
+                            (u32::from(base), u32::from(extra), KIND_LENGTH)
+                        }
+                        _ => unused,
+                    }
+                }
+            },
+            Alphabet::Distance => {
+                let index = usize::from(symbol);
+                match (DIST_BASE.get(index), DIST_EXTRA.get(index)) {
+                    (Some(&base), Some(&extra)) => {
+                        (u32::from(base), u32::from(extra), KIND_DISTANCE)
+                    }
+                    _ => unused,
+                }
+            }
+            Alphabet::Symbol => (u32::from(symbol), 0, KIND_SYMBOL),
+        }
+    }
+}
+
+/// A code read through a table: what its entry says it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Code {
+    Literal(u8),
+    EndOfBlock,
+    /// A length's base and the extra bits that follow its code.
+    Length(u16, u32),
+    /// A distance's base and the extra bits that follow its code.
+    Distance(u16, u32),
+    /// A symbol of an [`Alphabet::Symbol`] table.
+    Symbol(u16),
+    /// 3.2.5's literal/length 286 or 287, or distance 30 or 31.
+    Unused,
+}
+
+impl Code {
+    /// The meaning a code entry holds.
+    fn of(entry: u32) -> Code {
+        let value = entry & VALUE_MASK;
+        let extra = (entry >> EXTRA_SHIFT) & EXTRA_MASK;
+        match (entry >> KIND_SHIFT) & KIND_MASK {
+            KIND_LITERAL => Code::Literal(value as u8),
+            KIND_END => Code::EndOfBlock,
+            KIND_LENGTH => Code::Length(value as u16, extra),
+            KIND_DISTANCE => Code::Distance(value as u16, extra),
+            KIND_SYMBOL => Code::Symbol(value as u16),
+            _ => Code::Unused,
+        }
+    }
+}
+
 /// A canonical Huffman decoding table: one 9-bit primary lookup plus
 /// subtables for the codes that do not fit in it.
 #[derive(Clone, Debug)]
@@ -59,10 +153,22 @@ impl Huffman {
         }
     }
 
+    /// A table of the symbols themselves, [`Alphabet::Symbol`]'s: the
+    /// code-length alphabet's.
+    fn build(lengths: &[u8]) -> Option<Self> {
+        Self::build_as(lengths, Alphabet::Symbol)
+    }
+
+    /// A table whose every code's entry holds what its symbol means in
+    /// `alphabet` — the literal, or the length's or the distance's base and
+    /// extra bits — so a code resolves in the one read that finds it, and a
+    /// read of a code longer than the primary table in the one more its
+    /// subtable takes.
+    ///
     /// `None` when the lengths over-subscribe the code space. Incomplete
     /// codes are accepted: their holes decode as invalid, which is what
     /// makes a one-distance-code block work.
-    fn build(lengths: &[u8]) -> Option<Self> {
+    fn build_as(lengths: &[u8], alphabet: Alphabet) -> Option<Self> {
         let mut count = [0u16; 16];
         for &l in lengths {
             let l = l as usize;
@@ -153,7 +259,8 @@ impl Huffman {
 
         for &(sym, len, rev) in &codes {
             let l = u32::from(len);
-            let entry = (l << LEN_SHIFT) | u32::from(sym);
+            let (value, extra, kind) = alphabet.meaning(sym);
+            let entry = (kind << KIND_SHIFT) | (extra << EXTRA_SHIFT) | (l << LEN_SHIFT) | value;
             if l <= PRIMARY_BITS {
                 let step = 1usize << l;
                 let mut j = rev as usize;
@@ -196,7 +303,7 @@ fn reverse_bits(v: u32, n: u32) -> u32 {
 }
 
 // 3.2.6: the fixed literal/length and distance code lengths.
-fn fixed_literal() -> Huffman {
+fn fixed_literal_lengths() -> [u8; 288] {
     let mut lens = [0u8; 288];
     for (i, l) in lens.iter_mut().enumerate() {
         *l = match i {
@@ -206,11 +313,16 @@ fn fixed_literal() -> Huffman {
             _ => 8,
         };
     }
-    Huffman::build(&lens).unwrap_or_else(Huffman::empty)
+    lens
+}
+
+fn fixed_literal() -> Huffman {
+    Huffman::build_as(&fixed_literal_lengths(), Alphabet::LiteralLength)
+        .unwrap_or_else(Huffman::empty)
 }
 
 fn fixed_distance() -> Huffman {
-    Huffman::build(&[5u8; 30]).unwrap_or_else(Huffman::empty)
+    Huffman::build_as(&[5u8; 30], Alphabet::Distance).unwrap_or_else(Huffman::empty)
 }
 
 /// Position in the caller's byte slice. Split from the bit accumulator so a
@@ -226,10 +338,18 @@ struct BitState {
     cnt: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sym {
-    Val(u16),
+    Val(Code),
     NeedInput,
     Invalid,
+}
+
+/// One read of a table's entries, counted under test.
+fn entry(entries: &[u32], index: usize) -> Option<u32> {
+    #[cfg(test)]
+    tests::READS.with(|reads| reads.set(reads.get() + 1));
+    entries.get(index).copied()
 }
 
 impl BitState {
@@ -265,11 +385,12 @@ impl BitState {
     }
 
     fn decode(&mut self, t: &Huffman, src: &mut Bits<'_>) -> Sym {
+        #[cfg(test)]
+        tests::DECODES.with(|decodes| decodes.set(decodes.get() + 1));
         self.fill(src);
         let idx = (self.buf as usize) & (PRIMARY_SIZE - 1);
-        let e = match t.primary.get(idx) {
-            Some(&e) => e,
-            None => return Sym::Invalid,
+        let Some(e) = entry(&t.primary, idx) else {
+            return Sym::Invalid;
         };
         if e == 0 {
             // A hole. With fewer than 9 bits left the pattern is zero
@@ -286,14 +407,13 @@ impl BitState {
                 return Sym::NeedInput;
             }
             self.take(len);
-            return Sym::Val((e & SYM_MASK) as u16);
+            return Sym::Val(Code::of(e));
         }
         let bits = (e >> SUB_BITS_SHIFT) & 0xf;
         let off = (e & OFFSET_MASK) as usize;
         let j = ((self.buf >> PRIMARY_BITS) & ((1u64 << bits) - 1)) as usize;
-        let se = match t.sub.get(off + j) {
-            Some(&s) => s,
-            None => return Sym::Invalid,
+        let Some(se) = entry(&t.sub, off + j) else {
+            return Sym::Invalid;
         };
         if se == 0 {
             return if self.cnt < PRIMARY_BITS + bits {
@@ -307,7 +427,7 @@ impl BitState {
             return Sym::NeedInput;
         }
         self.take(len);
-        Sym::Val((se & SYM_MASK) as u16)
+        Sym::Val(Code::of(se))
     }
 }
 
@@ -320,9 +440,12 @@ enum State {
     DynClens,
     DynLens,
     Symbol,
-    LenExtra(u16),
+    /// A length's base and its extra bits.
+    LenExtra(u16, u32),
+    /// The length decoded.
     DistSym(u16),
-    DistExtra(u16, u16),
+    /// The length, and the distance's base and extra bits.
+    DistExtra(u16, u16, u32),
     Copy(u16, u16),
     Done,
 }
@@ -531,9 +654,9 @@ impl Inflate {
                             break;
                         }
                         let sym = match self.bits.decode(&self.clen, src) {
-                            Sym::Val(s) => s,
+                            Sym::Val(Code::Symbol(s)) => s,
                             Sym::NeedInput => return Progress::NeedInput,
-                            Sym::Invalid => return Progress::Corrupt,
+                            Sym::Val(_) | Sym::Invalid => return Progress::Corrupt,
                         };
                         if sym < 16 {
                             if let Some(s) = self.lens.get_mut(self.idx) {
@@ -546,11 +669,19 @@ impl Inflate {
                             return Progress::Corrupt;
                         }
                     }
-                    let lit = match self.lens.get(..self.hlit).and_then(Huffman::build) {
+                    let lit = match self
+                        .lens
+                        .get(..self.hlit)
+                        .and_then(|lens| Huffman::build_as(lens, Alphabet::LiteralLength))
+                    {
                         Some(t) => t,
                         None => return Progress::Corrupt,
                     };
-                    let dist = match self.lens.get(self.hlit..total).and_then(Huffman::build) {
+                    let dist = match self
+                        .lens
+                        .get(self.hlit..total)
+                        .and_then(|lens| Huffman::build_as(lens, Alphabet::Distance))
+                    {
                         Some(t) => t,
                         None => return Progress::Corrupt,
                     };
@@ -560,38 +691,30 @@ impl Inflate {
                 }
 
                 State::Symbol => {
-                    let sym = match self.bits.decode(&self.lit, src) {
-                        Sym::Val(s) => s,
+                    match self.bits.decode(&self.lit, src) {
+                        Sym::Val(Code::Literal(byte)) => {
+                            if out.len() >= max_output {
+                                return Progress::OutputCap;
+                            }
+                            out.push(byte);
+                        }
+                        Sym::Val(Code::EndOfBlock) => {
+                            self.state = if self.last {
+                                State::Done
+                            } else {
+                                State::Header
+                            };
+                        }
+                        Sym::Val(Code::Length(base, extra)) => {
+                            self.state = State::LenExtra(base, extra);
+                        }
                         Sym::NeedInput => return Progress::NeedInput,
-                        Sym::Invalid => return Progress::Corrupt,
-                    };
-                    if sym < 256 {
-                        if out.len() >= max_output {
-                            return Progress::OutputCap;
-                        }
-                        out.push(sym as u8);
-                    } else if sym == 256 {
-                        self.state = if self.last {
-                            State::Done
-                        } else {
-                            State::Header
-                        };
-                    } else {
-                        let i = sym as usize - 257;
-                        if i >= LEN_BASE.len() {
-                            // 286 and 287 are in the alphabet but never used.
-                            return Progress::Corrupt;
-                        }
-                        self.state = State::LenExtra(i as u16);
+                        // 286 and 287 are in the alphabet but never used.
+                        Sym::Val(_) | Sym::Invalid => return Progress::Corrupt,
                     }
                 }
 
-                State::LenExtra(i) => {
-                    let i = i as usize;
-                    let (base, extra) = match (LEN_BASE.get(i), LEN_EXTRA.get(i)) {
-                        (Some(&b), Some(&e)) => (b, u32::from(e)),
-                        _ => return Progress::Corrupt,
-                    };
+                State::LenExtra(base, extra) => {
                     if !self.bits.need(extra, src) {
                         return Progress::NeedInput;
                     }
@@ -599,24 +722,16 @@ impl Inflate {
                     self.state = State::DistSym(len as u16);
                 }
 
-                State::DistSym(len) => {
-                    let sym = match self.bits.decode(&self.dist, src) {
-                        Sym::Val(s) => s,
-                        Sym::NeedInput => return Progress::NeedInput,
-                        Sym::Invalid => return Progress::Corrupt,
-                    };
-                    if sym as usize >= DIST_BASE.len() {
-                        return Progress::Corrupt;
+                State::DistSym(len) => match self.bits.decode(&self.dist, src) {
+                    Sym::Val(Code::Distance(base, extra)) => {
+                        self.state = State::DistExtra(len, base, extra);
                     }
-                    self.state = State::DistExtra(len, sym);
-                }
+                    Sym::NeedInput => return Progress::NeedInput,
+                    // As are distances 30 and 31.
+                    Sym::Val(_) | Sym::Invalid => return Progress::Corrupt,
+                },
 
-                State::DistExtra(len, sym) => {
-                    let i = sym as usize;
-                    let (base, extra) = match (DIST_BASE.get(i), DIST_EXTRA.get(i)) {
-                        (Some(&b), Some(&e)) => (b, u32::from(e)),
-                        _ => return Progress::Corrupt,
-                    };
+                State::DistExtra(len, base, extra) => {
                     if !self.bits.need(extra, src) {
                         return Progress::NeedInput;
                     }
@@ -933,6 +1048,15 @@ pub(crate) fn zlib_reads_clean(
 mod tests {
     use super::*;
 
+    std::thread_local! {
+        /// Every read of a table's entries this thread has made, so a test can
+        /// say what a code costs to decode — a property of the code rather
+        /// than of the machine.
+        pub(super) static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Every code this thread has decoded, likewise.
+        pub(super) static DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
     const CAP: Limits = Limits::new(1 << 20);
 
     fn raw(input: &[u8]) -> (Vec<u8>, bool, Vec<Warning>) {
@@ -979,6 +1103,315 @@ mod tests {
         }
         let t = Huffman::build(&lens).expect("kraft-complete");
         assert!(!t.sub.is_empty());
+    }
+
+    /// The decode as it was: the symbol out of a table of symbols, then its
+    /// meaning out of 3.2.5's tables, a lookup for the base and one for the
+    /// extra bits.
+    fn symbol_then_base(alphabet: Alphabet, symbol: u16) -> Code {
+        let i = usize::from(symbol);
+        match alphabet {
+            Alphabet::LiteralLength if i < 256 => Code::Literal(symbol as u8),
+            Alphabet::LiteralLength if i == 256 => Code::EndOfBlock,
+            Alphabet::LiteralLength => match (LEN_BASE.get(i - 257), LEN_EXTRA.get(i - 257)) {
+                (Some(&base), Some(&extra)) => Code::Length(base, u32::from(extra)),
+                _ => Code::Unused,
+            },
+            Alphabet::Distance => match (DIST_BASE.get(i), DIST_EXTRA.get(i)) {
+                (Some(&base), Some(&extra)) => Code::Distance(base, u32::from(extra)),
+                _ => Code::Unused,
+            },
+            Alphabet::Symbol => Code::Symbol(symbol),
+        }
+    }
+
+    /// The code at the head of `pattern`, read through `table` with 32 bits
+    /// in hand, and how many of them it took.
+    fn read(table: &Huffman, pattern: u64) -> (Sym, u32) {
+        let mut state = BitState {
+            buf: pattern,
+            cnt: 32,
+        };
+        let mut src = Bits { input: &[], pos: 0 };
+        let sym = state.decode(table, &mut src);
+        (sym, 32 - state.cnt)
+    }
+
+    /// A linear congruential generator's top bits, as `bound`-bounded draws.
+    fn draws(seed: u64) -> impl FnMut(usize) -> usize {
+        let mut state = seed;
+        move |bound| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as usize) % bound.max(1)
+        }
+    }
+
+    /// One deflate token: a literal byte, or a match of a length from a
+    /// distance back.
+    #[derive(Clone, Copy, Debug)]
+    enum Token {
+        Literal(u8),
+        Match(usize, usize),
+    }
+
+    /// Tokens for about `len` bytes of page-like text: about a third of them
+    /// matches of 3 to 258 bytes from anywhere up to 32 768 back, and
+    /// literals of a small alphabet between.
+    fn tokens(len: usize, seed: u64) -> Vec<Token> {
+        let mut draw = draws(seed);
+        let mut tokens = Vec::new();
+        let mut made = 0usize;
+        while made < len {
+            if made > 40 && draw(3) == 0 {
+                let length = 3 + draw(256);
+                tokens.push(Token::Match(length, 1 + draw(made.min(32_768))));
+                made += length;
+            } else {
+                tokens.push(Token::Literal(b"etaoin shrdlu"[draw(13)]));
+                made += 1;
+            }
+        }
+        tokens
+    }
+
+    /// Bits gathered as deflate packs them, from each byte's least
+    /// significant bit up.
+    #[derive(Default)]
+    struct BitSink {
+        bytes: Vec<u8>,
+        used: u32,
+    }
+
+    impl BitSink {
+        fn bit(&mut self, bit: u32) {
+            if self.used == 0 {
+                self.bytes.push(0);
+            }
+            if let Some(last) = self.bytes.last_mut() {
+                *last |= ((bit & 1) as u8) << self.used;
+            }
+            self.used = (self.used + 1) % 8;
+        }
+
+        /// A field: `value`'s low `count` bits, least significant first.
+        fn field(&mut self, value: usize, count: u8) {
+            for i in 0..u32::from(count) {
+                self.bit((value >> i) as u32);
+            }
+        }
+
+        /// A Huffman code, most significant bit first (3.1.1).
+        fn code(&mut self, (code, length): (u32, u32)) {
+            for i in (0..length).rev() {
+                self.bit(code >> i);
+            }
+        }
+    }
+
+    /// 3.2.6's fixed code for a literal/length symbol, as code and length.
+    fn fixed_code(symbol: usize) -> (u32, u32) {
+        let s = symbol as u32;
+        match symbol {
+            0..=143 => (0x30 + s, 8),
+            144..=255 => (0x190 + s - 144, 9),
+            256..=279 => (s - 256, 7),
+            _ => (0xC0 + s - 280, 8),
+        }
+    }
+
+    /// One final block of 3.2.6's fixed codes carrying `tokens`, written bit
+    /// by bit from the clauses rather than by the crate's encoder, which
+    /// chooses its own codes; and the bytes the tokens make.
+    fn fixed_block(tokens: &[Token]) -> (Vec<u8>, Vec<u8>) {
+        let mut sink = BitSink::default();
+        // BFINAL, then BTYPE 01.
+        sink.field(0b011, 3);
+        let mut data = Vec::new();
+        for &token in tokens {
+            match token {
+                Token::Literal(byte) => {
+                    sink.code(fixed_code(usize::from(byte)));
+                    data.push(byte);
+                }
+                Token::Match(length, distance) => {
+                    let at = LEN_BASE
+                        .iter()
+                        .rposition(|&base| usize::from(base) <= length)
+                        .unwrap_or(0);
+                    sink.code(fixed_code(257 + at));
+                    sink.field(length - usize::from(LEN_BASE[at]), LEN_EXTRA[at]);
+                    let back = DIST_BASE
+                        .iter()
+                        .rposition(|&base| usize::from(base) <= distance)
+                        .unwrap_or(0);
+                    sink.code((back as u32, 5));
+                    sink.field(distance - usize::from(DIST_BASE[back]), DIST_EXTRA[back]);
+                    let start = data.len() - distance;
+                    for k in 0..length {
+                        data.push(data[start + k]);
+                    }
+                }
+            }
+        }
+        sink.code(fixed_code(256));
+        (sink.bytes, data)
+    }
+
+    /// The lengths of a complete prefix code of `count` codes, none longer
+    /// than fifteen bits, given to distinct symbols of `symbols`: leaves
+    /// split from a root, a random one at a time and every third time the
+    /// deepest still splittable, so codes too long for the primary table
+    /// come too.
+    fn complete_lengths(symbols: usize, count: usize, seed: u64) -> Vec<u8> {
+        let mut draw = draws(seed);
+        let mut leaves = vec![0u8];
+        let mut turn = 0;
+        while leaves.len() < count.min(symbols) {
+            let splittable: Vec<usize> = (0..leaves.len()).filter(|&i| leaves[i] < 15).collect();
+            if splittable.is_empty() {
+                break;
+            }
+            turn += 1;
+            let at = if turn % 3 == 0 {
+                splittable
+                    .iter()
+                    .copied()
+                    .max_by_key(|&i| leaves[i])
+                    .unwrap_or(0)
+            } else {
+                splittable[draw(splittable.len())]
+            };
+            let depth = leaves.swap_remove(at) + 1;
+            leaves.extend([depth, depth]);
+        }
+        let mut order: Vec<usize> = (0..symbols).collect();
+        for i in (1..symbols).rev() {
+            order.swap(i, draw(i + 1));
+        }
+        let mut lengths = vec![0u8; symbols];
+        for (&symbol, &depth) in order.iter().zip(&leaves) {
+            lengths[symbol] = depth;
+        }
+        lengths
+    }
+
+    /// The fixed tables, and random complete and incomplete dynamic ones of
+    /// both alphabets — as many literal/length symbols as `HLIT` can name,
+    /// 286 and 287 among them, and distance 30 and 31 — with codes up to
+    /// fifteen bits.
+    fn tables() -> Vec<(Alphabet, Vec<u8>)> {
+        let mut tables = vec![
+            (Alphabet::LiteralLength, fixed_literal_lengths().to_vec()),
+            (Alphabet::Distance, vec![5; 30]),
+            // 3.2.7's one distance code of one bit.
+            (Alphabet::Distance, vec![1]),
+        ];
+        for seed in 0..12u64 {
+            let mut draw = draws(seed + 100);
+            let hlit = 257 + draw(32);
+            let hdist = 1 + draw(32);
+            for (alphabet, symbols) in
+                [(Alphabet::LiteralLength, hlit), (Alphabet::Distance, hdist)]
+            {
+                let count = 2 + draw(symbols - 1);
+                let complete = complete_lengths(symbols, count, seed);
+                let mut incomplete = complete.clone();
+                for _ in 0..1 + draw(4) {
+                    let at = draw(symbols);
+                    incomplete[at] = 0;
+                }
+                tables.push((alphabet, complete));
+                tables.push((alphabet, incomplete));
+            }
+        }
+        tables
+    }
+
+    /// **The combined tables decode what the separate lookups did.**
+    ///
+    /// Every fifteen-bit pattern through each table of [`tables`] — every
+    /// code with every suffix, the subtables' and the holes' included —
+    /// gives the meaning, code length and extra bits through the combined
+    /// table that the table of symbols and [`symbol_then_base`] give, and
+    /// the same answer where there is no code.
+    #[test]
+    fn the_combined_tables_decode_what_the_separate_lookups_did() {
+        let mut long = 0usize;
+        for (index, (alphabet, lengths)) in tables().iter().enumerate() {
+            let combined = Huffman::build_as(lengths, *alphabet).expect("a code the test drew");
+            let symbols = Huffman::build(lengths).expect("the same code");
+            for pattern in 0..1u64 << 15 {
+                let (ours, taken) = read(&combined, pattern);
+                let (theirs, their_taken) = match read(&symbols, pattern) {
+                    (Sym::Val(Code::Symbol(symbol)), taken) => {
+                        (Sym::Val(symbol_then_base(*alphabet, symbol)), taken)
+                    }
+                    other => other,
+                };
+                assert_eq!(
+                    (ours, taken),
+                    (theirs, their_taken),
+                    "table {index}, {alphabet:?}, pattern {pattern:015b}"
+                );
+                long += usize::from(matches!(ours, Sym::Val(_)) && taken > PRIMARY_BITS);
+            }
+        }
+        assert!(long > 0, "no code was longer than the primary table");
+    }
+
+    /// **A length or a distance resolves in one table read**, two for a
+    /// code longer than the primary table — and the read is the whole of it,
+    /// the base and the extra bits coming with the code. Counted through
+    /// [`READS`] over every code of every table of [`tables`], and over a
+    /// whole stream of fixed codes, where every symbol is one read.
+    #[test]
+    fn a_length_or_distance_resolves_in_one_table_read() {
+        let mut seen = [0usize; 2];
+        for (alphabet, lengths) in tables() {
+            if alphabet == Alphabet::Symbol {
+                continue;
+            }
+            let table = Huffman::build_as(&lengths, alphabet).expect("a code the test drew");
+            for pattern in 0..1u64 << 15 {
+                READS.with(|reads| reads.set(0));
+                let (sym, taken) = read(&table, pattern);
+                let reads = READS.with(std::cell::Cell::get);
+                let kind = match sym {
+                    Sym::Val(Code::Length(..)) => 0,
+                    Sym::Val(Code::Distance(..)) => 1,
+                    _ => continue,
+                };
+                seen[kind] += 1;
+                let expected = if taken <= PRIMARY_BITS { 1 } else { 2 };
+                assert_eq!(reads, expected, "{alphabet:?}, pattern {pattern:015b}");
+            }
+        }
+        assert!(seen[0] > 0 && seen[1] > 0, "{seen:?}");
+
+        // A stream of fixed codes, literals and matches: the fixed codes all
+        // fit the primary table, so each symbol is one read, and the matches
+        // are why there are fewer symbols than bytes.
+        let (coded, data) = fixed_block(&tokens(20_000, 5));
+        READS.with(|reads| reads.set(0));
+        DECODES.with(|decodes| decodes.set(0));
+        let mut inf = Inflate::new();
+        let mut src = Bits {
+            input: &coded,
+            pos: 0,
+        };
+        let mut out = Vec::new();
+        assert_eq!(inf.run(&mut src, &mut out, 1 << 20), Progress::Finished);
+        assert_eq!(out, data);
+        let reads = READS.with(std::cell::Cell::get);
+        let decodes = DECODES.with(std::cell::Cell::get);
+        assert_eq!(reads, decodes, "{reads} reads for {decodes} symbols");
+        assert!(
+            decodes > 0 && decodes < data.len() as u64,
+            "{decodes} symbols for {} bytes: the stream coded no match",
+            data.len()
+        );
     }
 
     #[test]
