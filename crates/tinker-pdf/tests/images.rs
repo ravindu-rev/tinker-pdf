@@ -732,3 +732,69 @@ fn a_jpeg_whose_space_cannot_hold_its_samples_keeps_its_own_colour() {
         "and the refusal named"
     );
 }
+
+/// **A JPEG decodes into its image without a second copy**
+/// (`docs/design/jpeg-speed.md`, "Decoding into the image"): beside the
+/// image's RGB, a single-scan sequential 4:2:0 image's decode holds at most
+/// 0.3 times that RGB — one MCU row of coefficients, of planes and of the
+/// strip it hands on — read from the render's counted work. The page it
+/// draws one sample a pixel is the decoder's samples, byte for byte, and the
+/// uncounted render's.
+#[test]
+fn a_jpeg_decodes_into_its_image_without_a_second_copy() {
+    use tinker_pdf_filters::{JpegOptions, JpegSampling, JpegSource, JpegSourceColour};
+
+    let (width, height) = (256u32, 256u32);
+    let samples: Vec<u8> = (0..width * height)
+        .flat_map(|i| {
+            let (x, y) = (i % width, i / width);
+            [x as u8, (y * 255 / height) as u8, ((x ^ y) * 3) as u8]
+        })
+        .collect();
+    let jpeg = tinker_pdf_filters::jpeg_encode(
+        &JpegSource {
+            width,
+            height,
+            colour: JpegSourceColour::Rgb,
+            stride: width as usize * 3,
+            data: &samples,
+        },
+        &JpegOptions {
+            sampling: JpegSampling::FourTwoZero,
+            ..JpegOptions::default()
+        },
+    )
+    .expect("the raster encodes");
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_image(b"Im0", &ImageData::Jpeg(&jpeg)));
+    builder.add_page(f64::from(width), f64::from(height), |page| {
+        page.image(b"Im0", 0.0, 0.0, f64::from(width), f64::from(height));
+    });
+    let doc = Document::open(builder.finish()).expect("it opens");
+    let page = doc.page(0).expect("a page");
+
+    let counted = page.render(&RenderOptions {
+        stats: true,
+        ..RenderOptions::default()
+    });
+    let stats = counted.stats.expect("the render counted");
+    let rgb = u64::from(width * height * 3);
+    assert!(stats.jpeg_held > 0, "the decode's held bytes were counted");
+    assert!(
+        10 * stats.jpeg_held <= 3 * rgb,
+        "the decode held {} bytes beside an image of {rgb}",
+        stats.jpeg_held
+    );
+
+    let decoded = tinker_pdf_filters::jpeg_decode(&jpeg, 1 << 28).expect("it decodes");
+    assert_eq!((decoded.width, decoded.height), (width, height));
+    for y in 0..height {
+        for x in 0..width {
+            let at = (y * width + x) as usize * 3;
+            let want = (decoded.data[at], decoded.data[at + 1], decoded.data[at + 2]);
+            assert_eq!(pixel(&counted, x, y), want, "({x}, {y})");
+        }
+    }
+    let plain = page.render(&RenderOptions::default());
+    assert!(plain.data == counted.data, "counting changed the page");
+}

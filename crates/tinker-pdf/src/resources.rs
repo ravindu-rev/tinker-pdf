@@ -16,8 +16,9 @@ use tinker_pdf_cos::{
     CosError, Counting, DecodedStreams, Dict, Name, ObjRef, Object,
 };
 use tinker_pdf_filters::{
-    ccitt_decode, jbig2_decode, jpeg_decode, CcittParams, Jbig2Params, JpegColor,
-    Warning as FilterWarning, MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_WORK_MULTIPLE,
+    ccitt_decode, jbig2_decode, jpeg_decode, jpeg_decode_strips, CcittParams, Jbig2Params,
+    JpegColor, JpegLayout, JpegSink, Warning as FilterWarning, MAX_JBIG2_SYMBOL_PIXELS,
+    MAX_JBIG2_WORK_MULTIPLE,
 };
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_raster::canvas::{Canvas, Color};
@@ -640,11 +641,14 @@ pub(crate) enum InlineSamples {
 /// Adobe-inverted CMYK already turned back into ink values, which are the
 /// decoder's to undo, and nothing else (7.4.8).
 ///
-/// The one decode both [`PageResources::jpeg_image`] and
-/// [`crate::Page::images`] make, under the one ceiling.
+/// The decode [`crate::Page::images`] makes, under the ceiling
+/// [`PageResources::jpeg_image`]'s strips are decoded under.
 fn jpeg_samples(raw: &[u8]) -> Result<tinker_pdf_filters::JpegImage, String> {
-    jpeg_decode(raw, 1 << 28).map_err(|e| format!("{e:?}"))
+    jpeg_decode(raw, JPEG_CEILING).map_err(|e| format!("{e:?}"))
 }
+
+/// The output ceiling every JPEG decode is handed.
+const JPEG_CEILING: usize = 1 << 28;
 
 /// How many components a decoded JPEG's samples have a pixel.
 fn jpeg_components(color: JpegColor) -> u8 {
@@ -671,43 +675,8 @@ fn samples_in_space(
     bpc: u32,
     decode: &[(f64, f64)],
 ) -> Vec<u8> {
-    let n = space.components();
-    let max = ((1u32 << bpc.min(16)) - 1) as f64;
-    let indexed = matches!(space, ColorSpace::Indexed { .. });
-    let mut remembered = Remembered::for_image(space, n, bpc);
     let mut rgb = Vec::with_capacity(pixels.saturating_mul(3));
-    let mut components = Vec::with_capacity(n);
-    for pixel in 0..pixels {
-        components.clear();
-        let mut key = 0u128;
-        for c in 0..n {
-            let at = pixel * n + c;
-            let value = match bpc {
-                8 => u32::from(samples.get(at).copied().unwrap_or(0)),
-                _ => read_bits(samples, at * bpc as usize, bpc),
-            };
-            key = Remembered::key(key, c, value);
-            // An indexed space's component is the index itself, and its
-            // `/Decode` maps the index range rather than a fraction of one.
-            let raw = if indexed {
-                f64::from(value)
-            } else {
-                f64::from(value) / max
-            };
-            components.push(
-                match decode.get(c).copied().or_else(|| default_decode(space, c)) {
-                    Some((dmin, dmax)) if indexed => dmin + raw * (dmax - dmin) / max.max(1.0),
-                    Some((dmin, dmax)) => dmin + raw * (dmax - dmin),
-                    None => raw,
-                },
-            );
-        }
-        let (r, g, b) = match remembered.as_mut() {
-            Some(table) => table.convert(key, || space.to_rgb(&components)),
-            None => space.to_rgb(&components),
-        };
-        rgb.extend_from_slice(&[r, g, b]);
-    }
+    SpaceSamples::new(space, bpc, decode).extend(space, samples, pixels, &mut rgb);
     rgb
 }
 
@@ -986,6 +955,136 @@ fn converted(space: &ColorSpace, components: &[f64]) -> (u8, u8, u8) {
     #[cfg(test)]
     SAMPLE_CONVERSIONS.with(|count| count.set(count.get() + 1));
     space.to_rgb(components)
+}
+
+/// [`samples_in_space`] a run of pixels at a time, for a codec that hands its
+/// samples out in strips: the remembered colours last across the runs, which
+/// come in the image's order, so every pixel's colour is the one a single
+/// call over the whole image gives.
+struct SpaceSamples<'d> {
+    /// Values a pixel, `bpc` bits each.
+    n: usize,
+    bpc: u32,
+    /// The largest value a sample holds.
+    max: f64,
+    indexed: bool,
+    decode: &'d [(f64, f64)],
+    remembered: Option<Remembered>,
+    /// One pixel's values, read through `/Decode`.
+    components: Vec<f64>,
+}
+
+impl<'d> SpaceSamples<'d> {
+    fn new(space: &ColorSpace, bpc: u32, decode: &'d [(f64, f64)]) -> SpaceSamples<'d> {
+        let n = space.components();
+        SpaceSamples {
+            n,
+            bpc,
+            max: ((1u32 << bpc.min(16)) - 1) as f64,
+            indexed: matches!(space, ColorSpace::Indexed { .. }),
+            decode,
+            remembered: Remembered::for_image(space, n, bpc),
+            components: Vec::with_capacity(n),
+        }
+    }
+
+    /// Converts the first `pixels` pixels of `samples` in `space`, the space
+    /// [`SpaceSamples::new`] was made for, onto the end of `rgb`.
+    fn extend(&mut self, space: &ColorSpace, samples: &[u8], pixels: usize, rgb: &mut Vec<u8>) {
+        let (n, bpc, max, indexed) = (self.n, self.bpc, self.max, self.indexed);
+        rgb.reserve(pixels.saturating_mul(3));
+        for pixel in 0..pixels {
+            self.components.clear();
+            let mut key = 0u128;
+            for c in 0..n {
+                let at = pixel * n + c;
+                let value = match bpc {
+                    8 => u32::from(samples.get(at).copied().unwrap_or(0)),
+                    _ => read_bits(samples, at * bpc as usize, bpc),
+                };
+                key = Remembered::key(key, c, value);
+                // An indexed space's component is the index itself, and its
+                // `/Decode` maps the index range rather than a fraction of one.
+                let raw = if indexed {
+                    f64::from(value)
+                } else {
+                    f64::from(value) / max
+                };
+                self.components.push(
+                    match self
+                        .decode
+                        .get(c)
+                        .copied()
+                        .or_else(|| default_decode(space, c))
+                    {
+                        Some((dmin, dmax)) if indexed => dmin + raw * (dmax - dmin) / max.max(1.0),
+                        Some((dmin, dmax)) => dmin + raw * (dmax - dmin),
+                        None => raw,
+                    },
+                );
+            }
+            let components = &self.components;
+            let (r, g, b) = match self.remembered.as_mut() {
+                Some(table) => table.convert(key, || space.to_rgb(components)),
+                None => space.to_rgb(components),
+            };
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+    }
+}
+
+/// Where a JPEG's strips are written: straight into the image's RGB, so no
+/// whole decoded image and no second copy of its colour exist beside it
+/// (`docs/design/jpeg-speed.md`, "Decoding into the image").
+struct JpegInto<'r, 'd> {
+    resources: &'r PageResources,
+    /// The space the dictionary's `/ColorSpace` was read as, until the layout
+    /// says how many components the samples have.
+    named: Option<ColorSpace>,
+    name: &'d [u8],
+    decode: &'d [(f64, f64)],
+    /// The space the samples are drawn in, when it is not the codec's own
+    /// colour, and its converter.
+    space: Option<(ColorSpace, SpaceSamples<'d>)>,
+    color: JpegColor,
+    width: usize,
+    rgb: Vec<u8>,
+}
+
+impl JpegSink for JpegInto<'_, '_> {
+    fn begin(&mut self, layout: JpegLayout) {
+        self.color = layout.color;
+        self.width = layout.width as usize;
+        let pixels = self.width.saturating_mul(layout.height as usize);
+        self.rgb = Vec::with_capacity(pixels.saturating_mul(3));
+        let components = usize::from(jpeg_components(layout.color));
+        self.space = self
+            .resources
+            .codec_space(self.named.take(), components, self.name)
+            .map(|space| {
+                let converter = SpaceSamples::new(&space, 8, self.decode);
+                (space, converter)
+            });
+    }
+
+    fn strip(&mut self, _: u32, rows: u32, data: &[u8]) {
+        let pixels = (rows as usize).saturating_mul(self.width);
+        match self.space.as_mut() {
+            // Drawn in its dictionary's space, a sample takes `/Decode`
+            // before the space, as the sample loop's does.
+            Some((space, converter)) => converter.extend(space, data, pixels, &mut self.rgb),
+            // Drawn in its own colour, `/Decode` is applied to the converted
+            // strip instead.
+            None => {
+                let start = self.rgb.len();
+                jpeg_rgb(self.color, data, pixels, &mut self.rgb);
+                invert_if_decode_reverses(
+                    self.decode,
+                    self.rgb.get_mut(start..).unwrap_or_default(),
+                );
+            }
+        }
+    }
 }
 
 /// What a JBIG2 image's decode is allowed to cost, as the pixels
@@ -4568,6 +4667,11 @@ impl PageResources {
     /// ([`samples_in_space`]); drawn in its own colour, `/Decode` is applied
     /// to the converted output instead, which is what
     /// [`invert_if_decode_reverses`] is for.
+    ///
+    /// The decode hands its strips to [`JpegInto`], which writes each into
+    /// the image's RGB, so the decode holds a strip and its coefficients
+    /// beside the image and no more; what it held is counted into
+    /// [`crate::Stats::jpeg_held`].
     fn jpeg_image(
         &self,
         raw: &[u8],
@@ -4576,22 +4680,25 @@ impl PageResources {
         named: Option<ColorSpace>,
         name: &[u8],
     ) -> Result<DecodedImage, String> {
-        let image = jpeg_samples(raw)?;
-        let components = usize::from(jpeg_components(image.color));
-        let rgb = match self.codec_space(named, components, name) {
-            Some(space) => {
-                let pixels = (image.width as usize) * (image.height as usize);
-                samples_in_space(&space, &image.data, pixels, 8, decode)
-            }
-            None => {
-                let mut rgb = jpeg_to_rgb(&image);
-                invert_if_decode_reverses(decode, &mut rgb);
-                rgb
-            }
+        let mut into = JpegInto {
+            resources: self,
+            named,
+            name,
+            decode,
+            space: None,
+            color: JpegColor::Gray,
+            width: 0,
+            rgb: Vec::new(),
         };
+        let frame =
+            jpeg_decode_strips(raw, JPEG_CEILING, &mut into).map_err(|e| format!("{e:?}"))?;
+        stats::jpeg_held(self.op.work.as_deref(), frame.held.total());
+        let pixels = (frame.layout.width as usize) * (frame.layout.height as usize);
+        let mut rgb = into.rgb;
+        rgb.resize(pixels * 3, 255);
         Ok(DecodedImage {
-            width: image.width,
-            height: image.height,
+            width: frame.layout.width,
+            height: frame.layout.height,
             rgb,
             alpha: Vec::new(),
             stencil: false,
@@ -6113,31 +6220,28 @@ fn sample_transfer(function: &Function) -> [u8; 256] {
     table
 }
 
-fn jpeg_to_rgb(image: &tinker_pdf_filters::JpegImage) -> Vec<u8> {
-    let count = (image.width as usize) * (image.height as usize);
-    let mut out = Vec::with_capacity(count * 3);
-
-    match image.color {
+/// A JPEG's own colour for `pixels` pixels of its samples, onto the end of
+/// `rgb`: a grey replicated to three, RGB as it is, CMYK through
+/// `DeviceCmyk`'s conversion.
+fn jpeg_rgb(color: JpegColor, samples: &[u8], pixels: usize, rgb: &mut Vec<u8>) {
+    rgb.reserve(pixels.saturating_mul(3));
+    match color {
         JpegColor::Gray => {
-            for i in 0..count {
-                let v = image.data.get(i).copied().unwrap_or(0);
-                out.extend_from_slice(&[v, v, v]);
+            for i in 0..pixels {
+                let v = samples.get(i).copied().unwrap_or(0);
+                rgb.extend_from_slice(&[v, v, v]);
             }
         }
-        JpegColor::Rgb => out.extend_from_slice(&image.data),
+        JpegColor::Rgb => rgb.extend_from_slice(samples),
         JpegColor::Cmyk | JpegColor::CmykInverted => {
             let space = ColorSpace::DeviceCmyk;
-            for i in 0..count {
-                let at =
-                    |c: usize| f64::from(image.data.get(i * 4 + c).copied().unwrap_or(0)) / 255.0;
+            for i in 0..pixels {
+                let at = |c: usize| f64::from(samples.get(i * 4 + c).copied().unwrap_or(0)) / 255.0;
                 let (r, g, b) = space.to_rgb(&[at(0), at(1), at(2), at(3)]);
-                out.extend_from_slice(&[r, g, b]);
+                rgb.extend_from_slice(&[r, g, b]);
             }
         }
     }
-
-    out.resize(count * 3, 255);
-    out
 }
 
 /// Which glyph of a CFF program a character code selects.

@@ -83,6 +83,14 @@ pub(crate) fn png_held(work: Option<&Work>, image_scratch: usize, peak: usize) {
     }
 }
 
+/// Records what a JPEG decode held beside the image it decoded into, when
+/// the operation is counting.
+pub(crate) fn jpeg_held(work: Option<&Work>, bytes: usize) {
+    if let Some(work) = work {
+        work.jpeg_held(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+}
+
 /// Adds what a renderer counted — its glyphs shown and outlines painted — to
 /// the operation's tally, when it is counting. The renderer has no edge to the
 /// tally's crate and hands its counts back as a value instead.

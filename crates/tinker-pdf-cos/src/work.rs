@@ -271,6 +271,15 @@ pub struct Stats {
     ///
     /// Counted with `content_tokens_read`.
     pub operators_run: u64,
+    /// The most bytes a JPEG decode held at once beside the image it decoded
+    /// into: its coefficients, its component planes and the strip it handed
+    /// on, every buffer sized from the image. A maximum, as
+    /// `png_image_scratch` is.
+    ///
+    /// Counted by `tinker-pdf-filters`' strip decode, which hands it back as
+    /// a value (`JpegHeld`), and added by the facade's image path, which
+    /// writes each strip into the image and holds nothing else beside it.
+    pub jpeg_held: u64,
 }
 
 /// One kind of step a [`Work`] counts: a [`Stats`] field, by name.
@@ -342,10 +351,10 @@ impl Stats {
     /// guard compares at two sizes of one input.
     ///
     /// The maxima and the quantity are left out — `most_decodes_of_one_stream`,
-    /// `bytes_decoded`, `png_image_scratch` and `png_peak` — because a byte
-    /// total grows with the page and would hide a step count that grows with
-    /// the document. `bytes_scanned` is in: each of its bytes is a step the
-    /// repair scan took, not output.
+    /// `bytes_decoded`, `png_image_scratch`, `png_peak` and `jpeg_held` —
+    /// because a byte total grows with the page and would hide a step count
+    /// that grows with the document. `bytes_scanned` is in: each of its
+    /// bytes is a step the repair scan took, not output.
     #[must_use]
     pub fn work(&self) -> u64 {
         [
@@ -498,6 +507,7 @@ impl Add for Stats {
                 .content_tokens_read
                 .saturating_add(other.content_tokens_read),
             operators_run: self.operators_run.saturating_add(other.operators_run),
+            jpeg_held: self.jpeg_held.max(other.jpeg_held),
         }
     }
 }
@@ -584,6 +594,15 @@ impl Work {
             let stats = &mut tally.stats;
             stats.png_image_scratch = stats.png_image_scratch.max(image_scratch);
             stats.png_peak = stats.png_peak.max(peak);
+        }
+    }
+
+    /// Records what a JPEG decode held beside its image, kept where it is the
+    /// larger ([`Stats::jpeg_held`]).
+    pub fn jpeg_held(&self, bytes: u64) {
+        if let Ok(mut tally) = self.counts.lock() {
+            let stats = &mut tally.stats;
+            stats.jpeg_held = stats.jpeg_held.max(bytes);
         }
     }
 
@@ -759,6 +778,23 @@ mod tests {
         other.png_held(70, 20);
         let sum = stats + other.stats();
         assert_eq!((sum.png_image_scratch, sum.png_peak), (70, 900));
+        assert_eq!(other.stats() + stats, sum, "in either order");
+    }
+
+    /// A JPEG decode's held bytes are a maximum: the larger is kept, in a
+    /// tally and across `+`, and they are no step `work()` totals.
+    #[test]
+    fn a_jpeg_decodes_held_bytes_keep_the_larger_and_count_no_work() {
+        let work = Work::new();
+        work.jpeg_held(4_000);
+        work.jpeg_held(1_500);
+        let stats = work.stats();
+        assert_eq!(stats.jpeg_held, 4_000);
+        assert_eq!(stats.work(), 0, "bytes held are no step");
+        let other = Work::new();
+        other.jpeg_held(9_000);
+        let sum = stats + other.stats();
+        assert_eq!(sum.jpeg_held, 9_000);
         assert_eq!(other.stats() + stats, sum, "in either order");
     }
 

@@ -212,7 +212,12 @@ refused and named, and the codec's own colour drawn (the refusal table).
 `images.rs` and `jpx_images.rs` hold each to its twin
 (`a_jpeg_draws_in_the_space_its_dictionary_names`,
 `a_jpx_image_draws_in_the_space_its_dictionary_names` and their inline
-twins).
+twins). **A JPEG is decoded straight into its image**: the decoder hands its
+strips, one MCU row at a time, to a sink that converts each into the image's
+RGB as it arrives, so no whole decoded image and no second copy of its
+colour exist beside the image, for an image XObject and an inline image alike
+(`a_jpeg_decodes_into_its_image_without_a_second_copy`); `Page::images` and
+image recoding keep the decoder's whole samples.
 
 **Form XObjects.** A form's own `/Resources` are consulted (8.10.1), so a form
 pasted in from another document resolves its names in the dictionary it brought
@@ -714,9 +719,11 @@ mask's at each decode the image cache makes —
 with `most_decodes_of_one_stream`, the most runs any one stream had,
 `most_decoded_stream`, the reference of the stream that had them (the lowest
 of several that tie), and `bytes_decoded`, the bytes the runs returned
-([filters](filters.md)); and, from `Bitmap::to_png_counted`,
-`png_image_scratch` and `png_peak`, maxima of the bytes a PNG write held.
-`Stats::work()` totals the step counts, which leaves out that maximum and that
+([filters](filters.md)); `jpeg_held`, the most bytes a JPEG decode held
+at once beside the image it decoded into — its coefficients, its planes and
+its strip; and, from `Bitmap::to_png_counted`, `png_image_scratch` and
+`png_peak`, maxima of the bytes a PNG write held.
+`Stats::work()` totals the step counts, which leaves out those maxima and that
 quantity, and two `Stats` add with `+`, a maximum keeping the larger. Every
 render door counts the same way: `Page::render`, `Page::render_form` (the
 scope it reads the form's name in included), `Page::render_annotation` (both
