@@ -24,6 +24,7 @@ members = [
   "crates/tinker-pdf-shape",
   "crates/tinker-pdf-color",
   "crates/tinker-pdf-math",
+  "crates/tinker-pdf-pool",
   "crates/tinker-pdf-raster",
   "crates/tinker-pdf-content",
   "crates/tinker-pdf-render",
@@ -62,7 +63,7 @@ authors = ["tinker-pdf contributors"]
 # path means nothing to anybody who downloads the result. Cargo builds from the
 # path here and resolves the version from the registry there, so the number is
 # invisible in this checkout — which is exactly why `cargo xtask check`
-# compares all ten against `[workspace.package] version` rather than trusting
+# compares every one against `[workspace.package] version` rather than trusting
 # that a release remembered them.
 [workspace.dependencies]
 tinker-pdf-cos = { path = "crates/tinker-pdf-cos", version = "0.0.1", default-features = false }
@@ -79,6 +80,7 @@ tinker-pdf-shape = { path = "crates/tinker-pdf-shape", version = "0.0.1" }
 tinker-pdf-svg = { path = "crates/tinker-pdf-svg", version = "0.0.1" }
 tinker-pdf-color = { path = "crates/tinker-pdf-color", version = "0.0.1" }
 tinker-pdf-math = { path = "crates/tinker-pdf-math", version = "0.0.1" }
+tinker-pdf-pool = { path = "crates/tinker-pdf-pool", version = "0.0.1" }
 tinker-pdf-raster = { path = "crates/tinker-pdf-raster", version = "0.0.1" }
 tinker-pdf-content = { path = "crates/tinker-pdf-content", version = "0.0.1", default-features = false }
 tinker-pdf-render = { path = "crates/tinker-pdf-render", version = "0.0.1", default-features = false }

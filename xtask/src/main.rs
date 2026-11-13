@@ -819,6 +819,14 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // `docs/architecture.md`'s leaf list, and inserting into the middle of
     // that list renumbers every comment below.
     ("tinker-pdf-archive", &["tinker-pdf-filters"]),
+    // The fifteenth leaf, and one more with no internal dependency at all:
+    // the engine's own thread pool (row P-15, `docs/design/parallelism.md`).
+    // It takes closures and plain values and returns values, so the writer
+    // and a decoder take it as a parameter without learning anything of the
+    // facade, and with nothing under it no edge into it can cycle. Filed
+    // after `archive` for the same reason `archive` is filed where it is: the
+    // ordinal is its position in `docs/architecture.md`'s leaf list.
+    ("tinker-pdf-pool", &[]),
     // The eighth leaf, and the first with nothing under it since `crypto`.
     ("tinker-pdf-xml", &[]),
     // The ninth, and the fourth crate here with no internal dependency at all.

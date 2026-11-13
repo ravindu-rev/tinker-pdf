@@ -1,0 +1,16 @@
+[package]
+name = "tinker-pdf-pool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The engine's own thread pool: the independent parts of one operation on threads the call starts in a scope and joins, results joined in index order, serial on the caller where no thread starts. No PDF types"
+
+# No dependencies, internal or otherwise: the pool is `std::thread::scope`, an
+# atomic counter, a mutex and a condition variable, and a leaf that took an
+# edge for any of them would be a leaf with a reason to learn what it is
+# scheduling. `docs/design/parallelism.md` has the design; `xtask`'s `ALLOWED`
+# table declares the crate with no edge.
+[dependencies]
