@@ -2605,6 +2605,18 @@ corpora already vendored here. So every name stays on the list.
   `a_cjk_request_is_answered_by_no_latin_face`,
   `a_collection_of_no_region_falls_to_the_latin_families` and
   `without_the_latin_faces_only_a_cjk_request_is_answered`.
+- `crates/tinker-pdf/tests/fallback_coverage.rs` — the census FT-02's faces
+  are priced with ([design/fallback-faces.md](../design/fallback-faces.md)),
+  `#[ignore]`d, printing `RAN`/`SKIPPED`: each candidate's characters of each
+  `Script` value and class, its bytes as published and as WOFF2, and the
+  bytes of the faces each group carries. Its instruments run in every
+  `cargo test`: the classes read from the vendored UCD, a face counted by its
+  `cmap`, the mathematics rule and the candidates against the design's
+  tables; so do its records' tests: `fallback_coverage.tsv` whole and adding
+  up (`the_committed_census_is_whole`), the design's mathematics face and Han
+  order its counts' (`the_designs_outcomes_are_the_records`), and each
+  group's gzipped wasm in `fallback_sizes.tsv`, past the default profile's by
+  the group's faces (`the_committed_wasm_sizes_are_whole`).
 - `crates/tinker-pdf-font/src/type1_subset/tests.rs` — programs built byte by
   byte through the crate's own cipher, whose `type1.rs` tests hold it to
   chapter 7.3's worked example: every kept glyph outlining and advancing as

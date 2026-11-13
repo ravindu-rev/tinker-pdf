@@ -1,0 +1,1075 @@
+# The fallback census's counts and sizes (docs/design/fallback-faces.md,
+# "Every script, emoji, mathematics, music and symbols"): the rows
+# fallback_face_coverage_census in crates/tinker-pdf/tests/fallback_coverage.rs
+# prints over the candidates of the design's tables and FT-01's four region
+# faces, each fetched from the upstream its storage row names, with its WOFF2
+# form beside it:
+#
+#   TINKER_FALLBACK_FACES=<directory> cargo test -p tinker-pdf --release --test fallback_coverage -- --ignored --nocapture
+#
+# Its four tables in its order, each row led by its table's name and each
+# table headed by the row the census prints for it. A count or a size is the
+# same in a release and a debug build. the_committed_census_is_whole, beside
+# the census, holds this record whole and adding up, and
+# the_designs_outcomes_are_the_records holds the design's outcomes to it.
+#
+#   value     each Script value, by its ISO 15924 code, and each class, and
+#             the assigned characters it holds
+#   coverage  a row for each face and each value or class its cmap covers any
+#             character of, and how many
+#   storage   a row for each face: its bytes as published and as WOFF2,
+#             whether the WOFF2 form unpacks through woff.rs to a face of the
+#             published one's glyph count, its upstream and its SPDX
+#             expression
+#   group     a row for each feature group: the faces it carries, every
+#             candidate of it but, of the mathematics candidates, the one the
+#             design's rule chooses; their bytes as published and as WOFF2
+#             together, the second what a native build of the group carries
+#
+value	name	characters
+value	class:emoji	1219
+value	class:math	2322
+value	class:music	730
+value	class:pictographic	1395
+value	class:symbols	8924
+value	script:Adlm	88
+value	script:Aghb	53
+value	script:Ahom	65
+value	script:Arab	1413
+value	script:Armi	31
+value	script:Armn	96
+value	script:Avst	61
+value	script:Bali	127
+value	script:Bamu	657
+value	script:Bass	36
+value	script:Batk	56
+value	script:Beng	96
+value	script:Berf	50
+value	script:Bhks	97
+value	script:Bopo	77
+value	script:Brah	115
+value	script:Brai	256
+value	script:Bugi	30
+value	script:Buhd	20
+value	script:Cakm	71
+value	script:Cans	726
+value	script:Cari	49
+value	script:Cham	83
+value	script:Cher	172
+value	script:Chrs	28
+value	script:Copt	137
+value	script:Cpmn	99
+value	script:Cprt	55
+value	script:Cyrl	508
+value	script:Deva	164
+value	script:Diak	72
+value	script:Dogr	60
+value	script:Dsrt	80
+value	script:Dupl	143
+value	script:Egyp	5105
+value	script:Elba	40
+value	script:Elym	23
+value	script:Ethi	523
+value	script:Gara	69
+value	script:Geor	173
+value	script:Glag	134
+value	script:Gong	63
+value	script:Gonm	75
+value	script:Goth	27
+value	script:Gran	85
+value	script:Grek	518
+value	script:Gujr	91
+value	script:Gukh	58
+value	script:Guru	80
+value	script:Hang	11739
+value	script:Hani	103351
+value	script:Hano	21
+value	script:Hatr	26
+value	script:Hebr	134
+value	script:Hira	381
+value	script:Hluw	583
+value	script:Hmng	127
+value	script:Hmnp	71
+value	script:Hung	108
+value	script:Ital	39
+value	script:Java	90
+value	script:Kali	47
+value	script:Kana	321
+value	script:Kawi	87
+value	script:Khar	68
+value	script:Khmr	146
+value	script:Khoj	65
+value	script:Kits	472
+value	script:Knda	92
+value	script:Krai	58
+value	script:Kthi	68
+value	script:Lana	127
+value	script:Laoo	83
+value	script:Latn	1492
+value	script:Lepc	74
+value	script:Limb	68
+value	script:Lina	341
+value	script:Linb	211
+value	script:Lisu	49
+value	script:Lyci	29
+value	script:Lydi	27
+value	script:Mahj	39
+value	script:Maka	25
+value	script:Mand	29
+value	script:Mani	51
+value	script:Marc	68
+value	script:Medf	91
+value	script:Mend	213
+value	script:Merc	90
+value	script:Mero	32
+value	script:Mlym	118
+value	script:Modi	79
+value	script:Mong	168
+value	script:Mroo	43
+value	script:Mtei	79
+value	script:Mult	38
+value	script:Mymr	243
+value	script:Nagm	42
+value	script:Nand	65
+value	script:Narb	32
+value	script:Nbat	40
+value	script:Newa	97
+value	script:Nkoo	62
+value	script:Nshu	397
+value	script:Ogam	29
+value	script:Olck	48
+value	script:Onao	44
+value	script:Orkh	73
+value	script:Orya	91
+value	script:Osge	72
+value	script:Osma	40
+value	script:Ougr	26
+value	script:Palm	32
+value	script:Pauc	57
+value	script:Perm	43
+value	script:Phag	56
+value	script:Phli	27
+value	script:Phlp	29
+value	script:Phnx	29
+value	script:Plrd	149
+value	script:Prti	30
+value	script:Rjng	37
+value	script:Rohg	50
+value	script:Runr	86
+value	script:Samr	61
+value	script:Sarb	32
+value	script:Saur	82
+value	script:Sgnw	672
+value	script:Shaw	48
+value	script:Shrd	104
+value	script:Sidd	92
+value	script:Sidt	26
+value	script:Sind	69
+value	script:Sinh	111
+value	script:Sogd	42
+value	script:Sogo	40
+value	script:Sora	35
+value	script:Soyo	83
+value	script:Sund	72
+value	script:Sunu	44
+value	script:Sylo	45
+value	script:Syrc	88
+value	script:Tagb	18
+value	script:Takr	68
+value	script:Tale	35
+value	script:Talu	83
+value	script:Taml	123
+value	script:Tang	7059
+value	script:Tavt	72
+value	script:Tayo	55
+value	script:Telu	101
+value	script:Tfng	59
+value	script:Tglg	23
+value	script:Thaa	50
+value	script:Thai	86
+value	script:Tibt	207
+value	script:Tirh	82
+value	script:Tnsa	89
+value	script:Todr	52
+value	script:Tols	54
+value	script:Toto	31
+value	script:Tutg	80
+value	script:Ugar	31
+value	script:Vaii	300
+value	script:Vith	70
+value	script:Wara	84
+value	script:Wcho	59
+value	script:Xpeo	50
+value	script:Xsux	1234
+value	script:Yezi	47
+value	script:Yiii	1220
+value	script:Zanb	72
+value	script:Zinh	684
+value	script:Zyyy	9123
+coverage	file	face	group	value	covered
+coverage	NotoSansArabic-Regular.ttf	Noto Sans Arabic	fallback-scripts	class:math	4
+coverage	NotoSansArabic-Regular.ttf	Noto Sans Arabic	fallback-scripts	class:symbols	31
+coverage	NotoSansArabic-Regular.ttf	Noto Sans Arabic	fallback-scripts	script:Arab	1194
+coverage	NotoSansArabic-Regular.ttf	Noto Sans Arabic	fallback-scripts	script:Zinh	15
+coverage	NotoSansArabic-Regular.ttf	Noto Sans Arabic	fallback-scripts	script:Zyyy	41
+coverage	NotoSansArmenian-Regular.ttf	Noto Sans Armenian	fallback-scripts	class:symbols	3
+coverage	NotoSansArmenian-Regular.ttf	Noto Sans Armenian	fallback-scripts	script:Armn	96
+coverage	NotoSansArmenian-Regular.ttf	Noto Sans Armenian	fallback-scripts	script:Zinh	1
+coverage	NotoSansArmenian-Regular.ttf	Noto Sans Armenian	fallback-scripts	script:Zyyy	8
+coverage	NotoSansBengali-Regular.ttf	Noto Sans Bengali	fallback-scripts	class:symbols	2
+coverage	NotoSansBengali-Regular.ttf	Noto Sans Bengali	fallback-scripts	script:Beng	96
+coverage	NotoSansBengali-Regular.ttf	Noto Sans Bengali	fallback-scripts	script:Deva	1
+coverage	NotoSansBengali-Regular.ttf	Noto Sans Bengali	fallback-scripts	script:Zinh	10
+coverage	NotoSansBengali-Regular.ttf	Noto Sans Bengali	fallback-scripts	script:Zyyy	27
+coverage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	class:math	90
+coverage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	class:pictographic	6
+coverage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	class:symbols	104
+coverage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	script:Bopo	2
+coverage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	script:Cyrl	443
+coverage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	script:Grek	368
+coverage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	script:Latn	1384
+coverage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	script:Zinh	221
+coverage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	script:Zyyy	547
+coverage	NotoSansDevanagari-Regular.ttf	Noto Sans Devanagari	fallback-scripts	class:math	10
+coverage	NotoSansDevanagari-Regular.ttf	Noto Sans Devanagari	fallback-scripts	class:symbols	19
+coverage	NotoSansDevanagari-Regular.ttf	Noto Sans Devanagari	fallback-scripts	script:Deva	164
+coverage	NotoSansDevanagari-Regular.ttf	Noto Sans Devanagari	fallback-scripts	script:Zinh	34
+coverage	NotoSansDevanagari-Regular.ttf	Noto Sans Devanagari	fallback-scripts	script:Zyyy	83
+coverage	NotoSansEthiopic-Regular.ttf	Noto Sans Ethiopic	fallback-scripts	class:math	1
+coverage	NotoSansEthiopic-Regular.ttf	Noto Sans Ethiopic	fallback-scripts	class:symbols	12
+coverage	NotoSansEthiopic-Regular.ttf	Noto Sans Ethiopic	fallback-scripts	script:Ethi	523
+coverage	NotoSansEthiopic-Regular.ttf	Noto Sans Ethiopic	fallback-scripts	script:Zinh	2
+coverage	NotoSansEthiopic-Regular.ttf	Noto Sans Ethiopic	fallback-scripts	script:Zyyy	8
+coverage	NotoSansGeorgian-Regular.ttf	Noto Sans Georgian	fallback-scripts	script:Armn	1
+coverage	NotoSansGeorgian-Regular.ttf	Noto Sans Georgian	fallback-scripts	script:Geor	173
+coverage	NotoSansGeorgian-Regular.ttf	Noto Sans Georgian	fallback-scripts	script:Zyyy	8
+coverage	NotoSansGujarati-Regular.ttf	Noto Sans Gujarati	fallback-scripts	class:symbols	10
+coverage	NotoSansGujarati-Regular.ttf	Noto Sans Gujarati	fallback-scripts	script:Gujr	91
+coverage	NotoSansGujarati-Regular.ttf	Noto Sans Gujarati	fallback-scripts	script:Zinh	4
+coverage	NotoSansGujarati-Regular.ttf	Noto Sans Gujarati	fallback-scripts	script:Zyyy	19
+coverage	NotoSansGurmukhi-Regular.ttf	Noto Sans Gurmukhi	fallback-scripts	class:math	10
+coverage	NotoSansGurmukhi-Regular.ttf	Noto Sans Gurmukhi	fallback-scripts	class:symbols	20
+coverage	NotoSansGurmukhi-Regular.ttf	Noto Sans Gurmukhi	fallback-scripts	script:Guru	80
+coverage	NotoSansGurmukhi-Regular.ttf	Noto Sans Gurmukhi	fallback-scripts	script:Zinh	4
+coverage	NotoSansGurmukhi-Regular.ttf	Noto Sans Gurmukhi	fallback-scripts	script:Zyyy	70
+coverage	NotoSansHebrew-Regular.ttf	Noto Sans Hebrew	fallback-scripts	class:math	1
+coverage	NotoSansHebrew-Regular.ttf	Noto Sans Hebrew	fallback-scripts	class:symbols	2
+coverage	NotoSansHebrew-Regular.ttf	Noto Sans Hebrew	fallback-scripts	script:Hebr	134
+coverage	NotoSansHebrew-Regular.ttf	Noto Sans Hebrew	fallback-scripts	script:Zinh	3
+coverage	NotoSansHebrew-Regular.ttf	Noto Sans Hebrew	fallback-scripts	script:Zyyy	10
+coverage	NotoSansKannada-Regular.ttf	Noto Sans Kannada	fallback-scripts	class:math	10
+coverage	NotoSansKannada-Regular.ttf	Noto Sans Kannada	fallback-scripts	class:symbols	16
+coverage	NotoSansKannada-Regular.ttf	Noto Sans Kannada	fallback-scripts	script:Knda	91
+coverage	NotoSansKannada-Regular.ttf	Noto Sans Kannada	fallback-scripts	script:Zinh	8
+coverage	NotoSansKannada-Regular.ttf	Noto Sans Kannada	fallback-scripts	script:Zyyy	67
+coverage	NotoSansKhmer-Regular.ttf	Noto Sans Khmer	fallback-scripts	class:symbols	33
+coverage	NotoSansKhmer-Regular.ttf	Noto Sans Khmer	fallback-scripts	script:Khmr	146
+coverage	NotoSansKhmer-Regular.ttf	Noto Sans Khmer	fallback-scripts	script:Zinh	2
+coverage	NotoSansKhmer-Regular.ttf	Noto Sans Khmer	fallback-scripts	script:Zyyy	27
+coverage	NotoSansLao-Regular.ttf	Noto Sans Lao	fallback-scripts	class:symbols	1
+coverage	NotoSansLao-Regular.ttf	Noto Sans Lao	fallback-scripts	script:Laoo	83
+coverage	NotoSansLao-Regular.ttf	Noto Sans Lao	fallback-scripts	script:Zinh	2
+coverage	NotoSansLao-Regular.ttf	Noto Sans Lao	fallback-scripts	script:Zyyy	7
+coverage	NotoSansMalayalam-Regular.ttf	Noto Sans Malayalam	fallback-scripts	class:math	10
+coverage	NotoSansMalayalam-Regular.ttf	Noto Sans Malayalam	fallback-scripts	class:symbols	15
+coverage	NotoSansMalayalam-Regular.ttf	Noto Sans Malayalam	fallback-scripts	script:Mlym	118
+coverage	NotoSansMalayalam-Regular.ttf	Noto Sans Malayalam	fallback-scripts	script:Zinh	7
+coverage	NotoSansMalayalam-Regular.ttf	Noto Sans Malayalam	fallback-scripts	script:Zyyy	62
+coverage	NotoSansMyanmar-Regular.ttf	Noto Sans Myanmar	fallback-scripts	class:symbols	6
+coverage	NotoSansMyanmar-Regular.ttf	Noto Sans Myanmar	fallback-scripts	script:Mymr	223
+coverage	NotoSansMyanmar-Regular.ttf	Noto Sans Myanmar	fallback-scripts	script:Zinh	3
+coverage	NotoSansMyanmar-Regular.ttf	Noto Sans Myanmar	fallback-scripts	script:Zyyy	13
+coverage	NotoSansOriya-Regular.ttf	Noto Sans Oriya	fallback-scripts	class:math	10
+coverage	NotoSansOriya-Regular.ttf	Noto Sans Oriya	fallback-scripts	class:symbols	11
+coverage	NotoSansOriya-Regular.ttf	Noto Sans Oriya	fallback-scripts	script:Orya	91
+coverage	NotoSansOriya-Regular.ttf	Noto Sans Oriya	fallback-scripts	script:Zinh	2
+coverage	NotoSansOriya-Regular.ttf	Noto Sans Oriya	fallback-scripts	script:Zyyy	58
+coverage	NotoSansSinhala-Regular.ttf	Noto Sans Sinhala	fallback-scripts	class:math	10
+coverage	NotoSansSinhala-Regular.ttf	Noto Sans Sinhala	fallback-scripts	class:symbols	10
+coverage	NotoSansSinhala-Regular.ttf	Noto Sans Sinhala	fallback-scripts	script:Latn	52
+coverage	NotoSansSinhala-Regular.ttf	Noto Sans Sinhala	fallback-scripts	script:Sinh	111
+coverage	NotoSansSinhala-Regular.ttf	Noto Sans Sinhala	fallback-scripts	script:Zinh	2
+coverage	NotoSansSinhala-Regular.ttf	Noto Sans Sinhala	fallback-scripts	script:Zyyy	53
+coverage	NotoSansTamil-Regular.ttf	Noto Sans Tamil	fallback-scripts	class:math	10
+coverage	NotoSansTamil-Regular.ttf	Noto Sans Tamil	fallback-scripts	class:symbols	23
+coverage	NotoSansTamil-Regular.ttf	Noto Sans Tamil	fallback-scripts	script:Deva	1
+coverage	NotoSansTamil-Regular.ttf	Noto Sans Tamil	fallback-scripts	script:Gran	3
+coverage	NotoSansTamil-Regular.ttf	Noto Sans Tamil	fallback-scripts	script:Taml	72
+coverage	NotoSansTamil-Regular.ttf	Noto Sans Tamil	fallback-scripts	script:Zinh	6
+coverage	NotoSansTamil-Regular.ttf	Noto Sans Tamil	fallback-scripts	script:Zyyy	65
+coverage	NotoSansTelugu-Regular.ttf	Noto Sans Telugu	fallback-scripts	class:math	10
+coverage	NotoSansTelugu-Regular.ttf	Noto Sans Telugu	fallback-scripts	class:symbols	11
+coverage	NotoSansTelugu-Regular.ttf	Noto Sans Telugu	fallback-scripts	script:Telu	100
+coverage	NotoSansTelugu-Regular.ttf	Noto Sans Telugu	fallback-scripts	script:Zinh	5
+coverage	NotoSansTelugu-Regular.ttf	Noto Sans Telugu	fallback-scripts	script:Zyyy	60
+coverage	NotoSansThaana-Regular.ttf	Noto Sans Thaana	fallback-scripts	class:symbols	2
+coverage	NotoSansThaana-Regular.ttf	Noto Sans Thaana	fallback-scripts	script:Arab	17
+coverage	NotoSansThaana-Regular.ttf	Noto Sans Thaana	fallback-scripts	script:Thaa	50
+coverage	NotoSansThaana-Regular.ttf	Noto Sans Thaana	fallback-scripts	script:Zinh	2
+coverage	NotoSansThaana-Regular.ttf	Noto Sans Thaana	fallback-scripts	script:Zyyy	35
+coverage	NotoSansThai-Regular.ttf	Noto Sans Thai	fallback-scripts	class:symbols	1
+coverage	NotoSansThai-Regular.ttf	Noto Sans Thai	fallback-scripts	script:Thai	86
+coverage	NotoSansThai-Regular.ttf	Noto Sans Thai	fallback-scripts	script:Zinh	4
+coverage	NotoSansThai-Regular.ttf	Noto Sans Thai	fallback-scripts	script:Zyyy	11
+coverage	NotoSerifTibetan-Regular.ttf	Noto Serif Tibetan	fallback-scripts	class:math	1
+coverage	NotoSerifTibetan-Regular.ttf	Noto Serif Tibetan	fallback-scripts	class:pictographic	1
+coverage	NotoSerifTibetan-Regular.ttf	Noto Serif Tibetan	fallback-scripts	class:symbols	39
+coverage	NotoSerifTibetan-Regular.ttf	Noto Serif Tibetan	fallback-scripts	script:Tibt	207
+coverage	NotoSerifTibetan-Regular.ttf	Noto Serif Tibetan	fallback-scripts	script:Zinh	2
+coverage	NotoSerifTibetan-Regular.ttf	Noto Serif Tibetan	fallback-scripts	script:Zyyy	14
+coverage	NotoSansAdlam-Regular.ttf	Noto Sans Adlam	fallback-scripts-limited	class:math	6
+coverage	NotoSansAdlam-Regular.ttf	Noto Sans Adlam	fallback-scripts-limited	class:symbols	6
+coverage	NotoSansAdlam-Regular.ttf	Noto Sans Adlam	fallback-scripts-limited	script:Adlm	88
+coverage	NotoSansAdlam-Regular.ttf	Noto Sans Adlam	fallback-scripts-limited	script:Zyyy	60
+coverage	NotoSansBalinese-Regular.ttf	Noto Sans Balinese	fallback-scripts-limited	class:symbols	20
+coverage	NotoSansBalinese-Regular.ttf	Noto Sans Balinese	fallback-scripts-limited	script:Bali	124
+coverage	NotoSansBalinese-Regular.ttf	Noto Sans Balinese	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansBalinese-Regular.ttf	Noto Sans Balinese	fallback-scripts-limited	script:Zyyy	7
+coverage	NotoSansBamum-Regular.ttf	Noto Sans Bamum	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansBamum-Regular.ttf	Noto Sans Bamum	fallback-scripts-limited	script:Bamu	657
+coverage	NotoSansBamum-Regular.ttf	Noto Sans Bamum	fallback-scripts-limited	script:Zyyy	5
+coverage	NotoSansBatak-Regular.ttf	Noto Sans Batak	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansBatak-Regular.ttf	Noto Sans Batak	fallback-scripts-limited	script:Batk	56
+coverage	NotoSansBatak-Regular.ttf	Noto Sans Batak	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansBatak-Regular.ttf	Noto Sans Batak	fallback-scripts-limited	script:Zyyy	6
+coverage	NotoSansChakma-Regular.ttf	Noto Sans Chakma	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansChakma-Regular.ttf	Noto Sans Chakma	fallback-scripts-limited	script:Beng	10
+coverage	NotoSansChakma-Regular.ttf	Noto Sans Chakma	fallback-scripts-limited	script:Cakm	71
+coverage	NotoSansChakma-Regular.ttf	Noto Sans Chakma	fallback-scripts-limited	script:Mymr	10
+coverage	NotoSansChakma-Regular.ttf	Noto Sans Chakma	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansChakma-Regular.ttf	Noto Sans Chakma	fallback-scripts-limited	script:Zyyy	10
+coverage	NotoSansCanadianAboriginal-Regular.ttf	Noto Sans Canadian Aboriginal	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansCanadianAboriginal-Regular.ttf	Noto Sans Canadian Aboriginal	fallback-scripts-limited	script:Cans	726
+coverage	NotoSansCanadianAboriginal-Regular.ttf	Noto Sans Canadian Aboriginal	fallback-scripts-limited	script:Zyyy	5
+coverage	NotoSansCham-Regular.ttf	Noto Sans Cham	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansCham-Regular.ttf	Noto Sans Cham	fallback-scripts-limited	script:Cham	83
+coverage	NotoSansCham-Regular.ttf	Noto Sans Cham	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansCham-Regular.ttf	Noto Sans Cham	fallback-scripts-limited	script:Zyyy	17
+coverage	NotoSansCherokee-Regular.ttf	Noto Sans Cherokee	fallback-scripts-limited	script:Cher	172
+coverage	NotoSansCherokee-Regular.ttf	Noto Sans Cherokee	fallback-scripts-limited	script:Zinh	10
+coverage	NotoSansCherokee-Regular.ttf	Noto Sans Cherokee	fallback-scripts-limited	script:Zyyy	4
+coverage	NotoSerifNPHmong-Regular.ttf	Noto Serif NP Hmong	fallback-scripts-limited	class:symbols	2
+coverage	NotoSerifNPHmong-Regular.ttf	Noto Serif NP Hmong	fallback-scripts-limited	script:Hmnp	71
+coverage	NotoSerifNPHmong-Regular.ttf	Noto Serif NP Hmong	fallback-scripts-limited	script:Zyyy	5
+coverage	NotoSansJavanese-Regular.ttf	Noto Sans Javanese	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansJavanese-Regular.ttf	Noto Sans Javanese	fallback-scripts-limited	script:Java	90
+coverage	NotoSansJavanese-Regular.ttf	Noto Sans Javanese	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansJavanese-Regular.ttf	Noto Sans Javanese	fallback-scripts-limited	script:Zyyy	7
+coverage	NotoSansKayahLi-Regular.ttf	Noto Sans Kayah Li	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansKayahLi-Regular.ttf	Noto Sans Kayah Li	fallback-scripts-limited	script:Kali	47
+coverage	NotoSansKayahLi-Regular.ttf	Noto Sans Kayah Li	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansKayahLi-Regular.ttf	Noto Sans Kayah Li	fallback-scripts-limited	script:Zyyy	8
+coverage	NotoSansTaiTham-Regular.ttf	Noto Sans Tai Tham	fallback-scripts-limited	class:math	1
+coverage	NotoSansTaiTham-Regular.ttf	Noto Sans Tai Tham	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansTaiTham-Regular.ttf	Noto Sans Tai Tham	fallback-scripts-limited	script:Lana	127
+coverage	NotoSansTaiTham-Regular.ttf	Noto Sans Tai Tham	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansTaiTham-Regular.ttf	Noto Sans Tai Tham	fallback-scripts-limited	script:Zyyy	6
+coverage	NotoSansLepcha-Regular.ttf	Noto Sans Lepcha	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansLepcha-Regular.ttf	Noto Sans Lepcha	fallback-scripts-limited	script:Lepc	74
+coverage	NotoSansLepcha-Regular.ttf	Noto Sans Lepcha	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansLepcha-Regular.ttf	Noto Sans Lepcha	fallback-scripts-limited	script:Zyyy	6
+coverage	NotoSansLimbu-Regular.ttf	Noto Sans Limbu	fallback-scripts-limited	class:symbols	2
+coverage	NotoSansLimbu-Regular.ttf	Noto Sans Limbu	fallback-scripts-limited	script:Limb	68
+coverage	NotoSansLimbu-Regular.ttf	Noto Sans Limbu	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansLimbu-Regular.ttf	Noto Sans Limbu	fallback-scripts-limited	script:Zyyy	7
+coverage	NotoSansLisu-Regular.ttf	Noto Sans Lisu	fallback-scripts-limited	script:Lisu	49
+coverage	NotoSansLisu-Regular.ttf	Noto Sans Lisu	fallback-scripts-limited	script:Zyyy	10
+coverage	NotoSansMandaic-Regular.ttf	Noto Sans Mandaic	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansMandaic-Regular.ttf	Noto Sans Mandaic	fallback-scripts-limited	script:Mand	29
+coverage	NotoSansMandaic-Regular.ttf	Noto Sans Mandaic	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansMandaic-Regular.ttf	Noto Sans Mandaic	fallback-scripts-limited	script:Zyyy	6
+coverage	NotoSansMeeteiMayek-Regular.ttf	Noto Sans Meetei Mayek	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansMeeteiMayek-Regular.ttf	Noto Sans Meetei Mayek	fallback-scripts-limited	script:Mtei	79
+coverage	NotoSansMeeteiMayek-Regular.ttf	Noto Sans Meetei Mayek	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansMeeteiMayek-Regular.ttf	Noto Sans Meetei Mayek	fallback-scripts-limited	script:Zyyy	6
+coverage	NotoSansNewa-Regular.ttf	Noto Sans Newa	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansNewa-Regular.ttf	Noto Sans Newa	fallback-scripts-limited	script:Newa	97
+coverage	NotoSansNewa-Regular.ttf	Noto Sans Newa	fallback-scripts-limited	script:Zinh	3
+coverage	NotoSansNewa-Regular.ttf	Noto Sans Newa	fallback-scripts-limited	script:Zyyy	6
+coverage	NotoSansNKo-Regular.ttf	Noto Sans NKo	fallback-scripts-limited	class:symbols	2
+coverage	NotoSansNKo-Regular.ttf	Noto Sans NKo	fallback-scripts-limited	script:Arab	1
+coverage	NotoSansNKo-Regular.ttf	Noto Sans NKo	fallback-scripts-limited	script:Nkoo	62
+coverage	NotoSansNKo-Regular.ttf	Noto Sans NKo	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansNKo-Regular.ttf	Noto Sans NKo	fallback-scripts-limited	script:Zyyy	14
+coverage	NotoSansOlChiki-Regular.ttf	Noto Sans Ol Chiki	fallback-scripts-limited	script:Olck	48
+coverage	NotoSansOlChiki-Regular.ttf	Noto Sans Ol Chiki	fallback-scripts-limited	script:Zyyy	5
+coverage	NotoSansOsage-Regular.ttf	Noto Sans Osage	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansOsage-Regular.ttf	Noto Sans Osage	fallback-scripts-limited	script:Osge	72
+coverage	NotoSansOsage-Regular.ttf	Noto Sans Osage	fallback-scripts-limited	script:Zinh	4
+coverage	NotoSansOsage-Regular.ttf	Noto Sans Osage	fallback-scripts-limited	script:Zyyy	5
+coverage	NotoSansMiao-Regular.ttf	Noto Sans Miao	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansMiao-Regular.ttf	Noto Sans Miao	fallback-scripts-limited	script:Plrd	149
+coverage	NotoSansMiao-Regular.ttf	Noto Sans Miao	fallback-scripts-limited	script:Zyyy	5
+coverage	NotoSansHanifiRohingya-Regular.ttf	Noto Sans Hanifi Rohingya	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansHanifiRohingya-Regular.ttf	Noto Sans Hanifi Rohingya	fallback-scripts-limited	script:Arab	2
+coverage	NotoSansHanifiRohingya-Regular.ttf	Noto Sans Hanifi Rohingya	fallback-scripts-limited	script:Rohg	50
+coverage	NotoSansHanifiRohingya-Regular.ttf	Noto Sans Hanifi Rohingya	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansHanifiRohingya-Regular.ttf	Noto Sans Hanifi Rohingya	fallback-scripts-limited	script:Zyyy	11
+coverage	NotoSansSaurashtra-Regular.ttf	Noto Sans Saurashtra	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansSaurashtra-Regular.ttf	Noto Sans Saurashtra	fallback-scripts-limited	script:Saur	82
+coverage	NotoSansSaurashtra-Regular.ttf	Noto Sans Saurashtra	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansSaurashtra-Regular.ttf	Noto Sans Saurashtra	fallback-scripts-limited	script:Zyyy	6
+coverage	NotoSansSundanese-Regular.ttf	Noto Sans Sundanese	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansSundanese-Regular.ttf	Noto Sans Sundanese	fallback-scripts-limited	script:Sund	72
+coverage	NotoSansSundanese-Regular.ttf	Noto Sans Sundanese	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansSundanese-Regular.ttf	Noto Sans Sundanese	fallback-scripts-limited	script:Zyyy	8
+coverage	NotoSansSylotiNagri-Regular.ttf	Noto Sans Syloti Nagri	fallback-scripts-limited	class:symbols	5
+coverage	NotoSansSylotiNagri-Regular.ttf	Noto Sans Syloti Nagri	fallback-scripts-limited	script:Beng	10
+coverage	NotoSansSylotiNagri-Regular.ttf	Noto Sans Syloti Nagri	fallback-scripts-limited	script:Sylo	45
+coverage	NotoSansSylotiNagri-Regular.ttf	Noto Sans Syloti Nagri	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansSylotiNagri-Regular.ttf	Noto Sans Syloti Nagri	fallback-scripts-limited	script:Zyyy	11
+coverage	NotoSansSyriac-Regular.ttf	Noto Sans Syriac	fallback-scripts-limited	class:math	4
+coverage	NotoSansSyriac-Regular.ttf	Noto Sans Syriac	fallback-scripts-limited	class:symbols	8
+coverage	NotoSansSyriac-Regular.ttf	Noto Sans Syriac	fallback-scripts-limited	script:Arab	14
+coverage	NotoSansSyriac-Regular.ttf	Noto Sans Syriac	fallback-scripts-limited	script:Syrc	77
+coverage	NotoSansSyriac-Regular.ttf	Noto Sans Syriac	fallback-scripts-limited	script:Zinh	27
+coverage	NotoSansSyriac-Regular.ttf	Noto Sans Syriac	fallback-scripts-limited	script:Zyyy	32
+coverage	NotoSansTaiLe-Regular.ttf	Noto Sans Tai Le	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansTaiLe-Regular.ttf	Noto Sans Tai Le	fallback-scripts-limited	script:Mymr	10
+coverage	NotoSansTaiLe-Regular.ttf	Noto Sans Tai Le	fallback-scripts-limited	script:Tale	35
+coverage	NotoSansTaiLe-Regular.ttf	Noto Sans Tai Le	fallback-scripts-limited	script:Zinh	7
+coverage	NotoSansTaiLe-Regular.ttf	Noto Sans Tai Le	fallback-scripts-limited	script:Zyyy	12
+coverage	NotoSansNewTaiLue-Regular.ttf	Noto Sans New Tai Lue	fallback-scripts-limited	class:symbols	2
+coverage	NotoSansNewTaiLue-Regular.ttf	Noto Sans New Tai Lue	fallback-scripts-limited	script:Talu	83
+coverage	NotoSansNewTaiLue-Regular.ttf	Noto Sans New Tai Lue	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansNewTaiLue-Regular.ttf	Noto Sans New Tai Lue	fallback-scripts-limited	script:Zyyy	21
+coverage	NotoSansTaiViet-Regular.ttf	Noto Sans Tai Viet	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansTaiViet-Regular.ttf	Noto Sans Tai Viet	fallback-scripts-limited	script:Tavt	72
+coverage	NotoSansTaiViet-Regular.ttf	Noto Sans Tai Viet	fallback-scripts-limited	script:Zinh	2
+coverage	NotoSansTaiViet-Regular.ttf	Noto Sans Tai Viet	fallback-scripts-limited	script:Zyyy	6
+coverage	NotoSansTifinagh-Regular.ttf	Noto Sans Tifinagh	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansTifinagh-Regular.ttf	Noto Sans Tifinagh	fallback-scripts-limited	script:Tfng	59
+coverage	NotoSansTifinagh-Regular.ttf	Noto Sans Tifinagh	fallback-scripts-limited	script:Zinh	11
+coverage	NotoSansTifinagh-Regular.ttf	Noto Sans Tifinagh	fallback-scripts-limited	script:Zyyy	6
+coverage	NotoSansVai-Regular.ttf	Noto Sans Vai	fallback-scripts-limited	script:Vaii	300
+coverage	NotoSansVai-Regular.ttf	Noto Sans Vai	fallback-scripts-limited	script:Zyyy	4
+coverage	NotoSansWancho-Regular.ttf	Noto Sans Wancho	fallback-scripts-limited	class:symbols	1
+coverage	NotoSansWancho-Regular.ttf	Noto Sans Wancho	fallback-scripts-limited	script:Wcho	59
+coverage	NotoSansWancho-Regular.ttf	Noto Sans Wancho	fallback-scripts-limited	script:Zyyy	20
+coverage	NotoSansYi-Regular.ttf	Noto Sans Yi	fallback-scripts-limited	class:symbols	55
+coverage	NotoSansYi-Regular.ttf	Noto Sans Yi	fallback-scripts-limited	script:Yiii	1220
+coverage	NotoSansYi-Regular.ttf	Noto Sans Yi	fallback-scripts-limited	script:Zyyy	35
+coverage	NotoSansCaucasianAlbanian-Regular.ttf	Noto Sans Caucasian Albanian	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansCaucasianAlbanian-Regular.ttf	Noto Sans Caucasian Albanian	fallback-scripts-historic	script:Aghb	53
+coverage	NotoSansCaucasianAlbanian-Regular.ttf	Noto Sans Caucasian Albanian	fallback-scripts-historic	script:Zinh	9
+coverage	NotoSansCaucasianAlbanian-Regular.ttf	Noto Sans Caucasian Albanian	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSerifAhom-Regular.ttf	Noto Serif Ahom	fallback-scripts-historic	class:symbols	2
+coverage	NotoSerifAhom-Regular.ttf	Noto Serif Ahom	fallback-scripts-historic	script:Ahom	65
+coverage	NotoSerifAhom-Regular.ttf	Noto Serif Ahom	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansImperialAramaic-Regular.ttf	Noto Sans Imperial Aramaic	fallback-scripts-historic	script:Armi	31
+coverage	NotoSansImperialAramaic-Regular.ttf	Noto Sans Imperial Aramaic	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansAvestan-Regular.ttf	Noto Sans Avestan	fallback-scripts-historic	script:Avst	61
+coverage	NotoSansAvestan-Regular.ttf	Noto Sans Avestan	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansAvestan-Regular.ttf	Noto Sans Avestan	fallback-scripts-historic	script:Zyyy	8
+coverage	NotoSansBassaVah-Regular.ttf	Noto Sans Bassa Vah	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansBassaVah-Regular.ttf	Noto Sans Bassa Vah	fallback-scripts-historic	script:Bass	36
+coverage	NotoSansBassaVah-Regular.ttf	Noto Sans Bassa Vah	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansBhaiksuki-Regular.ttf	Noto Sans Bhaiksuki	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansBhaiksuki-Regular.ttf	Noto Sans Bhaiksuki	fallback-scripts-historic	script:Bhks	97
+coverage	NotoSansBhaiksuki-Regular.ttf	Noto Sans Bhaiksuki	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansBrahmi-Regular.ttf	Noto Sans Brahmi	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansBrahmi-Regular.ttf	Noto Sans Brahmi	fallback-scripts-historic	script:Brah	115
+coverage	NotoSansBrahmi-Regular.ttf	Noto Sans Brahmi	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansBrahmi-Regular.ttf	Noto Sans Brahmi	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansBuginese-Regular.ttf	Noto Sans Buginese	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansBuginese-Regular.ttf	Noto Sans Buginese	fallback-scripts-historic	script:Bugi	30
+coverage	NotoSansBuginese-Regular.ttf	Noto Sans Buginese	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansBuginese-Regular.ttf	Noto Sans Buginese	fallback-scripts-historic	script:Zyyy	7
+coverage	NotoSansBuhid-Regular.ttf	Noto Sans Buhid	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansBuhid-Regular.ttf	Noto Sans Buhid	fallback-scripts-historic	script:Buhd	20
+coverage	NotoSansBuhid-Regular.ttf	Noto Sans Buhid	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansBuhid-Regular.ttf	Noto Sans Buhid	fallback-scripts-historic	script:Zyyy	8
+coverage	NotoSansCarian-Regular.ttf	Noto Sans Carian	fallback-scripts-historic	script:Cari	49
+coverage	NotoSansCarian-Regular.ttf	Noto Sans Carian	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansChorasmian-Regular.ttf	Noto Sans Chorasmian	fallback-scripts-historic	script:Chrs	28
+coverage	NotoSansChorasmian-Regular.ttf	Noto Sans Chorasmian	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSansChorasmian-Regular.ttf	Noto Sans Chorasmian	fallback-scripts-historic	script:Zyyy	3
+coverage	NotoSansCoptic-Regular.ttf	Noto Sans Coptic	fallback-scripts-historic	class:symbols	34
+coverage	NotoSansCoptic-Regular.ttf	Noto Sans Coptic	fallback-scripts-historic	script:Copt	137
+coverage	NotoSansCoptic-Regular.ttf	Noto Sans Coptic	fallback-scripts-historic	script:Grek	1
+coverage	NotoSansCoptic-Regular.ttf	Noto Sans Coptic	fallback-scripts-historic	script:Zinh	17
+coverage	NotoSansCoptic-Regular.ttf	Noto Sans Coptic	fallback-scripts-historic	script:Zyyy	49
+coverage	NotoSansCyproMinoan-Regular.ttf	Noto Sans Cypro Minoan	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansCyproMinoan-Regular.ttf	Noto Sans Cypro Minoan	fallback-scripts-historic	script:Cpmn	99
+coverage	NotoSansCyproMinoan-Regular.ttf	Noto Sans Cypro Minoan	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansCypriot-Regular.ttf	Noto Sans Cypriot	fallback-scripts-historic	script:Cprt	55
+coverage	NotoSansCypriot-Regular.ttf	Noto Sans Cypriot	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSerifDivesAkuru-Regular.ttf	Noto Serif Dives Akuru	fallback-scripts-historic	class:symbols	1
+coverage	NotoSerifDivesAkuru-Regular.ttf	Noto Serif Dives Akuru	fallback-scripts-historic	script:Diak	49
+coverage	NotoSerifDivesAkuru-Regular.ttf	Noto Serif Dives Akuru	fallback-scripts-historic	script:Zyyy	3
+coverage	NotoSerifDogra-Regular.ttf	Noto Serif Dogra	fallback-scripts-historic	class:symbols	1
+coverage	NotoSerifDogra-Regular.ttf	Noto Serif Dogra	fallback-scripts-historic	script:Dogr	60
+coverage	NotoSerifDogra-Regular.ttf	Noto Serif Dogra	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSerifDogra-Regular.ttf	Noto Serif Dogra	fallback-scripts-historic	script:Zyyy	7
+coverage	NotoSansDeseret-Regular.ttf	Noto Sans Deseret	fallback-scripts-historic	script:Dsrt	80
+coverage	NotoSansDeseret-Regular.ttf	Noto Sans Deseret	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansDuployan-Regular.ttf	Noto Sans Duployan	fallback-scripts-historic	class:math	10
+coverage	NotoSansDuployan-Regular.ttf	Noto Sans Duployan	fallback-scripts-historic	class:pictographic	2
+coverage	NotoSansDuployan-Regular.ttf	Noto Sans Duployan	fallback-scripts-historic	class:symbols	11
+coverage	NotoSansDuployan-Regular.ttf	Noto Sans Duployan	fallback-scripts-historic	script:Dupl	143
+coverage	NotoSansDuployan-Regular.ttf	Noto Sans Duployan	fallback-scripts-historic	script:Latn	1
+coverage	NotoSansDuployan-Regular.ttf	Noto Sans Duployan	fallback-scripts-historic	script:Zinh	16
+coverage	NotoSansDuployan-Regular.ttf	Noto Sans Duployan	fallback-scripts-historic	script:Zyyy	54
+coverage	NotoSansEgyptianHieroglyphs-Regular.ttf	Noto Sans Egyptian Hieroglyphs	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansEgyptianHieroglyphs-Regular.ttf	Noto Sans Egyptian Hieroglyphs	fallback-scripts-historic	script:Egyp	1078
+coverage	NotoSansEgyptianHieroglyphs-Regular.ttf	Noto Sans Egyptian Hieroglyphs	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansEgyptianHieroglyphs-Regular.ttf	Noto Sans Egyptian Hieroglyphs	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansElbasan-Regular.ttf	Noto Sans Elbasan	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansElbasan-Regular.ttf	Noto Sans Elbasan	fallback-scripts-historic	script:Elba	40
+coverage	NotoSansElbasan-Regular.ttf	Noto Sans Elbasan	fallback-scripts-historic	script:Grek	28
+coverage	NotoSansElbasan-Regular.ttf	Noto Sans Elbasan	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSansElbasan-Regular.ttf	Noto Sans Elbasan	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansElymaic-Regular.ttf	Noto Sans Elymaic	fallback-scripts-historic	script:Elym	23
+coverage	NotoSansElymaic-Regular.ttf	Noto Sans Elymaic	fallback-scripts-historic	script:Zyyy	2
+coverage	NotoSansGlagolitic-Regular.ttf	Noto Sans Glagolitic	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansGlagolitic-Regular.ttf	Noto Sans Glagolitic	fallback-scripts-historic	script:Cyrl	6
+coverage	NotoSansGlagolitic-Regular.ttf	Noto Sans Glagolitic	fallback-scripts-historic	script:Glag	132
+coverage	NotoSansGlagolitic-Regular.ttf	Noto Sans Glagolitic	fallback-scripts-historic	script:Zinh	5
+coverage	NotoSansGlagolitic-Regular.ttf	Noto Sans Glagolitic	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansGunjalaGondi-Regular.ttf	Noto Sans Gunjala Gondi	fallback-scripts-historic	class:math	7
+coverage	NotoSansGunjalaGondi-Regular.ttf	Noto Sans Gunjala Gondi	fallback-scripts-historic	class:symbols	8
+coverage	NotoSansGunjalaGondi-Regular.ttf	Noto Sans Gunjala Gondi	fallback-scripts-historic	script:Gong	63
+coverage	NotoSansGunjalaGondi-Regular.ttf	Noto Sans Gunjala Gondi	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansGunjalaGondi-Regular.ttf	Noto Sans Gunjala Gondi	fallback-scripts-historic	script:Zyyy	29
+coverage	NotoSansMasaramGondi-Regular.ttf	Noto Sans Masaram Gondi	fallback-scripts-historic	class:math	7
+coverage	NotoSansMasaramGondi-Regular.ttf	Noto Sans Masaram Gondi	fallback-scripts-historic	class:symbols	8
+coverage	NotoSansMasaramGondi-Regular.ttf	Noto Sans Masaram Gondi	fallback-scripts-historic	script:Gonm	75
+coverage	NotoSansMasaramGondi-Regular.ttf	Noto Sans Masaram Gondi	fallback-scripts-historic	script:Zyyy	33
+coverage	NotoSansGothic-Regular.ttf	Noto Sans Gothic	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansGothic-Regular.ttf	Noto Sans Gothic	fallback-scripts-historic	script:Goth	27
+coverage	NotoSansGothic-Regular.ttf	Noto Sans Gothic	fallback-scripts-historic	script:Zinh	4
+coverage	NotoSansGothic-Regular.ttf	Noto Sans Gothic	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansGrantha-Regular.ttf	Noto Sans Grantha	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansGrantha-Regular.ttf	Noto Sans Grantha	fallback-scripts-historic	script:Gran	85
+coverage	NotoSansGrantha-Regular.ttf	Noto Sans Grantha	fallback-scripts-historic	script:Taml	15
+coverage	NotoSansGrantha-Regular.ttf	Noto Sans Grantha	fallback-scripts-historic	script:Zinh	11
+coverage	NotoSansGrantha-Regular.ttf	Noto Sans Grantha	fallback-scripts-historic	script:Zyyy	10
+coverage	NotoSansHanunoo-Regular.ttf	Noto Sans Hanunoo	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansHanunoo-Regular.ttf	Noto Sans Hanunoo	fallback-scripts-historic	script:Hano	21
+coverage	NotoSansHanunoo-Regular.ttf	Noto Sans Hanunoo	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansHanunoo-Regular.ttf	Noto Sans Hanunoo	fallback-scripts-historic	script:Zyyy	8
+coverage	NotoSansHatran-Regular.ttf	Noto Sans Hatran	fallback-scripts-historic	script:Hatr	26
+coverage	NotoSansHatran-Regular.ttf	Noto Sans Hatran	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSansHatran-Regular.ttf	Noto Sans Hatran	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansAnatolianHieroglyphs-Regular.ttf	Noto Sans Anatolian Hieroglyphs	fallback-scripts-historic	script:Hluw	583
+coverage	NotoSansAnatolianHieroglyphs-Regular.ttf	Noto Sans Anatolian Hieroglyphs	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansPahawhHmong-Regular.ttf	Noto Sans Pahawh Hmong	fallback-scripts-historic	class:symbols	6
+coverage	NotoSansPahawhHmong-Regular.ttf	Noto Sans Pahawh Hmong	fallback-scripts-historic	script:Hmng	127
+coverage	NotoSansPahawhHmong-Regular.ttf	Noto Sans Pahawh Hmong	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansPahawhHmong-Regular.ttf	Noto Sans Pahawh Hmong	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansOldHungarian-Regular.ttf	Noto Sans Old Hungarian	fallback-scripts-historic	script:Hung	108
+coverage	NotoSansOldHungarian-Regular.ttf	Noto Sans Old Hungarian	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSansOldHungarian-Regular.ttf	Noto Sans Old Hungarian	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansOldItalic-Regular.ttf	Noto Sans Old Italic	fallback-scripts-historic	script:Ital	39
+coverage	NotoSansOldItalic-Regular.ttf	Noto Sans Old Italic	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansKawi-Regular.ttf	Noto Sans Kawi	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansKawi-Regular.ttf	Noto Sans Kawi	fallback-scripts-historic	script:Kawi	86
+coverage	NotoSansKawi-Regular.ttf	Noto Sans Kawi	fallback-scripts-historic	script:Zyyy	3
+coverage	NotoSansKharoshthi-Regular.ttf	Noto Sans Kharoshthi	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansKharoshthi-Regular.ttf	Noto Sans Kharoshthi	fallback-scripts-historic	script:Khar	68
+coverage	NotoSansKharoshthi-Regular.ttf	Noto Sans Kharoshthi	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansKharoshthi-Regular.ttf	Noto Sans Kharoshthi	fallback-scripts-historic	script:Zyyy	8
+coverage	NotoSansKhojki-Regular.ttf	Noto Sans Khojki	fallback-scripts-historic	class:symbols	10
+coverage	NotoSansKhojki-Regular.ttf	Noto Sans Khojki	fallback-scripts-historic	script:Gujr	10
+coverage	NotoSansKhojki-Regular.ttf	Noto Sans Khojki	fallback-scripts-historic	script:Khoj	64
+coverage	NotoSansKhojki-Regular.ttf	Noto Sans Khojki	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansKhojki-Regular.ttf	Noto Sans Khojki	fallback-scripts-historic	script:Zyyy	15
+coverage	NotoSerifKhitanSmallScript-Regular.ttf	Noto Serif Khitan Small Script	fallback-scripts-historic	class:math	1
+coverage	NotoSerifKhitanSmallScript-Regular.ttf	Noto Serif Khitan Small Script	fallback-scripts-historic	class:symbols	2
+coverage	NotoSerifKhitanSmallScript-Regular.ttf	Noto Serif Khitan Small Script	fallback-scripts-historic	script:Hani	9
+coverage	NotoSerifKhitanSmallScript-Regular.ttf	Noto Serif Khitan Small Script	fallback-scripts-historic	script:Kits	471
+coverage	NotoSerifKhitanSmallScript-Regular.ttf	Noto Serif Khitan Small Script	fallback-scripts-historic	script:Zyyy	17
+coverage	NotoSansKaithi-Regular.ttf	Noto Sans Kaithi	fallback-scripts-historic	class:symbols	10
+coverage	NotoSansKaithi-Regular.ttf	Noto Sans Kaithi	fallback-scripts-historic	script:Deva	10
+coverage	NotoSansKaithi-Regular.ttf	Noto Sans Kaithi	fallback-scripts-historic	script:Kthi	68
+coverage	NotoSansKaithi-Regular.ttf	Noto Sans Kaithi	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansKaithi-Regular.ttf	Noto Sans Kaithi	fallback-scripts-historic	script:Zyyy	18
+coverage	NotoSansLinearA-Regular.ttf	Noto Sans Linear A	fallback-scripts-historic	script:Lina	341
+coverage	NotoSansLinearA-Regular.ttf	Noto Sans Linear A	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansLinearB-Regular.ttf	Noto Sans Linear B	fallback-scripts-historic	class:symbols	54
+coverage	NotoSansLinearB-Regular.ttf	Noto Sans Linear B	fallback-scripts-historic	script:Linb	211
+coverage	NotoSansLinearB-Regular.ttf	Noto Sans Linear B	fallback-scripts-historic	script:Zyyy	61
+coverage	NotoSansLycian-Regular.ttf	Noto Sans Lycian	fallback-scripts-historic	script:Lyci	29
+coverage	NotoSansLycian-Regular.ttf	Noto Sans Lycian	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansLydian-Regular.ttf	Noto Sans Lydian	fallback-scripts-historic	script:Lydi	27
+coverage	NotoSansLydian-Regular.ttf	Noto Sans Lydian	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSansLydian-Regular.ttf	Noto Sans Lydian	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSerifMakasar-Regular.ttf	Noto Serif Makasar	fallback-scripts-historic	class:symbols	1
+coverage	NotoSerifMakasar-Regular.ttf	Noto Serif Makasar	fallback-scripts-historic	script:Maka	25
+coverage	NotoSerifMakasar-Regular.ttf	Noto Serif Makasar	fallback-scripts-historic	script:Zyyy	3
+coverage	NotoSansMahajani-Regular.ttf	Noto Sans Mahajani	fallback-scripts-historic	class:symbols	10
+coverage	NotoSansMahajani-Regular.ttf	Noto Sans Mahajani	fallback-scripts-historic	script:Deva	10
+coverage	NotoSansMahajani-Regular.ttf	Noto Sans Mahajani	fallback-scripts-historic	script:Mahj	39
+coverage	NotoSansMahajani-Regular.ttf	Noto Sans Mahajani	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansMahajani-Regular.ttf	Noto Sans Mahajani	fallback-scripts-historic	script:Zyyy	17
+coverage	NotoSansManichaean-Regular.ttf	Noto Sans Manichaean	fallback-scripts-historic	class:symbols	2
+coverage	NotoSansManichaean-Regular.ttf	Noto Sans Manichaean	fallback-scripts-historic	script:Mani	51
+coverage	NotoSansManichaean-Regular.ttf	Noto Sans Manichaean	fallback-scripts-historic	script:Zinh	3
+coverage	NotoSansManichaean-Regular.ttf	Noto Sans Manichaean	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansMarchen-Regular.ttf	Noto Sans Marchen	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansMarchen-Regular.ttf	Noto Sans Marchen	fallback-scripts-historic	script:Marc	68
+coverage	NotoSansMarchen-Regular.ttf	Noto Sans Marchen	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansMedefaidrin-Regular.ttf	Noto Sans Medefaidrin	fallback-scripts-historic	script:Medf	91
+coverage	NotoSansMedefaidrin-Regular.ttf	Noto Sans Medefaidrin	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansMendeKikakui-Regular.ttf	Noto Sans Mende Kikakui	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansMendeKikakui-Regular.ttf	Noto Sans Mende Kikakui	fallback-scripts-historic	script:Mend	213
+coverage	NotoSansMendeKikakui-Regular.ttf	Noto Sans Mende Kikakui	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansMeroitic-Regular.ttf	Noto Sans Meroitic	fallback-scripts-historic	script:Merc	90
+coverage	NotoSansMeroitic-Regular.ttf	Noto Sans Meroitic	fallback-scripts-historic	script:Mero	32
+coverage	NotoSansMeroitic-Regular.ttf	Noto Sans Meroitic	fallback-scripts-historic	script:Zyyy	7
+coverage	NotoSansModi-Regular.ttf	Noto Sans Modi	fallback-scripts-historic	class:symbols	10
+coverage	NotoSansModi-Regular.ttf	Noto Sans Modi	fallback-scripts-historic	script:Modi	79
+coverage	NotoSansModi-Regular.ttf	Noto Sans Modi	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansModi-Regular.ttf	Noto Sans Modi	fallback-scripts-historic	script:Zyyy	15
+coverage	NotoSansMongolian-Regular.ttf	Noto Sans Mongolian	fallback-scripts-historic	class:pictographic	1
+coverage	NotoSansMongolian-Regular.ttf	Noto Sans Mongolian	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansMongolian-Regular.ttf	Noto Sans Mongolian	fallback-scripts-historic	script:Mong	168
+coverage	NotoSansMongolian-Regular.ttf	Noto Sans Mongolian	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansMongolian-Regular.ttf	Noto Sans Mongolian	fallback-scripts-historic	script:Zyyy	36
+coverage	NotoSansMro-Regular.ttf	Noto Sans Mro	fallback-scripts-historic	script:Mroo	43
+coverage	NotoSansMro-Regular.ttf	Noto Sans Mro	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansMultani-Regular.ttf	Noto Sans Multani	fallback-scripts-historic	script:Guru	10
+coverage	NotoSansMultani-Regular.ttf	Noto Sans Multani	fallback-scripts-historic	script:Mult	38
+coverage	NotoSansMultani-Regular.ttf	Noto Sans Multani	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansNagMundari-Regular.ttf	Noto Sans Nag Mundari	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansNagMundari-Regular.ttf	Noto Sans Nag Mundari	fallback-scripts-historic	script:Nagm	42
+coverage	NotoSansNagMundari-Regular.ttf	Noto Sans Nag Mundari	fallback-scripts-historic	script:Zyyy	21
+coverage	NotoSansOldNorthArabian-Regular.ttf	Noto Sans Old North Arabian	fallback-scripts-historic	script:Narb	32
+coverage	NotoSansOldNorthArabian-Regular.ttf	Noto Sans Old North Arabian	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansNandinagari-Regular.ttf	Noto Sans Nandinagari	fallback-scripts-historic	class:symbols	7
+coverage	NotoSansNandinagari-Regular.ttf	Noto Sans Nandinagari	fallback-scripts-historic	script:Knda	10
+coverage	NotoSansNandinagari-Regular.ttf	Noto Sans Nandinagari	fallback-scripts-historic	script:Nand	65
+coverage	NotoSansNandinagari-Regular.ttf	Noto Sans Nandinagari	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansNandinagari-Regular.ttf	Noto Sans Nandinagari	fallback-scripts-historic	script:Zyyy	15
+coverage	NotoSansNabataean-Regular.ttf	Noto Sans Nabataean	fallback-scripts-historic	script:Nbat	40
+coverage	NotoSansNabataean-Regular.ttf	Noto Sans Nabataean	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansNushu-Regular.ttf	Noto Sans Nushu	fallback-scripts-historic	script:Nshu	397
+coverage	NotoSansNushu-Regular.ttf	Noto Sans Nushu	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansOgham-Regular.ttf	Noto Sans Ogham	fallback-scripts-historic	script:Ogam	29
+coverage	NotoSansOgham-Regular.ttf	Noto Sans Ogham	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansOldTurkic-Regular.ttf	Noto Sans Old Turkic	fallback-scripts-historic	script:Orkh	73
+coverage	NotoSansOldTurkic-Regular.ttf	Noto Sans Old Turkic	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSansOldTurkic-Regular.ttf	Noto Sans Old Turkic	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansOsmanya-Regular.ttf	Noto Sans Osmanya	fallback-scripts-historic	script:Osma	40
+coverage	NotoSansOsmanya-Regular.ttf	Noto Sans Osmanya	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSerifOldUyghur-Regular.ttf	Noto Serif Old Uyghur	fallback-scripts-historic	class:symbols	1
+coverage	NotoSerifOldUyghur-Regular.ttf	Noto Serif Old Uyghur	fallback-scripts-historic	script:Mani	1
+coverage	NotoSerifOldUyghur-Regular.ttf	Noto Serif Old Uyghur	fallback-scripts-historic	script:Ougr	26
+coverage	NotoSerifOldUyghur-Regular.ttf	Noto Serif Old Uyghur	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSerifOldUyghur-Regular.ttf	Noto Serif Old Uyghur	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansPalmyrene-Regular.ttf	Noto Sans Palmyrene	fallback-scripts-historic	class:symbols	2
+coverage	NotoSansPalmyrene-Regular.ttf	Noto Sans Palmyrene	fallback-scripts-historic	script:Palm	32
+coverage	NotoSansPalmyrene-Regular.ttf	Noto Sans Palmyrene	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansPauCinHau-Regular.ttf	Noto Sans Pau Cin Hau	fallback-scripts-historic	script:Pauc	57
+coverage	NotoSansPauCinHau-Regular.ttf	Noto Sans Pau Cin Hau	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansOldPermic-Regular.ttf	Noto Sans Old Permic	fallback-scripts-historic	class:math	1
+coverage	NotoSansOldPermic-Regular.ttf	Noto Sans Old Permic	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansOldPermic-Regular.ttf	Noto Sans Old Permic	fallback-scripts-historic	script:Cyrl	1
+coverage	NotoSansOldPermic-Regular.ttf	Noto Sans Old Permic	fallback-scripts-historic	script:Perm	43
+coverage	NotoSansOldPermic-Regular.ttf	Noto Sans Old Permic	fallback-scripts-historic	script:Zinh	6
+coverage	NotoSansOldPermic-Regular.ttf	Noto Sans Old Permic	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansPhagsPa-Regular.ttf	Noto Sans Phags Pa	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansPhagsPa-Regular.ttf	Noto Sans Phags Pa	fallback-scripts-historic	script:Hani	1
+coverage	NotoSansPhagsPa-Regular.ttf	Noto Sans Phags Pa	fallback-scripts-historic	script:Mong	1
+coverage	NotoSansPhagsPa-Regular.ttf	Noto Sans Phags Pa	fallback-scripts-historic	script:Phag	56
+coverage	NotoSansPhagsPa-Regular.ttf	Noto Sans Phags Pa	fallback-scripts-historic	script:Zinh	3
+coverage	NotoSansPhagsPa-Regular.ttf	Noto Sans Phags Pa	fallback-scripts-historic	script:Zyyy	33
+coverage	NotoSansInscriptionalPahlavi-Regular.ttf	Noto Sans Inscriptional Pahlavi	fallback-scripts-historic	script:Phli	27
+coverage	NotoSansInscriptionalPahlavi-Regular.ttf	Noto Sans Inscriptional Pahlavi	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansPsalterPahlavi-Regular.ttf	Noto Sans Psalter Pahlavi	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansPsalterPahlavi-Regular.ttf	Noto Sans Psalter Pahlavi	fallback-scripts-historic	script:Phlp	29
+coverage	NotoSansPsalterPahlavi-Regular.ttf	Noto Sans Psalter Pahlavi	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansPsalterPahlavi-Regular.ttf	Noto Sans Psalter Pahlavi	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansPhoenician-Regular.ttf	Noto Sans Phoenician	fallback-scripts-historic	script:Phnx	29
+coverage	NotoSansPhoenician-Regular.ttf	Noto Sans Phoenician	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansInscriptionalParthian-Regular.ttf	Noto Sans Inscriptional Parthian	fallback-scripts-historic	script:Prti	30
+coverage	NotoSansInscriptionalParthian-Regular.ttf	Noto Sans Inscriptional Parthian	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansRejang-Regular.ttf	Noto Sans Rejang	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansRejang-Regular.ttf	Noto Sans Rejang	fallback-scripts-historic	script:Rjng	37
+coverage	NotoSansRejang-Regular.ttf	Noto Sans Rejang	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansRejang-Regular.ttf	Noto Sans Rejang	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansRunic-Regular.ttf	Noto Sans Runic	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansRunic-Regular.ttf	Noto Sans Runic	fallback-scripts-historic	script:Runr	86
+coverage	NotoSansRunic-Regular.ttf	Noto Sans Runic	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSansRunic-Regular.ttf	Noto Sans Runic	fallback-scripts-historic	script:Zyyy	8
+coverage	NotoSansSamaritan-Regular.ttf	Noto Sans Samaritan	fallback-scripts-historic	script:Samr	61
+coverage	NotoSansSamaritan-Regular.ttf	Noto Sans Samaritan	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansOldSouthArabian-Regular.ttf	Noto Sans Old South Arabian	fallback-scripts-historic	script:Sarb	32
+coverage	NotoSansOldSouthArabian-Regular.ttf	Noto Sans Old South Arabian	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansSignWriting-Regular.ttf	Noto Sans Sign Writing	fallback-scripts-historic	class:symbols	541
+coverage	NotoSansSignWriting-Regular.ttf	Noto Sans Sign Writing	fallback-scripts-historic	script:Sgnw	672
+coverage	NotoSansSignWriting-Regular.ttf	Noto Sans Sign Writing	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSansSignWriting-Regular.ttf	Noto Sans Sign Writing	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansShavian-Regular.ttf	Noto Sans Shavian	fallback-scripts-historic	script:Shaw	48
+coverage	NotoSansShavian-Regular.ttf	Noto Sans Shavian	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansSharada-Regular.ttf	Noto Sans Sharada	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansSharada-Regular.ttf	Noto Sans Sharada	fallback-scripts-historic	script:Shrd	96
+coverage	NotoSansSharada-Regular.ttf	Noto Sans Sharada	fallback-scripts-historic	script:Zinh	9
+coverage	NotoSansSharada-Regular.ttf	Noto Sans Sharada	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansSiddham-Regular.ttf	Noto Sans Siddham	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansSiddham-Regular.ttf	Noto Sans Siddham	fallback-scripts-historic	script:Sidd	92
+coverage	NotoSansSiddham-Regular.ttf	Noto Sans Siddham	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansSiddham-Regular.ttf	Noto Sans Siddham	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansKhudawadi-Regular.ttf	Noto Sans Khudawadi	fallback-scripts-historic	class:symbols	10
+coverage	NotoSansKhudawadi-Regular.ttf	Noto Sans Khudawadi	fallback-scripts-historic	script:Sind	69
+coverage	NotoSansKhudawadi-Regular.ttf	Noto Sans Khudawadi	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansKhudawadi-Regular.ttf	Noto Sans Khudawadi	fallback-scripts-historic	script:Zyyy	19
+coverage	NotoSansSoraSompeng-Regular.ttf	Noto Sans Sora Sompeng	fallback-scripts-historic	script:Sora	35
+coverage	NotoSansSoraSompeng-Regular.ttf	Noto Sans Sora Sompeng	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansSogdian-Regular.ttf	Noto Sans Sogdian	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansSogdian-Regular.ttf	Noto Sans Sogdian	fallback-scripts-historic	script:Sogd	42
+coverage	NotoSansSogdian-Regular.ttf	Noto Sans Sogdian	fallback-scripts-historic	script:Zinh	1
+coverage	NotoSansSogdian-Regular.ttf	Noto Sans Sogdian	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansOldSogdian-Regular.ttf	Noto Sans Old Sogdian	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansOldSogdian-Regular.ttf	Noto Sans Old Sogdian	fallback-scripts-historic	script:Sogo	40
+coverage	NotoSansOldSogdian-Regular.ttf	Noto Sans Old Sogdian	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansSoyombo-Regular.ttf	Noto Sans Soyombo	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansSoyombo-Regular.ttf	Noto Sans Soyombo	fallback-scripts-historic	script:Soyo	83
+coverage	NotoSansSoyombo-Regular.ttf	Noto Sans Soyombo	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansSunuwar-Regular.ttf	Noto Sans Sunuwar	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansSunuwar-Regular.ttf	Noto Sans Sunuwar	fallback-scripts-historic	script:Sunu	44
+coverage	NotoSansSunuwar-Regular.ttf	Noto Sans Sunuwar	fallback-scripts-historic	script:Zinh	10
+coverage	NotoSansSunuwar-Regular.ttf	Noto Sans Sunuwar	fallback-scripts-historic	script:Zyyy	29
+coverage	NotoSansTagbanwa-Regular.ttf	Noto Sans Tagbanwa	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansTagbanwa-Regular.ttf	Noto Sans Tagbanwa	fallback-scripts-historic	script:Tagb	18
+coverage	NotoSansTagbanwa-Regular.ttf	Noto Sans Tagbanwa	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansTagbanwa-Regular.ttf	Noto Sans Tagbanwa	fallback-scripts-historic	script:Zyyy	8
+coverage	NotoSansTakri-Regular.ttf	Noto Sans Takri	fallback-scripts-historic	class:symbols	10
+coverage	NotoSansTakri-Regular.ttf	Noto Sans Takri	fallback-scripts-historic	script:Takr	68
+coverage	NotoSansTakri-Regular.ttf	Noto Sans Takri	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansTakri-Regular.ttf	Noto Sans Takri	fallback-scripts-historic	script:Zyyy	17
+coverage	NotoSerifTangut-Regular.ttf	Noto Serif Tangut	fallback-scripts-historic	class:symbols	2
+coverage	NotoSerifTangut-Regular.ttf	Noto Serif Tangut	fallback-scripts-historic	script:Tang	6914
+coverage	NotoSerifTangut-Regular.ttf	Noto Serif Tangut	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSansTagalog-Regular.ttf	Noto Sans Tagalog	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansTagalog-Regular.ttf	Noto Sans Tagalog	fallback-scripts-historic	script:Tglg	23
+coverage	NotoSansTagalog-Regular.ttf	Noto Sans Tagalog	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansTagalog-Regular.ttf	Noto Sans Tagalog	fallback-scripts-historic	script:Zyyy	8
+coverage	NotoSansTirhuta-Regular.ttf	Noto Sans Tirhuta	fallback-scripts-historic	class:symbols	10
+coverage	NotoSansTirhuta-Regular.ttf	Noto Sans Tirhuta	fallback-scripts-historic	script:Beng	4
+coverage	NotoSansTirhuta-Regular.ttf	Noto Sans Tirhuta	fallback-scripts-historic	script:Tirh	82
+coverage	NotoSansTirhuta-Regular.ttf	Noto Sans Tirhuta	fallback-scripts-historic	script:Zinh	4
+coverage	NotoSansTirhuta-Regular.ttf	Noto Sans Tirhuta	fallback-scripts-historic	script:Zyyy	18
+coverage	NotoSansTangsa-Regular.ttf	Noto Sans Tangsa	fallback-scripts-historic	script:Tnsa	89
+coverage	NotoSansTangsa-Regular.ttf	Noto Sans Tangsa	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSerifTodhri-Regular.ttf	Noto Serif Todhri	fallback-scripts-historic	class:symbols	1
+coverage	NotoSerifTodhri-Regular.ttf	Noto Serif Todhri	fallback-scripts-historic	script:Todr	52
+coverage	NotoSerifTodhri-Regular.ttf	Noto Serif Todhri	fallback-scripts-historic	script:Zinh	10
+coverage	NotoSerifTodhri-Regular.ttf	Noto Serif Todhri	fallback-scripts-historic	script:Zyyy	6
+coverage	NotoSerifToto-Regular.ttf	Noto Serif Toto	fallback-scripts-historic	class:symbols	1
+coverage	NotoSerifToto-Regular.ttf	Noto Serif Toto	fallback-scripts-historic	script:Toto	31
+coverage	NotoSerifToto-Regular.ttf	Noto Serif Toto	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansUgaritic-Regular.ttf	Noto Sans Ugaritic	fallback-scripts-historic	script:Ugar	31
+coverage	NotoSansUgaritic-Regular.ttf	Noto Sans Ugaritic	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansVithkuqi-Regular.ttf	Noto Sans Vithkuqi	fallback-scripts-historic	class:math	5
+coverage	NotoSansVithkuqi-Regular.ttf	Noto Sans Vithkuqi	fallback-scripts-historic	class:symbols	4
+coverage	NotoSansVithkuqi-Regular.ttf	Noto Sans Vithkuqi	fallback-scripts-historic	script:Vith	70
+coverage	NotoSansVithkuqi-Regular.ttf	Noto Sans Vithkuqi	fallback-scripts-historic	script:Zyyy	31
+coverage	NotoSansWarangCiti-Regular.ttf	Noto Sans Warang Citi	fallback-scripts-historic	script:Wara	84
+coverage	NotoSansWarangCiti-Regular.ttf	Noto Sans Warang Citi	fallback-scripts-historic	script:Zinh	2
+coverage	NotoSansWarangCiti-Regular.ttf	Noto Sans Warang Citi	fallback-scripts-historic	script:Zyyy	3
+coverage	NotoSansOldPersian-Regular.ttf	Noto Sans Old Persian	fallback-scripts-historic	script:Xpeo	50
+coverage	NotoSansOldPersian-Regular.ttf	Noto Sans Old Persian	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSansCuneiform-Regular.ttf	Noto Sans Cuneiform	fallback-scripts-historic	script:Xsux	1234
+coverage	NotoSansCuneiform-Regular.ttf	Noto Sans Cuneiform	fallback-scripts-historic	script:Zyyy	4
+coverage	NotoSerifYezidi-Regular.ttf	Noto Serif Yezidi	fallback-scripts-historic	class:symbols	1
+coverage	NotoSerifYezidi-Regular.ttf	Noto Serif Yezidi	fallback-scripts-historic	script:Arab	1
+coverage	NotoSerifYezidi-Regular.ttf	Noto Serif Yezidi	fallback-scripts-historic	script:Yezi	47
+coverage	NotoSerifYezidi-Regular.ttf	Noto Serif Yezidi	fallback-scripts-historic	script:Zyyy	8
+coverage	NotoSansZanabazarSquare-Regular.ttf	Noto Sans Zanabazar Square	fallback-scripts-historic	class:symbols	1
+coverage	NotoSansZanabazarSquare-Regular.ttf	Noto Sans Zanabazar Square	fallback-scripts-historic	script:Zanb	72
+coverage	NotoSansZanabazarSquare-Regular.ttf	Noto Sans Zanabazar Square	fallback-scripts-historic	script:Zyyy	5
+coverage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	class:emoji	7
+coverage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	class:math	2263
+coverage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	class:pictographic	31
+coverage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	class:symbols	1398
+coverage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	script:Arab	204
+coverage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	script:Grek	58
+coverage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	script:Latn	55
+coverage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	script:Zinh	62
+coverage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	script:Zyyy	2540
+coverage	NotoMusic-Regular.ttf	Noto Music	fallback-music	class:math	3
+coverage	NotoMusic-Regular.ttf	Noto Music	fallback-music	class:music	545
+coverage	NotoMusic-Regular.ttf	Noto Music	fallback-music	class:symbols	516
+coverage	NotoMusic-Regular.ttf	Noto Music	fallback-music	script:Grek	70
+coverage	NotoMusic-Regular.ttf	Noto Music	fallback-music	script:Zinh	22
+coverage	NotoMusic-Regular.ttf	Noto Music	fallback-music	script:Zyyy	469
+coverage	NotoZnamennyMusicalNotation-Regular.ttf	Noto Znamenny Musical Notation	fallback-music	class:math	1
+coverage	NotoZnamennyMusicalNotation-Regular.ttf	Noto Znamenny Musical Notation	fallback-music	class:music	185
+coverage	NotoZnamennyMusicalNotation-Regular.ttf	Noto Znamenny Musical Notation	fallback-music	class:symbols	118
+coverage	NotoZnamennyMusicalNotation-Regular.ttf	Noto Znamenny Musical Notation	fallback-music	script:Zinh	69
+coverage	NotoZnamennyMusicalNotation-Regular.ttf	Noto Znamenny Musical Notation	fallback-music	script:Zyyy	119
+coverage	NotoSansSymbols-Regular.ttf	Noto Sans Symbols	fallback-symbols	class:emoji	22
+coverage	NotoSansSymbols-Regular.ttf	Noto Sans Symbols	fallback-symbols	class:math	25
+coverage	NotoSansSymbols-Regular.ttf	Noto Sans Symbols	fallback-symbols	class:pictographic	65
+coverage	NotoSansSymbols-Regular.ttf	Noto Sans Symbols	fallback-symbols	class:symbols	721
+coverage	NotoSansSymbols-Regular.ttf	Noto Sans Symbols	fallback-symbols	script:Latn	92
+coverage	NotoSansSymbols-Regular.ttf	Noto Sans Symbols	fallback-symbols	script:Zinh	7
+coverage	NotoSansSymbols-Regular.ttf	Noto Sans Symbols	fallback-symbols	script:Zyyy	741
+coverage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	class:emoji	202
+coverage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	class:math	58
+coverage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	class:pictographic	350
+coverage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	class:symbols	2502
+coverage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	script:Arab	31
+coverage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	script:Brai	256
+coverage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	script:Grek	80
+coverage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	script:Zinh	4
+coverage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	script:Zyyy	2270
+coverage	NotoSansMayanNumerals-Regular.ttf	Noto Sans Mayan Numerals	fallback-symbols	class:symbols	20
+coverage	NotoSansMayanNumerals-Regular.ttf	Noto Sans Mayan Numerals	fallback-symbols	script:Zyyy	24
+coverage	NotoSansIndicSiyaqNumbers-Regular.ttf	Noto Sans Indic Siyaq Numbers	fallback-symbols	class:symbols	67
+coverage	NotoSansIndicSiyaqNumbers-Regular.ttf	Noto Sans Indic Siyaq Numbers	fallback-symbols	script:Arab	21
+coverage	NotoSansIndicSiyaqNumbers-Regular.ttf	Noto Sans Indic Siyaq Numbers	fallback-symbols	script:Zyyy	72
+coverage	NotoSerifOttomanSiyaq-Regular.ttf	Noto Serif Ottoman Siyaq	fallback-symbols	class:symbols	61
+coverage	NotoSerifOttomanSiyaq-Regular.ttf	Noto Serif Ottoman Siyaq	fallback-symbols	script:Zyyy	61
+coverage	NotoEmoji[wght].ttf	Noto Emoji	fallback-emoji	class:emoji	1205
+coverage	NotoEmoji[wght].ttf	Noto Emoji	fallback-emoji	class:math	20
+coverage	NotoEmoji[wght].ttf	Noto Emoji	fallback-emoji	class:pictographic	1381
+coverage	NotoEmoji[wght].ttf	Noto Emoji	fallback-emoji	class:symbols	1402
+coverage	NotoEmoji[wght].ttf	Noto Emoji	fallback-emoji	script:Zinh	4
+coverage	NotoEmoji[wght].ttf	Noto Emoji	fallback-emoji	script:Zyyy	1464
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	class:emoji	44
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	class:math	2142
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	class:pictographic	131
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	class:symbols	1917
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	script:Arab	2
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	script:Cyrl	106
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	script:Grek	91
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	script:Hira	1
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	script:Latn	674
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	script:Zinh	105
+coverage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	script:Zyyy	3171
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	class:emoji	26
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	class:math	172
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	class:pictographic	75
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	class:symbols	1777
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Bopo	77
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Cyrl	66
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Grek	50
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Hang	208
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Hani	14083
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Hira	90
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Kana	298
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Latn	345
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Zinh	13
+coverage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	script:Zyyy	1512
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	class:emoji	26
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	class:math	172
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	class:pictographic	75
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	class:symbols	1777
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Bopo	77
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Cyrl	66
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Grek	50
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Hang	208
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Hani	28267
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Hira	90
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Kana	298
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Latn	345
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Zinh	13
+coverage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	script:Zyyy	1512
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	class:emoji	26
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	class:math	172
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	class:pictographic	75
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	class:symbols	1777
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Bopo	77
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Cyrl	66
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Grek	50
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Hang	208
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Hani	18104
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Hira	90
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Kana	298
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Latn	345
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Zinh	13
+coverage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	script:Zyyy	1512
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	class:emoji	26
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	class:math	172
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	class:pictographic	75
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	class:symbols	1777
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Bopo	77
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Cyrl	66
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Grek	50
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Hang	11739
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Hani	8995
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Hira	90
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Kana	298
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Latn	345
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Zinh	13
+coverage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	script:Zyyy	1512
+storage	file	face	group	bytes	woff2_bytes	woff2_unpacks	upstream	spdx
+storage	NotoSansArabic-Regular.ttf	Noto Sans Arabic	fallback-scripts	142140	49504	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansArabic/unhinted/ttf/	OFL-1.1
+storage	NotoSansArmenian-Regular.ttf	Noto Sans Armenian	fallback-scripts	18772	7912	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansArmenian/unhinted/ttf/	OFL-1.1
+storage	NotoSansBengali-Regular.ttf	Noto Sans Bengali	fallback-scripts	103704	43076	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansBengali/unhinted/ttf/	OFL-1.1
+storage	NotoSans-Regular.ttf	Noto Sans	fallback-scripts	431364	150904	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSans/unhinted/ttf/	OFL-1.1
+storage	NotoSansDevanagari-Regular.ttf	Noto Sans Devanagari	fallback-scripts	184228	54568	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansDevanagari/unhinted/ttf/	OFL-1.1
+storage	NotoSansEthiopic-Regular.ttf	Noto Sans Ethiopic	fallback-scripts	289244	72360	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansEthiopic/unhinted/ttf/	OFL-1.1
+storage	NotoSansGeorgian-Regular.ttf	Noto Sans Georgian	fallback-scripts	35300	15844	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansGeorgian/unhinted/ttf/	OFL-1.1
+storage	NotoSansGujarati-Regular.ttf	Noto Sans Gujarati	fallback-scripts	142760	38556	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansGujarati/unhinted/ttf/	OFL-1.1
+storage	NotoSansGurmukhi-Regular.ttf	Noto Sans Gurmukhi	fallback-scripts	35956	14704	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansGurmukhi/unhinted/ttf/	OFL-1.1
+storage	NotoSansHebrew-Regular.ttf	Noto Sans Hebrew	fallback-scripts	16836	6924	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansHebrew/unhinted/ttf/	OFL-1.1
+storage	NotoSansKannada-Regular.ttf	Noto Sans Kannada	fallback-scripts	135488	36284	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansKannada/unhinted/ttf/	OFL-1.1
+storage	NotoSansKhmer-Regular.ttf	Noto Sans Khmer	fallback-scripts	67784	17940	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansKhmer/unhinted/ttf/	OFL-1.1
+storage	NotoSansLao-Regular.ttf	Noto Sans Lao	fallback-scripts	21720	8968	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansLao/unhinted/ttf/	OFL-1.1
+storage	NotoSansMalayalam-Regular.ttf	Noto Sans Malayalam	fallback-scripts	77312	26952	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMalayalam/unhinted/ttf/	OFL-1.1
+storage	NotoSansMyanmar-Regular.ttf	Noto Sans Myanmar	fallback-scripts	148628	51148	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMyanmar/unhinted/ttf/	OFL-1.1
+storage	NotoSansOriya-Regular.ttf	Noto Sans Oriya	fallback-scripts	131216	41460	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOriya/unhinted/ttf/	OFL-1.1
+storage	NotoSansSinhala-Regular.ttf	Noto Sans Sinhala	fallback-scripts	90296	28844	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSinhala/unhinted/ttf/	OFL-1.1
+storage	NotoSansTamil-Regular.ttf	Noto Sans Tamil	fallback-scripts	46600	17596	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTamil/unhinted/ttf/	OFL-1.1
+storage	NotoSansTelugu-Regular.ttf	Noto Sans Telugu	fallback-scripts	165212	44348	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTelugu/unhinted/ttf/	OFL-1.1
+storage	NotoSansThaana-Regular.ttf	Noto Sans Thaana	fallback-scripts	27308	12932	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansThaana/unhinted/ttf/	OFL-1.1
+storage	NotoSansThai-Regular.ttf	Noto Sans Thai	fallback-scripts	20960	9204	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansThai/unhinted/ttf/	OFL-1.1
+storage	NotoSerifTibetan-Regular.ttf	Noto Serif Tibetan	fallback-scripts	609640	161956	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifTibetan/unhinted/ttf/	OFL-1.1
+storage	NotoSansAdlam-Regular.ttf	Noto Sans Adlam	fallback-scripts-limited	60276	17272	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansAdlam/unhinted/ttf/	OFL-1.1
+storage	NotoSansBalinese-Regular.ttf	Noto Sans Balinese	fallback-scripts-limited	92380	30576	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansBalinese/unhinted/ttf/	OFL-1.1
+storage	NotoSansBamum-Regular.ttf	Noto Sans Bamum	fallback-scripts-limited	149152	76548	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansBamum/unhinted/ttf/	OFL-1.1
+storage	NotoSansBatak-Regular.ttf	Noto Sans Batak	fallback-scripts-limited	21860	9272	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansBatak/unhinted/ttf/	OFL-1.1
+storage	NotoSansChakma-Regular.ttf	Noto Sans Chakma	fallback-scripts-limited	56784	23168	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansChakma/unhinted/ttf/	OFL-1.1
+storage	NotoSansCanadianAboriginal-Regular.ttf	Noto Sans Canadian Aboriginal	fallback-scripts-limited	94888	21900	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansCanadianAboriginal/unhinted/ttf/	OFL-1.1
+storage	NotoSansCham-Regular.ttf	Noto Sans Cham	fallback-scripts-limited	32036	12532	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansCham/unhinted/ttf/	OFL-1.1
+storage	NotoSansCherokee-Regular.ttf	Noto Sans Cherokee	fallback-scripts-limited	65168	28224	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansCherokee/unhinted/ttf/	OFL-1.1
+storage	NotoSerifNPHmong-Regular.ttf	Noto Serif NP Hmong	fallback-scripts-limited	15072	6952	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifNPHmong/unhinted/ttf/	OFL-1.1
+storage	NotoSansJavanese-Regular.ttf	Noto Sans Javanese	fallback-scripts-limited	120456	34480	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansJavanese/unhinted/ttf/	OFL-1.1
+storage	NotoSansKayahLi-Regular.ttf	Noto Sans Kayah Li	fallback-scripts-limited	9272	4180	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansKayahLi/unhinted/ttf/	OFL-1.1
+storage	NotoSansTaiTham-Regular.ttf	Noto Sans Tai Tham	fallback-scripts-limited	116880	41756	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTaiTham/unhinted/ttf/	OFL-1.1
+storage	NotoSansLepcha-Regular.ttf	Noto Sans Lepcha	fallback-scripts-limited	26036	11240	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansLepcha/unhinted/ttf/	OFL-1.1
+storage	NotoSansLimbu-Regular.ttf	Noto Sans Limbu	fallback-scripts-limited	12804	6900	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansLimbu/unhinted/ttf/	OFL-1.1
+storage	NotoSansLisu-Regular.ttf	Noto Sans Lisu	fallback-scripts-limited	6388	2876	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansLisu/unhinted/ttf/	OFL-1.1
+storage	NotoSansMandaic-Regular.ttf	Noto Sans Mandaic	fallback-scripts-limited	19112	6796	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMandaic/unhinted/ttf/	OFL-1.1
+storage	NotoSansMeeteiMayek-Regular.ttf	Noto Sans Meetei Mayek	fallback-scripts-limited	16536	8560	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMeeteiMayek/unhinted/ttf/	OFL-1.1
+storage	NotoSansNewa-Regular.ttf	Noto Sans Newa	fallback-scripts-limited	152664	51172	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansNewa/unhinted/ttf/	OFL-1.1
+storage	NotoSansNKo-Regular.ttf	Noto Sans NKo	fallback-scripts-limited	24608	8188	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansNKo/unhinted/ttf/	OFL-1.1
+storage	NotoSansOlChiki-Regular.ttf	Noto Sans Ol Chiki	fallback-scripts-limited	8564	4652	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOlChiki/unhinted/ttf/	OFL-1.1
+storage	NotoSansOsage-Regular.ttf	Noto Sans Osage	fallback-scripts-limited	12188	5480	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOsage/unhinted/ttf/	OFL-1.1
+storage	NotoSansMiao-Regular.ttf	Noto Sans Miao	fallback-scripts-limited	37524	12064	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMiao/unhinted/ttf/	OFL-1.1
+storage	NotoSansHanifiRohingya-Regular.ttf	Noto Sans Hanifi Rohingya	fallback-scripts-limited	19404	6784	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansHanifiRohingya/unhinted/ttf/	OFL-1.1
+storage	NotoSansSaurashtra-Regular.ttf	Noto Sans Saurashtra	fallback-scripts-limited	19768	10696	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSaurashtra/unhinted/ttf/	OFL-1.1
+storage	NotoSansSundanese-Regular.ttf	Noto Sans Sundanese	fallback-scripts-limited	11424	5108	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSundanese/unhinted/ttf/	OFL-1.1
+storage	NotoSansSylotiNagri-Regular.ttf	Noto Sans Syloti Nagri	fallback-scripts-limited	16692	8432	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSylotiNagri/unhinted/ttf/	OFL-1.1
+storage	NotoSansSyriac-Regular.ttf	Noto Sans Syriac	fallback-scripts-limited	53584	16892	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSyriac/unhinted/ttf/	OFL-1.1
+storage	NotoSansTaiLe-Regular.ttf	Noto Sans Tai Le	fallback-scripts-limited	11796	5684	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTaiLe/unhinted/ttf/	OFL-1.1
+storage	NotoSansNewTaiLue-Regular.ttf	Noto Sans New Tai Lue	fallback-scripts-limited	20240	7464	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansNewTaiLue/unhinted/ttf/	OFL-1.1
+storage	NotoSansTaiViet-Regular.ttf	Noto Sans Tai Viet	fallback-scripts-limited	17912	8608	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTaiViet/unhinted/ttf/	OFL-1.1
+storage	NotoSansTifinagh-Regular.ttf	Noto Sans Tifinagh	fallback-scripts-limited	59124	19448	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTifinagh/unhinted/ttf/	OFL-1.1
+storage	NotoSansVai-Regular.ttf	Noto Sans Vai	fallback-scripts-limited	54956	16020	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansVai/unhinted/ttf/	OFL-1.1
+storage	NotoSansWancho-Regular.ttf	Noto Sans Wancho	fallback-scripts-limited	18400	8516	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansWancho/unhinted/ttf/	OFL-1.1
+storage	NotoSansYi-Regular.ttf	Noto Sans Yi	fallback-scripts-limited	182988	57440	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansYi/unhinted/ttf/	OFL-1.1
+storage	NotoSansCaucasianAlbanian-Regular.ttf	Noto Sans Caucasian Albanian	fallback-scripts-historic	24752	7220	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansCaucasianAlbanian/unhinted/ttf/	OFL-1.1
+storage	NotoSerifAhom-Regular.ttf	Noto Serif Ahom	fallback-scripts-historic	21212	9732	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifAhom/unhinted/ttf/	OFL-1.1
+storage	NotoSansImperialAramaic-Regular.ttf	Noto Sans Imperial Aramaic	fallback-scripts-historic	6212	3444	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansImperialAramaic/unhinted/ttf/	OFL-1.1
+storage	NotoSansAvestan-Regular.ttf	Noto Sans Avestan	fallback-scripts-historic	12504	5832	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansAvestan/unhinted/ttf/	OFL-1.1
+storage	NotoSansBassaVah-Regular.ttf	Noto Sans Bassa Vah	fallback-scripts-historic	8068	3788	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansBassaVah/unhinted/ttf/	OFL-1.1
+storage	NotoSansBhaiksuki-Regular.ttf	Noto Sans Bhaiksuki	fallback-scripts-historic	232524	60692	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansBhaiksuki/unhinted/ttf/	OFL-1.1
+storage	NotoSansBrahmi-Regular.ttf	Noto Sans Brahmi	fallback-scripts-historic	46972	18344	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansBrahmi/unhinted/ttf/	OFL-1.1
+storage	NotoSansBuginese-Regular.ttf	Noto Sans Buginese	fallback-scripts-historic	7184	3448	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansBuginese/unhinted/ttf/	OFL-1.1
+storage	NotoSansBuhid-Regular.ttf	Noto Sans Buhid	fallback-scripts-historic	5268	2152	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansBuhid/unhinted/ttf/	OFL-1.1
+storage	NotoSansCarian-Regular.ttf	Noto Sans Carian	fallback-scripts-historic	6272	3064	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansCarian/unhinted/ttf/	OFL-1.1
+storage	NotoSansChorasmian-Regular.ttf	Noto Sans Chorasmian	fallback-scripts-historic	17356	6420	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansChorasmian/unhinted/ttf/	OFL-1.1
+storage	NotoSansCoptic-Regular.ttf	Noto Sans Coptic	fallback-scripts-historic	31368	13880	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansCoptic/unhinted/ttf/	OFL-1.1
+storage	NotoSansCyproMinoan-Regular.ttf	Noto Sans Cypro Minoan	fallback-scripts-historic	12504	5160	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansCyproMinoan/unhinted/ttf/	OFL-1.1
+storage	NotoSansCypriot-Regular.ttf	Noto Sans Cypriot	fallback-scripts-historic	7932	4012	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansCypriot/unhinted/ttf/	OFL-1.1
+storage	NotoSerifDivesAkuru-Regular.ttf	Noto Serif Dives Akuru	fallback-scripts-historic	302744	79844	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifDivesAkuru/unhinted/ttf/	OFL-1.1
+storage	NotoSerifDogra-Regular.ttf	Noto Serif Dogra	fallback-scripts-historic	28800	12352	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifDogra/unhinted/ttf/	OFL-1.1
+storage	NotoSansDeseret-Regular.ttf	Noto Sans Deseret	fallback-scripts-historic	10692	5352	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansDeseret/unhinted/ttf/	OFL-1.1
+storage	NotoSansDuployan-Regular.ttf	Noto Sans Duployan	fallback-scripts-historic	1977212	363044	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansDuployan/unhinted/ttf/	OFL-1.1
+storage	NotoSansEgyptianHieroglyphs-Regular.ttf	Noto Sans Egyptian Hieroglyphs	fallback-scripts-historic	585872	270092	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansEgyptianHieroglyphs/unhinted/ttf/	OFL-1.1
+storage	NotoSansElbasan-Regular.ttf	Noto Sans Elbasan	fallback-scripts-historic	11012	5368	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansElbasan/unhinted/ttf/	OFL-1.1
+storage	NotoSansElymaic-Regular.ttf	Noto Sans Elymaic	fallback-scripts-historic	8884	4660	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansElymaic/unhinted/ttf/	OFL-1.1
+storage	NotoSansGlagolitic-Regular.ttf	Noto Sans Glagolitic	fallback-scripts-historic	23836	10876	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansGlagolitic/unhinted/ttf/	OFL-1.1
+storage	NotoSansGunjalaGondi-Regular.ttf	Noto Sans Gunjala Gondi	fallback-scripts-historic	69836	17780	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansGunjalaGondi/unhinted/ttf/	OFL-1.1
+storage	NotoSansMasaramGondi-Regular.ttf	Noto Sans Masaram Gondi	fallback-scripts-historic	30628	11260	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMasaramGondi/unhinted/ttf/	OFL-1.1
+storage	NotoSansGothic-Regular.ttf	Noto Sans Gothic	fallback-scripts-historic	6208	2976	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansGothic/unhinted/ttf/	OFL-1.1
+storage	NotoSansGrantha-Regular.ttf	Noto Sans Grantha	fallback-scripts-historic	284888	76720	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansGrantha/unhinted/ttf/	OFL-1.1
+storage	NotoSansHanunoo-Regular.ttf	Noto Sans Hanunoo	fallback-scripts-historic	7620	3592	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansHanunoo/unhinted/ttf/	OFL-1.1
+storage	NotoSansHatran-Regular.ttf	Noto Sans Hatran	fallback-scripts-historic	4708	2088	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansHatran/unhinted/ttf/	OFL-1.1
+storage	NotoSansAnatolianHieroglyphs-Regular.ttf	Noto Sans Anatolian Hieroglyphs	fallback-scripts-historic	228124	110560	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansAnatolianHieroglyphs/unhinted/ttf/	OFL-1.1
+storage	NotoSansPahawhHmong-Regular.ttf	Noto Sans Pahawh Hmong	fallback-scripts-historic	18120	8156	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansPahawhHmong/unhinted/ttf/	OFL-1.1
+storage	NotoSansOldHungarian-Regular.ttf	Noto Sans Old Hungarian	fallback-scripts-historic	53612	17840	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOldHungarian/unhinted/ttf/	OFL-1.1
+storage	NotoSansOldItalic-Regular.ttf	Noto Sans Old Italic	fallback-scripts-historic	7220	3612	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOldItalic/unhinted/ttf/	OFL-1.1
+storage	NotoSansKawi-Regular.ttf	Noto Sans Kawi	fallback-scripts-historic	39796	15660	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansKawi/unhinted/ttf/	OFL-1.1
+storage	NotoSansKharoshthi-Regular.ttf	Noto Sans Kharoshthi	fallback-scripts-historic	34204	16804	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansKharoshthi/unhinted/ttf/	OFL-1.1
+storage	NotoSansKhojki-Regular.ttf	Noto Sans Khojki	fallback-scripts-historic	44552	18048	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansKhojki/unhinted/ttf/	OFL-1.1
+storage	NotoSerifKhitanSmallScript-Regular.ttf	Noto Serif Khitan Small Script	fallback-scripts-historic	609184	141540	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifKhitanSmallScript/unhinted/ttf/	OFL-1.1
+storage	NotoSansKaithi-Regular.ttf	Noto Sans Kaithi	fallback-scripts-historic	69684	23704	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansKaithi/unhinted/ttf/	OFL-1.1
+storage	NotoSansLinearA-Regular.ttf	Noto Sans Linear A	fallback-scripts-historic	57832	23632	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansLinearA/unhinted/ttf/	OFL-1.1
+storage	NotoSansLinearB-Regular.ttf	Noto Sans Linear B	fallback-scripts-historic	62548	27664	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansLinearB/unhinted/ttf/	OFL-1.1
+storage	NotoSansLycian-Regular.ttf	Noto Sans Lycian	fallback-scripts-historic	4152	2068	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansLycian/unhinted/ttf/	OFL-1.1
+storage	NotoSansLydian-Regular.ttf	Noto Sans Lydian	fallback-scripts-historic	4680	2292	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansLydian/unhinted/ttf/	OFL-1.1
+storage	NotoSerifMakasar-Regular.ttf	Noto Serif Makasar	fallback-scripts-historic	6944	3364	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifMakasar/unhinted/ttf/	OFL-1.1
+storage	NotoSansMahajani-Regular.ttf	Noto Sans Mahajani	fallback-scripts-historic	13780	6868	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMahajani/unhinted/ttf/	OFL-1.1
+storage	NotoSansManichaean-Regular.ttf	Noto Sans Manichaean	fallback-scripts-historic	31156	9796	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansManichaean/unhinted/ttf/	OFL-1.1
+storage	NotoSansMarchen-Regular.ttf	Noto Sans Marchen	fallback-scripts-historic	127388	26320	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMarchen/unhinted/ttf/	OFL-1.1
+storage	NotoSansMedefaidrin-Regular.ttf	Noto Sans Medefaidrin	fallback-scripts-historic	30432	13392	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMedefaidrin/unhinted/ttf/	OFL-1.1
+storage	NotoSansMendeKikakui-Regular.ttf	Noto Sans Mende Kikakui	fallback-scripts-historic	35148	13396	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMendeKikakui/unhinted/ttf/	OFL-1.1
+storage	NotoSansMeroitic-Regular.ttf	Noto Sans Meroitic	fallback-scripts-historic	33384	13228	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMeroitic/unhinted/ttf/	OFL-1.1
+storage	NotoSansModi-Regular.ttf	Noto Sans Modi	fallback-scripts-historic	44172	20152	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansModi/unhinted/ttf/	OFL-1.1
+storage	NotoSansMongolian-Regular.ttf	Noto Sans Mongolian	fallback-scripts-historic	342708	71952	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMongolian/unhinted/ttf/	OFL-1.1
+storage	NotoSansMro-Regular.ttf	Noto Sans Mro	fallback-scripts-historic	6580	3512	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMro/unhinted/ttf/	OFL-1.1
+storage	NotoSansMultani-Regular.ttf	Noto Sans Multani	fallback-scripts-historic	9676	5444	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMultani/unhinted/ttf/	OFL-1.1
+storage	NotoSansNagMundari-Regular.ttf	Noto Sans Nag Mundari	fallback-scripts-historic	10676	5868	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansNagMundari/unhinted/ttf/	OFL-1.1
+storage	NotoSansOldNorthArabian-Regular.ttf	Noto Sans Old North Arabian	fallback-scripts-historic	6916	3388	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOldNorthArabian/unhinted/ttf/	OFL-1.1
+storage	NotoSansNandinagari-Regular.ttf	Noto Sans Nandinagari	fallback-scripts-historic	135316	41764	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansNandinagari/unhinted/ttf/	OFL-1.1
+storage	NotoSansNabataean-Regular.ttf	Noto Sans Nabataean	fallback-scripts-historic	8000	4132	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansNabataean/unhinted/ttf/	OFL-1.1
+storage	NotoSansNushu-Regular.ttf	Noto Sans Nushu	fallback-scripts-historic	116228	51308	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansNushu/unhinted/ttf/	OFL-1.1
+storage	NotoSansOgham-Regular.ttf	Noto Sans Ogham	fallback-scripts-historic	4348	1460	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOgham/unhinted/ttf/	OFL-1.1
+storage	NotoSansOldTurkic-Regular.ttf	Noto Sans Old Turkic	fallback-scripts-historic	8252	3960	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOldTurkic/unhinted/ttf/	OFL-1.1
+storage	NotoSansOsmanya-Regular.ttf	Noto Sans Osmanya	fallback-scripts-historic	8204	4320	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOsmanya/unhinted/ttf/	OFL-1.1
+storage	NotoSerifOldUyghur-Regular.ttf	Noto Serif Old Uyghur	fallback-scripts-historic	20404	8880	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifOldUyghur/unhinted/ttf/	OFL-1.1
+storage	NotoSansPalmyrene-Regular.ttf	Noto Sans Palmyrene	fallback-scripts-historic	15332	5360	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansPalmyrene/unhinted/ttf/	OFL-1.1
+storage	NotoSansPauCinHau-Regular.ttf	Noto Sans Pau Cin Hau	fallback-scripts-historic	9048	4124	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansPauCinHau/unhinted/ttf/	OFL-1.1
+storage	NotoSansOldPermic-Regular.ttf	Noto Sans Old Permic	fallback-scripts-historic	9648	4260	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOldPermic/unhinted/ttf/	OFL-1.1
+storage	NotoSansPhagsPa-Regular.ttf	Noto Sans Phags Pa	fallback-scripts-historic	39668	11888	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansPhagsPa/unhinted/ttf/	OFL-1.1
+storage	NotoSansInscriptionalPahlavi-Regular.ttf	Noto Sans Inscriptional Pahlavi	fallback-scripts-historic	5648	2912	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansInscriptionalPahlavi/unhinted/ttf/	OFL-1.1
+storage	NotoSansPsalterPahlavi-Regular.ttf	Noto Sans Psalter Pahlavi	fallback-scripts-historic	21224	7148	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansPsalterPahlavi/unhinted/ttf/	OFL-1.1
+storage	NotoSansPhoenician-Regular.ttf	Noto Sans Phoenician	fallback-scripts-historic	5864	3376	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansPhoenician/unhinted/ttf/	OFL-1.1
+storage	NotoSansInscriptionalParthian-Regular.ttf	Noto Sans Inscriptional Parthian	fallback-scripts-historic	7508	3804	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansInscriptionalParthian/unhinted/ttf/	OFL-1.1
+storage	NotoSansRejang-Regular.ttf	Noto Sans Rejang	fallback-scripts-historic	7704	3376	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansRejang/unhinted/ttf/	OFL-1.1
+storage	NotoSansRunic-Regular.ttf	Noto Sans Runic	fallback-scripts-historic	9808	4136	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansRunic/unhinted/ttf/	OFL-1.1
+storage	NotoSansSamaritan-Regular.ttf	Noto Sans Samaritan	fallback-scripts-historic	10740	5568	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSamaritan/unhinted/ttf/	OFL-1.1
+storage	NotoSansOldSouthArabian-Regular.ttf	Noto Sans Old South Arabian	fallback-scripts-historic	4964	2204	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOldSouthArabian/unhinted/ttf/	OFL-1.1
+storage	NotoSansSignWriting-Regular.ttf	Noto Sans Sign Writing	fallback-scripts-historic	5214876	869240	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSignWriting/unhinted/ttf/	OFL-1.1
+storage	NotoSansShavian-Regular.ttf	Noto Sans Shavian	fallback-scripts-historic	6328	3240	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansShavian/unhinted/ttf/	OFL-1.1
+storage	NotoSansSharada-Regular.ttf	Noto Sans Sharada	fallback-scripts-historic	53324	22260	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSharada/unhinted/ttf/	OFL-1.1
+storage	NotoSansSiddham-Regular.ttf	Noto Sans Siddham	fallback-scripts-historic	144800	47540	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSiddham/unhinted/ttf/	OFL-1.1
+storage	NotoSansKhudawadi-Regular.ttf	Noto Sans Khudawadi	fallback-scripts-historic	18684	9036	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansKhudawadi/unhinted/ttf/	OFL-1.1
+storage	NotoSansSoraSompeng-Regular.ttf	Noto Sans Sora Sompeng	fallback-scripts-historic	8000	4028	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSoraSompeng/unhinted/ttf/	OFL-1.1
+storage	NotoSansSogdian-Regular.ttf	Noto Sans Sogdian	fallback-scripts-historic	72128	22716	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSogdian/unhinted/ttf/	OFL-1.1
+storage	NotoSansOldSogdian-Regular.ttf	Noto Sans Old Sogdian	fallback-scripts-historic	17696	6808	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOldSogdian/unhinted/ttf/	OFL-1.1
+storage	NotoSansSoyombo-Regular.ttf	Noto Sans Soyombo	fallback-scripts-historic	66308	21232	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSoyombo/unhinted/ttf/	OFL-1.1
+storage	NotoSansSunuwar-Regular.ttf	Noto Sans Sunuwar	fallback-scripts-historic	14596	7160	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSunuwar/unhinted/ttf/	OFL-1.1
+storage	NotoSansTagbanwa-Regular.ttf	Noto Sans Tagbanwa	fallback-scripts-historic	5892	3052	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTagbanwa/unhinted/ttf/	OFL-1.1
+storage	NotoSansTakri-Regular.ttf	Noto Sans Takri	fallback-scripts-historic	18456	8752	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTakri/unhinted/ttf/	OFL-1.1
+storage	NotoSerifTangut-Regular.ttf	Noto Serif Tangut	fallback-scripts-historic	3065476	1019788	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifTangut/unhinted/ttf/	OFL-1.1
+storage	NotoSansTagalog-Regular.ttf	Noto Sans Tagalog	fallback-scripts-historic	7012	3600	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTagalog/unhinted/ttf/	OFL-1.1
+storage	NotoSansTirhuta-Regular.ttf	Noto Sans Tirhuta	fallback-scripts-historic	70044	30648	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTirhuta/unhinted/ttf/	OFL-1.1
+storage	NotoSansTangsa-Regular.ttf	Noto Sans Tangsa	fallback-scripts-historic	23056	10916	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansTangsa/unhinted/ttf/	OFL-1.1
+storage	NotoSerifTodhri-Regular.ttf	Noto Serif Todhri	fallback-scripts-historic	11104	5744	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifTodhri/unhinted/ttf/	OFL-1.1
+storage	NotoSerifToto-Regular.ttf	Noto Serif Toto	fallback-scripts-historic	7000	3180	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifToto/unhinted/ttf/	OFL-1.1
+storage	NotoSansUgaritic-Regular.ttf	Noto Sans Ugaritic	fallback-scripts-historic	6968	2752	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansUgaritic/unhinted/ttf/	OFL-1.1
+storage	NotoSansVithkuqi-Regular.ttf	Noto Sans Vithkuqi	fallback-scripts-historic	18500	9416	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansVithkuqi/unhinted/ttf/	OFL-1.1
+storage	NotoSansWarangCiti-Regular.ttf	Noto Sans Warang Citi	fallback-scripts-historic	27268	11944	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansWarangCiti/unhinted/ttf/	OFL-1.1
+storage	NotoSansOldPersian-Regular.ttf	Noto Sans Old Persian	fallback-scripts-historic	12440	4868	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansOldPersian/unhinted/ttf/	OFL-1.1
+storage	NotoSansCuneiform-Regular.ttf	Noto Sans Cuneiform	fallback-scripts-historic	819932	299576	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansCuneiform/unhinted/ttf/	OFL-1.1
+storage	NotoSerifYezidi-Regular.ttf	Noto Serif Yezidi	fallback-scripts-historic	12116	4576	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifYezidi/unhinted/ttf/	OFL-1.1
+storage	NotoSansZanabazarSquare-Regular.ttf	Noto Sans Zanabazar Square	fallback-scripts-historic	20548	6656	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansZanabazarSquare/unhinted/ttf/	OFL-1.1
+storage	NotoSansMath-Regular.ttf	Noto Sans Math	fallback-math	657440	245784	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMath/unhinted/ttf/	OFL-1.1
+storage	NotoMusic-Regular.ttf	Noto Music	fallback-music	80716	35356	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoMusic/unhinted/ttf/	OFL-1.1
+storage	NotoZnamennyMusicalNotation-Regular.ttf	Noto Znamenny Musical Notation	fallback-music	45376	11084	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoZnamennyMusicalNotation/unhinted/ttf/	OFL-1.1
+storage	NotoSansSymbols-Regular.ttf	Noto Sans Symbols	fallback-symbols	145508	54860	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSymbols/unhinted/ttf/	OFL-1.1
+storage	NotoSansSymbols2-Regular.ttf	Noto Sans Symbols 2	fallback-symbols	671568	232944	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansSymbols2/unhinted/ttf/	OFL-1.1
+storage	NotoSansMayanNumerals-Regular.ttf	Noto Sans Mayan Numerals	fallback-symbols	4396	1280	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansMayanNumerals/unhinted/ttf/	OFL-1.1
+storage	NotoSansIndicSiyaqNumbers-Regular.ttf	Noto Sans Indic Siyaq Numbers	fallback-symbols	22344	9504	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSansIndicSiyaqNumbers/unhinted/ttf/	OFL-1.1
+storage	NotoSerifOttomanSiyaq-Regular.ttf	Noto Serif Ottoman Siyaq	fallback-symbols	19220	5532	yes	https://github.com/notofonts/notofonts.github.io at 3460ae9 fonts/NotoSerifOttomanSiyaq/unhinted/ttf/	OFL-1.1
+storage	NotoEmoji[wght].ttf	Noto Emoji	fallback-emoji	1982596	1052324	yes	https://github.com/google/fonts at 29b4ec6 ofl/notoemoji/	OFL-1.1
+storage	STIXTwoMath-Regular.ttf	STIX Two Math	fallback-math	1517976	559132	yes	https://github.com/google/fonts at 29b4ec6 ofl/stixtwomath/	OFL-1.1
+storage	SourceHanSansJP-Regular.otf	Source Han Sans JP	cjk-fonts	4562224	3399196	yes	https://github.com/adobe-fonts/source-han-sans release 2.005R SubsetOTF/JP/	OFL-1.1
+storage	SourceHanSansCN-Regular.otf	Source Han Sans CN	cjk-fonts	8429224	6200108	yes	https://github.com/adobe-fonts/source-han-sans release 2.005R SubsetOTF/CN/	OFL-1.1
+storage	SourceHanSansTW-Regular.otf	Source Han Sans TW	cjk-fonts	5730540	4236308	yes	https://github.com/adobe-fonts/source-han-sans release 2.005R SubsetOTF/TW/	OFL-1.1
+storage	SourceHanSansKR-Regular.otf	Source Han Sans KR	cjk-fonts	4632304	3182156	yes	https://github.com/adobe-fonts/source-han-sans release 2.005R SubsetOTF/KR/	OFL-1.1
+group	name	faces	bytes	woff2_bytes
+group	fallback-scripts	22	2942468	911984
+group	fallback-scripts-limited	34	1636936	595880
+group	fallback-scripts-historic	98	15916196	4234160
+group	fallback-emoji	1	1982596	1052324
+group	fallback-math	1	657440	245784
+group	fallback-music	2	126092	46440
+group	fallback-symbols	5	863036	304120
+group	cjk-fonts	4	23354292	17017768

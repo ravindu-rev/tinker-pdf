@@ -481,14 +481,16 @@ region, so step 2 chooses among FT-01's faces by the caller's BCP 47 tag:
 subtag, or with the region `TW`, `HK` or `MO`, the Traditional Chinese face;
 any other `zh` the Simplified Chinese face. Without a tag, the font's
 character collection chooses, as `Region::of` reads it for FT-01; with
-neither, the four faces are asked in the order of how many of the script's
-characters each covers, most first, by FT-02.2's census, and the first that
-covers `c` draws it. Hiragana and Katakana prefer the Japanese face, Hangul
-the Korean and Bopomofo the Traditional Chinese, before the rest, whatever
-the tag. Every other script has one face here, so a language changes its
-form only through the face's own `locl` lookups, which the producing path's
-shaper runs under the OpenType language system the tag names (FT-15); the
-reading path, which does not shape, draws the default forms.
+neither, the four faces are asked in the order of how many Han characters
+each covers, most first, by FT-02.2's census — Simplified Chinese,
+Traditional Chinese, Japanese, Korean, by `fallback_coverage.tsv` — and the
+first that covers `c` draws it. Hiragana and Katakana prefer the Japanese
+face, Hangul the Korean and Bopomofo the Traditional Chinese, before the rest
+in Han's order, whatever the tag. Every other script has one face here, so a
+language changes its form only through the face's own `locl` lookups, which
+the producing path's shaper runs under the OpenType language system the tag
+names (FT-15); the reading path, which does not shape, draws the default
+forms.
 
 **Where the producing path takes the language.** From the element's computed
 style: the `lang` and `xml:lang` FT-15 resolves and carries into layout's
@@ -713,10 +715,11 @@ The class groups, each a feature of its own:
 
 All of them are `OFL-1.1`. Of the two mathematics candidates the group
 carries one: the one whose `cmap` covers the most `Math` characters by
-FT-02.2's census, and of two that cover as many the smaller stored. Every
-other group carries all its candidates, which serve different characters.
-`fallback-fonts` turns all seven groups on; `bundled-fonts` turns none of
-them on, so the bundled profile grows by FT-01's faces alone.
+FT-02.2's census, and of two that cover as many the smaller stored — Noto
+Sans Math, by `fallback_coverage.tsv`. Every other group carries all its
+candidates, which serve different characters. `fallback-fonts` turns all
+seven groups on; `bundled-fonts` turns none of them on, so the bundled
+profile grows by FT-01's faces alone.
 
 **The storage form, and where the faces live.** As FT-01's: WOFF2, the
 reference encoder's, named with its version in each face's provenance, made
@@ -748,33 +751,44 @@ reports it by name where the script is reported. An embedded font's missing
 glyph is the font's own: neither path asks the lookup for it.
 
 **The census** (FT-02.2) prices the faces and chooses none of them but the
-mathematics face, by the rule above. `crates/tinker-pdf/tests/fallback_coverage.rs`,
-`#[ignore]`d, `fallback_face_coverage_census`, reads each candidate of the
-tables above from the directory `TINKER_FALLBACK_FACES` names — and FT-01's
-four region faces, which step 2 orders by it — and each one's WOFF2 form from
-the same directory under its stem with `.woff2`. It prints `RAN` and two
-tables, each row led by its table's name, or `SKIPPED`: `coverage`, a row for
-each face and each `Script` value and class its `cmap` covers any character
-of, with the count it covers and the count the value or class holds; and
-`storage`, a row for each face, its bytes as published and as WOFF2, and a
-row for each group, its faces' WOFF2 bytes together, the bytes it adds to a
-native build. Its rows are `crates/tinker-pdf/tests/fallback_coverage.tsv`
-(ruling 16), held whole by `the_committed_census_is_whole`, and each group's
-gzipped wasm, built as `release.yml` builds the default profile with a
-scratch feature that carries the group's WOFF2 files, is `fallback_sizes.tsv`
-beside it. Each run's revision, machine and day go in its commit's message.
+mathematics face, by the rule above. `fallback_face_coverage_census`,
+`#[ignore]`d in `crates/tinker-pdf/tests/fallback_coverage.rs`, reads each
+candidate of the tables above from the directory `TINKER_FALLBACK_FACES`
+names — and FT-01's four region faces, which step 2 orders by it — and each
+one's WOFF2 form from the same directory under its stem with `.woff2`. It
+prints `RAN` and four tables, each row led by its table's name, or
+`SKIPPED`: `value`, each `Script` value and class and the characters it
+holds; `coverage`, a row for each face and each value or class its `cmap`
+covers any character of, with the count it covers; `storage`, a row for each
+face, its bytes as published and as WOFF2 and whether that form unpacks
+through `woff.rs` to the face; and `group`, a row for each group, the faces
+it carries — every candidate, but of the mathematics candidates the one the
+rule chooses — and their bytes together, published and as WOFF2, the second
+the bytes the group adds to a native build. Its rows are
+`crates/tinker-pdf/tests/fallback_coverage.tsv` (ruling 16), held whole and
+adding up by `the_committed_census_is_whole`, and
+`the_designs_outcomes_are_the_records` holds the mathematics face and Han's
+order above to its counts. Each group's gzipped wasm, `bindings/js` built as
+`release.yml` builds the default profile with a scratch feature that carries
+the WOFF2 forms its `group` row counts, goes in `fallback_sizes.tsv` beside
+it, after the default profile's of the same revision: the census builds no
+wasm. `the_committed_wasm_sizes_are_whole` holds a row for each group, past
+the default's by at least 99 in 100 of the group's WOFF2 bytes, which gzip
+does not shrink, so a build whose linker dropped the faces fails. Each run's
+revision, machine and day go in its commit's message.
 
 **The page-per-script proof, and what "no `.notdef`" is measured by.** For
 every script the tables give a face, and for each class group, FT-02.5
 generates a Markdown page and opens it with `Document::open_markdown`, the
 features on: the first 64 of the script's letters — `General_Category` `L`,
 in code point order — that its face covers, or the first 64 of the class's
-characters its group's faces cover. "No `.notdef`" is three facts of that document: no font it embeds is
-shown glyph 0 anywhere on the page, read from the page's own text-showing
-operators through the font's encoding; the producing path's `Fonts::uncovered`
-counts no character; and the page renders reporting nothing. The reading
-path's twin is FT-02.6's page of an unembedded font whose `/Differences`
-name characters of drawn scripts and of reported ones.
+characters its group's faces cover. "No `.notdef`" is three facts of that
+document: no font it embeds is shown glyph 0 anywhere on the page, read from
+the page's own text-showing operators through the font's encoding; the
+producing path's `Fonts::uncovered` counts no character; and the page
+renders reporting nothing. The reading path's twin is FT-02.6's page of an
+unembedded font whose `/Differences` name characters of drawn scripts and of
+reported ones.
 
 ### Milestones
 
@@ -782,9 +796,10 @@ name characters of drawn scripts and of reported ones.
 2. **FT-02.2: the price.** Exit: `fallback_coverage.rs`
    `fallback_face_coverage_census` (ignored) reads the candidates from
    `TINKER_FALLBACK_FACES` and prints `RAN` with a row per face and script,
-   or `SKIPPED`; its rows, with each group's bytes and wasm figures, are
-   `fallback_coverage.tsv` and `fallback_sizes.tsv`, held by
-   `the_committed_census_is_whole`.
+   or `SKIPPED`; its rows, each group's bytes among them, are
+   `fallback_coverage.tsv`, held by `the_committed_census_is_whole` and
+   `the_designs_outcomes_are_the_records`, and each group's wasm figure is
+   `fallback_sizes.tsv`'s, held by `the_committed_wasm_sizes_are_whole`.
 3. **FT-02.3: the lookup.** Exit: `crates/tinker-pdf/src/fallback.rs`'s
    `every_script_resolves_to_its_groups_face`,
    `common_and_inherited_take_their_runs_script`,
