@@ -199,13 +199,13 @@ replay of its own in `crates/tinker-pdf-svg/src/tests.rs`.
 
 `cff_charstrings`, `content_stream`, `cos_syntax`, `crypt`, `crypt_ciphers`,
 `css_structured`, `form_script`, `glyf_outlines`, `html_structured`,
-`jpx_codestream`, `layout`, `render_page`, `signatures` and `xml_structured`
-are structured generators: the body is carved into fields rather than parsed
-as a format, so every seed reaches the code by construction and there is no
-reachability question of this shape to ask. The seeds of `cff_charstrings`,
-`content_stream`, `cos_syntax`, `css_structured`, `glyf_outlines`,
-`html_structured`, `jpx_codestream` and `xml_structured` are choice sequences
-their
+`jpx_codestream`, `layout`, `render_page`, `render_rewrite`, `signatures` and
+`xml_structured` are structured generators: the body is carved into fields
+rather than parsed as a format, so every seed reaches the code by construction
+and there is no reachability question of this shape to ask. The seeds of
+`cff_charstrings`, `content_stream`, `cos_syntax`, `css_structured`,
+`glyf_outlines`, `html_structured`, `jpx_codestream`, `render_rewrite` and
+`xml_structured` are choice sequences their
 generators' `write_the_fuzz_seeds` write, each named for the feature it
 reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `cos_document`,
 `cos_object`, `content_tokenizer`, `icc_profile` and `zip_archive` are covered
@@ -293,6 +293,11 @@ generated stylesheet as written and as rewritten with every selector in
 `:is()`, which the rule index cannot bucket, and holds the indexed cascade to
 the brute-force one, style for style; a selector both match wrongly passes, and
 the crate's own tests and the EPUB reftests are what hold matching right.
+`render_rewrite` renders a generated document, rewrites it as the corpus
+relations rewrite one, and holds the reopened document's pages to the
+original's byte for byte; a rewrite that is not valid PDF but that this engine
+reads anyway passes it, which is what the written-files helper's strict
+validation is for.
 
 `cff_subset` is the strongest target and still not exempt: it fuzzes a
 *writer*, and its round trip goes through **this repository's own** parser, so

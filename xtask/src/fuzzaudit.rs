@@ -243,6 +243,10 @@ const UNSIGNED: &[(&str, &str)] = &[
     ("pki_der", "DER: a SEQUENCE tag, which any DER shares"),
     ("render_page", "a generator over page content, not a file"),
     (
+        "render_rewrite",
+        "a structured generator: the body chooses a page, its document's sections and their spellings",
+    ),
+    (
         "shape",
         "the face sits after a glyph run whose length is a knob",
     ),

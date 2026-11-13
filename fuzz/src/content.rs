@@ -946,6 +946,28 @@ impl Gen<'_, '_> {
 /// A generated page, its document written clean, and render options chosen
 /// with it.
 pub fn page(c: &mut Choices) -> Page {
+    let (objects, options) = model(c);
+    let file = File {
+        version: (1, 7),
+        sections: vec![Section {
+            objects,
+            freed: Vec::new(),
+            xref: Xref::Table { eol: 0 },
+            trailer: vec![(b"Root".to_vec(), Value::reference(1))],
+        }],
+    };
+    let written = cos::write(&file, &mut Choices::new(&[]));
+    Page {
+        bytes: written.bytes,
+        options,
+    }
+}
+
+/// A generated page's objects — 1 the catalog, 2 the page tree, 3 the page,
+/// 4 its resources, then every object they name, by number — and render
+/// options chosen with it: what [`page`] writes, for a writer that lays the
+/// objects out otherwise.
+pub fn model(c: &mut Choices) -> (Vec<Indirect>, RenderOptions) {
     let width = 8 + c.range(0, MAX_PAGE - 8);
     let height = 8 + c.range(0, MAX_PAGE - 8);
     let mut generator = Gen {
@@ -1069,20 +1091,7 @@ pub fn page(c: &mut Choices) -> Page {
     let mut rest = std::mem::take(&mut generator.objects);
     rest.sort_by_key(|object| object.num);
     objects.extend(rest);
-    let file = File {
-        version: (1, 7),
-        sections: vec![Section {
-            objects,
-            freed: Vec::new(),
-            xref: Xref::Table { eol: 0 },
-            trailer: vec![(b"Root".to_vec(), Value::reference(1))],
-        }],
-    };
-    let written = cos::write(&file, &mut Choices::new(&[]));
-    Page {
-        bytes: written.bytes,
-        options,
-    }
+    (objects, options)
 }
 
 /// Render options for a page of `width` by `height` points.

@@ -403,3 +403,9 @@ name = "css_structured"
 path = "fuzz_targets/css_structured.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "render_rewrite"
+path = "fuzz_targets/render_rewrite.rs"
+test = false
+doc = false

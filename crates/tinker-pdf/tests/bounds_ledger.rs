@@ -721,6 +721,7 @@ const FUZZ_GEN_CFF: &str = include_str!("../../../fuzz/src/cff.rs");
 const FUZZ_GEN_CONTENT: &str = include_str!("../../../fuzz/src/content.rs");
 const FUZZ_GEN_COS: &str = include_str!("../../../fuzz/src/cos.rs");
 const FUZZ_GEN_CSS: &str = include_str!("../../../fuzz/src/css.rs");
+const FUZZ_GEN_DOCUMENT: &str = include_str!("../../../fuzz/src/document.rs");
 const FUZZ_GEN_GLYF: &str = include_str!("../../../fuzz/src/glyf.rs");
 const FUZZ_GEN_JPX: &str = include_str!("../../../fuzz/src/jpx.rs");
 const FUZZ_GEN_MARKUP: &str = include_str!("../../../fuzz/src/markup.rs");
@@ -4162,6 +4163,62 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                 buffer(Row("MAX_SVG_BYTES"), 1, 1, "the SVG markup"),
             ],
             vec![
+                (RENDER, "const MAX_GROUP_DEPTH: usize = 16;"),
+                (RENDER, "const MAX_TILE_AREA: u64 = 1 << 24;"),
+                (RENDER, "const MAX_PATTERN_DEPTH: u32 = 4;"),
+            ],
+        ),
+        written(
+            "render_rewrite",
+            vec![
+                buffer(
+                    Value(1 << 20),
+                    1,
+                    2,
+                    "the generated document, under 1 MiB at its generators' caps: 192 \
+                     operators in all, images of eight samples a side, one page's resources, \
+                     four sections and every token spelled in at most four bytes for each \
+                     one its plainest spelling takes (estimate); and the rewrite",
+                ),
+                buffer(
+                    Value(1 << 20),
+                    PARSED,
+                    3,
+                    "the objects parsed, the editor's copy the rewrite is written from, and \
+                     the rewrite's objects parsed again",
+                ),
+                buffer(
+                    Value(generated_page),
+                    4,
+                    1 + 16,
+                    "the RGBA canvas, and a group buffer for each of the sixteen levels \
+                     MAX_GROUP_DEPTH lets groups nest",
+                ),
+                buffer(
+                    Value(generated_page),
+                    5,
+                    2,
+                    "the two bitmaps compared, at most five bytes a pixel",
+                ),
+                buffer(
+                    Value(1 << 24),
+                    4,
+                    4,
+                    "a tiling pattern's cell at MAX_TILE_AREA, for each of the four levels \
+                     MAX_PATTERN_DEPTH lets patterns nest",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_CONTENT, "pub const MAX_TOTAL_OPS: usize = 192;"),
+                (FUZZ_GEN_CONTENT, "pub const MAX_IMAGE: usize = 8;"),
+                (FUZZ_GEN_CONTENT, "pub const MAX_PAGE: i64 = 72;"),
+                (FUZZ_GEN_CONTENT, "[1.0, 0.5, 2.0, 1.5, 0.25, 3.0]"),
+                (FUZZ_GEN_CONTENT, ".ceil() as u32 + 4;"),
+                (FUZZ_GEN_COS, "pub const MAX_SECTIONS: usize = 4;"),
+                (
+                    FUZZ_GEN_DOCUMENT,
+                    "let count = 1 + c.below(cos::MAX_SECTIONS);",
+                ),
                 (RENDER, "const MAX_GROUP_DEPTH: usize = 16;"),
                 (RENDER, "const MAX_TILE_AREA: u64 = 1 << 24;"),
                 (RENDER, "const MAX_PATTERN_DEPTH: u32 = 4;"),

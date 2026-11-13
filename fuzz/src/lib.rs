@@ -12,6 +12,7 @@ pub mod cff;
 pub mod content;
 pub mod cos;
 pub mod css;
+pub mod document;
 pub mod glyf;
 pub mod jpx;
 pub mod markup;

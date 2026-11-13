@@ -339,15 +339,25 @@ match budget wide enough for brute force's extra work.
 
 ### Render against rewrite: `render_rewrite`
 
-The input is a document the COS and content generators write. The relation is
-asked only of one read cleanly — `LadderLevel::Trust`, no warning, not
-encrypted — as the corpus relations ask theirs, since a rewrite of a document
-the reader repaired compares two repairs rather than two renders. Such a
-document is rewritten as those relations rewrite one,
-`Document::editor().save(&WriteOptions::default())` (`WriteMode::Rewrite`),
-and reopened, and every page is rendered before and after with the same
-options. A rewrite that does not reopen fails the run, and so does a page
-count, a size, a byte or a warning that differs.
+The input is a document the COS and content generators write together:
+`fuzz/src/document.rs` takes the page `content::model` generates — its objects
+and the render's options — and lays the objects out as `cos::write` writes a
+file, in one to four sections, each a cross-reference table or stream with
+objects packed into an object stream or not, the updates writing some of the
+page's objects again as they were and adding and freeing objects nothing
+refers to, every token spelled as the input chooses. `content_stream` writes
+the same objects in one table in the plainest spelling, so the two targets'
+pages are one generator's.
+
+A file so written opens on `LadderLevel::Trust`, and the target asserts it. The
+relation is asked only of one read cleanly — `LadderLevel::Trust`, no warning,
+not encrypted, after the first render — as the corpus relations ask theirs,
+since a rewrite of a document the reader repaired compares two repairs rather
+than two renders. Such a document is rewritten as those relations rewrite one,
+`Document::editor().save` with `WriteMode::Rewrite`, and reopened, and every
+page is rendered before and after with the same options. A rewrite that does
+not reopen fails the run, and so does a page count, a size, a byte or a
+warning that differs.
 
 ### Tile against page: `render_tile`
 
