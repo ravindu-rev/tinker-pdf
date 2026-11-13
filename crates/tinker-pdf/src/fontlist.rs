@@ -72,7 +72,7 @@ use tinker_pdf_cos::{
 /// Form XObjects nest, tiling patterns carry resources, and a Type 3 font's
 /// `/Resources` can name another Type 3 font. Sixteen is past anything a
 /// producer emits and bounded for anything that does not.
-const MAX_RESOURCE_DEPTH: u32 = 16;
+pub(crate) const MAX_RESOURCE_DEPTH: u32 = 16;
 
 /// How many distinct fonts a listing returns before it stops.
 ///
@@ -337,20 +337,151 @@ fn program_of(doc: &CosDocument, dict: &Dict, kind: FontKind) -> Option<FontProg
 /// descendant part of the Type 0 font rather than a font of its own, and a
 /// listing that showed both would report every CJK face twice.
 pub(crate) fn of_document(doc: &Arc<CosDocument>) -> Vec<DocumentFont> {
-    let mut out: Vec<DocumentFont> = Vec::new();
-    let mut seen: BTreeSet<Identity> = BTreeSet::new();
+    let mut fonts = Fonts::default();
     let mut scopes: BTreeSet<ObjRef> = BTreeSet::new();
 
     for page in cos_pages::collect(doc) {
-        if let Some(resources) = page.resources.clone() {
-            walk(doc, &resources, 0, &mut scopes, &mut seen, &mut out);
-        }
-        annotation_resources(doc, &page, &mut scopes, &mut seen, &mut out);
+        walk_page(doc, &page, &mut scopes, &mut fonts);
     }
     // Last, so a font a page names keeps the page's own resource name at the
     // head of the list.
-    form_default_resources(doc, &mut scopes, &mut seen, &mut out);
-    out
+    form_default_resources(doc, &mut scopes, &mut fonts);
+    fonts.out
+}
+
+/// What a walk over the resource scopes a page can enter does at each of
+/// them.
+///
+/// The walk is one, and two listings are what it visits for: this module's
+/// fonts ([`Document::fonts`]) and a page's spot colorants
+/// ([`crate::Page::spot_colorants`]). A scope one of them reaches is a scope
+/// the other reaches, by the same route, the same bounds and the same order:
+/// a `/Resources` dictionary, then — as the walk meets them in it — each Type
+/// 3 font's own (9.6.5), through `/Font` and through a graphics state's
+/// `/Font` (8.4.5), each form XObject's (8.10.1) and each tiling pattern's
+/// (8.7.3), and where the visitor reads what a render draws, each soft
+/// mask's group's (11.6.5.2).
+///
+/// [`Document::fonts`]: crate::Document::fonts
+pub(crate) trait ScopeVisitor {
+    /// Whether the visitor holds all it will keep, which ends the walk: a
+    /// bound rather than a budget (ruling 1).
+    fn full(&self) -> bool;
+
+    /// A `/Resources` dictionary the walk has entered, before it reads
+    /// anything inside it.
+    fn scope(&mut self, doc: &Arc<CosDocument>, resources: &Dict) {
+        let _ = (doc, resources);
+    }
+
+    /// A font a scope names: by its `/Font` key `label`, or by a graphics
+    /// state's `/Font` (8.4.5), `label` `None`. `reference` is the font
+    /// dictionary's object, `None` for one written inline.
+    ///
+    /// Answers whether the walk is to enter the font's own `/Resources`,
+    /// which a Type 3 font's glyph procedures run in (9.6.5), so the visitor
+    /// decides when a font met again has been entered already.
+    fn font(
+        &mut self,
+        doc: &Arc<CosDocument>,
+        label: Option<String>,
+        reference: Option<ObjRef>,
+        dict: &Dict,
+    ) -> bool;
+
+    /// An annotation's appearance stream (12.5.5), a form XObject reached by
+    /// reference rather than by a name, before the walk enters its
+    /// `/Resources`.
+    fn appearance(&mut self, doc: &Arc<CosDocument>, stream: &Dict) {
+        let _ = (doc, stream);
+    }
+
+    /// Whether the walk reads what a render draws: a soft mask's group's
+    /// resources entered (11.6.5.2), and of an annotation's appearances its
+    /// normal one, `/N`, alone. Off for the font listing, which reads every
+    /// appearance an annotation carries — a checkbox's off state is as
+    /// embedded as its on state — and enters no soft mask.
+    fn drawn(&self) -> bool {
+        false
+    }
+}
+
+/// The font listing's side of the walk: each font once, by [`Identity`],
+/// with every resource name it answers to.
+#[derive(Default)]
+struct Fonts {
+    out: Vec<DocumentFont>,
+    seen: BTreeSet<Identity>,
+}
+
+impl ScopeVisitor for Fonts {
+    fn full(&self) -> bool {
+        self.out.len() >= MAX_FONTS
+    }
+
+    fn font(
+        &mut self,
+        doc: &Arc<CosDocument>,
+        label: Option<String>,
+        reference: Option<ObjRef>,
+        dict: &Dict,
+    ) -> bool {
+        let mut font = read_one(doc, dict, reference);
+        let id = identity(reference, &font);
+        // 8.4.5: a graphics state names a font by reference (`/Font [font
+        // size]`), which an interpreter binds as `Tf` binds a name, so it is
+        // a font the scope could bind. Its resource names are the ones `/Font`
+        // gives it, none for a font only a state names.
+        let Some(label) = label else {
+            if !self.seen.insert(id) {
+                return false;
+            }
+            let type3 = font.kind == FontKind::Type3;
+            self.out.push(font);
+            return type3;
+        };
+        if self.seen.contains(&id) {
+            // Already listed: record the further name it answers to and do
+            // not list it twice.
+            for existing in self.out.iter_mut() {
+                if identity(existing.reference, existing) != id {
+                    continue;
+                }
+                if !existing.resource_names.contains(&label) {
+                    existing.resource_names.push(label);
+                    existing.resource_names.sort();
+                }
+                break;
+            }
+            return false;
+        }
+        self.seen.insert(id);
+        font.resource_names.push(label);
+        // A Type 3 font's glyphs are content streams with resources of their
+        // own (9.6.5), and those resources may name further fonts.
+        let type3 = font.kind == FontKind::Type3;
+        self.out.push(font);
+        type3
+    }
+}
+
+/// A page's own `/Resources`, and then the appearances of its annotations:
+/// every scope the page's content and its annotations can enter, walked for
+/// `visitor`.
+///
+/// `scopes` is every form, tiling pattern and soft-mask group already
+/// walked, by its object, which the caller keeps across pages when one
+/// listing spans several.
+pub(crate) fn walk_page(
+    doc: &Arc<CosDocument>,
+    page: &cos_pages::Page,
+    scopes: &mut BTreeSet<ObjRef>,
+    visitor: &mut impl ScopeVisitor,
+) {
+    if let Some(resources) = &page.resources {
+        walk(doc, resources, 0, scopes, visitor);
+    }
+    annotation_resources(doc, page, scopes, visitor);
 }
 
 /// The `/AcroForm /DR` dictionary (12.7.3.3).
@@ -376,8 +507,7 @@ pub(crate) fn of_document(doc: &Arc<CosDocument>) -> Vec<DocumentFont> {
 fn form_default_resources(
     doc: &Arc<CosDocument>,
     scopes: &mut BTreeSet<ObjRef>,
-    seen: &mut BTreeSet<Identity>,
-    out: &mut Vec<DocumentFont>,
+    visitor: &mut impl ScopeVisitor,
 ) {
     let Some(catalog) = doc.catalog() else {
         return;
@@ -389,10 +519,10 @@ fn form_default_resources(
     let Some(resources) = doc.resolve_key(form, doc.intern(b"DR")).as_dict().cloned() else {
         return;
     };
-    walk(doc, &resources, 0, scopes, seen, out);
+    walk(doc, &resources, 0, scopes, visitor);
 }
 
-/// The `/Resources` of each of a page's annotations' normal appearances.
+/// The `/Resources` of each of a page's annotations' appearances.
 ///
 /// An appearance stream is a form XObject reached by reference rather than by
 /// a resource name (12.5.5), so the content walk never sees it — which is why
@@ -403,8 +533,7 @@ fn annotation_resources(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     scopes: &mut BTreeSet<ObjRef>,
-    seen: &mut BTreeSet<Identity>,
-    out: &mut Vec<DocumentFont>,
+    visitor: &mut impl ScopeVisitor,
 ) {
     let Ok(object) = doc.get(page.reference) else {
         return;
@@ -429,9 +558,13 @@ fn annotation_resources(
         // Every state of every appearance, not just the one `/AS` selects: a
         // checkbox's off state is as embedded as its on state, and a listing
         // that followed `/AS` would report a different set of fonts depending
-        // on what the form was filled in with.
-        for (_, value) in ap.iter() {
-            collect_appearance(doc, value, 0, scopes, seen, out);
+        // on what the form was filled in with. A visitor reading what a render
+        // draws takes the normal appearance's states alone (12.5.5).
+        for (key, value) in ap.iter() {
+            if visitor.drawn() && *key != Name::N {
+                continue;
+            }
+            collect_appearance(doc, value, 0, scopes, visitor);
         }
     }
 }
@@ -444,8 +577,7 @@ fn collect_appearance(
     value: &Object,
     depth: u32,
     scopes: &mut BTreeSet<ObjRef>,
-    seen: &mut BTreeSet<Identity>,
-    out: &mut Vec<DocumentFont>,
+    visitor: &mut impl ScopeVisitor,
 ) {
     if depth > 2 {
         // `/AP` is at most `/N` → state → stream. Anything deeper is not a
@@ -459,34 +591,56 @@ fn collect_appearance(
     // A stream is the appearance itself; a plain dictionary here is the
     // dictionary of states a checkbox writes (12.5.5).
     if resolved.as_stream().is_some() {
+        visitor.appearance(doc, dict);
         if let Some(resources) = doc.resolve_key(dict, Name::RESOURCES).as_dict().cloned() {
-            walk(doc, &resources, 0, scopes, seen, out);
+            walk(doc, &resources, 0, scopes, visitor);
         }
         return;
     }
     for (_, nested) in dict.iter() {
-        collect_appearance(doc, nested, depth + 1, scopes, seen, out);
+        collect_appearance(doc, nested, depth + 1, scopes, visitor);
     }
 }
 
-/// Adds every font in one `/Resources` dictionary, then follows the scopes it
-/// opens.
+/// The font a graphics state names (8.4.5): the reference `/Font [font size]`
+/// opens with.
+fn state_font(doc: &CosDocument, state: &Dict) -> Option<ObjRef> {
+    let value = state.get(doc.intern(b"Font"))?;
+    let value = doc.resolve(value);
+    value
+        .as_array()
+        .and_then(<[Object]>::first)
+        .and_then(Object::as_objref)
+}
+
+/// The group a graphics state's soft mask is drawn from (11.6.5.2): the
+/// `/SMask` dictionary's `/G`, a transparency group XObject, with its
+/// object. `None` for `/SMask /None` and for a mask with no group.
+pub(crate) fn soft_mask_group(doc: &CosDocument, state: &Dict) -> Option<(ObjRef, Arc<Object>)> {
+    let mask = doc.resolve_key(state, doc.intern(b"SMask"));
+    let reference = mask.as_dict()?.get_ref(doc.intern(b"G"))?;
+    let group = doc.get(reference).ok()?;
+    group.as_dict()?;
+    Some((reference, group))
+}
+
+/// Visits one `/Resources` dictionary, then follows the scopes it opens.
 fn walk(
     doc: &Arc<CosDocument>,
     resources: &Dict,
     depth: u32,
     scopes: &mut BTreeSet<ObjRef>,
-    seen: &mut BTreeSet<Identity>,
-    out: &mut Vec<DocumentFont>,
+    visitor: &mut impl ScopeVisitor,
 ) {
-    if depth > MAX_RESOURCE_DEPTH || out.len() >= MAX_FONTS {
+    if depth > MAX_RESOURCE_DEPTH || visitor.full() {
         return;
     }
+    visitor.scope(doc, resources);
 
     let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
     if let Some(table) = fonts.as_dict() {
         for (key, entry) in table.iter() {
-            if out.len() >= MAX_FONTS {
+            if visitor.full() {
                 return;
             }
             let reference = entry.as_objref();
@@ -498,88 +652,45 @@ fn walk(
                 .name_bytes(*key)
                 .map(|b| String::from_utf8_lossy(&b).into_owned())
                 .unwrap_or_default();
-
-            let font = read_one(doc, dict, reference);
-            let id = identity(reference, &font);
-            match seen.contains(&id) {
-                // Already listed: record the further name it answers to and
-                // do not list it twice.
-                true => {
-                    for existing in out.iter_mut() {
-                        if identity(existing.reference, existing) != id {
-                            continue;
-                        }
-                        if !existing.resource_names.contains(&label) {
-                            existing.resource_names.push(label);
-                            existing.resource_names.sort();
-                        }
-                        break;
-                    }
-                }
-                false => {
-                    seen.insert(id);
-                    let mut font = font;
-                    font.resource_names.push(label);
-                    // A Type 3 font's glyphs are content streams with
-                    // resources of their own (9.6.5), and those resources may
-                    // name further fonts.
-                    if font.kind == FontKind::Type3 {
-                        if let Some(nested) =
-                            doc.resolve_key(dict, Name::RESOURCES).as_dict().cloned()
-                        {
-                            out.push(font);
-                            walk(doc, &nested, depth + 1, scopes, seen, out);
-                            continue;
-                        }
-                    }
-                    out.push(font);
-                }
+            if visitor.font(doc, Some(label), reference, dict) {
+                type3_resources(doc, dict, depth, scopes, visitor);
             }
         }
     }
 
-    // 8.4.5: a graphics state names a font by reference (`/Font [font
-    // size]`), which an interpreter binds as `Tf` binds a name, so it is a
-    // font the scope could bind. Its resource names are the ones `/Font`
-    // gives it, none for a font only a state names.
     let states = doc.resolve_key(resources, doc.intern(b"ExtGState"));
     for (_, entry) in states.as_dict().into_iter().flat_map(Dict::iter) {
-        if out.len() >= MAX_FONTS {
+        if visitor.full() {
             return;
         }
         let state = doc.resolve(entry);
-        let Some(value) = state
-            .as_dict()
-            .and_then(|state| state.get(doc.intern(b"Font")))
-        else {
+        let Some(state) = state.as_dict() else {
             continue;
         };
-        let value = doc.resolve(value);
-        let Some(reference) = value
-            .as_array()
-            .and_then(<[Object]>::first)
-            .and_then(Object::as_objref)
-        else {
-            continue;
-        };
-        let Ok(object) = doc.get(reference) else {
-            continue;
-        };
-        let Some(dict) = object.as_dict() else {
-            continue;
-        };
-        let font = read_one(doc, dict, Some(reference));
-        if !seen.insert(identity(Some(reference), &font)) {
-            continue;
-        }
-        if font.kind == FontKind::Type3 {
-            if let Some(nested) = doc.resolve_key(dict, Name::RESOURCES).as_dict().cloned() {
-                out.push(font);
-                walk(doc, &nested, depth + 1, scopes, seen, out);
-                continue;
+        if let Some(reference) = state_font(doc, state) {
+            if let Ok(object) = doc.get(reference) {
+                if let Some(dict) = object.as_dict() {
+                    if visitor.font(doc, None, Some(reference), dict) {
+                        type3_resources(doc, dict, depth, scopes, visitor);
+                    }
+                }
             }
         }
-        out.push(font);
+        // 11.6.5.2: a soft mask's group is a form whose content runs in its
+        // own resources, as a form's does, when a `gs` installs the mask.
+        if visitor.drawn() {
+            if let Some((reference, group)) = soft_mask_group(doc, state) {
+                if scopes.insert(reference) {
+                    if let Some(dict) = group.as_dict() {
+                        if let Some(nested) =
+                            doc.resolve_key(dict, Name::RESOURCES).as_dict().cloned()
+                        {
+                            walk(doc, &nested, depth + 1, scopes, visitor);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     for key in [&b"XObject"[..], &b"Pattern"[..]] {
@@ -603,8 +714,22 @@ fn walk(
             let Some(nested) = doc.resolve_key(dict, Name::RESOURCES).as_dict().cloned() else {
                 continue;
             };
-            walk(doc, &nested, depth + 1, scopes, seen, out);
+            walk(doc, &nested, depth + 1, scopes, visitor);
         }
+    }
+}
+
+/// A Type 3 font's own `/Resources` (9.6.5), walked one deeper than the scope
+/// that names the font.
+fn type3_resources(
+    doc: &Arc<CosDocument>,
+    font: &Dict,
+    depth: u32,
+    scopes: &mut BTreeSet<ObjRef>,
+    visitor: &mut impl ScopeVisitor,
+) {
+    if let Some(nested) = doc.resolve_key(font, Name::RESOURCES).as_dict().cloned() {
+        walk(doc, &nested, depth + 1, scopes, visitor);
     }
 }
 

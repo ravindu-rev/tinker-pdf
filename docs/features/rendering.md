@@ -471,6 +471,33 @@ white; a region is the page's rectangle in the same order. Every byte is the
 `Bgr8` (`bgr_and_bgra_are_the_rgba8_render_reordered`,
 `bgra_tiles_are_the_bgra_page`). The C ABI keeps its four formats.
 
+**A page's spot colorants** (8.6.6.4, 8.6.6.5;
+[design/overprint-separations.md](../design/overprint-separations.md)).
+`Page::spot_colorants` lists each spot colorant the page's resource scopes
+name once, as a `SpotColorant` carrying its name — bytes, `#` escapes decoded
+— in the order the scopes first name it, which is the order a separations
+render lays its spot plates out in. A spot is a colorant of a `/Separation`
+or `/DeviceN` space that is not one of the four process colorants 8.6.6.4
+reserves (`Cyan`, `Magenta`, `Yellow`, `Black`), not `/All` or `/None`, and
+not a process component an `NChannel` space's `/Process` names; a plain
+`/DeviceN`'s `/Process` is not read, as 8.6.6.5 has it. The scopes are the
+ones `Document::fonts` walks, by the same walk, with what a render draws: the
+page's `/Resources`, each Type 3 font's, form's, tiling pattern's and soft
+mask's group's within them, and every state of each annotation's normal
+appearance — not its down or rollover one. Within one `/Resources` dictionary
+its `/ColorSpace` entries come first, then its XObjects' spaces — an image's,
+not a stencil mask's, and a form's transparency group's `/CS` — its
+shadings', its shading patterns' and its soft masks' groups', each space
+followed by an `/Indexed` base or a `/Pattern` space's underlying space, a
+`/DeviceN` giving its names in array order and then its `/Colorants` keys;
+then the scopes the dictionary opens, in the walk's order, and the
+annotations last, an appearance's group before its resources. Names are read
+by the reader `Page::images` uses (`separation_name`, `device_n_names`), and
+nothing is decoded or evaluated, so listing adds nothing to
+`Document::warnings`. A scope is walked once, the walk stops sixteen scopes
+deep and the listing at 4 096 spots, each with what it had read
+(`separations.rs`, `the_colorant_inventory_is_every_spot_its_resources_name`).
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and

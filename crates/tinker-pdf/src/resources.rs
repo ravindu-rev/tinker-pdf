@@ -6865,12 +6865,7 @@ impl PageResources {
                 }
             }
             b"Separation" => {
-                let colorant = items
-                    .get(1)
-                    .and_then(|o| self.doc.resolve(o).as_name())
-                    .and_then(|n| self.doc.name_bytes(n))
-                    .map(|b| b.to_vec())
-                    .unwrap_or_default();
+                let colorant = separation_name(&self.doc, items).unwrap_or_default();
                 // 8.6.6.4's `/All` and `/None` never select their alternate,
                 // so the renderer puts no default in for it, and nor does this.
                 let selects = !matches!(colorant.as_slice(), b"All" | b"None");
@@ -6887,25 +6882,7 @@ impl PageResources {
                 }
             }
             b"DeviceN" => ImageSpace::DeviceN {
-                colorants: items
-                    .get(1)
-                    .map(|o| self.doc.resolve(o))
-                    .and_then(|names| {
-                        names.as_array().map(|names| {
-                            names
-                                .iter()
-                                .take(limits::MAX_ARRAY_LEN)
-                                .filter_map(|n| {
-                                    self.doc
-                                        .resolve(n)
-                                        .as_name()
-                                        .and_then(|n| self.doc.name_bytes(n))
-                                        .map(|b| b.to_vec())
-                                })
-                                .collect()
-                        })
-                    })
-                    .unwrap_or_default(),
+                colorants: device_n_names(&self.doc, items),
                 alternate: Box::new(items.get(2).map_or_else(
                     || unreadable(b""),
                     |a| self.describe(a, inline, depth + 1, painting),
@@ -6948,6 +6925,119 @@ impl PageResources {
             other => unreadable(other),
         }
     }
+}
+
+/// The colorant a `/Separation` space array names (8.6.6.4): its second
+/// element, resolved, as a name's bytes — `/All` and `/None` among them,
+/// which only a caller knowing the family tells from a colorant — or `None`
+/// where that element is no name.
+///
+/// **The one reading of a space's colorant names.** `Page::images`'
+/// describer, the renderer's `parse_space` and a page's spot-colorant
+/// inventory (`crate::separations`) all take a space's names from here and
+/// from [`device_n_names`], so the three cannot come to disagree about what a
+/// space is called.
+pub(crate) fn separation_name(doc: &CosDocument, items: &[Object]) -> Option<Vec<u8>> {
+    let name = doc.resolve(items.get(1)?).as_name()?;
+    doc.name_bytes(name).map(|bytes| bytes.to_vec())
+}
+
+/// The colorants a `/DeviceN` space array's names array gives (8.6.6.5), in
+/// its order: each element resolved, and kept where it is a name — at most
+/// [`limits::MAX_ARRAY_LEN`] of them — as [`separation_name`] reads one.
+pub(crate) fn device_n_names(doc: &CosDocument, items: &[Object]) -> Vec<Vec<u8>> {
+    let Some(names) = items.get(1).map(|names| doc.resolve(names)) else {
+        return Vec::new();
+    };
+    let Some(names) = names.as_array() else {
+        return Vec::new();
+    };
+    names
+        .iter()
+        .take(limits::MAX_ARRAY_LEN)
+        .filter_map(|name| {
+            let name = doc.resolve(name).as_name()?;
+            doc.name_bytes(name).map(|bytes| bytes.to_vec())
+        })
+        .collect()
+}
+
+/// What a `/DeviceN` space array's attributes dictionary, its fifth element,
+/// says about its colorants (8.6.6.5, Tables 70 and 71), read but not
+/// evaluated: no space in it is parsed and no stream decoded.
+pub(crate) struct DeviceNAttributes {
+    /// `/Subtype /NChannel` (PDF 1.6): each component is evaluated by itself,
+    /// and `/Process` names the process components.
+    pub(crate) n_channel: bool,
+    /// `/Colorants`: each colorant's own `/Separation` space array, by the
+    /// name its key gives, in the dictionary's order — at most
+    /// [`limits::MAX_ARRAY_LEN`] of them.
+    pub(crate) colorants: Vec<(Vec<u8>, Object)>,
+    /// `/Process`: its `/ColorSpace` as written, and the names `/Components`
+    /// gives that space's components, in their order.
+    pub(crate) process: Option<(Object, Vec<Vec<u8>>)>,
+}
+
+impl DeviceNAttributes {
+    /// Whether `name` is a process component of an `NChannel` space: one
+    /// `/Process` names. 8.6.6.5 has `/Process` read only under
+    /// `/Subtype /NChannel` — a plain `/DeviceN` supports only what it did
+    /// before PDF 1.6 — so a plain one's names are never process names here;
+    /// the four 8.6.6.4 reserves are their caller's to tell.
+    pub(crate) fn is_process_component(&self, name: &[u8]) -> bool {
+        self.n_channel
+            && self
+                .process
+                .as_ref()
+                .is_some_and(|(_, components)| components.iter().any(|c| c == name))
+    }
+}
+
+/// A `/DeviceN` space array's attributes (8.6.6.5), or `None` where it has
+/// no fifth element or that element is no dictionary.
+pub(crate) fn device_n_attributes(
+    doc: &CosDocument,
+    items: &[Object],
+) -> Option<DeviceNAttributes> {
+    let attributes = doc.resolve(items.get(4)?);
+    let attributes = attributes.as_dict()?;
+    let name_of = |object: &Object| -> Option<Vec<u8>> {
+        let name = doc.resolve(object).as_name()?;
+        doc.name_bytes(name).map(|bytes| bytes.to_vec())
+    };
+    let n_channel = attributes
+        .get(Name::SUBTYPE)
+        .and_then(name_of)
+        .is_some_and(|subtype| subtype == b"NChannel");
+    let table = doc.resolve_key(attributes, doc.intern(b"Colorants"));
+    let colorants = table
+        .as_dict()
+        .into_iter()
+        .flat_map(Dict::iter)
+        .take(limits::MAX_ARRAY_LEN)
+        .filter_map(|(key, value)| {
+            let name = doc.name_bytes(*key)?;
+            Some((name.to_vec(), value.clone()))
+        })
+        .collect();
+    let process = doc.resolve_key(attributes, doc.intern(b"Process"));
+    let process = process.as_dict().and_then(|process| {
+        let space = process.get(Name::COLOR_SPACE)?.clone();
+        let components = doc.resolve_key(process, doc.intern(b"Components"));
+        let names = components
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(limits::MAX_ARRAY_LEN)
+            .filter_map(name_of)
+            .collect();
+        Some((space, names))
+    });
+    Some(DeviceNAttributes {
+        n_channel,
+        colorants,
+        process,
+    })
 }
 
 /// Adds to an image's warnings why each default it fell back from was

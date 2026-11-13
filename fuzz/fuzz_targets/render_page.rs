@@ -70,6 +70,10 @@ fuzz_target!(|data: &[u8]| {
     // uses — so a colour space, a mask or a palette the renderer never reads
     // this way is parsed here.
     let _ = page.images();
+    // The spot-colorant inventory: every scope a render enters and every
+    // space in it, names read and nothing evaluated, over resources the input
+    // shapes — cycles, depth and `/DeviceN` attributes included.
+    let _ = page.spot_colorants();
 
     // A low resolution on purpose: a fuzzer's inputs claim enormous page
     // boxes, and the interesting failures are in the operators rather than in

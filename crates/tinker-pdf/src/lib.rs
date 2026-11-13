@@ -54,6 +54,7 @@ mod recode;
 pub mod redact;
 mod render_part;
 mod resources;
+mod separations;
 pub mod shaping;
 pub mod signature;
 pub mod standalone;
@@ -244,6 +245,9 @@ pub use patch::{Patch, PatchFallback};
 pub use png_read::PngReadError;
 /// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
 pub use render_part::{NotDrawn, RenderPartError};
+/// Separations: a page's spot colorants, behind [`Page::spot_colorants`]
+/// (`docs/design/overprint-separations.md`).
+pub use separations::SpotColorant;
 pub use stats::Stats;
 /// A page written as SVG 1.1: [`Page::to_svg`], and what it could not say.
 pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
