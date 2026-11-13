@@ -1359,15 +1359,62 @@ collision and sequence attributes from the run starting at `attCollisions`,
 justification from each level's — and set by rules: shift, advance and
 attachment (to, at, with, level), insert, component references, the user
 attributes the description counts, justification width, the bidi level; and
-the feature values. A slot's cluster is the byte offset of the first
+the feature values. A slot stores only what a rule set; every other
+attribute reads as its glyph's, so a glyph a rule puts in a slot brings its
+own advance and an attribute a rule set stays set. The collision and sequence
+defaults are the run of glyph attributes from `attCollisions`, where the
+description's flags mark a collision pass: in order `collision.flags`,
+`min.x`, `min.y`, `max.x`, `max.y`, `margin` and `marginweight`, then
+`sequence.class`, `proxClass` and `order`, then the sequence weights. The
+vendored Awami Nastaliq bears the order out — its glyph table's
+`collision { margin = STDMARGIN; marginweight = STDMARGINWT }` is 150 and 400
+at `attCollisions` + 5 and + 6, its nuqtas' `sequence { class =
+ORDER_UNUQTAS; order = ORDER_LEFTDOWN; … valign { height = 275m; weight =
+500 } }` 1, 0, 1, …, 275 and 500 from + 7 — and no vendored glyph table sets
+the four limits, whose order follows the slot attributes' numbers. A slot
+reference — `attach.to`, a component's — names a slot by an id no other slot
+of the run has had, so that it survives insertions and deletions, and reads
+as the offset from the reading slot to the slot it names, 0 where it names
+none or one no longer there. A slot's cluster is the byte offset of the first
 character it is associated with. An `Assoc` gives the slot the span of the
 input slots it names; an inserted slot takes the characters of the slot after
 it, or of the slot before it at the stream's end, the GDL's cursor rule for an
 unassociated insertion; a deleted slot's characters join the slot before it,
-or the one after it at the start. At the end a span of slots whose clusters
-go backwards is merged to its least, as `Buffer::reorder` merges a reordered
-span, so clusters stay monotonic. Every insertion is charged against
+or the one after it at the start — when its action ends, and only where no
+`Assoc` of the action named it, because the GDL's default is for a deletion
+"which has not been associated" and the compiled code of its own example
+`ZWJ clsCons > _ clsConsJoin:(2 3)` deletes the joiner before it associates
+it. At the end a span of slots whose characters overlap or go backwards is
+merged to its least, as `Buffer::reorder` merges a reordered span, so
+clusters stay monotonic. Every insertion is charged against
 `Limits::max_glyphs`, and one past it is refused by name.
+
+**Acting on the stream.** An action edits the stream in place, and its slot
+operands count slots of the stream as the action found it, the GTF's "the
+glyph that was in the input in the given slot": from the input slot the
+current slot is, and for a slot the action inserted from the input slot
+before the one it was inserted ahead of. The compiled faces settle that last
+point. Awami Nastaliq's `_ cMark1l > @M:M _ / ^ _ cMark2l_1234u
+cMark2l_1234u? _=M` inserts at the match's start and copies and associates
+the mark three input slots on, `Insert PutCopy 3 Assoc 3`; its
+`gAlefMaddaAbove cDiacriticUpper _ > gAlef:1 @2:2 gMaddaAbove:1` inserts at
+the match's end and associates the inserted madda with the first slot,
+`Assoc −1`, one input slot back from the diacritic it follows. So each
+action keeps a journal of what it inserted and deleted and a copy of each
+input slot as it was before the action first changed it: `PutCopy`, `PutSubs`
+and `Assoc` read those copies, and the computing instructions read each slot
+as it stands, a deleted one as it was found. `PutCopy` copies the input
+slot's glyph and what rules set on it, keeping the current slot's characters
+for an `Assoc` to set; `Insert` puts in a copy of the slot it goes before,
+attached to nothing; `CopyNext` leaves the current slot as it stands, which
+in place is the input's, and moves on; `Delete` makes the slot before
+current, so the slot pointer may stand before the stream's first; `SetFeat`
+sets the feature of the slot at its offset, clipped to the largest value the
+feature declares. An action that names a slot outside the stream or its
+input, a class that gives no glyph, or an insertion past the glyph ceiling
+is refused by name at its instruction and ends there; what it did until then
+stands. A slot's position and a metric over an attachment cluster are
+positioning's to answer (*Positioning*).
 
 **The stack machine.** Code is checked before it ever runs, once a face:
 every opcode the GTF's table lists and none it marks unimplemented (`NextN`,

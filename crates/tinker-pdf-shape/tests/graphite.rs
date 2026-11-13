@@ -2017,6 +2017,12 @@ struct DescriptionSpec {
     passes: Vec<PassSpec>,
     /// `iSubst`, `iPos`, `iJust`, `iBidi`.
     order: [u8; 4],
+    /// The description's flags; bit 5 a collision pass.
+    flags: u8,
+    /// How many user attributes it counts.
+    user_attributes: u8,
+    /// The first glyph attribute of its collision settings.
+    attr_collisions: u8,
 }
 
 /// A class map of `linear` classes and then `lookups`, its offsets `ULONG`s
@@ -2081,7 +2087,7 @@ fn description_bytes(spec: &DescriptionSpec, major: u32) -> Vec<u8> {
     head.extend(spec.order);
     // flags, the cross-line contexts, and the pseudo, break weight and
     // directionality attributes.
-    head.extend([0, 0, 0, 0, 1, 2]);
+    head.extend([spec.flags, 0, 0, 0, 1, 2]);
     if major >= 2 {
         // Mirroring and skip-pass attributes, and no justification levels.
         head.extend([3, 4, 0]);
@@ -2089,7 +2095,7 @@ fn description_bytes(spec: &DescriptionSpec, major: u32) -> Vec<u8> {
     head.extend(u16s(&[0]));
     // User attributes, components a ligature, direction, collisions, and
     // two reserved bytes.
-    head.extend([0, 0, 1, 0, 0, 0]);
+    head.extend([spec.user_attributes, 0, 1, spec.attr_collisions, 0, 0]);
     if major >= 2 {
         // The third reserved byte, no critical features, a reserved byte.
         head.extend([0, 0, 0]);
@@ -2676,6 +2682,7 @@ fn a_silf_reads_at_every_version_it_covers() {
         class_map: class_map(&[vec![9, 8]], &[], false),
         passes: vec![pass],
         order: [0, 1, 1, 255],
+        ..DescriptionSpec::default()
     };
     for major in 1..=5u32 {
         let mut spec = spec.clone();
@@ -3063,6 +3070,7 @@ const BOUNDS: Bounds = Bounds {
     classes: 4,
     features: 2,
     user_attributes: 3,
+    positioning: false,
 };
 
 /// A rule's constraint, in pass 3.
@@ -3979,4 +3987,709 @@ fn the_vendored_faces_code_checks_and_names_its_attributes() {
         .insert((5, SlotAttribute::AttachTo, 0), -1);
     assert!(!answers(&stream, 5));
     assert!(answers(&stream, 4) && answers(&stream, 0));
+}
+
+// --- acting on the stream (FT-07d.8) -------------------------------------
+//
+// `acting_face` is a face built for actions: glyphs whose advances say who
+// they are, a description whose classes the actions select from, glyph
+// attributes a slot's defaults come from, and two features. Each action is
+// the bytes the GTF appendix lays its instructions out as, hand-compiled
+// from the GDL rule beside it, and run through `Slots::act` on a stream the
+// test states; what it leaves is read back through the stream.
+
+use tinker_pdf_shape::graphite::{Acted, FeatureValues, Slots, Source};
+
+/// Where the action tests' actions stand: pass 3, before the positioning
+/// passes `acting_face`'s description begins at 10.
+const ACTING: Site = Site {
+    pass: 3,
+    block: Block::Action(1),
+};
+
+/// The classes the action tests select from: linear 0 `[40]`, 1
+/// `[50, 51, 52]` and 6 the compiler documentation's upper vowels, the rest
+/// one glyph each; lookup 10 its lower vowels and 11 `[30, 31, 32]`.
+fn acting_classes() -> Vec<u8> {
+    let mut linear: Vec<Vec<u16>> = (0..10).map(|n| vec![200 + n]).collect();
+    linear[0] = vec![40];
+    linear[1] = vec![50, 51, 52];
+    linear[6] = vec![0x53, 0x57, 0x5B, 0x61, 0x67];
+    let lower = vec![(0x21, 0), (0x25, 1), (0x29, 2), (0x2F, 3), (0x35, 4)];
+    let input = vec![(30, 0), (31, 1), (32, 2)];
+    class_map(&linear, &[lower, input], true)
+}
+
+/// The face the action tests run over: 220 glyphs, glyph `n` `500 + n`
+/// wide; a `Silf` 4 description of [`acting_classes`], three user
+/// attributes, positioning from pass 10, and a collision pass whose glyph
+/// attributes start at 20; glyph 5's break weight −15 and directionality 3;
+/// glyph 7's collision flags 1, `min.x` −100, margin 150 and sequence class
+/// 4; and a `Feat` of two features, the first declaring 0 to 2, the second 0
+/// and 1.
+fn acting_face() -> Vec<u8> {
+    let spec = DescriptionSpec {
+        class_map: acting_classes(),
+        order: [0, 10, 10, 255],
+        flags: 0x20,
+        user_attributes: 3,
+        attr_collisions: 20,
+        ..DescriptionSpec::default()
+    };
+    let silf = silf_table(4, &[spec]);
+    let mut maps = vec![BTreeMap::new(); 220];
+    maps[5] = BTreeMap::from([(1, -15), (2, 3)]);
+    maps[7] = BTreeMap::from([(20, 1), (21, -100), (25, 150), (27, 4)]);
+    let index = Index {
+        long: false,
+        names: false,
+    };
+    let (glat, gloc) = glat_and_gloc(GlatVersion::Two, &maps, &[], index, 32);
+    let feat = feat_table(&[
+        (id(b"aaaa"), 0x8000, &[0, 1, 2]),
+        (id(b"bbbb"), 0x8000, &[0, 1]),
+    ]);
+    Face::new(220, &[])
+        .with(b"Silf", silf)
+        .with(b"Glat", glat)
+        .with(b"Gloc", gloc)
+        .with(b"Feat", feat)
+        .build()
+}
+
+/// Runs `test` over a stream of `glyphs` — each `(glyph, first, last)`, the
+/// last two byte offsets of the characters it stands for — of the face
+/// `bytes`, its features at their defaults.
+fn with_stream<R>(
+    bytes: &[u8],
+    glyphs: &[(u16, u32, u32)],
+    test: impl FnOnce(&mut Slots<'_>) -> R,
+) -> R {
+    let limits = Limits::DEFAULT;
+    let sfnt = Sfnt::parse(bytes).expect("the face parses");
+    let tables = Tables::parse(&sfnt, &limits).expect("a description");
+    let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");
+    let description = silf.description(0).expect("its description");
+    let attributes = tables
+        .attributes(&limits)
+        .map(|read| read.expect("its attributes read"));
+    let features = tables.features().map(|read| read.expect("its Feat reads"));
+    let values = features.as_ref().map_or_else(Vec::new, |features| {
+        FeatureValues::defaults(features).as_slice().to_vec()
+    });
+    let source = Source {
+        sfnt: &sfnt,
+        attributes: attributes.as_ref(),
+        description: &description,
+        features: features.as_ref(),
+    };
+    let mut slots = Slots::new(source, glyphs, &values);
+    test(&mut slots)
+}
+
+/// `code`, checked as an action of pass `pass`, run at `position`.
+fn act_in(
+    slots: &mut Slots<'_>,
+    pass: u8,
+    code: &[u8],
+    position: usize,
+    limits: &Limits,
+) -> Result<Acted, Refusal> {
+    let features = slots.face().features.map_or(0, |features| features.len());
+    let bounds = Bounds::for_pass(slots.face().description, features, usize::from(pass));
+    let site = Site {
+        pass,
+        block: ACTING.block,
+    };
+    let program = machine::check(code, site, &bounds, limits)?;
+    let mut budget = Budget::new(limits);
+    slots.act(&program, position, &mut budget, limits)
+}
+
+/// `code`, checked as an action of pass 3, run at `position`.
+fn act(slots: &mut Slots<'_>, code: &[u8], position: usize) -> Result<Acted, Refusal> {
+    act_in(slots, ACTING.pass, code, position, &Limits::DEFAULT)
+}
+
+/// The three slots most action tests start from: glyph 30, the input
+/// class's first; glyph 5, with a break weight; glyph 7, with collision
+/// attributes; each standing for one character.
+const THREE: [(u16, u32, u32); 3] = [(30, 0, 0), (5, 1, 1), (7, 2, 2)];
+
+/// Each slot's characters.
+fn spans(slots: &Slots<'_>) -> Vec<(u32, u32)> {
+    (0..slots.len())
+        .map(|at| slots.slot(at).expect("a slot").characters())
+        .collect()
+}
+
+/// `attribute` of slot `at`, as the stream reads it.
+fn attribute(slots: &Slots<'_>, at: usize, attribute: SlotAttribute, index: u8) -> i32 {
+    slots
+        .slot_attribute(at, attribute, index)
+        .expect("the stream answers")
+}
+
+/// The pointer and offset an action leaves.
+const fn acted(pointer: i64, offset: i32) -> Acted {
+    Acted { pointer, offset }
+}
+
+/// A program per action instruction, the stream it leaves the one the GTF
+/// appendix's table describes; a slot's defaults coming from its glyph; the
+/// operands counting slots as the action found them; a positioning pass
+/// held to one-to-one; what stops an action, each named, its effects to
+/// that point standing; and the vendored Dai Banna SIL's composition, run.
+#[test]
+fn each_action_instruction_rewrites_the_stream_as_specified() {
+    let face = acting_face();
+    let run = |glyphs: &[(u16, u32, u32)], code: &[u8], position: usize| {
+        with_stream(&face, glyphs, |slots| {
+            let result = act(slots, code, position);
+            (result, slots.glyphs(), spans(slots))
+        })
+    };
+    let mut programs = 0usize;
+
+    // `Next` and `CopyNext` move the pointer and leave the slots.
+    let (result, glyphs, _) = run(&THREE, &[0x19, 0x19, 0x31], 0);
+    assert_eq!((result, glyphs), (Ok(acted(2, 0)), vec![30, 5, 7]));
+    let (result, glyphs, _) = run(&THREE, &[0x1B, 0x31], 1);
+    assert_eq!((result, glyphs), (Ok(acted(2, 0)), vec![30, 5, 7]));
+    programs += 2;
+
+    // `PutGlyph`, in both widths: the class's first glyph.
+    let (result, glyphs, _) = run(&THREE, &[0x1C, 0, 0x19, 0x31], 1);
+    assert_eq!((result, glyphs), (Ok(acted(2, 0)), vec![30, 40, 7]));
+    let (_, glyphs, _) = run(&THREE, &[0x3B, 0, 1, 0x31], 0);
+    assert_eq!(glyphs, vec![50, 5, 7]);
+    programs += 2;
+
+    // `PutSubs`, in both widths: the input glyph's index in the input class
+    // selects the output class's glyph; the input slot may be another.
+    let (_, glyphs, _) = run(&THREE, &[0x1D, 0, 11, 1, 0x31], 0);
+    assert_eq!(glyphs, vec![50, 5, 7]);
+    let (_, glyphs, _) = run(
+        &[(32, 0, 0), (70, 1, 1)],
+        &[0x38, 0xFF, 0, 11, 0, 1, 0x31],
+        1,
+    );
+    assert_eq!(glyphs, vec![32, 52]);
+    programs += 2;
+
+    // `PutCopy` copies the input slot's glyph and what was set on it, not
+    // its characters; the glyph's own defaults come with the glyph.
+    with_stream(&face, &THREE, |slots| {
+        assert_eq!(act(slots, &[0x1E, 2, 0x31], 0), Ok(acted(0, 0)));
+        assert_eq!(slots.glyphs(), vec![7, 5, 7]);
+        assert_eq!(spans(slots)[0], (0, 0));
+        assert_eq!(attribute(slots, 0, SlotAttribute::CollisionFlags, 0), 1);
+    });
+    // "The glyph that was in the input": slot 0 is changed, then copied to
+    // slot 1 as the action found it.
+    with_stream(&face, &THREE, |slots| {
+        let code = [0x01, 9, 0x23, 20, 0x3B, 0, 0, 0x19, 0x1E, 0xFF, 0x31];
+        assert_eq!(act(slots, &code, 0), Ok(acted(1, 0)));
+        assert_eq!(slots.glyphs(), vec![40, 30, 7]);
+        assert_eq!(attribute(slots, 0, SlotAttribute::ShiftX, 0), 9);
+        assert_eq!(attribute(slots, 1, SlotAttribute::ShiftX, 0), 0);
+    });
+    programs += 2;
+
+    // `Insert` puts a slot before the current one and makes it current;
+    // `Delete` removes the current one and makes the one before current.
+    let (result, glyphs, spans_after) = run(&THREE, &[0x1F, 0x1C, 0, 0x31], 1);
+    assert_eq!(result, Ok(acted(1, 0)));
+    assert_eq!(glyphs, vec![30, 40, 5, 7]);
+    assert_eq!(
+        spans_after[1],
+        (1, 1),
+        "the characters of the slot after it"
+    );
+    let (result, glyphs, spans_after) = run(&THREE, &[0x20, 0x19, 0x31], 1);
+    assert_eq!(result, Ok(acted(1, 0)));
+    assert_eq!(glyphs, vec![30, 7]);
+    assert_eq!(spans_after, vec![(0, 1), (2, 2)]);
+    programs += 2;
+
+    // `Assoc` gives the current slot the span of the input slots it names.
+    let (_, _, spans_after) = run(&THREE, &[0x21, 2, 0, 1, 0x19, 0x31], 1);
+    assert_eq!(spans_after, vec![(0, 0), (1, 2), (2, 2)]);
+    programs += 1;
+
+    // `AttrSet`, `AttrAdd` and `AttrSub`, the last two from the glyph's
+    // own value where no rule set one.
+    with_stream(&face, &THREE, |slots| {
+        act(slots, &[0x01, 9, 0x23, 20, 0x31], 0).expect("acts");
+        act(slots, &[0x01, 9, 0x24, 0, 0x31], 1).expect("acts");
+        act(slots, &[0x01, 50, 0x25, 64, 0x31], 2).expect("acts");
+        assert_eq!(attribute(slots, 0, SlotAttribute::ShiftX, 0), 9);
+        assert_eq!(attribute(slots, 1, SlotAttribute::AdvanceX, 0), 505 + 9);
+        assert_eq!(attribute(slots, 2, SlotAttribute::CollisionMargin, 0), 100);
+        // And the defaults no rule touched: the glyph's break weight and
+        // directionality, `insert` true, the rest 0.
+        assert_eq!(attribute(slots, 1, SlotAttribute::BreakWeight, 0), -15);
+        assert_eq!(attribute(slots, 1, SlotAttribute::Directionality, 0), 3);
+        assert_eq!(attribute(slots, 0, SlotAttribute::Insert, 0), 1);
+        assert_eq!(attribute(slots, 2, SlotAttribute::CollisionMinX, 0), -100);
+        assert_eq!(attribute(slots, 2, SlotAttribute::SequenceClass, 0), 4);
+        assert_eq!(attribute(slots, 0, SlotAttribute::CollisionFlags, 0), 0);
+        assert_eq!(attribute(slots, 0, SlotAttribute::AdvanceX, 0), 530);
+    });
+    programs += 3;
+
+    // `AttrSetSlot`: `attach.to` names a slot relative to the current one,
+    // and reads back as the offset to it.
+    with_stream(&face, &THREE, |slots| {
+        act(slots, &[0x01, 0xFF, 0x26, 2, 0x31], 1).expect("acts");
+        assert_eq!(slots.attached_to(1), Some(0));
+        assert_eq!(attribute(slots, 1, SlotAttribute::AttachTo, 0), -1);
+        assert_eq!(attribute(slots, 0, SlotAttribute::AttachTo, 0), 0);
+    });
+    // `IAttrSetSlot`: a component's reference.
+    with_stream(&face, &THREE, |slots| {
+        act(slots, &[0x01, 2, 0x27, 15, 3, 0x31], 0).expect("acts");
+        assert_eq!(attribute(slots, 0, SlotAttribute::ComponentReference, 3), 2);
+        assert_eq!(attribute(slots, 0, SlotAttribute::ComponentReference, 4), 0);
+    });
+    programs += 2;
+
+    // `IAttrSet`, `IAttrAdd` and `IAttrSub` on a user attribute.
+    with_stream(&face, &THREE, |slots| {
+        let code = [
+            0x01, 4, 0x33, 55, 2, 0x01, 3, 0x34, 55, 2, 0x01, 1, 0x35, 55, 2, 0x31,
+        ];
+        act(slots, &code, 0).expect("acts");
+        assert_eq!(attribute(slots, 0, SlotAttribute::User, 2), 6);
+        assert_eq!(attribute(slots, 0, SlotAttribute::User, 1), 0);
+    });
+    programs += 3;
+
+    // `SetFeat`: the feature of the slot at the offset, clipped to the
+    // largest value it declares.
+    with_stream(&face, &THREE, |slots| {
+        let code = [0x01, 9, 0x42, 0, 1, 0x01, 1, 0x42, 1, 0, 0x31];
+        act(slots, &code, 0).expect("acts");
+        assert_eq!(slots.feature(1, 0), 2);
+        assert_eq!(slots.feature(0, 1), 1);
+        assert_eq!(slots.feature(2, 0), 0);
+    });
+    programs += 1;
+
+    // What an action returns: `PopRet`'s value, `RetZero`, `RetTrue`, and
+    // the top of the stack where it ends without one.
+    for (code, position, expected) in [
+        (&[0x19, 0x01, 0xFE, 0x30][..], 0, acted(1, -2)),
+        (&[0x31][..], 1, acted(1, 0)),
+        (&[0x32][..], 1, acted(1, 1)),
+        (&[0x01, 5][..], 0, acted(0, 5)),
+        (&[][..], 2, acted(2, 0)),
+    ] {
+        assert_eq!(run(&THREE, code, position).0, Ok(expected), "{code:02X?}");
+    }
+    programs += 5;
+    assert_eq!(programs, 25, "a program per case");
+
+    // A positioning pass makes only one-to-one substitutions: an action of
+    // one that inserts, deletes or copies another slot fails its check.
+    with_stream(&face, &THREE, |slots| {
+        for (code, opcode) in [
+            (&[0x1F][..], 0x1F),
+            (&[0x20][..], 0x20),
+            (&[0x1E, 1][..], 0x1E),
+        ] {
+            assert!(matches!(
+                act_in(slots, 12, code, 0, &Limits::DEFAULT),
+                Err(Refusal::CodeRefused {
+                    pass: 12,
+                    fault: Fault::NotOneToOne(op),
+                    ..
+                }) if op == opcode
+            ));
+        }
+        let one_to_one = [0x1E, 0, 0x1C, 0, 0x1D, 0, 11, 1, 0x31];
+        assert!(act_in(slots, 12, &one_to_one, 0, &Limits::DEFAULT).is_ok());
+    });
+
+    // What stops an action, each named at its instruction; what it did
+    // before stands.
+    let stopped = |glyphs: &[(u16, u32, u32)], code: &[u8], at: u16, fault: Fault| {
+        let (result, glyphs, _) = run(glyphs, code, 0);
+        assert_eq!(
+            result,
+            Err(Refusal::CodeRefused {
+                pass: 3,
+                block: Block::Action(1),
+                at,
+                fault,
+            }),
+            "{code:02X?}"
+        );
+        glyphs
+    };
+    stopped(&THREE, &[0x19, 0x19, 0x19, 0x19], 3, Fault::SlotOutOfRange);
+    stopped(
+        &THREE,
+        &[0x19, 0x19, 0x19, 0x1C, 0],
+        3,
+        Fault::SlotOutOfRange,
+    );
+    stopped(
+        &[(99, 0, 0)],
+        &[0x1D, 0, 11, 1],
+        0,
+        Fault::NoGlyphInClass(11),
+    );
+    stopped(
+        &[(31, 0, 0)],
+        &[0x1D, 0, 11, 0],
+        0,
+        Fault::NoGlyphInClass(0),
+    );
+    stopped(&THREE, &[0x21, 1, 5, 0x31], 0, Fault::SlotOutOfRange);
+    stopped(&THREE, &[0x01, 9, 0x26, 2], 2, Fault::SlotOutOfRange);
+    let kept = stopped(&THREE, &[0x1C, 0, 0x21, 1, 9], 2, Fault::SlotOutOfRange);
+    assert_eq!(
+        kept,
+        vec![40, 5, 7],
+        "the glyph put before the refusal stands"
+    );
+    // A read the stream cannot answer: a slot's position, which positioning
+    // resolves, and a box from a face with no `glyf`.
+    assert_eq!(
+        run(&THREE, &[0x28, 19, 0, 0x23, 20], 0).0,
+        Err(Refusal::PositionNotResolved)
+    );
+    assert_eq!(
+        run(&THREE, &[0x2A, 2, 0, 0, 0x23, 20], 0).0,
+        Err(Refusal::GlyphBoundsUnavailable { glyph: 30 })
+    );
+
+    // The vendored Dai Banna SIL's composition rule, as compiled: `e` and the
+    // acute's pseudo-glyph become `é`, standing for both characters.
+    let limits = Limits::DEFAULT;
+    let sfnt = Sfnt::parse(DAI_BANNA).expect("Dai Banna SIL parses");
+    let e = sfnt.glyph_for_char('e').expect("e");
+    let composed = sfnt.glyph_for_char('\u{E9}').expect("é");
+    with_stream(DAI_BANNA, &[(e, 0, 0), (413, 1, 1)], |slots| {
+        let description = slots.face().description;
+        let pass = description.pass(1, &limits).expect("pass 1");
+        let found = pass.candidates(&slots.glyphs(), 0, &limits);
+        let rule = found.candidates[0].rule;
+        let features = slots.face().features.map_or(0, |f| f.len());
+        let bounds = Bounds::for_pass(description, features, 1);
+        let site = Site {
+            pass: 1,
+            block: Block::Action(rule),
+        };
+        let code = pass.action(rule).expect("its action");
+        let program = machine::check(code, site, &bounds, &limits).expect("it checks");
+        let mut budget = Budget::new(&limits);
+        let result = slots.act(&program, 0, &mut budget, &limits);
+        assert_eq!(result, Ok(acted(1, 0)));
+        assert_eq!(slots.glyphs(), vec![composed]);
+        assert_eq!(spans(slots), vec![(0, 1)]);
+    });
+}
+
+/// An inserted slot takes the characters of the slot after it, or of the
+/// one before it at the stream's end, until an `Assoc` gives it others; a
+/// deleted slot's characters join the slot before it, or after it at the
+/// start, unless an `Assoc` of its action names it; and the clusters of
+/// the stream that comes out never go backwards.
+#[test]
+fn an_inserted_slot_takes_the_cluster_the_design_states() {
+    let face = acting_face();
+    // A character of two bytes in the middle.
+    let three = [(30, 0, 0), (5, 1, 2), (7, 3, 3)];
+    let after = |code: &[u8], position: usize| {
+        with_stream(&face, &three, |slots| {
+            act(slots, code, position).expect("acts");
+            let clusters = slots.clusters();
+            assert!(
+                clusters.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{clusters:?}"
+            );
+            (spans(slots), clusters)
+        })
+    };
+    // Inserted at the start, in the middle and at the end.
+    assert_eq!(
+        after(&[0x1F, 0x1C, 0, 0x31], 0),
+        (vec![(0, 0), (0, 0), (1, 2), (3, 3)], vec![0, 0, 1, 3])
+    );
+    assert_eq!(
+        after(&[0x1F, 0x1C, 0, 0x31], 1),
+        (vec![(0, 0), (1, 2), (1, 2), (3, 3)], vec![0, 1, 1, 3])
+    );
+    assert_eq!(
+        after(&[0x19, 0x19, 0x19, 0x1F, 0x1C, 0, 0x31], 0),
+        (vec![(0, 0), (1, 2), (3, 3), (3, 3)], vec![0, 1, 3, 3])
+    );
+    // Inserted at the start and associated with the second input slot: it
+    // stands before the first, so the two are one cluster.
+    assert_eq!(
+        after(&[0x1F, 0x1C, 0, 0x21, 1, 2, 0x31], 0),
+        (vec![(1, 2), (0, 0), (1, 2), (3, 3)], vec![0, 0, 0, 3])
+    );
+    // Deleted, unassociated: into the slot before, or after at the start.
+    assert_eq!(
+        after(&[0x20, 0x19, 0x31], 1),
+        (vec![(0, 2), (3, 3)], vec![0, 3])
+    );
+    assert_eq!(
+        after(&[0x20, 0x19, 0x31], 0),
+        (vec![(0, 2), (3, 3)], vec![0, 3])
+    );
+    // Deleted and then named by the next slot's `Assoc`, as the GDL's joiner
+    // is: the slot before keeps its own.
+    assert_eq!(
+        after(&[0x20, 0x19, 0x21, 2, 0xFF, 0, 0x31], 1),
+        (vec![(0, 0), (1, 3)], vec![0, 1])
+    );
+    // Two slots exchanged: the span they make is one cluster.
+    assert_eq!(
+        after(
+            &[0x1E, 1, 0x21, 1, 1, 0x19, 0x1E, 0xFF, 0x21, 1, 0xFF, 0x31],
+            0
+        ),
+        (vec![(1, 2), (0, 0), (3, 3)], vec![0, 0, 3])
+    );
+}
+
+/// Every insertion is charged against `Limits::max_glyphs`: the one past it
+/// is refused by name at its instruction, the action ends there, and what
+/// it did before stands.
+#[test]
+fn an_insertion_past_the_glyph_ceiling_is_refused_and_named() {
+    let face = acting_face();
+    let ceiling = |max_glyphs: usize| Limits {
+        max_glyphs,
+        ..Limits::DEFAULT
+    };
+    with_stream(&face, &THREE, |slots| {
+        let result = act_in(slots, 3, &[0x1C, 0, 0x1F, 0x31], 0, &ceiling(3));
+        assert_eq!(
+            result,
+            Err(Refusal::CodeRefused {
+                pass: 3,
+                block: Block::Action(1),
+                at: 2,
+                fault: Fault::TooManySlots,
+            })
+        );
+        assert_eq!(slots.glyphs(), vec![40, 5, 7]);
+    });
+    with_stream(&face, &THREE, |slots| {
+        let result = act_in(slots, 3, &[0x1F, 0x1F, 0x31], 0, &ceiling(4));
+        assert!(matches!(
+            result,
+            Err(Refusal::CodeRefused {
+                at: 1,
+                fault: Fault::TooManySlots,
+                ..
+            })
+        ));
+        assert_eq!(slots.len(), 4, "the first insertion stands");
+    });
+    with_stream(&face, &THREE, |slots| {
+        let result = act_in(slots, 3, &[0x1F, 0x1F, 0x31], 0, &ceiling(5));
+        assert_eq!(result, Ok(acted(0, 0)));
+        assert_eq!(slots.len(), 5);
+    });
+    // A run's own ceiling leaves room for a run's worth of insertions.
+    with_stream(&face, &THREE, |slots| {
+        let code: Vec<u8> = std::iter::repeat(0x1F).take(64).chain([0x31]).collect();
+        assert!(act_in(slots, 3, &code, 0, &Limits::for_glyphs(3)).is_ok());
+        assert_eq!(slots.len(), 67);
+    });
+}
+
+/// The design's examples of acting on the stream, each a GDL rule
+/// hand-compiled into the action the GTF lays out, run and counted.
+#[test]
+fn the_action_examples_hold() {
+    let face = acting_face();
+    let mut held = 0usize;
+    let result = |glyphs: &[(u16, u32, u32)], code: &[u8], position: usize| {
+        with_stream(&face, glyphs, |slots| {
+            act(slots, code, position).expect("acts");
+            (slots.glyphs(), spans(slots), slots.clusters())
+        })
+    };
+
+    // The compiler documentation's `PutSubs 0 10 6`: "a", index 0 of the
+    // lower vowels' class 10, becomes "A", index 0 of the upper vowels' 6.
+    assert_eq!(
+        result(&[(0x21, 0, 0)], &[0x1D, 0, 10, 6, 0x31], 0).0,
+        vec![0x53]
+    );
+    held += 1;
+
+    // GDL 4.4.1: `c(192) > clsLowTones$1 / clsVowel _` — the vowel before
+    // selects the tone.
+    let low_tone = [0x1D, 0xFF, 11, 1, 0x19, 0x31];
+    assert_eq!(
+        result(&[(31, 0, 0), (70, 1, 1)], &low_tone, 1).0,
+        vec![31, 51]
+    );
+    held += 1;
+
+    // GDL 4.4.2: `clsCons clsVowel1 clsVowel2 > @2 @1 @3`.
+    let reorder = [
+        0x1E, 1, 0x21, 1, 1, 0x19, 0x1E, 0xFF, 0x21, 1, 0xFF, 0x19, 0x1E, 0, 0x21, 1, 0, 0x19, 0x31,
+    ];
+    let (glyphs, spans_after, clusters) = result(&THREE, &reorder, 0);
+    assert_eq!(glyphs, vec![5, 30, 7]);
+    assert_eq!(spans_after, vec![(1, 1), (0, 0), (2, 2)]);
+    assert_eq!(clusters, vec![0, 0, 2]);
+    held += 1;
+
+    // GDL 4.4.3: `clsCons gDepI > @2:2 @1:1` — each glyph moved with its
+    // own character.
+    let swap = [
+        0x1E, 1, 0x21, 1, 1, 0x19, 0x1E, 0xFF, 0x21, 1, 0xFF, 0x19, 0x31,
+    ];
+    let (glyphs, spans_after, clusters) = result(&[(60, 0, 0), (61, 1, 1)], &swap, 0);
+    assert_eq!(glyphs, vec![61, 60]);
+    assert_eq!(spans_after, vec![(1, 1), (0, 0)]);
+    assert_eq!(clusters, vec![0, 0]);
+    held += 1;
+
+    // GDL 4.4.4: `_ gDepI > @3 _ / _ clsConsC _` — the dependent I inserted
+    // before the consonant and deleted after it, associated with itself.
+    let moved = [0x1F, 0x1E, 2, 0x21, 1, 2, 0x19, 0x1B, 0x20, 0x19, 0x31];
+    let (glyphs, spans_after, clusters) = result(&[(60, 0, 0), (61, 1, 1)], &moved, 0);
+    assert_eq!(glyphs, vec![61, 60]);
+    assert_eq!(spans_after, vec![(1, 1), (0, 0)]);
+    assert_eq!(clusters, vec![0, 0]);
+    held += 1;
+
+    // GDL 4.4.4: `ZWJ clsCons > _ clsConsJoin:(2 3) / clsCons _ _` — the
+    // joiner deleted into the consonant after it, the consonant before
+    // keeping its own character.
+    let joined = [0x20, 0x19, 0x1D, 0, 11, 1, 0x21, 2, 0xFF, 0, 0x19, 0x31];
+    let (glyphs, spans_after, clusters) = result(&[(40, 0, 0), (90, 1, 3), (32, 4, 4)], &joined, 1);
+    assert_eq!(glyphs, vec![40, 52]);
+    assert_eq!(spans_after, vec![(0, 0), (1, 4)]);
+    assert_eq!(clusters, vec![0, 1]);
+    held += 1;
+
+    // GDL 4.4.4: the Thai split vowel, `_ VSchwa > VE:4 VShort / _ clsCons
+    // clsTone? _` — both parts standing for the vowel.
+    let split = [
+        0x1F, 0x1C, 0, 0x21, 1, 3, 0x19, 0x1B, 0x1B, 0x1C, 2, 0x19, 0x31,
+    ];
+    let (glyphs, spans_after, clusters) = result(&[(60, 0, 0), (61, 1, 1), (62, 2, 2)], &split, 0);
+    assert_eq!(glyphs, vec![40, 60, 61, 202]);
+    assert_eq!(spans_after, vec![(2, 2), (0, 0), (1, 1), (2, 2)]);
+    assert_eq!(clusters, vec![0, 0, 0, 0]);
+    held += 1;
+
+    // GDL 4.4.5: `Co ZWJ Ce > Coe:(1 2 3){component{o.reference = @1;
+    // e.ref = @3}} _ _` — one ligature for the three, its first component
+    // itself and its last a slot it deleted.
+    let ligature = [
+        0x1C, 0, 0x21, 3, 0, 1, 2, 0x01, 0, 0x27, 15, 0, 0x01, 2, 0x27, 15, 1, 0x19, 0x20, 0x19,
+        0x20, 0x19, 0x31,
+    ];
+    with_stream(&face, &[(63, 0, 0), (64, 1, 3), (65, 4, 4)], |slots| {
+        assert_eq!(act(slots, &ligature, 0), Ok(acted(1, 0)));
+        assert_eq!(slots.glyphs(), vec![40]);
+        assert_eq!(spans(slots), vec![(0, 4)]);
+        assert_eq!(attribute(slots, 0, SlotAttribute::ComponentReference, 0), 0);
+        assert_eq!(attribute(slots, 0, SlotAttribute::ComponentReference, 1), 0);
+    });
+    held += 1;
+
+    // GDL 6.3: `clsToneMark gRaiseMark > @1 { raiseFlag = true } _` in the
+    // substitution table, and `clsToneMark { shift.y = 100m } / _ {
+    // raiseFlag == true }` in the positioning table: the flag, `user1`, set
+    // by one pass and read by a later one.
+    with_stream(&face, &[(66, 0, 0), (67, 1, 1)], |slots| {
+        let raise = [0x1E, 0, 0x01, 1, 0x33, 55, 0, 0x19, 0x20, 0x19, 0x31];
+        act(slots, &raise, 0).expect("the substitution acts");
+        assert_eq!(slots.glyphs(), vec![66]);
+        let features = slots.face().features.map_or(0, |f| f.len());
+        let bounds = Bounds::for_pass(slots.face().description, features, 12);
+        let site = Site {
+            pass: 12,
+            block: Block::Constraint(0),
+        };
+        let test = [0x22, 0, 7, 0x2E, 55, 0, 0, 0x01, 1, 0x13, 0x30];
+        let program = machine::check(&test, site, &bounds, &Limits::DEFAULT).expect("checks");
+        let mut budget = Budget::new(&Limits::DEFAULT);
+        let frame = Frame {
+            position: 0,
+            under_test: Some(0),
+        };
+        assert!(machine::holds(&program, &*slots, frame, &mut budget).expect("runs"));
+        let shift = [0x1E, 0, 0x01, 100, 0x23, 21, 0x19, 0x31];
+        act_in(slots, 12, &shift, 0, &Limits::DEFAULT).expect("the positioning acts");
+        assert_eq!(attribute(slots, 0, SlotAttribute::ShiftY, 0), 100);
+    });
+    held += 1;
+
+    assert_eq!(held, 9, "the action examples the design counts");
+}
+
+/// A slot's collision and sequence defaults are its glyph's attributes from
+/// `attCollisions` on, in the order the design reads off Awami Nastaliq: its
+/// upper nuqtas' glyph-table `collision { margin = STDMARGIN; marginweight =
+/// STDMARGINWT }` and `sequence { class = ORDER_UNUQTAS; order =
+/// ORDER_LEFTDOWN; … }` read 150, 400, 1, 0 and 1 in a slot no rule touched.
+#[test]
+fn a_slot_takes_its_collision_defaults_from_its_glyph() {
+    let limits = Limits::DEFAULT;
+    let sfnt = Sfnt::parse(AWAMI).expect("Awami Nastaliq parses");
+    let tables = Tables::parse(&sfnt, &limits).expect("a description");
+    let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");
+    let description = silf.description(0).expect("its description");
+    assert_eq!(description.attr_collisions, 4);
+    assert_ne!(description.flags & 0x20, 0, "a collision pass");
+    let attributes = tables
+        .attributes(&limits)
+        .expect("Gloc and Glat")
+        .expect("readable");
+    let base = 4u16;
+    let upper = (0..u16::try_from(attributes.glyph_count()).expect("a face's glyphs"))
+        .find(|glyph| {
+            let at = |offset: u16| attributes.attribute(*glyph, base + offset);
+            at(5) == Some(150) && at(6) == Some(400) && at(7) == Some(1) && at(9) == Some(1)
+        })
+        .expect("an upper nuqta");
+    let features = tables.features().map(|read| read.expect("its Feat reads"));
+    let values = features.as_ref().map_or_else(Vec::new, |features| {
+        FeatureValues::defaults(features).as_slice().to_vec()
+    });
+    let source = Source {
+        sfnt: &sfnt,
+        attributes: Some(&attributes),
+        description: &description,
+        features: features.as_ref(),
+    };
+    let slots = Slots::new(source, &[(upper, 0, 1)], &values);
+    let read = |attribute| attribute_of(&slots, attribute);
+    assert_eq!(read(SlotAttribute::CollisionMargin), 150);
+    assert_eq!(read(SlotAttribute::CollisionMarginWeight), 400);
+    assert_eq!(read(SlotAttribute::SequenceClass), 1);
+    assert_eq!(read(SlotAttribute::SequenceProxClass), 0);
+    assert_eq!(read(SlotAttribute::SequenceOrder), 1);
+    for limit in [
+        SlotAttribute::CollisionMinX,
+        SlotAttribute::CollisionMinY,
+        SlotAttribute::CollisionMaxX,
+        SlotAttribute::CollisionMaxY,
+    ] {
+        assert_eq!(read(limit), 0, "no glyph table sets {limit:?}");
+    }
+    let advance = i32::from(sfnt.advance(upper).expect("an advance"));
+    assert_eq!(read(SlotAttribute::AdvanceX), advance);
+}
+
+/// `attribute` of slot 0.
+fn attribute_of(slots: &Slots<'_>, attribute: SlotAttribute) -> i32 {
+    slots
+        .slot_attribute(0, attribute, 0)
+        .expect("the stream answers")
 }

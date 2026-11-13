@@ -16,7 +16,9 @@
 //! machine finding the rules that match at a scan position ([`Pass`]); and
 //! the stack machine their code runs on ([`machine`]): every block checked
 //! before it runs, and a constraint's computing instructions run against a
-//! stream ([`Reads`]) to decide whether its rule fires. A face whose only
+//! stream ([`Reads`]) to decide whether its rule fires; and the slot stream
+//! ([`Slots`]) a rule's action rewrites, putting glyphs, inserting,
+//! deleting, copying and associating slots and setting their attributes. A face whose only
 //! layout tables are these is still shaped as though it carried none, and
 //! every run over it says so (`crate::Warning::TableNotRun`).
 //!
@@ -41,6 +43,7 @@ pub mod glat;
 mod lz4;
 pub mod machine;
 pub mod silf;
+pub mod slot;
 
 pub use feat::{Feature, FeatureValues, Features, Languages, Setting};
 pub use glat::{Attributes, GlatVersion, Octabox, Subbox};
@@ -50,6 +53,7 @@ pub use machine::{
 pub use silf::{
     Candidate, ClassKind, ClassMap, Description, JustificationLevel, Matched, Pass, Silf,
 };
+pub use slot::{Acted, Slot, Slots, Source};
 
 /// `Silf`, a Graphite description's rules.
 pub const SILF: Tag = Tag::new(b"Silf");
@@ -192,6 +196,15 @@ pub enum Refusal {
     /// The run spent [`Limits::max_instructions`]; the rest of its code did
     /// not run.
     TooManyInstructions,
+    /// Code read a slot's position, or a glyph metric over an attachment
+    /// cluster, which positioning resolves; the code ended there.
+    PositionNotResolved,
+    /// Code read a glyph's box, and the face gives none: no `glyf`, or a
+    /// glyph past `loca`.
+    GlyphBoundsUnavailable {
+        /// The glyph, the real one a pseudo-glyph stands for.
+        glyph: u16,
+    },
 }
 
 /// The table `table` as it reads uncompressed: the bytes themselves where it

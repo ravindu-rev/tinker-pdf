@@ -111,8 +111,18 @@ pub enum Fault {
     DivisionByZero,
     /// `i32::MIN` divided by −1, whose quotient `i32` cannot hold.
     DivisionOverflow,
-    /// A slot offset reaching before the stream's start or past its end.
+    /// A slot offset reaching before the stream's start or past its end,
+    /// or an action's pointer where no slot is.
     SlotOutOfRange,
+    /// An insertion past [`Limits::max_glyphs`].
+    TooManySlots,
+    /// A class that gives no glyph: the input glyph is not in the input
+    /// class, or the output class holds no glyph at its index.
+    NoGlyphInClass(u16),
+    /// An instruction a positioning pass may not run — `Insert`, `Delete`,
+    /// or a `PutCopy` of another slot — because a positioning pass makes
+    /// "only a one-to-one substitution".
+    NotOneToOne(u8),
 }
 
 /// A slot attribute an instruction reads or sets, by the number compiled
@@ -679,17 +689,31 @@ pub struct Bounds {
     pub features: usize,
     /// How many user attributes the description counts.
     pub user_attributes: u8,
+    /// Whether the block is a positioning pass's.
+    pub positioning: bool,
 }
 
 impl Bounds {
     /// The bounds `description`'s code is checked against, in a face whose
-    /// `Feat` declares `features` features.
+    /// `Feat` declares `features` features, for a pass before its
+    /// positioning passes.
     #[must_use]
     pub fn of(description: &super::Description<'_>, features: usize) -> Bounds {
         Bounds {
             classes: description.classes().len(),
             features,
             user_attributes: description.user_attributes,
+            positioning: false,
+        }
+    }
+
+    /// The same, for pass `pass` of the description: a positioning pass
+    /// from `iPos` on.
+    #[must_use]
+    pub fn for_pass(description: &super::Description<'_>, features: usize, pass: usize) -> Bounds {
+        Bounds {
+            positioning: pass >= usize::from(description.positioning),
+            ..Bounds::of(description, features)
         }
     }
 }
@@ -766,6 +790,12 @@ pub fn check(
         if site.block.is_action() {
             if matches!(op, Op::ContextItem { .. }) {
                 return Err(refuse(at, Fault::ContextItemInAction));
+            }
+            let reorders = matches!(op, Op::Insert | Op::Delete)
+                || matches!(op, Op::PutCopy { slot } if slot != 0);
+            if bounds.positioning && reorders {
+                let opcode = code.get(at).copied().unwrap_or(0);
+                return Err(refuse(at, Fault::NotOneToOne(opcode)));
             }
         } else if op.acts() {
             let opcode = code.get(at).copied().unwrap_or(0);
@@ -1245,7 +1275,7 @@ impl Budget {
     }
 
     /// Charges one instruction.
-    fn charge(&mut self) -> Result<(), Refusal> {
+    pub(crate) fn charge(&mut self) -> Result<(), Refusal> {
         if self.left == 0 {
             self.spent = true;
             return Err(Refusal::TooManyInstructions);
@@ -1285,7 +1315,9 @@ pub fn answer<E: Reads + ?Sized>(
     budget: &mut Budget,
 ) -> Result<i32, Refusal> {
     let site = program.site;
-    let base = frame.under_test.unwrap_or(0);
+    let base = frame
+        .under_test
+        .map_or(0, |slot| i64::try_from(slot).unwrap_or(i64::MAX));
     let mut stack: Vec<i32> = Vec::new();
     if !site.block.is_action() {
         stack.push(1);
@@ -1301,8 +1333,9 @@ pub fn answer<E: Reads + ?Sized>(
         };
         match instruction.op {
             Op::ContextItem { slot, end } => {
+                let position = i64::try_from(frame.position).unwrap_or(i64::MAX);
                 let tested = frame.under_test.and_then(|tested| {
-                    let wanted = offset(frame.position, slot, stream.slot_count());
+                    let wanted = offset(position, slot, stream.slot_count());
                     (wanted == Some(tested)).then_some(())
                 });
                 if tested.is_none() {
@@ -1352,9 +1385,10 @@ pub(crate) enum Computed {
     NotComputing,
 }
 
-/// The stream index `slot` slots from `base`, where the stream holds it.
-pub(crate) fn offset(base: usize, slot: i8, count: usize) -> Option<usize> {
-    let at = i64::try_from(base).ok()?.checked_add(i64::from(slot))?;
+/// The stream index `slot` slots from `base`, where the stream holds it;
+/// `base` may stand before the stream, as an action's inserted slot does.
+pub(crate) fn offset(base: i64, slot: i8, count: usize) -> Option<usize> {
+    let at = base.checked_add(i64::from(slot))?;
     let at = usize::try_from(at).ok()?;
     (at < count).then_some(at)
 }
@@ -1365,7 +1399,7 @@ pub(crate) fn compute<E: Reads + ?Sized>(
     op: Op,
     stack: &mut Vec<i32>,
     stream: &E,
-    base: usize,
+    base: i64,
 ) -> Result<(), Computed> {
     let mut pop = || stack.pop().ok_or(Computed::Fault(Fault::StackUnderflow));
     let slot_at = |slot: i8| {
@@ -1513,6 +1547,7 @@ mod tests {
             classes: 4,
             features: 2,
             user_attributes: 3,
+            positioning: false,
         }
     }
 

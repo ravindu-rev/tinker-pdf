@@ -1020,9 +1020,15 @@ What it does:
   (`graphite::Reads`), in wrapping `i32` arithmetic, each skipped
   `ContextItem` block a test that holds, every instruction charged against
   `Limits::max_instructions`; a division the machine cannot do, a slot
-  outside the stream and a spent budget are each refused by name. No rule's
-  action runs yet, and no run is shaped through any of it: the
-  refused-by-name table below says what a run over such a face does.
+  outside the stream and a spent budget are each refused by name. A rule's
+  action rewrites the slot stream (`graphite::Slots`): putting a glyph or a
+  class-indexed substitute, inserting, deleting, copying and associating
+  slots, and setting slot attributes, its operands counting slots of the
+  stream as the action found it, each insertion held to `Limits::max_glyphs`;
+  a slot keeps the characters it stands for, and the stream's clusters come
+  out never going backwards. No pass runs yet, and no run is shaped through
+  any of it: the refused-by-name table below says what a run over such a face
+  does.
 - **AAT tables, read and not yet run.** `tinker_pdf_shape::aat` holds the
   structures Apple's *TrueType Reference Manual* builds its AAT tables of
   (*AAT shaping* in the design). `aat::Lookup` reads a lookup table in each
