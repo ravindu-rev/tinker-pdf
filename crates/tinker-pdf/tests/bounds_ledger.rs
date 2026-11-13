@@ -3957,9 +3957,17 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                 1,
                 "the output, its component planes, and the coefficients: a frame one \
                  pixel wide pads each row of blocks to its widest MCU, 32 samples, so its \
-                 coefficients reach 24 bytes a byte of output",
+                 coefficients reach 24 bytes a byte of output; a reduced scale holds the \
+                 same coefficients and less of the rest, since the ceiling bounds the \
+                 frame's own samples at every scale",
             )],
-            vec![(FUZZ_JPEG, "jpeg_decode(data, 1 << 22)")],
+            vec![
+                (FUZZ_JPEG, "jpeg_decode(data, 1 << 22)"),
+                (
+                    FUZZ_JPEG,
+                    "jpeg_decode_strips(data, 1 << 22, scale, &mut Dropped)",
+                ),
+            ],
         ),
         written(
             "jpx",

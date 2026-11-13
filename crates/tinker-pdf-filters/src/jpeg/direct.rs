@@ -6,7 +6,10 @@
 //! against it over inputs that reach every branch of both, so that a
 //! full-size decode stays byte-identical for every stream.
 
-use super::{Component, HuffmanTable, JpegColor, JpegError, JpegImage, COS_TABLE, ZIGZAG};
+use super::{
+    Component, HuffmanTable, JpegColor, JpegError, JpegImage, JpegScale, COS_TABLE, REDUCED,
+    REDUCED_BOUND, ZIGZAG,
+};
 use crate::Warning;
 
 /// Reads bits from the entropy-coded segment a byte at a time, unstuffing as
@@ -173,9 +176,43 @@ pub(super) fn idct_block(input: &[i32; 64], precision: u8, out: &mut [u8; 64]) {
         }
     }
 }
-/// Turns the finished coefficients into pixels: one full-resolution plane
-/// a component, upsampled as it is written, then interleaved —
-/// [`super::finish`] without its strips.
+
+/// The reduced transform of one block at `N/8`, `n` its `N` of 4 or 2, into
+/// `out`'s first `n × n` samples, row-major: every sample its own double sum
+/// over the block's top-left `n × n` coefficients —
+/// [`super::reduced_block`] without its two passes. A block whose kept
+/// coefficients have no AC term takes [`super::dc_level`].
+pub(super) fn idct_reduced(input: &[i32; 64], n: usize, precision: u8, out: &mut [u8; 16]) {
+    let coefficient = |u: usize, v: usize| input.get(v * 8 + u).copied().unwrap_or(0);
+    let ac = (0..n).any(|v| (0..n).any(|u| (u, v) != (0, 0) && coefficient(u, v) != 0));
+    if !ac {
+        out.fill(super::dc_level(coefficient(0, 0), precision));
+        return;
+    }
+    let cosine = |x: usize, u: usize| match n {
+        4 => REDUCED.four[x][u],
+        _ => REDUCED.two[x][u],
+    };
+    let half = 1i64 << (precision - 1);
+    let ceiling = (1i64 << precision) - 1;
+    for y in 0..n {
+        for x in 0..n {
+            let mut sum = 0i64;
+            for v in 0..n {
+                for u in 0..n {
+                    let s = coefficient(u, v).clamp(-REDUCED_BOUND, REDUCED_BOUND);
+                    sum += i64::from(s) * cosine(x, u) * cosine(y, v);
+                }
+            }
+            let level = ((sum + (1 << 31)) >> 32) + half;
+            out[y * n + x] = (level.clamp(0, ceiling) >> (precision - 8)) as u8;
+        }
+    }
+}
+
+/// Turns the finished coefficients into pixels at `scale`: one plane a
+/// component at the image's size, each block's samples upsampled as they are
+/// written, then interleaved — [`super::finish`] without its strips.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_planes(
     components: &[Component],
@@ -187,6 +224,7 @@ pub(super) fn finish_planes(
     precision: u8,
     max_output: usize,
     mut warnings: Vec<Warning>,
+    scale: JpegScale,
 ) -> Result<JpegImage, JpegError> {
     if width == 0 || height == 0 || components.is_empty() {
         return Err(JpegError::Truncated);
@@ -224,7 +262,16 @@ pub(super) fn finish_planes(
     let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
     let v_max = components.iter().map(|c| c.v).max().unwrap_or(1).max(1);
 
-    // One full-resolution plane per component, upsampled as it is written.
+    // The image the scale makes, `n` samples a block side: the frame itself
+    // at full size.
+    let n = scale.block_samples() as usize;
+    let (width, height) = (
+        scale.length(width as u32) as usize,
+        scale.length(height as u32) as usize,
+    );
+
+    // One plane per component at the image's size, upsampled as it is
+    // written.
     let mut planes: Vec<Vec<u8>> = components
         .iter()
         .map(|_| vec![128u8; width * height])
@@ -232,6 +279,7 @@ pub(super) fn finish_planes(
 
     let mut block = [0i32; 64];
     let mut pixels = [0u8; 64];
+    let mut reduced = [0u8; 16];
 
     for (ci, component) in components.iter().enumerate() {
         let table = quant.get(component.quant).copied().unwrap_or([1; 64]);
@@ -260,17 +308,25 @@ pub(super) fn finish_planes(
                         *slot = i32::from(coefficient).saturating_mul(q);
                     }
                 }
-                idct_block(&block, precision, &mut pixels);
+                if n == 8 {
+                    idct_block(&block, precision, &mut pixels);
+                } else {
+                    idct_reduced(&block, n, precision, &mut reduced);
+                }
 
-                let origin_x = bx * 8 * scale_x;
-                let origin_y = by * 8 * scale_y;
+                let origin_x = bx * n * scale_x;
+                let origin_y = by * n * scale_y;
                 if origin_x >= width || origin_y >= height {
                     continue;
                 }
 
-                for py in 0..8usize {
-                    for px in 0..8usize {
-                        let value = pixels.get(py * 8 + px).copied().unwrap_or(128);
+                for py in 0..n {
+                    for px in 0..n {
+                        let value = if n == 8 {
+                            pixels.get(py * 8 + px).copied().unwrap_or(128)
+                        } else {
+                            reduced.get(py * n + px).copied().unwrap_or(128)
+                        };
                         for ry in 0..scale_y {
                             for rx in 0..scale_x {
                                 let x = origin_x + px * scale_x + rx;

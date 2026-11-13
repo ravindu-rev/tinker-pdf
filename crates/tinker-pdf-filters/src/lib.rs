@@ -91,7 +91,7 @@ pub use jbig2::{
 pub use jpeg::{
     decode as jpeg_decode, decode_strips as jpeg_decode_strips, jpeg_encode, JpegColor,
     JpegEncodeError, JpegError, JpegFrame, JpegHeld, JpegImage, JpegLayout, JpegOptions,
-    JpegQuantisation, JpegSampling, JpegSink, JpegSource, JpegSourceColour,
+    JpegQuantisation, JpegSampling, JpegScale, JpegSink, JpegSource, JpegSourceColour,
 };
 pub use jpx::{
     jpx_decode, jpx_decode_attributed, jpx_decode_request, jpx_header, JpxColour, JpxCounts,

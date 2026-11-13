@@ -34,8 +34,9 @@ use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
     ascii85_decode, ascii_hex_decode, bmp_decode, brotli_decode, ccitt_decode, flate_decode,
-    gif_decode, jpeg_decode, lzw_decode, png_decode, png_scan, run_length_decode, tiff_decode,
-    tiff_scan, webp_decode, CcittParams, Limits,
+    gif_decode, jpeg_decode, jpeg_decode_strips, lzw_decode, png_decode, png_scan,
+    run_length_decode, tiff_decode, tiff_scan, webp_decode, CcittParams, JpegLayout, JpegScale,
+    JpegSink, Limits,
 };
 
 /// One corpus directory, or `None` when the fuzz tree is not in this checkout.
@@ -296,6 +297,26 @@ fn the_lzw_seeds_reach_the_decoder() {
     report("lzw", files.len(), reached);
 }
 
+/// What a strip decode hands its sink: the layout, and every strip's first
+/// row, row count and bytes, in order.
+#[derive(Default)]
+struct Strips {
+    layouts: Vec<JpegLayout>,
+    rows: Vec<(u32, u32)>,
+    bytes: usize,
+}
+
+impl JpegSink for Strips {
+    fn begin(&mut self, layout: JpegLayout) {
+        self.layouts.push(layout);
+    }
+
+    fn strip(&mut self, y: u32, rows: u32, data: &[u8]) {
+        self.rows.push((y, rows));
+        self.bytes += data.len();
+    }
+}
+
 #[test]
 fn the_jpeg_seeds_reach_the_decoder() {
     let Some(files) = seeds("jpeg") else {
@@ -303,19 +324,56 @@ fn the_jpeg_seeds_reach_the_decoder() {
         return;
     };
     let mut reached = 0;
+    let mut scales = Vec::new();
     for (label, data) in &files {
-        if let Ok(image) = jpeg_decode(data, 1 << 22) {
+        // The target's call: the scale the input's length picks, full size
+        // through the whole-image decode and a reduced one through the strips.
+        let scale = JpegScale::ALL[data.len() % 4];
+        let decoded = match scale {
+            JpegScale::Full => jpeg_decode(data, 1 << 22).map(|image| {
+                // The geometry has to describe the samples it returned, which
+                // is the assertion `fuzz/fuzz_targets/jpeg.rs` does not make —
+                // see that file's header.
+                assert_eq!(
+                    image.data.len(),
+                    image.width as usize * image.height as usize * image.color.components(),
+                    "{label}: the samples are not the geometry's"
+                );
+                (image.width, image.height)
+            }),
+            scale => {
+                let mut strips = Strips::default();
+                jpeg_decode_strips(data, 1 << 22, scale, &mut strips).map(|frame| {
+                    let layout = frame.layout;
+                    assert_eq!(strips.layouts, vec![layout], "{label}: one layout, first");
+                    let rows: u32 = strips.rows.iter().map(|&(_, rows)| rows).sum();
+                    assert_eq!(rows, layout.height, "{label}: the strips are the image");
+                    assert_eq!(
+                        strips.bytes,
+                        layout.width as usize * rows as usize * layout.color.components(),
+                        "{label}: the strips are not the geometry's"
+                    );
+                    // The reduced image is its scale's fraction of the frame.
+                    assert_eq!(
+                        (layout.width, layout.height),
+                        (
+                            scale.length(layout.full_width),
+                            scale.length(layout.full_height)
+                        ),
+                        "{label}"
+                    );
+                    (layout.width, layout.height)
+                })
+            }
+        };
+        if let Ok((width, height)) = decoded {
             reached += 1;
-            // The geometry has to describe the samples it returned, which is
-            // the assertion `fuzz/fuzz_targets/jpeg.rs` does not make — see
-            // that file's header.
-            assert!(
-                image.width > 0 && image.height > 0,
-                "{label}: a zero-sized success"
-            );
+            scales.push(scale);
+            assert!(width > 0 && height > 0, "{label}: a zero-sized success");
         }
     }
     report("jpeg", files.len(), reached);
+    println!("jpeg-seeds: the seeds that decode reach the scales {scales:?}");
 }
 
 #[test]

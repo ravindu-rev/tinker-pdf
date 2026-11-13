@@ -62,6 +62,15 @@
 //! two paths cannot drift apart unseen: the test build decodes every
 //! sequential stream both ways and holds them equal.
 //!
+//! **A strip decode takes a scale** ([`JpegScale`]). At 1/2, 1/4 and 1/8 each
+//! block's top-left 4 × 4, 2 × 2 or 1 × 1 coefficients are transformed by the
+//! reduced transforms ([`reduced_block`]) into an image of `⌈W·N/8⌉` by
+//! `⌈H·N/8⌉`, a subsampled component reduced by the same factor before it is
+//! replicated, for every frame type, both coders and both precisions. A block
+//! whose kept coefficients have no AC term, and every block at 1/8, takes the
+//! full transform's DC level ([`dc_level`]), so a flat block is the same level
+//! at every scale. [`decode`] is the full-size decode.
+//!
 //! The IDCT is the integer separable transform. That means output can differ
 //! from libjpeg's by a least-significant bit on some coefficients — there is no
 //! single correct IDCT, only conforming ones — so comparison against a
@@ -136,25 +145,85 @@ impl JpegColor {
     }
 }
 
+/// The size a strip decode makes its image at: the frame's own, or a half, a
+/// quarter or an eighth of it each way, reduced in the DCT domain
+/// (`docs/design/jpeg-speed.md`, "The reduced transforms").
+///
+/// At `N/8` each block's top-left `N × N` coefficients are transformed into
+/// `N × N` samples, so a `W × H` frame gives a `⌈W·N/8⌉ × ⌈H·N/8⌉` image whose
+/// sample `X` covers the frame's columns `8X/N` up to `8(X+1)/N`, the last cut
+/// where the frame ends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum JpegScale {
+    /// Every sample: `N` is 8.
+    #[default]
+    Full,
+    /// Four samples a block side, from its top-left 4 × 4 coefficients.
+    Half,
+    /// Two samples a block side, from its top-left 2 × 2 coefficients.
+    Quarter,
+    /// One sample a block: its DC level.
+    Eighth,
+}
+
+impl JpegScale {
+    /// Every scale, the full size first and then each smaller one: the order
+    /// the `jpeg` fuzz target's input length picks them in.
+    pub const ALL: [JpegScale; 4] = [
+        JpegScale::Full,
+        JpegScale::Half,
+        JpegScale::Quarter,
+        JpegScale::Eighth,
+    ];
+
+    /// `N` of `N/8`: the samples a block gives along each side.
+    #[must_use]
+    pub fn block_samples(self) -> u32 {
+        match self {
+            JpegScale::Full => 8,
+            JpegScale::Half => 4,
+            JpegScale::Quarter => 2,
+            JpegScale::Eighth => 1,
+        }
+    }
+
+    /// A length of `full` samples at this scale: `⌈full·N/8⌉`.
+    #[must_use]
+    pub fn length(self, full: u32) -> u32 {
+        let scaled = (u64::from(full) * u64::from(self.block_samples())).div_ceil(8);
+        // At most `full`, since `N` is at most 8.
+        u32::try_from(scaled).unwrap_or(full)
+    }
+}
+
 /// A decoded image's geometry and colour: what a [`JpegSink`] is told before
 /// its first strip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JpegLayout {
-    /// Width in pixels.
+    /// Width in pixels: the frame's at full size, `⌈X·N/8⌉` of its `X` at
+    /// `N/8`.
     pub width: u32,
-    /// Height in pixels.
+    /// Height in pixels, likewise.
     pub height: u32,
     /// What the components mean.
     pub color: JpegColor,
     /// T.81 B.2.2's `P`: the frame's sample precision, 8 or 12. The samples
     /// are eight bits whatever it was, as [`JpegImage::data`]'s are.
     pub precision: u8,
+    /// The scale the image is decoded at.
+    pub scale: JpegScale,
+    /// T.81 B.2.2's `X`: the frame's own width, which the image covers at
+    /// every scale, its last column cut where the frame ends.
+    pub full_width: u32,
+    /// T.81 B.2.2's `Y`: the frame's own height, likewise.
+    pub full_height: u32,
 }
 
 /// Where [`decode_strips`] hands a decoded image, a strip at a time.
 ///
-/// A strip is one MCU row of the image — `8 · Vmax` rows, the last cut at
-/// the image's height — and the strips arrive top to bottom.
+/// A strip is one MCU row of the image — `N · Vmax` rows at the scale's `N`,
+/// `8 · Vmax` at full size, the last cut at the image's height — and the
+/// strips arrive top to bottom.
 pub trait JpegSink {
     /// The image's geometry and colour: once, before the first strip.
     fn begin(&mut self, layout: JpegLayout);
@@ -197,6 +266,9 @@ pub struct JpegFrame {
     pub warnings: Vec<Warning>,
     /// What it held while it decoded.
     pub held: JpegHeld,
+    /// Samples the inverse transforms output, every component's: `N × N` for
+    /// each block transformed at the scale's `N`, before any is replicated.
+    pub transformed: u64,
 }
 
 /// Why a JPEG could not be decoded.
@@ -873,10 +945,10 @@ fn colour_of(components: usize, adobe_seen: bool) -> Option<JpegColor> {
     }
 }
 
-/// Decodes a JPEG.
+/// Decodes a JPEG, at full size.
 pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
     let mut image = Collected::default();
-    let scanned = scan_frame(data, max_output, Some(&mut image))?;
+    let scanned = scan_frame(data, max_output, JpegScale::Full, Some(&mut image))?;
     let frame = finish(scanned, max_output, &mut image)?;
     Ok(JpegImage {
         width: frame.layout.width,
@@ -888,16 +960,21 @@ pub fn decode(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
     })
 }
 
-/// Decodes a JPEG a strip at a time (`docs/design/jpeg-speed.md`,
-/// "Strips"): `sink` is told the image's layout, then handed every strip, top
-/// to bottom, and the image is never held whole.
+/// Decodes a JPEG a strip at a time, at `scale` (`docs/design/jpeg-speed.md`,
+/// "Strips" and "The reduced transforms"): `sink` is told the image's
+/// layout, then handed every strip, top to bottom, and the image is never
+/// held whole.
 ///
-/// The strips are [`decode`]'s image, row for row, and the frame its
-/// geometry, colour and warnings. **A decode that hands out a strip
-/// succeeds**: every check is made before the first one.
+/// At full size the strips are [`decode`]'s image, row for row, and the frame
+/// its geometry, colour and warnings; at a reduced scale they are the image
+/// the reduced transforms make, `⌈W·N/8⌉` by `⌈H·N/8⌉`. `max_output` bounds
+/// the frame's own samples at every scale, since the coefficients a decode
+/// holds are the frame's. **A decode that hands out a strip succeeds**: every
+/// check is made before the first one.
 pub fn decode_strips(
     data: &[u8],
     max_output: usize,
+    scale: JpegScale,
     sink: &mut dyn JpegSink,
 ) -> Result<JpegFrame, JpegError> {
     let mut forwarded = Forwarded {
@@ -905,7 +982,7 @@ pub fn decode_strips(
         strip: Vec::new(),
         held: 0,
     };
-    let scanned = scan_frame(data, max_output, Some(&mut forwarded))?;
+    let scanned = scan_frame(data, max_output, scale, Some(&mut forwarded))?;
     finish(scanned, max_output, &mut forwarded)
 }
 
@@ -919,20 +996,51 @@ struct Scanned {
     adobe_transform: Option<u8>,
     /// T.81 B.2.2's `P`.
     precision: u8,
+    /// The scale the image is painted at.
+    scale: JpegScale,
     /// What the scans tolerated.
     warnings: Vec<Warning>,
-    /// The layout and what was held, for a frame that streamed: its strips
-    /// were painted as its scan was decoded.
-    streamed: Option<(JpegLayout, JpegHeld)>,
+    /// What a frame that streamed left: its strips were painted as its scan
+    /// was decoded.
+    streamed: Option<Streamed>,
+}
+
+/// A streamed frame's layout, what it held and the samples it transformed.
+struct Streamed {
+    layout: JpegLayout,
+    held: JpegHeld,
+    transformed: u64,
+}
+
+/// The layout of a `width` by `height` frame's image at `scale`.
+fn layout_at(
+    width: usize,
+    height: usize,
+    color: JpegColor,
+    precision: u8,
+    scale: JpegScale,
+) -> JpegLayout {
+    // B.2.2's `X` and `Y` are sixteen bits.
+    let (full_width, full_height) = (width as u32, height as u32);
+    JpegLayout {
+        width: scale.length(full_width),
+        height: scale.length(full_height),
+        color,
+        precision,
+        scale,
+        full_width,
+        full_height,
+    }
 }
 
 /// Reads every marker segment and decodes every scan into the frame's
 /// coefficients, or, for a frame that streams and a `stream` to paint into,
-/// paints each MCU row as it is decoded (`docs/design/jpeg-speed.md`,
-/// "Which frames stream").
+/// paints each MCU row at `scale` as it is decoded
+/// (`docs/design/jpeg-speed.md`, "Which frames stream").
 fn scan_frame(
     data: &[u8],
     max_output: usize,
+    scale: JpegScale,
     mut stream: Option<&mut dyn Rows>,
 ) -> Result<Scanned, JpegError> {
     if data.get(..2) != Some(&[0xFF, 0xD8]) {
@@ -1174,21 +1282,10 @@ fn scan_frame(
                     if let (true, Some(colour), Some(target)) =
                         (streams, colour, stream.as_deref_mut())
                     {
-                        let layout = JpegLayout {
-                            width: width as u32,
-                            height: height as u32,
-                            color: colour,
-                            precision: sample_precision,
-                        };
+                        let layout = layout_at(width, height, colour, sample_precision, scale);
                         target.begin(layout);
-                        let painter = Painter::new(
-                            &components,
-                            width,
-                            height,
-                            colour,
-                            adobe_transform.unwrap_or(0),
-                            sample_precision,
-                        );
+                        let painter =
+                            Painter::new(&components, layout, adobe_transform.unwrap_or(0));
                         painting = Some((painter, layout));
                     }
                 }
@@ -1296,7 +1393,11 @@ fn scan_frame(
                 planes: painter.held(),
                 strip: target.held(),
             };
-            Some((layout, held))
+            Some(Streamed {
+                layout,
+                held,
+                transformed: painter.transformed,
+            })
         }
         _ => None,
     };
@@ -1309,6 +1410,7 @@ fn scan_frame(
         adobe_seen,
         adobe_transform,
         precision: sample_precision,
+        scale,
         warnings,
         streamed,
     })
@@ -1907,11 +2009,12 @@ impl Rows for Forwarded<'_> {
     }
 }
 
-/// Turns the finished coefficients into pixels, one MCU row at a time
-/// (`docs/design/jpeg-speed.md`, "Strips"), into `target`.
+/// Turns the finished coefficients into pixels at the scan's scale, one MCU
+/// row at a time (`docs/design/jpeg-speed.md`, "Strips"), into `target`.
 ///
 /// Every check this makes comes before the first strip, so a target that is
-/// handed a strip is handed the whole image.
+/// handed a strip is handed the whole image. The ceiling is held to the
+/// frame's own samples at every scale.
 fn finish(
     scanned: Scanned,
     max_output: usize,
@@ -1925,10 +2028,16 @@ fn finish(
         adobe_seen,
         adobe_transform,
         precision,
+        scale,
         mut warnings,
         streamed,
     } = scanned;
-    if let Some((layout, held)) = streamed {
+    if let Some(Streamed {
+        layout,
+        held,
+        transformed,
+    }) = streamed
+    {
         // Painted as its scan was decoded, every check below made first.
         if precision > 8 {
             warnings.push(Warning::JpegPrecisionNarrowed);
@@ -1937,6 +2046,7 @@ fn finish(
             layout,
             warnings,
             held,
+            transformed,
         });
     }
     if width == 0 || height == 0 || components.is_empty() {
@@ -1961,21 +2071,9 @@ fn finish(
         warnings.push(Warning::JpegPrecisionNarrowed);
     }
 
-    let layout = JpegLayout {
-        width: width as u32,
-        height: height as u32,
-        color,
-        precision,
-    };
+    let layout = layout_at(width, height, color, precision, scale);
     target.begin(layout);
-    let mut painter = Painter::new(
-        &components,
-        width,
-        height,
-        color,
-        adobe_transform.unwrap_or(0),
-        precision,
-    );
+    let mut painter = Painter::new(&components, layout, adobe_transform.unwrap_or(0));
     for strip in 0..painter.strips() {
         painter.paint(strip, &components, &quant, target);
     }
@@ -1992,6 +2090,7 @@ fn finish(
             planes: painter.held(),
             strip: target.held(),
         },
+        transformed: painter.transformed,
     })
 }
 
@@ -1999,17 +2098,19 @@ fn finish(
 struct Plane {
     /// Image columns one of this component's samples covers, and image rows:
     /// T.81 A.1.1's `Hmax / H` and `Vmax / V`, rounded down as a ratio that
-    /// does not divide leaves them.
+    /// does not divide leaves them, at every scale.
     sx: usize,
     sy: usize,
     /// The component's blocks a row, and its block rows.
     blocks_x: usize,
     blocks_y: usize,
+    /// `N`: the samples a block gives along each side at the painter's scale.
+    n: usize,
     /// The first block row the plane holds for the strip being painted, and
     /// how many it holds.
     first: usize,
     held: usize,
-    /// Lines of the image's width, eight a block row the plane has room for,
+    /// Lines of the image's width, `N` a block row the plane has room for,
     /// each sample replicated across the image columns it covers as it is
     /// written. A column no block covers — only a ratio that does not divide
     /// leaves one — keeps the 128 the plane was filled with.
@@ -2021,22 +2122,24 @@ impl Plane {
     /// component covers it.
     fn line(&self, y: usize, width: usize) -> Option<&[u8]> {
         let row = y / self.sy;
-        let block_row = row / 8;
+        let block_row = row / self.n;
         if block_row < self.first || block_row >= self.first + self.held {
             return None;
         }
-        let at = ((block_row - self.first) * 8 + row % 8) * width;
+        let at = ((block_row - self.first) * self.n + row % self.n) * width;
         self.samples.get(at..at + width)
     }
 }
 
-/// The block rows of a component the image rows of strip `strip` read:
-/// `first..last`, empty when none of them is a row the component has.
+/// The block rows of a component the image rows of strip `strip` read, each
+/// block row `n` of the component's own rows: `first..last`, empty when none
+/// of them is a row the component has.
 fn block_rows(
     strip: usize,
     strip_rows: usize,
     height: usize,
     sy: usize,
+    n: usize,
     blocks_y: usize,
 ) -> (usize, usize) {
     let top = strip * strip_rows;
@@ -2044,41 +2147,46 @@ fn block_rows(
     if top >= bottom {
         return (0, 0);
     }
-    let first = top / sy / 8;
-    let last = ((bottom - 1) / sy / 8 + 1).min(blocks_y);
+    let first = top / sy / n;
+    let last = ((bottom - 1) / sy / n + 1).min(blocks_y);
     (first, last.max(first))
 }
 
-/// Paints a frame's strips from its coefficients: each component's block
-/// rows a strip reads, dequantised, transformed and replicated into its
+/// Paints a frame's strips from its coefficients at a scale: each component's
+/// block rows a strip reads, dequantised, transformed and replicated into its
 /// plane, then each image row converted from the planes into the strip.
 struct Painter {
+    /// The image's width and height: the frame's at full size, `⌈X·N/8⌉` and
+    /// `⌈Y·N/8⌉` at `N/8`.
     width: usize,
     height: usize,
     color: JpegColor,
     /// The Adobe marker's transform, 2 for YCCK.
     transform: u8,
     precision: u8,
-    /// Image rows a strip has: one MCU row, `8 · Vmax`.
+    /// The scale the blocks are transformed at.
+    scale: JpegScale,
+    /// The zig-zag positions a block's top-left `N × N` coefficients reach.
+    span: usize,
+    /// Image rows a strip has: one MCU row, `N · Vmax`.
     strip_rows: usize,
     planes: Vec<Plane>,
     /// A line of 128s, for an image row no block row of a component covers,
     /// which only a ratio that does not divide leaves.
     grey: Vec<u8>,
+    /// Samples the inverse transforms have output, every component's.
+    transformed: u64,
 }
 
 impl Painter {
-    fn new(
-        components: &[Component],
-        width: usize,
-        height: usize,
-        color: JpegColor,
-        transform: u8,
-        precision: u8,
-    ) -> Painter {
+    /// The painter of `layout`'s image from `components`, `transform` being
+    /// the Adobe marker's.
+    fn new(components: &[Component], layout: JpegLayout, transform: u8) -> Painter {
+        let (width, height) = (layout.width as usize, layout.height as usize);
+        let n = layout.scale.block_samples() as usize;
         let h_max = components.iter().map(|c| c.h).max().unwrap_or(1).max(1);
         let v_max = components.iter().map(|c| c.v).max().unwrap_or(1).max(1);
-        let strip_rows = 8 * v_max;
+        let strip_rows = n * v_max;
         let strips = height.div_ceil(strip_rows);
         let mut uncovered = false;
         let planes = components
@@ -2088,29 +2196,32 @@ impl Painter {
                 let most = (0..strips)
                     .map(|strip| {
                         let (first, last) =
-                            block_rows(strip, strip_rows, height, sy, component.blocks_y);
+                            block_rows(strip, strip_rows, height, sy, n, component.blocks_y);
                         last - first
                     })
                     .max()
                     .unwrap_or(0);
-                uncovered |= component.blocks_y.saturating_mul(8).saturating_mul(sy) < height;
+                uncovered |= component.blocks_y.saturating_mul(n).saturating_mul(sy) < height;
                 Plane {
                     sx: h_max / component.h.max(1),
                     sy,
                     blocks_x: component.blocks_x,
                     blocks_y: component.blocks_y,
+                    n,
                     first: 0,
                     held: 0,
-                    samples: vec![128u8; most.saturating_mul(8).saturating_mul(width)],
+                    samples: vec![128u8; most.saturating_mul(n).saturating_mul(width)],
                 }
             })
             .collect();
         Painter {
             width,
             height,
-            color,
+            color: layout.color,
             transform,
-            precision,
+            precision: layout.precision,
+            scale: layout.scale,
+            span: kept_span(n),
             strip_rows,
             planes,
             grey: if uncovered {
@@ -2118,6 +2229,7 @@ impl Painter {
             } else {
                 Vec::new()
             },
+            transformed: 0,
         }
     }
 
@@ -2148,14 +2260,30 @@ impl Painter {
             return;
         }
         let (width, height, strip_rows) = (self.width, self.height, self.strip_rows);
-        let precision = self.precision;
+        let (precision, scale, span) = (self.precision, self.scale, self.span);
         for (plane, component) in self.planes.iter_mut().zip(components) {
-            let (first, last) = block_rows(strip, strip_rows, height, plane.sy, plane.blocks_y);
+            let (first, last) =
+                block_rows(strip, strip_rows, height, plane.sy, plane.n, plane.blocks_y);
             plane.first = first;
             plane.held = last - first;
             let table = quant.get(component.quant).copied().unwrap_or([1; 64]);
             for by in first..last {
-                transform_row(plane, component, &table, by, width, precision);
+                let row = BlockRow {
+                    plane: &mut *plane,
+                    component,
+                    table: &table,
+                    by,
+                    width,
+                    precision,
+                };
+                self.transformed += match scale {
+                    JpegScale::Full => transform_row(row),
+                    JpegScale::Half => transform_row_reduced(row, span, &REDUCED.four),
+                    JpegScale::Quarter => transform_row_reduced(row, span, &REDUCED.two),
+                    // Every block at 1/8 takes its DC level, which reads no
+                    // cosine.
+                    JpegScale::Eighth => transform_row_reduced::<1>(row, span, &[[0]]),
+                };
             }
         }
 
@@ -2188,18 +2316,36 @@ fn dequantise(source: &[i16], table: &[u16; 64], block: &mut [i32; 64]) {
     }
 }
 
-/// Transforms block row `by` of `component` into its place in `plane`.
-fn transform_row(
-    plane: &mut Plane,
-    component: &Component,
-    table: &[u16; 64],
+/// One block row a transform paints.
+struct BlockRow<'r> {
+    /// The plane it is painted into.
+    plane: &'r mut Plane,
+    /// The component its blocks are read from, and its quantisation table.
+    component: &'r Component,
+    table: &'r [u16; 64],
+    /// The block row.
     by: usize,
+    /// The image's width.
     width: usize,
+    /// The frame's precision, 8 or 12.
     precision: u8,
-) {
+}
+
+/// Transforms a block row of a component into its place in its plane at
+/// full size, returning the samples the transform output.
+fn transform_row(row: BlockRow<'_>) -> u64 {
+    let BlockRow {
+        plane,
+        component,
+        table,
+        by,
+        width,
+        precision,
+    } = row;
     let base = (by - plane.first) * 8;
     let mut block = [0i32; 64];
     let mut pixels = [0u8; 64];
+    let mut transformed = 0u64;
     for bx in 0..plane.blocks_x {
         let origin = bx * 8 * plane.sx;
         if origin >= width {
@@ -2210,25 +2356,97 @@ fn transform_row(
             Some(source) => {
                 dequantise(source, table, &mut block);
                 idct_block(&block, precision, &mut pixels);
+                transformed += 64;
             }
             // A block the buffer does not hold leaves the 128 a plane starts
             // as.
             None => pixels = [128; 64],
         }
-        for (py, row) in pixels.chunks_exact(8).enumerate() {
+        for (py, samples) in pixels.chunks_exact(8).enumerate() {
             let at = (base + py) * width;
             if let Some(line) = plane.samples.get_mut(at..at + width) {
-                replicate(line, row, origin, plane.sx);
+                replicate(line, samples, origin, plane.sx);
             }
         }
     }
+    transformed
 }
 
-/// Writes one block row's eight samples into `line` from column `origin`,
-/// each across `sx` columns, as far as the image's width.
+/// Transforms a block row of a component into its place in its plane at
+/// `N/8`: each block's top-left `N × N` coefficients, which the zig-zag
+/// positions below `span` hold, into `N × N` samples by `cosines`
+/// ([`reduced_block`]), returning the samples the transform output.
+fn transform_row_reduced<const N: usize>(
+    row: BlockRow<'_>,
+    span: usize,
+    cosines: &[[i64; N]; N],
+) -> u64 {
+    let BlockRow {
+        plane,
+        component,
+        table,
+        by,
+        width,
+        precision,
+    } = row;
+    let base = (by - plane.first) * N;
+    let mut transformed = 0u64;
+    for bx in 0..plane.blocks_x {
+        let origin = bx * N * plane.sx;
+        if origin >= width {
+            // Every block further right is past the image too.
+            break;
+        }
+        let samples = match component.block(bx, by) {
+            Some(source) => {
+                transformed += (N * N) as u64;
+                reduced_block(&kept(source, table, span), cosines, precision)
+            }
+            // A block the buffer does not hold leaves the 128 a plane starts
+            // as.
+            None => [[128; N]; N],
+        };
+        for (py, line_samples) in samples.iter().enumerate() {
+            let at = (base + py) * width;
+            if let Some(line) = plane.samples.get_mut(at..at + width) {
+                replicate(line, line_samples, origin, plane.sx);
+            }
+        }
+    }
+    transformed
+}
+
+/// The top-left `N × N` of a block's coefficients, `[v][u]`, out of zig-zag
+/// order and dequantised as [`dequantise`] dequantises them: the zig-zag
+/// positions below `span` hold every one of them.
+fn kept<const N: usize>(source: &[i16], table: &[u16; 64], span: usize) -> [[i32; N]; N] {
+    let mut kept = [[0i32; N]; N];
+    for (&coefficient, &z) in source.iter().zip(ZIGZAG.iter()).take(span) {
+        if coefficient == 0 {
+            continue;
+        }
+        if let Some(slot) = kept.get_mut(z / 8).and_then(|row| row.get_mut(z % 8)) {
+            let q = i32::from(table.get(z).copied().unwrap_or(1));
+            *slot = i32::from(coefficient).saturating_mul(q);
+        }
+    }
+    kept
+}
+
+/// How many zig-zag positions a block's top-left `n × n` coefficients reach:
+/// one past the last of them in T.81 Figure A.6's order.
+fn kept_span(n: usize) -> usize {
+    ZIGZAG
+        .iter()
+        .rposition(|&z| z / 8 < n && z % 8 < n)
+        .map_or(0, |k| k + 1)
+}
+
+/// Writes one block row's samples into `line` from column `origin`, each
+/// across `sx` columns, as far as the image's width.
 fn replicate(line: &mut [u8], row: &[u8], origin: usize, sx: usize) {
     if sx == 1 {
-        let end = (origin + 8).min(line.len());
+        let end = (origin + row.len()).min(line.len());
         if let (Some(target), Some(source)) = (line.get_mut(origin..end), row.get(..end - origin)) {
             target.copy_from_slice(source);
         }
@@ -2561,9 +2779,7 @@ fn idct_block(input: &[i32; 64], precision: u8, out: &mut [u8; 64]) {
     if profile.rows == 1 && profile.ac & 1 == 0 {
         // No AC term: one row of one product, then one column of one.
         multiplied(2);
-        let dc = input.first().copied().map_or(0, i64::from);
-        let row = (dc * i64::from(kernel.k0)) >> 14;
-        out.fill(level(row * i64::from(kernel.k0)));
+        out.fill(dc_level(input.first().copied().unwrap_or(0), precision));
         return;
     }
     if profile.largest <= LANE_BOUND {
@@ -2664,6 +2880,126 @@ fn wide_transform(
             }
         }
     }
+}
+
+/// The level every sample of a block with no AC term takes: the full
+/// transform's own constant, `S(0, 0)` times [`COS_TABLE`]'s DC entry floored
+/// by `>> 14`, times it again and floored again, then level-shifted by
+/// `2^(P−1)`, clamped to the frame's range and narrowed to eight bits.
+///
+/// [`idct_block`] takes it for a block whose only coefficient is its DC, and
+/// [`reduced_block`] for one whose kept coefficients have no AC term, as every
+/// block at 1/8 has none: so a flat block is the same level at every scale
+/// (`docs/design/jpeg-speed.md`, "The reduced transforms").
+fn dc_level(dc: i32, precision: u8) -> u8 {
+    let k0 = i64::from(KERNEL.k0);
+    let half = 1i64 << (precision - 1);
+    let ceiling = (1i64 << precision) - 1;
+    let row = (i64::from(dc) * k0) >> 14;
+    ((((row * k0) >> 14) + half).clamp(0, ceiling) >> (precision - 8)) as u8
+}
+
+/// The largest magnitude a kept coefficient enters a reduced transform with:
+/// `2^20`, so that each pass's sums stay inside `i64` — a row's four terms of
+/// at most `2^20 · 2^15`, a column's four of `2^37 · 2^15`.
+const REDUCED_BOUND: i32 = 1 << 20;
+
+/// The reduced transforms' cosines, `K_N[x][u]`, in 1/65536.
+struct Reduced {
+    /// `K_4`, for 1/2.
+    four: [[i64; 4]; 4],
+    /// `K_2`, for 1/4.
+    two: [[i64; 2]; 2],
+}
+
+/// `K_N[x][u] = round(2^16 · C(u)/2 · cos((2x+1)uπ/2N))` for `N` of 4 and 2
+/// (`docs/design/jpeg-speed.md`, "The reduced transforms").
+///
+/// Computed once at first use rather than written out, as [`COS_TABLE`] is,
+/// so the values cannot drift from their formula. Every entry is far enough
+/// from a rounding boundary that every target's `cos` rounds it alike, which
+/// `the_reduced_cosines_match_their_formula` holds.
+static REDUCED: std::sync::LazyLock<Reduced> = std::sync::LazyLock::new(|| Reduced {
+    four: cosines(),
+    two: cosines(),
+});
+
+/// `K_N`, for the `N` its type names.
+fn cosines<const N: usize>() -> [[i64; N]; N] {
+    let mut table = [[0i64; N]; N];
+    for (x, row) in table.iter_mut().enumerate() {
+        for (u, slot) in row.iter_mut().enumerate() {
+            let cu = if u == 0 {
+                1.0 / std::f64::consts::SQRT_2
+            } else {
+                1.0
+            };
+            let angle = (2.0 * x as f64 + 1.0) * u as f64 * std::f64::consts::PI / (2.0 * N as f64);
+            *slot = (cu / 2.0 * angle.cos() * 65536.0).round() as i64;
+        }
+    }
+    table
+}
+
+/// A block's top-left `N × N` dequantised coefficients, `kept[v][u]`, as
+/// `N × N` samples, `[y][x]`: the reduced transform at `N/8`
+/// (`docs/design/jpeg-speed.md`, "The reduced transforms").
+///
+/// Each kept coefficient is clamped to [`REDUCED_BOUND`]; the row pass sums
+/// `S · K_N` exactly in `i64`, the column pass sums `K_N` times those exactly,
+/// and the one rounding is the last — add `2^31`, floor by `>> 32` — before
+/// the level shift, the clamp to the frame's range and the narrowing to eight
+/// bits. A block whose kept coefficients have no AC term takes [`dc_level`],
+/// and at 1/8 every block is one.
+fn reduced_block<const N: usize>(
+    kept: &[[i32; N]; N],
+    cosines: &[[i64; N]; N],
+    precision: u8,
+) -> [[u8; N]; N] {
+    let dc = kept
+        .first()
+        .and_then(|row| row.first())
+        .copied()
+        .unwrap_or(0);
+    let ac = kept
+        .iter()
+        .flatten()
+        .skip(1)
+        .any(|&coefficient| coefficient != 0);
+    if !ac {
+        return [[dc_level(dc, precision); N]; N];
+    }
+    let half = 1i64 << (precision - 1);
+    let ceiling = (1i64 << precision) - 1;
+    let narrow = precision - 8;
+
+    // The row pass: `rows[v][x]` is the sum over `u` of `S(u, v) · K_N[x][u]`.
+    let mut rows = [[0i64; N]; N];
+    for (sums, coefficients) in rows.iter_mut().zip(kept) {
+        for (sum, cosine) in sums.iter_mut().zip(cosines) {
+            *sum = coefficients
+                .iter()
+                .zip(cosine)
+                .map(|(&s, &k)| i64::from(s.clamp(-REDUCED_BOUND, REDUCED_BOUND)) * k)
+                .sum();
+        }
+    }
+
+    // The column pass, `[y][x]` the sum over `v` of `rows[v][x] · K_N[y][v]`,
+    // and the one rounding, out of 2^32.
+    let mut out = [[0u8; N]; N];
+    for (line, cosine) in out.iter_mut().zip(cosines) {
+        for (x, slot) in line.iter_mut().enumerate() {
+            let sum: i64 = rows
+                .iter()
+                .zip(cosine)
+                .map(|(row, &k)| row.get(x).copied().unwrap_or(0) * k)
+                .sum();
+            let level = ((sum + (1 << 31)) >> 32) + half;
+            *slot = (level.clamp(0, ceiling) >> narrow) as u8;
+        }
+    }
+    out
 }
 
 /// `cos((2x+1) · u · π / 16) · C(u) / 2`, in 1/16384.
@@ -5065,8 +5401,17 @@ mod tests {
     /// [`decode`] with no frame streaming: every frame's whole-image
     /// coefficients, painted a strip at a time at the end.
     fn decode_buffered(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
+        decode_buffered_at(data, max_output, JpegScale::Full)
+    }
+
+    /// [`decode_buffered`] at `scale`.
+    fn decode_buffered_at(
+        data: &[u8],
+        max_output: usize,
+        scale: JpegScale,
+    ) -> Result<JpegImage, JpegError> {
         let mut image = Collected::default();
-        let scanned = scan_frame(data, max_output, None)?;
+        let scanned = scan_frame(data, max_output, scale, None)?;
         assert!(
             scanned.streamed.is_none(),
             "nothing streams with nowhere to"
@@ -5082,10 +5427,35 @@ mod tests {
         })
     }
 
+    /// [`decode`] at `scale`, a frame that streams streaming: the whole image
+    /// the strips paint.
+    fn decode_at(data: &[u8], max_output: usize, scale: JpegScale) -> Result<JpegImage, JpegError> {
+        let mut image = Collected::default();
+        let scanned = scan_frame(data, max_output, scale, Some(&mut image))?;
+        let frame = finish(scanned, max_output, &mut image)?;
+        Ok(JpegImage {
+            width: frame.layout.width,
+            height: frame.layout.height,
+            color: frame.layout.color,
+            data: image.data,
+            precision: frame.layout.precision,
+            warnings: frame.warnings,
+        })
+    }
+
     /// [`decode`] with whole-image coefficients and whole-image planes in
     /// place of the strips.
     fn decode_through_planes(data: &[u8], max_output: usize) -> Result<JpegImage, JpegError> {
-        let scanned = scan_frame(data, max_output, None)?;
+        decode_through_planes_at(data, max_output, JpegScale::Full)
+    }
+
+    /// [`decode_through_planes`] at `scale`.
+    fn decode_through_planes_at(
+        data: &[u8],
+        max_output: usize,
+        scale: JpegScale,
+    ) -> Result<JpegImage, JpegError> {
+        let scanned = scan_frame(data, max_output, scale, None)?;
         direct::finish_planes(
             &scanned.components,
             &scanned.quant,
@@ -5096,6 +5466,7 @@ mod tests {
             scanned.precision,
             max_output,
             scanned.warnings,
+            scale,
         )
     }
 
@@ -5207,7 +5578,7 @@ mod tests {
             same(&label, &decode_buffered(&bytes, CEILING), &whole);
 
             let mut kept = Kept::default();
-            let frame = decode_strips(&bytes, CEILING, &mut kept);
+            let frame = decode_strips(&bytes, CEILING, JpegScale::Full, &mut kept);
             match (&planes, &frame) {
                 (Ok(image), Ok(frame)) => {
                     images += 1;
@@ -5311,7 +5682,7 @@ mod tests {
             recipe.cut = None;
             let bytes = streams::stream(&recipe, &mut noise);
             let mut kept = Kept::default();
-            let Ok(frame) = decode_strips(&bytes, CEILING, &mut kept) else {
+            let Ok(frame) = decode_strips(&bytes, CEILING, JpegScale::Full, &mut kept) else {
                 continue;
             };
             let layout = frame.layout;
@@ -5358,7 +5729,7 @@ mod tests {
             let recipe = streams::random_recipe(&mut noise);
             let bytes = streams::stream(&recipe, &mut noise);
             let mut kept = Kept::default();
-            let Ok(frame) = decode_strips(&bytes, CEILING, &mut kept) else {
+            let Ok(frame) = decode_strips(&bytes, CEILING, JpegScale::Full, &mut kept) else {
                 continue;
             };
             let h_max = usize::from(recipe.sampling.iter().map(|s| s.0).max().unwrap_or(1));
@@ -5398,5 +5769,904 @@ mod tests {
             whole_images > 60,
             "{whole_images} frames kept the whole image"
         );
+    }
+
+    // ---- The reduced transforms ---------------------------------------------
+    //
+    // 1/2, 1/4 and 1/8 in the DCT domain (`docs/design/jpeg-speed.md`, "The
+    // reduced transforms"): new output, held to its own definition.
+
+    /// The reduced scales, each with its `N`.
+    const REDUCED_SCALES: [(JpegScale, usize); 3] = [
+        (JpegScale::Half, 4),
+        (JpegScale::Quarter, 2),
+        (JpegScale::Eighth, 1),
+    ];
+
+    /// A dequantised block's top-left `n × n` through the strip decode's own
+    /// reduced transform, its samples row-major.
+    fn reduce(block: &[i32; 64], n: usize, precision: u8) -> Vec<u8> {
+        fn at<const N: usize>(
+            block: &[i32; 64],
+            cosines: &[[i64; N]; N],
+            precision: u8,
+        ) -> Vec<u8> {
+            let mut kept = [[0i32; N]; N];
+            for (v, row) in kept.iter_mut().enumerate() {
+                for (u, slot) in row.iter_mut().enumerate() {
+                    *slot = block[v * 8 + u];
+                }
+            }
+            reduced_block(&kept, cosines, precision)
+                .iter()
+                .flatten()
+                .copied()
+                .collect()
+        }
+        match n {
+            4 => at(block, &REDUCED.four, precision),
+            2 => at(block, &REDUCED.two, precision),
+            _ => at::<1>(block, &[[0]], precision),
+        }
+    }
+
+    /// The level P-09.1's definition gives sample `(x, y)` of a block at
+    /// `n/8`, evaluated in `f64`, rounded, level-shifted, clamped and narrowed
+    /// as a decoded sample is.
+    fn defined_level(block: &[i32; 64], n: usize, precision: u8, x: usize, y: usize) -> u8 {
+        let c = |u: usize| {
+            if u == 0 {
+                1.0 / std::f64::consts::SQRT_2
+            } else {
+                1.0
+            }
+        };
+        let basis = |position: usize, frequency: usize| {
+            ((2.0 * position as f64 + 1.0) * frequency as f64 * std::f64::consts::PI
+                / (2.0 * n as f64))
+                .cos()
+        };
+        let mut sum = 0.0f64;
+        for v in 0..n {
+            for u in 0..n {
+                sum += c(u) * c(v) * f64::from(block[v * 8 + u]) * basis(x, u) * basis(y, v);
+            }
+        }
+        let half = f64::from(1u32 << (precision - 1));
+        let ceiling = f64::from((1u32 << precision) - 1);
+        let level = ((sum / 4.0).round() + half).clamp(0.0, ceiling);
+        ((level as u32) >> (precision - 8)) as u8
+    }
+
+    /// The level P-09.1's definition gives a block with no AC term:
+    /// `S(0, 0)/8`, rounded, level-shifted, clamped and narrowed.
+    fn defined_dc_level(dc: i32, precision: u8) -> u8 {
+        let half = f64::from(1u32 << (precision - 1));
+        let ceiling = f64::from((1u32 << precision) - 1);
+        let level = ((f64::from(dc) / 8.0).round() + half).clamp(0.0, ceiling);
+        ((level as u32) >> (precision - 8)) as u8
+    }
+
+    /// **Each scale is its fraction of a length**, rounded up, and the scales
+    /// run full size first, as the `jpeg` fuzz target's length picks them.
+    #[test]
+    fn the_scales_are_their_fractions_of_a_length() {
+        assert_eq!(
+            JpegScale::ALL,
+            [
+                JpegScale::Full,
+                JpegScale::Half,
+                JpegScale::Quarter,
+                JpegScale::Eighth
+            ]
+        );
+        assert_eq!(JpegScale::default(), JpegScale::Full);
+        let n: Vec<u32> = JpegScale::ALL.iter().map(|s| s.block_samples()).collect();
+        assert_eq!(n, [8, 4, 2, 1]);
+        for full in [
+            0u32,
+            1,
+            2,
+            3,
+            7,
+            8,
+            9,
+            15,
+            16,
+            17,
+            1240,
+            1754,
+            65_535,
+            u32::MAX,
+        ] {
+            for scale in JpegScale::ALL {
+                let n = u64::from(scale.block_samples());
+                let expected = (u64::from(full) * n + 7) / 8;
+                assert_eq!(
+                    u64::from(scale.length(full)),
+                    expected,
+                    "{full} at {scale:?}"
+                );
+            }
+            assert_eq!(JpegScale::Full.length(full), full);
+        }
+        // The pairs the design names: a quarter of 1240 x 1754 is 310 x 439,
+        // and one sample an eighth of a pixel wide still covers it.
+        assert_eq!(
+            (
+                JpegScale::Quarter.length(1240),
+                JpegScale::Quarter.length(1754)
+            ),
+            (310, 439)
+        );
+        assert_eq!(JpegScale::Eighth.length(1), 1);
+    }
+
+    /// **The reduced transforms' cosines are their formula**, and every entry
+    /// is far enough from a rounding boundary that every target's `cos`
+    /// rounds it to the same integer.
+    #[test]
+    fn the_reduced_cosines_match_their_formula() {
+        fn check<const N: usize>(table: &[[i64; N]; N]) {
+            for (x, row) in table.iter().enumerate() {
+                for (u, &entry) in row.iter().enumerate() {
+                    let cu = if u == 0 {
+                        1.0 / std::f64::consts::SQRT_2
+                    } else {
+                        1.0
+                    };
+                    let exact = cu / 2.0
+                        * ((2.0 * x as f64 + 1.0) * u as f64 * std::f64::consts::PI
+                            / (2.0 * N as f64))
+                            .cos()
+                        * 65536.0;
+                    assert_eq!(entry, exact.round() as i64, "K_{N}[{x}][{u}]");
+                    let from_half = (exact - exact.floor() - 0.5).abs();
+                    assert!(
+                        from_half > 0.02,
+                        "K_{N}[{x}][{u}] is {from_half} from rounding the other way"
+                    );
+                    // C.2's symmetry: x and N - 1 - x differ by (-1)^u.
+                    let mirrored = table[N - 1 - x][u];
+                    assert_eq!(mirrored, if u % 2 == 0 { entry } else { -entry });
+                }
+            }
+            // The DC column is 2^16 / (2 sqrt 2) everywhere.
+            assert!(
+                table.iter().all(|row| row[0] == 23_170),
+                "K_{N}'s DC column"
+            );
+        }
+        check(&REDUCED.four);
+        check(&REDUCED.two);
+        assert_eq!(kept_span(8), 64);
+        assert_eq!(kept_span(4), 25);
+        assert_eq!(kept_span(2), 5);
+        assert_eq!(kept_span(1), 1);
+    }
+
+    /// **A flat block is the same level at every scale, exactly**: a block
+    /// whose one coefficient is its DC gives `dc_level` at every sample of the
+    /// full transform and of each reduced one, at both precisions and for
+    /// every DC a frame can carry — and a block whose kept coefficients have no
+    /// AC term, whatever lies outside them, gives the same level at its scale.
+    /// Through the decode, flat images from the encoder and a flat
+    /// arithmetic-coded frame decode at every scale to the full decode's one
+    /// colour.
+    #[test]
+    fn a_flat_block_is_the_same_level_at_every_scale() {
+        let mut noise = streams::Noise(0xF1A7_B10C_0000_0001);
+        let mut dcs: Vec<i32> = (-16_384..=16_384).step_by(7).collect();
+        dcs.extend([
+            i32::MIN,
+            i32::MIN + 1,
+            -(1 << 20) - 1,
+            -(1 << 20),
+            -1,
+            0,
+            1,
+            1 << 20,
+            (1 << 20) + 1,
+            i32::MAX,
+        ]);
+        for precision in [8u8, 12] {
+            for &dc in &dcs {
+                let mut block = [0i32; 64];
+                block[0] = dc;
+                let level = dc_level(dc, precision);
+                let mut full = [0u8; 64];
+                idct_block(&block, precision, &mut full);
+                assert!(
+                    full.iter().all(|&s| s == level),
+                    "{dc} at {precision} bits, full size"
+                );
+                for (_, n) in REDUCED_SCALES {
+                    let reduced = reduce(&block, n, precision);
+                    assert_eq!(reduced.len(), n * n);
+                    assert!(
+                        reduced.iter().all(|&s| s == level),
+                        "{dc} at {precision} bits, {n}/8"
+                    );
+                }
+                // AC terms outside the kept square change nothing at its
+                // scale.
+                for (_, n) in REDUCED_SCALES {
+                    let mut outside = block;
+                    for (index, slot) in outside.iter_mut().enumerate() {
+                        let (v, u) = (index / 8, index % 8);
+                        if (v >= n || u >= n) && noise.below(3) == 0 {
+                            *slot = noise.next() as i32 >> 8;
+                        }
+                    }
+                    let reduced = reduce(&outside, n, precision);
+                    assert!(
+                        reduced.iter().all(|&s| s == level),
+                        "{dc} with AC outside the {n} x {n} at {precision} bits"
+                    );
+                }
+            }
+        }
+
+        // Through the decode: every frame is flat, so each scale's image is
+        // the full decode's one colour, sample for sample.
+        let mut flat: Vec<(String, Vec<u8>)> = Vec::new();
+        for (width, height) in [(1u32, 1u32), (8, 8), (13, 7), (17, 33), (64, 48)] {
+            for value in [0u8, 31, 128, 144, 255] {
+                flat.push((
+                    format!("flat gray {width}x{height} of {value}"),
+                    huffman_flat_gray(width, height, value, 0),
+                ));
+                flat.push((
+                    format!("flat gray {width}x{height} of {value}, restarting"),
+                    huffman_flat_gray(width, height, value, 2),
+                ));
+            }
+            for (sampling, colour) in [
+                (JpegSampling::FourFourFour, [200u8, 40, 90]),
+                (JpegSampling::FourTwoZero, [12, 230, 128]),
+            ] {
+                let raster: Vec<u8> = (0..width * height).flat_map(|_| colour).collect();
+                let bytes = jpeg_encode(
+                    &JpegSource {
+                        width,
+                        height,
+                        colour: JpegSourceColour::Rgb,
+                        stride: width as usize * 3,
+                        data: &raster,
+                    },
+                    &JpegOptions {
+                        quantisation: JpegQuantisation::AnnexKHalved,
+                        sampling,
+                        restart_interval: 0,
+                    },
+                )
+                .expect("a flat raster encodes");
+                flat.push((format!("flat {sampling:?} {width}x{height}"), bytes));
+            }
+        }
+        let mut decisions = diff_of_128();
+        decisions.push((arith::Bin::Ac(0), 1));
+        flat.push((
+            "a flat SOF9 block".to_string(),
+            arithmetic_gray(
+                0xC9,
+                8,
+                8,
+                None,
+                None,
+                &[(0x00, 0x3F, 0x00, arith_segment(&decisions))],
+            ),
+        ));
+        flat.push((
+            "a twelve-bit flat pixel".to_string(),
+            tiny_gray_at(0xC1, 12),
+        ));
+        for (label, bytes) in &flat {
+            let full = decode(bytes, CEILING).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            let pixel = full.color.components();
+            let first = &full.data[..pixel];
+            assert!(
+                full.data.chunks(pixel).all(|p| p == first),
+                "{label}: the full decode is flat"
+            );
+            for (scale, _) in REDUCED_SCALES {
+                let mut kept = Kept::default();
+                let frame = decode_strips(bytes, CEILING, scale, &mut kept)
+                    .unwrap_or_else(|e| panic!("{label} at {scale:?}: {e:?}"));
+                assert_eq!(
+                    (frame.layout.width, frame.layout.height),
+                    (scale.length(full.width), scale.length(full.height)),
+                    "{label} at {scale:?}"
+                );
+                assert_eq!(frame.warnings, full.warnings, "{label} at {scale:?}");
+                assert!(
+                    kept.data.chunks(pixel).all(|p| p == first),
+                    "{label} at {scale:?}: a flat image is the full decode's level"
+                );
+            }
+        }
+    }
+
+    /// **An eighth-scale decode is each block's DC level**: every sample of
+    /// each component is `dc_level` of the block it lies in, read from the
+    /// frame's own coefficients, replicated by its sampling and converted as
+    /// a full-size sample is — or the 128 a ratio that does not divide leaves
+    /// a sample no block covers — for every frame type, both coders, both
+    /// precisions and every sampling and colour the generator draws.
+    #[test]
+    fn an_eighth_scale_decode_is_each_blocks_dc_level() {
+        let mut noise = streams::Noise(0xE16E_7D0C_0000_0008);
+        let mut images = 0usize;
+        let mut reached = std::collections::BTreeMap::<String, usize>::new();
+        let mut inputs: Vec<(String, Vec<u8>, Option<streams::Recipe>)> = Vec::new();
+        for _ in 0..500 {
+            let recipe = streams::random_recipe(&mut noise);
+            let bytes = streams::stream(&recipe, &mut noise);
+            inputs.push((format!("{recipe:?}"), bytes, Some(recipe)));
+        }
+        for (label, bytes) in streams::encoded().into_iter().chain(streams::seeds()) {
+            inputs.push((label, bytes, None));
+        }
+        for (label, bytes, recipe) in inputs {
+            let mut kept = Kept::default();
+            let decoded = decode_strips(&bytes, CEILING, JpegScale::Eighth, &mut kept);
+            let Ok(scanned) = scan_frame(&bytes, CEILING, JpegScale::Eighth, None) else {
+                assert!(decoded.is_err(), "{label}: the marker walk failed");
+                continue;
+            };
+            let Ok(frame) = decoded else {
+                assert!(
+                    kept.strips.is_empty(),
+                    "{label}: a failure handed out a strip"
+                );
+                continue;
+            };
+            images += 1;
+            let layout = frame.layout;
+            let (width, height) = (layout.width as usize, layout.height as usize);
+            assert_eq!(
+                (layout.full_width, layout.full_height),
+                (scanned.width as u32, scanned.height as u32),
+                "{label}"
+            );
+            assert_eq!(
+                (width, height),
+                (scanned.width.div_ceil(8), scanned.height.div_ceil(8)),
+                "{label}"
+            );
+            let h_max = scanned.components.iter().map(|c| c.h).max().unwrap_or(1);
+            let v_max = scanned.components.iter().map(|c| c.v).max().unwrap_or(1);
+            let planes: Vec<Vec<u8>> = scanned
+                .components
+                .iter()
+                .map(|component| {
+                    let (sx, sy) = (h_max / component.h, v_max / component.v);
+                    let q = i32::from(scanned.quant[component.quant][0]);
+                    let mut plane = vec![128u8; width * height];
+                    for y in 0..height {
+                        for x in 0..width {
+                            if let Some(block) = component.block(x / sx, y / sy) {
+                                let dc = i32::from(block[0]).saturating_mul(q);
+                                plane[y * width + x] = dc_level(dc, scanned.precision);
+                            }
+                        }
+                    }
+                    plane
+                })
+                .collect();
+            let row_bytes = width * layout.color.components();
+            let mut expected = vec![0u8; row_bytes * height];
+            for (y, line) in expected.chunks_exact_mut(row_bytes).enumerate() {
+                let mut lines: [&[u8]; 4] = [&[]; 4];
+                for (slot, plane) in lines.iter_mut().zip(&planes) {
+                    *slot = &plane[y * width..(y + 1) * width];
+                }
+                convert(
+                    layout.color,
+                    scanned.adobe_transform.unwrap_or(0),
+                    &lines,
+                    line,
+                );
+            }
+            assert!(
+                kept.data == expected,
+                "{label}: the eighth-scale image is not each block's DC level"
+            );
+            assert_eq!(
+                frame.transformed,
+                planes_blocks(&scanned) as u64,
+                "{label}: one sample a block"
+            );
+            if let Some(recipe) = recipe {
+                for class in [
+                    format!("frame {:#04x}", recipe.frame),
+                    format!("{} bits", recipe.precision),
+                    format!("{:?}", layout.color),
+                    format!("divides {}", recipe.divides()),
+                ] {
+                    *reached.entry(class).or_default() += 1;
+                }
+            }
+        }
+        assert!(images > 300, "{images} streams decoded to an image");
+        for class in [
+            "frame 0xc0",
+            "frame 0xc1",
+            "frame 0xc2",
+            "frame 0xc9",
+            "frame 0xca",
+            "8 bits",
+            "12 bits",
+            "Gray",
+            "Rgb",
+            "Cmyk",
+            "CmykInverted",
+            "divides false",
+        ] {
+            let count = reached.get(class).copied().unwrap_or(0);
+            assert!(count >= 5, "{class}: {count} images, {reached:?}");
+        }
+    }
+
+    /// The blocks a decode of `scanned` transforms: each component's that
+    /// the buffer holds and that some sample of the image lies in.
+    fn planes_blocks(scanned: &Scanned) -> usize {
+        let h_max = scanned.components.iter().map(|c| c.h).max().unwrap_or(1);
+        let v_max = scanned.components.iter().map(|c| c.v).max().unwrap_or(1);
+        scanned
+            .components
+            .iter()
+            .map(|component| {
+                let (sx, sy) = (h_max / component.h, v_max / component.v);
+                let across = scanned.width.div_ceil(8 * sx).min(component.blocks_x);
+                let down = scanned.height.div_ceil(8 * sy).min(component.blocks_y);
+                (0..down)
+                    .flat_map(|by| (0..across).map(move |bx| (bx, by)))
+                    .filter(|&(bx, by)| component.block(bx, by).is_some())
+                    .count()
+            })
+            .sum()
+    }
+
+    /// **The reduced transforms are within one level of their definition**:
+    /// random blocks, at 1/2, 1/4 and 1/8, at eight bits with kept
+    /// coefficients as large as an eight-bit frame's samples make them — 1 152
+    /// once dequantised — and at twelve with sixteen times that, against
+    /// P-09.1's formula evaluated in `f64`; a block with no kept AC term
+    /// against `S(0, 0)/8`. The rounded cosines move a sample by at most
+    /// `2^-17` of the kept coefficients' summed magnitude and the last
+    /// rounding by half a level, which keeps every sample within one.
+    #[test]
+    fn the_reduced_transforms_match_their_definition() {
+        let mut noise = streams::Noise(0x00DE_F1AE_D0BE_EF00);
+        let (mut transformed, mut constant) = (0usize, 0usize);
+        for case in 0..60_000 {
+            let precision = if case % 3 == 0 { 12 } else { 8 };
+            let largest: i64 = if precision == 8 { 1_152 } else { 18_432 };
+            let (_, n) = REDUCED_SCALES[noise.below(3) as usize];
+            let mut block = [0i32; 64];
+            let density = noise.below(4);
+            for v in 0..n {
+                for u in 0..n {
+                    let keep = match density {
+                        0 => (u, v) == (0, 0) || noise.below(8) == 0,
+                        1 => noise.below(2) == 0,
+                        _ => true,
+                    };
+                    if keep {
+                        let magnitude = if noise.below(8) == 0 {
+                            largest
+                        } else {
+                            (noise.next() % (largest as u64 + 1)) as i64
+                        };
+                        block[v * 8 + u] = (if noise.below(2) == 0 {
+                            magnitude
+                        } else {
+                            -magnitude
+                        }) as i32;
+                    }
+                }
+            }
+            // What lies outside the kept square is never read.
+            for (index, slot) in block.iter_mut().enumerate() {
+                if (index / 8 >= n || index % 8 >= n) && noise.below(4) == 0 {
+                    *slot = (noise.next() % 2048) as i32 - 1024;
+                }
+            }
+            let ac = (0..n).any(|v| (0..n).any(|u| (u, v) != (0, 0) && block[v * 8 + u] != 0));
+            let reduced = reduce(&block, n, precision);
+            for y in 0..n {
+                for x in 0..n {
+                    let want = if ac {
+                        defined_level(&block, n, precision, x, y)
+                    } else {
+                        defined_dc_level(block[0], precision)
+                    };
+                    let got = reduced[y * n + x];
+                    assert!(
+                        got.abs_diff(want) <= 1,
+                        "case {case}: ({x}, {y}) at {n}/8 and {precision} bits is {got}, \
+                         the definition {want}: {block:?}"
+                    );
+                }
+            }
+            // The direct double sum is the same integers.
+            let mut direct = [0u8; 16];
+            direct::idct_reduced(&block, n, precision, &mut direct);
+            assert_eq!(
+                &direct[..n * n],
+                &reduced[..],
+                "case {case}: the double sum"
+            );
+            if ac {
+                transformed += 1;
+            } else {
+                constant += 1;
+            }
+        }
+        assert!(
+            transformed > 25_000,
+            "{transformed} blocks took a transform"
+        );
+        assert!(constant > 15_000, "{constant} blocks took the DC level");
+    }
+
+    /// **A reduced transform takes any coefficient a dequantiser can hand it**
+    /// — every magnitude to `i32`'s ends, every kept position, both
+    /// precisions — without leaving `i64`, and the direct double sum agrees.
+    #[test]
+    fn a_reduced_transform_takes_any_coefficient() {
+        let mut noise = streams::Noise(0x0BAD_C0EF_F1C1_E175);
+        let extremes = [
+            i32::MIN,
+            i32::MIN + 1,
+            -(1 << 20) - 1,
+            -(1 << 20),
+            (1 << 20) - 1,
+            1 << 20,
+            (1 << 20) + 1,
+            i32::MAX,
+        ];
+        for case in 0..20_000 {
+            let precision = if case % 2 == 0 { 8 } else { 12 };
+            let n = [4usize, 2][noise.below(2) as usize];
+            let mut block = [0i32; 64];
+            for v in 0..n {
+                for u in 0..n {
+                    block[v * 8 + u] = if noise.below(2) == 0 {
+                        extremes[noise.below(extremes.len() as u64) as usize]
+                    } else {
+                        noise.next() as i32
+                    };
+                }
+            }
+            let reduced = reduce(&block, n, precision);
+            let mut direct = [0u8; 16];
+            direct::idct_reduced(&block, n, precision, &mut direct);
+            assert_eq!(&direct[..n * n], &reduced[..], "case {case}: {block:?}");
+        }
+        // Every coefficient at the clamp or past it, both signs: a block of
+        // `2^20` everywhere is a block of `2^20 + 1` everywhere.
+        for n in [4usize, 2] {
+            for precision in [8u8, 12] {
+                for sign in [1i32, -1] {
+                    let mut at = [0i32; 64];
+                    let mut past = [0i32; 64];
+                    for v in 0..n {
+                        for u in 0..n {
+                            at[v * 8 + u] = sign * (1 << 20);
+                            past[v * 8 + u] = if sign > 0 { i32::MAX } else { i32::MIN };
+                        }
+                    }
+                    assert_eq!(
+                        reduce(&at, n, precision),
+                        reduce(&past, n, precision),
+                        "{n}/8 at {precision} bits, sign {sign}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A quarter-scale decode transforms a sixteenth of the samples**,
+    /// counted: the transforms of every frame output `N × N` samples a block
+    /// at `N/8`, the same blocks at every scale, so a half-scale decode
+    /// outputs a quarter of the full decode's, a quarter-scale one a
+    /// sixteenth and an eighth-scale one a sixty-fourth — and the full decode
+    /// sixty-four for each block some sample of the image lies in.
+    #[test]
+    fn a_quarter_scale_decode_transforms_a_sixteenth_of_the_samples() {
+        let mut noise = streams::Noise(0x0016_7A45_F0E0_0004);
+        let mut inputs: Vec<(String, Vec<u8>)> = Vec::new();
+        for _ in 0..300 {
+            let recipe = streams::random_recipe(&mut noise);
+            let bytes = streams::stream(&recipe, &mut noise);
+            inputs.push((format!("{recipe:?}"), bytes));
+        }
+        inputs.extend(streams::encoded());
+        inputs.extend(streams::seeds());
+        let mut counted = 0usize;
+        for (label, bytes) in &inputs {
+            let mut kept = Kept::default();
+            let Ok(full) = decode_strips(bytes, CEILING, JpegScale::Full, &mut kept) else {
+                continue;
+            };
+            let scanned = scan_frame(bytes, CEILING, JpegScale::Full, None)
+                .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            assert_eq!(
+                full.transformed,
+                64 * planes_blocks(&scanned) as u64,
+                "{label}: sixty-four samples a block at full size"
+            );
+            for (scale, divisor) in [
+                (JpegScale::Half, 4u64),
+                (JpegScale::Quarter, 16),
+                (JpegScale::Eighth, 64),
+            ] {
+                let mut kept = Kept::default();
+                let frame = decode_strips(bytes, CEILING, scale, &mut kept)
+                    .unwrap_or_else(|e| panic!("{label} at {scale:?}: {e:?}"));
+                assert_eq!(
+                    frame.transformed * divisor,
+                    full.transformed,
+                    "{label} at {scale:?}"
+                );
+            }
+            counted += 1;
+        }
+        assert!(counted > 200, "{counted} streams were counted");
+
+        // One image whose count is known by hand: 64 x 48 at 4:2:0 is 8 x 6
+        // luma blocks and 4 x 3 of each chroma, 72 in all.
+        let raster = vec![77u8; 64 * 48 * 3];
+        let bytes = jpeg_encode(
+            &JpegSource {
+                width: 64,
+                height: 48,
+                colour: JpegSourceColour::Rgb,
+                stride: 64 * 3,
+                data: &raster,
+            },
+            &JpegOptions {
+                quantisation: JpegQuantisation::AnnexKHalved,
+                sampling: JpegSampling::FourTwoZero,
+                restart_interval: 0,
+            },
+        )
+        .expect("it encodes");
+        let mut kept = Kept::default();
+        let quarter = decode_strips(&bytes, CEILING, JpegScale::Quarter, &mut kept)
+            .expect("it decodes at a quarter");
+        assert_eq!(quarter.transformed, 72 * 4);
+        let full = decode_strips(&bytes, CEILING, JpegScale::Full, &mut Kept::default())
+            .expect("it decodes");
+        assert_eq!(full.transformed, 72 * 64);
+        assert_eq!((quarter.layout.width, quarter.layout.height), (16, 12));
+    }
+
+    /// **A reduced strip decode is the whole-image reduced decode**, row for
+    /// row: at 1/2, 1/4 and 1/8, through the sink, through the whole image a
+    /// streaming frame paints and through the buffered coefficients, against
+    /// whole-image planes made by the reduced transform's double sum, over
+    /// every stream P-09.4's equality runs over — every frame type and both
+    /// coders, 8 and 12 bits, every sampling the generator draws, ratios that
+    /// do not divide, odd sizes, every colour model, restarts and cuts. The
+    /// layout is the scale's fraction of the frame and names both; every strip
+    /// but the last is `N · Vmax` rows; the planes are at most one MCU row; a
+    /// stream that fails fails alike at every scale and hands the sink
+    /// nothing.
+    #[test]
+    fn a_reduced_strip_decode_is_the_whole_image_reduced_decode() {
+        let mut noise = streams::Noise(0x5CA1_ED57_1295_0002);
+        let mut images = 0usize;
+        let mut reached = std::collections::BTreeMap::<String, usize>::new();
+        for (label, bytes, recipe) in every_stream(&mut noise) {
+            let full = decode_through_planes(&bytes, CEILING);
+            for (scale, n) in REDUCED_SCALES {
+                let label = format!("{label} at {scale:?}");
+                let planes = decode_through_planes_at(&bytes, CEILING, scale);
+                let painted = decode_at(&bytes, CEILING, scale);
+                same(&label, &painted, &planes);
+                same(&label, &decode_buffered_at(&bytes, CEILING, scale), &planes);
+
+                let mut kept = Kept::default();
+                let frame = decode_strips(&bytes, CEILING, scale, &mut kept);
+                match (&planes, &frame, &full) {
+                    (Ok(image), Ok(frame), Ok(full)) => {
+                        images += 1;
+                        let layout = frame.layout;
+                        assert_eq!(kept.layouts, vec![layout], "{label}");
+                        assert_eq!(
+                            (layout.width, layout.height, layout.color, layout.precision),
+                            (image.width, image.height, image.color, image.precision),
+                            "{label}"
+                        );
+                        assert_eq!(
+                            (layout.scale, layout.full_width, layout.full_height),
+                            (scale, full.width, full.height),
+                            "{label}"
+                        );
+                        assert_eq!(
+                            (layout.width, layout.height),
+                            (scale.length(full.width), scale.length(full.height)),
+                            "{label}"
+                        );
+                        assert_eq!(frame.warnings, image.warnings, "{label}");
+                        assert_eq!(frame.warnings, full.warnings, "{label}");
+                        assert!(
+                            kept.data == image.data,
+                            "{label}: the strips are not the image"
+                        );
+                        if let Some(recipe) = &recipe {
+                            let strip_rows = (n * recipe.v_max()) as u32;
+                            if let Some((last, rest)) = kept.strips.split_last() {
+                                for &(_, rows) in rest {
+                                    assert_eq!(rows, strip_rows, "{label}");
+                                }
+                                assert!(last.1 <= strip_rows, "{label}: the last strip");
+                            }
+                            if recipe.divides() {
+                                let row = layout.width as usize * layout.color.components();
+                                assert!(
+                                    frame.held.planes <= strip_rows as usize * row,
+                                    "{label}: {} plane bytes",
+                                    frame.held.planes
+                                );
+                            }
+                            for class in [
+                                format!("{scale:?} frame {:#04x}", recipe.frame),
+                                format!("{scale:?} {} bits", recipe.precision),
+                                format!("{scale:?} {:?}", image.color),
+                                format!("{scale:?} {:?}", recipe.scans),
+                                format!("{scale:?} divides {}", recipe.divides()),
+                                format!("{scale:?} restart {}", recipe.restart > 0),
+                            ] {
+                                *reached.entry(class).or_default() += 1;
+                            }
+                        }
+                    }
+                    (Err(want), Err(got), Err(at_full)) => {
+                        assert_eq!(got, want, "{label}");
+                        assert_eq!(got, at_full, "{label}: a failure fails at every scale");
+                        assert!(
+                            kept.layouts.is_empty() && kept.strips.is_empty(),
+                            "{label}: a decode that failed handed out a strip"
+                        );
+                    }
+                    _ => panic!("{label}: the scales disagree on success"),
+                }
+            }
+        }
+        assert!(images > 1_800, "{images} reduced images decoded");
+        for scale in ["Half", "Quarter", "Eighth"] {
+            for class in [
+                "frame 0xc0",
+                "frame 0xc1",
+                "frame 0xc2",
+                "frame 0xc9",
+                "frame 0xca",
+                "8 bits",
+                "12 bits",
+                "Gray",
+                "Rgb",
+                "Cmyk",
+                "CmykInverted",
+                "Interleaved",
+                "EachAlone",
+                "Split",
+                "Progressive",
+                "divides false",
+                "restart true",
+            ] {
+                let key = format!("{scale} {class}");
+                let count = reached.get(&key).copied().unwrap_or(0);
+                assert!(count >= 10, "{key}: {count} images");
+            }
+        }
+    }
+
+    /// **A twelve-bit frame is narrowed at every scale, and says so**: the
+    /// same warning at each, and mid-grey stays mid-grey.
+    #[test]
+    fn every_scale_narrows_a_twelve_bit_frame_and_says_so() {
+        for scale in JpegScale::ALL {
+            let mut kept = Kept::default();
+            let frame = decode_strips(&tiny_gray_at(0xC1, 12), 1 << 20, scale, &mut kept)
+                .expect("SOF1 at twelve bits decodes");
+            assert_eq!(frame.layout.precision, 12, "{scale:?}");
+            assert_eq!(
+                frame.warnings,
+                vec![Warning::JpegPrecisionNarrowed],
+                "{scale:?}"
+            );
+            assert_eq!(kept.data, vec![128], "{scale:?}");
+        }
+    }
+
+    /// **The ceiling bounds the frame's own samples at every scale**, since
+    /// the coefficients a decode holds are the frame's: a frame one sample
+    /// past it is refused at every scale, whatever the reduced image would
+    /// hold, and one at it decodes at every scale.
+    #[test]
+    fn the_ceiling_bounds_the_frame_at_every_scale() {
+        let bytes = huffman_flat_gray(64, 48, 99, 0);
+        for scale in JpegScale::ALL {
+            let mut kept = Kept::default();
+            assert_eq!(
+                decode_strips(&bytes, 64 * 48 - 1, scale, &mut kept).err(),
+                Some(JpegError::Truncated),
+                "{scale:?}"
+            );
+            assert!(
+                kept.layouts.is_empty() && kept.strips.is_empty(),
+                "{scale:?}"
+            );
+            let frame = decode_strips(&bytes, 64 * 48, scale, &mut Kept::default())
+                .unwrap_or_else(|e| panic!("{scale:?}: {e:?}"));
+            assert_eq!(
+                (frame.layout.width, frame.layout.height),
+                (scale.length(64), scale.length(48))
+            );
+            assert!(decode_strips(&tiny_gray(), 0, scale, &mut Kept::default()).is_err());
+        }
+    }
+
+    /// **Arbitrary bytes terminate at every scale**, as they do at full size:
+    /// the same sweep as `arbitrary_bytes_terminate_without_panicking`, every
+    /// cut of a small frame included.
+    #[test]
+    fn arbitrary_bytes_terminate_at_every_scale() {
+        for (scale, _) in REDUCED_SCALES {
+            for len in 0..512usize {
+                let data: Vec<u8> = (0..len).map(|i| ((i * 31) % 256) as u8).collect();
+                let _ = decode_strips(&data, 1 << 16, scale, &mut Kept::default());
+            }
+            for cut in 0..tiny_gray().len() {
+                let mut truncated = tiny_gray();
+                truncated.truncate(cut);
+                let _ = decode_strips(&truncated, 1 << 20, scale, &mut Kept::default());
+            }
+            for cut in 0..progressive_refined_block().len() {
+                let mut truncated = progressive_refined_block();
+                truncated.truncate(cut);
+                let _ = decode_strips(&truncated, 1 << 20, scale, &mut Kept::default());
+            }
+        }
+    }
+
+    /// **The kept coefficients are a block's top-left square**, out of
+    /// zig-zag order and dequantised as the full transform's are, whatever
+    /// the rest of the block holds: the positions below `kept_span` reach
+    /// every one of them.
+    #[test]
+    fn the_kept_coefficients_are_the_top_left_square() {
+        fn square<const N: usize>(natural: &[i32; 64], kept: [[i32; N]; N], case: usize) {
+            for (v, row) in kept.iter().enumerate() {
+                for (u, &value) in row.iter().enumerate() {
+                    assert_eq!(value, natural[v * 8 + u], "case {case}: ({u}, {v}) of {N}");
+                }
+            }
+        }
+        let mut noise = streams::Noise(0x4EE7_0000_5A11_0001);
+        for case in 0..5_000 {
+            let source: Vec<i16> = (0..64)
+                .map(|_| {
+                    if noise.below(3) == 0 {
+                        0
+                    } else {
+                        noise.next() as i16
+                    }
+                })
+                .collect();
+            let mut table = [0u16; 64];
+            for slot in table.iter_mut() {
+                *slot = 1 + noise.below(65_535) as u16;
+            }
+            let mut natural = [0i32; 64];
+            dequantise(&source, &table, &mut natural);
+            square(&natural, kept::<4>(&source, &table, kept_span(4)), case);
+            square(&natural, kept::<2>(&source, &table, kept_span(2)), case);
+            square(&natural, kept::<1>(&source, &table, kept_span(1)), case);
+        }
     }
 }

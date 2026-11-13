@@ -17,7 +17,7 @@ use tinker_pdf_cos::{
 };
 use tinker_pdf_filters::{
     ccitt_decode, jbig2_decode, jpeg_decode, jpeg_decode_strips, CcittParams, Jbig2Params,
-    JpegColor, JpegLayout, JpegSink, Warning as FilterWarning, MAX_JBIG2_SYMBOL_PIXELS,
+    JpegColor, JpegLayout, JpegScale, JpegSink, Warning as FilterWarning, MAX_JBIG2_SYMBOL_PIXELS,
     MAX_JBIG2_WORK_MULTIPLE,
 };
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
@@ -4690,8 +4690,8 @@ impl PageResources {
             width: 0,
             rgb: Vec::new(),
         };
-        let frame =
-            jpeg_decode_strips(raw, JPEG_CEILING, &mut into).map_err(|e| format!("{e:?}"))?;
+        let frame = jpeg_decode_strips(raw, JPEG_CEILING, JpegScale::Full, &mut into)
+            .map_err(|e| format!("{e:?}"))?;
         stats::jpeg_held(self.op.work.as_deref(), frame.held.total());
         let pixels = (frame.layout.width as usize) * (frame.layout.height as usize);
         let mut rgb = into.rgb;

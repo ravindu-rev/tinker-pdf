@@ -107,6 +107,22 @@ two-level lookup tables over a 64-bit word of bits, and the transform makes
 each of its cosine table's products once, in `i32` lanes for every block whose
 coefficients are within its bound and in `i64` past it; both give the bytes
 the direct forms give, which the test build keeps to hold them to.
+
+**The strip decode takes a scale** (`JpegScale`): full size, or 1/2, 1/4 and
+1/8 in the DCT domain, for every frame type, both coders and both precisions.
+At `N/8` each block's top-left `N × N` coefficients are transformed into
+`N × N` samples by the reduced transform `docs/design/jpeg-speed.md` defines —
+`round(2^16 · C(u)/2 · cos((2x+1)uπ/2N))` cosines, each kept coefficient
+clamped to `±2^20`, both passes summed exactly in `i64` and one rounding at the
+end — and a subsampled component is reduced by the same factor before it is
+replicated, so a `W × H` frame gives a `⌈W·N/8⌉ × ⌈H·N/8⌉` image whose strips
+are `N · Vmax` rows. A block whose kept coefficients have no AC term, and every
+block at 1/8, takes the full transform's DC level, so a flat block is the same
+level at every scale exactly; any other reduced sample is within one level of
+the definition evaluated in `f64`, which the tests hold. `max_output` bounds
+the frame's own samples at every scale, since the coefficients a decode holds
+are the frame's, and a twelve-bit frame is narrowed, and says so, at every
+scale. `jpeg_decode` is the full-size decode.
 `JpegColor` names what came out: greyscale, YCbCr already converted to RGB,
 and CMYK with the Adobe transform undone — including the inverted-CMYK
 convention, reported as its own variant.
@@ -825,12 +841,14 @@ strip, run or reference change, and each byte returned. The steps ride the
 decode path's own context, the warnings accumulator every decoder is handed,
 or the decoder's own bit reader where it has no other; `jbig2_decode_measured`
 is JBIG2's, its `Jbig2SymbolExtent::work`. The image codecs are `jpeg_decode` (returns `JpegImage`)
-and `jpeg_decode_strips`, which hands a `JpegSink` the image's `JpegLayout`
-and then its strips, whole rows top to bottom, one MCU row each, and returns a
-`JpegFrame` — the layout, the warnings and `JpegHeld`, the bytes of
-coefficients, planes and strip it held — so a caller can write the image
-where it wants it without a second copy; every check is made before the first
-strip, so a decode that hands one out succeeds;
+and `jpeg_decode_strips`, which takes a `JpegScale`, hands a `JpegSink` the
+image's `JpegLayout` — its size, colour and precision, the scale, and the
+frame's own width and height — and then its strips, whole rows top to bottom,
+one MCU row each, and returns a `JpegFrame` — the layout, the warnings,
+`JpegHeld`, the bytes of coefficients, planes and strip it held, and
+`transformed`, the samples its inverse transforms output — so a caller can
+write the image where it wants it without a second copy; every check is made
+before the first strip, so a decode that hands one out succeeds;
 `ccitt_decode` (takes `CcittParams`), `jbig2_decode` (takes `Jbig2Params`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
 `JpxImage`) — `jpx_decode_request` the same decode asked for a
