@@ -362,12 +362,11 @@ impl Buffer {
     /// positive evidence in this corpus and three cases of negative evidence,
     /// and it stays anyway.
     ///
-    /// The reason is that the three do not say the restriction is wrong. They
-    /// say the *boundaries* are: `crate::universal`'s syllable rule is a
-    /// one-character lookback standing in for USE's regular expression over
-    /// cluster types, so a lookup blocked at a boundary this crate invented is
-    /// a defect in the grammar and not in the confinement. Dropping the
-    /// confinement would trade a rule USE states for three cases and let a
+    /// The reason is that the three do not say the restriction is wrong. Two
+    /// say a *boundary* was: a mark typed between a halant and its base cut
+    /// the cluster there, and `crate::universal`'s clusters now join a halant
+    /// to its base across the dependents between them. Dropping the
+    /// confinement would trade a rule USE states for those cases and let a
     /// conjunct-forming lookup build one out of two words.
     pub fn set_syllable(&mut self, at: usize, syllable: u16) {
         if let Some(props) = self.props.get_mut(at) {

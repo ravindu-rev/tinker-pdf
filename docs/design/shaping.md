@@ -863,8 +863,10 @@ vowel after a punctuation sign of `SHLANA-2/5`, which no reading of the
 grammar admits. The specification marks Tai Tham as supported only in part
 (its table of registered tags). So:
 
-- **A run whose script the specification's table of registered tags lists
-  takes the published grammar**, Tai Tham excepted. The table is transcribed
+- **A Brahmic run whose script the specification's table of registered tags
+  lists takes the published grammar**, Tai Tham excepted — a run the
+  Universal plan takes, as before, because it holds a character Unicode gives
+  an `Indic_Syllabic_Category`. The table is transcribed
   into `universal.rs` as `unicode::Script` values; the three it lists that
   the pinned 17.0.0 does not encode (Jurchen, Proto-Cuneiform, Seal) are left
   out, since no character can be in them.

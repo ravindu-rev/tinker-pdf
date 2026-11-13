@@ -1278,7 +1278,7 @@ impl<'a> Shaper<'a> {
             self.mark_joining_forms(&characters, &from, &mut buffer);
         }
         if opentype && plan == Plan::Universal {
-            self.mark_syllables(&characters, &from, &mut buffer);
+            self.mark_syllables(&characters, &from, &mut buffer, run.script);
         }
         #[cfg(test)]
         {
@@ -1560,9 +1560,22 @@ impl<'a> Shaper<'a> {
     /// a conjunct is one glyph standing for three, and asking the text how
     /// many glyphs a syllable ought to have is what made milestone 5 skip the
     /// clusters it most needed to reorder.
-    fn mark_syllables(&self, characters: &[(char, u32)], from: &[usize], buffer: &mut Buffer) {
+    ///
+    /// Which clusters there are is the run script's question: the published
+    /// grammar's for a script the Universal Shaping Engine lists, milestone
+    /// 5's for the rest ([`universal::clusters`]).
+    fn mark_syllables(
+        &self,
+        characters: &[(char, u32)],
+        from: &[usize],
+        buffer: &mut Buffer,
+        script: Script,
+    ) {
         let letters: Vec<char> = characters.iter().map(|(c, _)| *c).collect();
-        let syllables = universal::syllables(&letters);
+        let syllables: Vec<u16> = universal::clusters(&letters, script)
+            .into_iter()
+            .map(|(number, _)| number)
+            .collect();
         let categories: Vec<universal::Category> =
             letters.iter().map(|c| universal::category(*c)).collect();
         let rphf = repha_positions(&syllables, &categories);
@@ -2561,7 +2574,11 @@ mod tests {
                 .iter()
                 .map(|c| crate::universal::category(*c))
                 .collect();
-            super::repha_positions(&crate::universal::syllables(&letters), &categories)
+            let syllables: Vec<u16> = crate::universal::clusters(&letters, Script::Kannada)
+                .into_iter()
+                .map(|(number, _)| number)
+                .collect();
+            super::repha_positions(&syllables, &categories)
         }
 
         // KANNADA RA, VIRAMA, KA: a repha, and both of its two characters are

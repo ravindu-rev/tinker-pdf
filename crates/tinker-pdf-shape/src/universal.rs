@@ -29,21 +29,25 @@
 //!
 //! # What a syllable is here
 //!
-//! A base, and everything that hangs off it. A new one starts at a base
-//! character unless a halant came immediately before — because a halant is
-//! precisely the statement that the next consonant belongs to this cluster
-//! rather than starting a new one. Anything that is not Brahmic at all ends
-//! the syllable it interrupts and stands alone.
+//! Two answers, chosen by the run's script ([`clusters`]).
 //!
-//! That is a **simplification** of USE's published grammar, which is a regular
-//! expression over a dozen categories with named cluster types, and it is
-//! stated as one rather than presented as the whole thing. What it captures is
-//! the base, the halant chain and the trailing marks, which is what the
-//! reordering below and the per-syllable feature application need. What it
-//! does not capture is the distinction between the cluster *types* — a numeral
-//! cluster from a symbol cluster from a broken one — which USE uses to decide
-//! whether to insert a dotted circle. This crate never inserts one; see
-//! `docs/features/fonts.md`.
+//! A run of a script the specification's table of registered tags lists, Tai
+//! Tham excepted, is cut by **the published grammar** (*Cluster validation*):
+//! its seven cluster types, recognised by a hand-written walk over the
+//! classes, the longest type that matches taken at each start, `CGJ` and the
+//! joiners where the specification puts them, a cluster that starts with a
+//! mark broken, and a cut after 31 characters. `docs/design/shaping.md`, *The
+//! cluster grammar*, transcribes the patterns.
+//!
+//! Tai Tham and every Brahmic script the table does not list keep
+//! **milestone 5's cluster**: a base and everything that hangs off it, in any
+//! order. A new one starts at a base unless a halant has come since the last
+//! base with only dependents after it — a halant is precisely the statement
+//! that the next consonant belongs to this cluster — and `CGJ` continues the
+//! cluster it stands in. Anything that is not Brahmic at all ends the syllable
+//! it interrupts and stands alone. The corpus is why: about half of Tai Tham's
+//! cases are typed in orders the published grammar refuses, and every one of
+//! their fixtures draws them as one cluster.
 //!
 //! # The three rules, reintroduced as defects and counted
 //!
@@ -72,8 +76,8 @@
 //! [`crate::buffer::Buffer::set_syllable`].
 
 use crate::unicode::{
-    general_class, indic_positional, indic_syllabic, joining_type, script, GeneralClass,
-    IndicPositional, IndicSyllabic, JoiningType, Script,
+    general_class, indic_positional, indic_syllabic, joining_type, mark_category, script,
+    GeneralClass, IndicPositional, IndicSyllabic, JoiningType, MarkCategory, Script,
 };
 
 /// What a character is to the Universal Shaping Engine: its class and, where
@@ -703,37 +707,521 @@ pub(crate) fn is_brahmic(c: char) -> bool {
     indic_syllabic(c) != IndicSyllabic::Other
 }
 
-/// Which syllable each character of `text` belongs to, numbered from one.
+/// What kind of cluster a character's cluster is: the types *Cluster
+/// validation* names, and the broken one *Defective clusters* names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ClusterType {
+    /// `< IND | O | Rsv | WJ > [VS]`, or a character no pattern takes that is
+    /// not a mark: one character on its own, outside every syllable to the
+    /// confinement.
+    #[default]
+    Independent,
+    /// A base and what hangs off it.
+    Standard,
+    /// A standard cluster's base and halant chain, ended by a halant or a
+    /// reordering killer.
+    ViramaTerminated,
+    /// Joining numbers ended by a number joiner.
+    NumberJoinerTerminated,
+    /// Joining numbers.
+    Numeral,
+    /// A symbol or generic base and its consonant modifiers.
+    Symbol,
+    /// Hieroglyphs and their joiners, segments and modifiers.
+    Hieroglyph,
+    /// A cluster that starts with a mark (`General_Category` `Mn` or `Mc`):
+    /// one mark with no base, which takes a dotted circle (FT-08.7).
+    Broken,
+}
+
+/// The scripts *Registered tags for the Universal Shaping Engine* lists,
+/// transcribed from its Unicode 18.0 revision as the values the pinned
+/// 17.0.0 encodes. Jurchen, Proto-Cuneiform and Seal are listed there and not
+/// encoded here, so no character can be in them.
+const USE_SCRIPTS: &[Script] = &[
+    Script::Adlam,
+    Script::Ahom,
+    Script::Balinese,
+    Script::Batak,
+    Script::BeriaErfe,
+    Script::Bhaiksuki,
+    Script::Brahmi,
+    Script::Buginese,
+    Script::Buhid,
+    Script::Chakma,
+    Script::Cham,
+    Script::Chorasmian,
+    Script::CyproMinoan,
+    Script::DivesAkuru,
+    Script::Dogra,
+    Script::Duployan,
+    Script::EgyptianHieroglyphs,
+    Script::Elymaic,
+    Script::Garay,
+    Script::Grantha,
+    Script::GunjalaGondi,
+    Script::GurungKhema,
+    Script::HanifiRohingya,
+    Script::Hanunoo,
+    Script::Javanese,
+    Script::Kaithi,
+    Script::Kawi,
+    Script::KayahLi,
+    Script::Kharoshthi,
+    Script::KhitanSmallScript,
+    Script::Khojki,
+    Script::Khudawadi,
+    Script::KiratRai,
+    Script::Lepcha,
+    Script::Limbu,
+    Script::Mahajani,
+    Script::Makasar,
+    Script::Mandaic,
+    Script::Manichaean,
+    Script::Marchen,
+    Script::MasaramGondi,
+    Script::Medefaidrin,
+    Script::MeeteiMayek,
+    Script::Miao,
+    Script::Modi,
+    Script::Mongolian,
+    Script::Multani,
+    Script::NagMundari,
+    Script::Nandinagari,
+    Script::Newa,
+    Script::Nko,
+    Script::NyiakengPuachueHmong,
+    Script::OldSogdian,
+    Script::OldUyghur,
+    Script::OlOnal,
+    Script::PahawhHmong,
+    Script::PhagsPa,
+    Script::PsalterPahlavi,
+    Script::Rejang,
+    Script::Saurashtra,
+    Script::Sharada,
+    Script::Siddham,
+    Script::Sidetic,
+    Script::Sinhala,
+    Script::Sogdian,
+    Script::Soyombo,
+    Script::Sunuwar,
+    Script::Sundanese,
+    Script::SylotiNagri,
+    Script::Tagalog,
+    Script::Tagbanwa,
+    Script::TaiLe,
+    Script::TaiTham,
+    Script::TaiViet,
+    Script::TaiYo,
+    Script::Takri,
+    Script::Tangsa,
+    Script::Tibetan,
+    Script::Tifinagh,
+    Script::Tirhuta,
+    Script::Todhri,
+    Script::TolongSiki,
+    Script::Toto,
+    Script::TuluTigalari,
+    Script::Vithkuqi,
+    Script::Wancho,
+    Script::Yezidi,
+    Script::ZanabazarSquare,
+];
+
+/// Whether a Brahmic run of `script` is cut by the published grammar: the
+/// specification lists its script, and it is not Tai Tham, whose corpus the
+/// published grammar contradicts (`docs/design/shaping.md`, *The cluster
+/// grammar*).
+pub(crate) fn takes_published_grammar(script: Script) -> bool {
+    script != Script::TaiTham && USE_SCRIPTS.contains(&script)
+}
+
+/// Each character's cluster, numbered from one, and the cluster's type, for a
+/// Brahmic run of `script`: the published grammar's, or milestone 5's
+/// cluster where [`takes_published_grammar`] says the run keeps it.
 ///
-/// Zero is never returned, because zero is the buffer's "this glyph is in no
-/// syllable" and a run that is not Brahmic must not be restricted by a
-/// boundary it does not have.
-///
-/// The numbering saturates at [`u16::MAX`]: a paragraph with sixty-five
-/// thousand syllables in it would start sharing numbers between the last of
-/// them, which merges two clusters that should have been separate rather than
-/// splitting one that should not — the safe direction, and unreachable in any
-/// text a reader would look at.
-pub(crate) fn syllables(text: &[char]) -> Vec<u16> {
-    let mut out = Vec::new();
+/// Zero is "in no syllable", and is what an independent character gets, so
+/// a space, Latin or punctuation in a Brahmic run restricts nothing. The
+/// numbering saturates at [`u16::MAX`]: a paragraph with sixty-five thousand
+/// clusters in it would start sharing numbers between the last of them, which
+/// merges two clusters rather than splitting one — the safe direction, and
+/// unreachable in any text a reader would look at.
+pub(crate) fn clusters(text: &[char], script: Script) -> Vec<(u16, ClusterType)> {
+    if takes_published_grammar(script) {
+        published(text)
+    } else {
+        permissive(text)
+    }
+}
+
+/// *Cluster length*: a cluster is cut after this many characters, and the
+/// next starts there.
+const LONGEST_CLUSTER: usize = 31;
+
+/// Whether a character is a mark to *Defective clusters* and to the `ZWNJ`
+/// rule: `General_Category` `Mn` or `Mc`.
+fn is_mark(c: char) -> bool {
+    matches!(mark_category(c), Some(MarkCategory::Mn | MarkCategory::Mc))
+}
+
+/// The published grammar over a run.
+fn published(text: &[char]) -> Vec<(u16, ClusterType)> {
+    let categories: Vec<Category> = text.iter().map(|c| category(*c)).collect();
+    let marks: Vec<bool> = text.iter().map(|c| is_mark(*c)).collect();
+    let mut out = vec![(0u16, ClusterType::Independent); text.len()];
+    let mut number = 0u16;
+    let mut at = 0usize;
+    while at < text.len() {
+        let (end, kind) = recognise(&categories, &marks, at);
+        // A match always takes the character it starts at, and no more than
+        // the cluster length allows.
+        let end = end
+            .max(at.saturating_add(1))
+            .min(at.saturating_add(LONGEST_CLUSTER))
+            .min(text.len());
+        let numbered = kind != ClusterType::Independent;
+        if numbered {
+            number = number.saturating_add(1);
+        }
+        for slot in out.get_mut(at..end).into_iter().flatten() {
+            *slot = (if numbered { number } else { 0 }, kind);
+        }
+        at = end;
+    }
+    out
+}
+
+/// The cluster that starts at `at`: where it ends, and its type.
+fn recognise(categories: &[Category], marks: &[bool], at: usize) -> (usize, ClusterType) {
+    let first = categories.get(at).copied().unwrap_or_default();
+    // *Defective clusters*: a cluster that starts with a mark is broken, one
+    // mark to a cluster. A variation selector or `CGJ` on its own is not, since
+    // neither has any effect of its own.
+    if marks.get(at) == Some(&true) && !matches!(first, Category::Vs | Category::Cgj) {
+        return (
+            trailing(categories, at.saturating_add(1)),
+            ClusterType::Broken,
+        );
+    }
+    let (standard, virama) = base_led(categories, marks, at);
+    let (numeral, number_joined) = numbers(categories, marks, at);
+    let candidates = [
+        (standard, ClusterType::Standard),
+        (virama, ClusterType::ViramaTerminated),
+        (number_joined, ClusterType::NumberJoinerTerminated),
+        (numeral, ClusterType::Numeral),
+        (symbol(categories, marks, at), ClusterType::Symbol),
+        (hieroglyph(categories, marks, at), ClusterType::Hieroglyph),
+        (independent(categories, marks, at), ClusterType::Independent),
+    ];
+    // The longest match, and the first listed of two that tie: a generic base
+    // on its own is a standard cluster rather than a symbol one.
+    let mut best: Option<(usize, ClusterType)> = None;
+    for (end, kind) in candidates {
+        if let Some(end) = end {
+            if best.is_none_or(|(longest, _)| end > longest) {
+                best = Some((end, kind));
+            }
+        }
+    }
+    best.unwrap_or((
+        trailing(categories, at.saturating_add(1)),
+        ClusterType::Independent,
+    ))
+}
+
+/// Where a cluster ends once its last character is taken at `from`: `CGJ`,
+/// `ZWNJ` and `ZWJ` after it continue it (*Combining Grapheme Joiner*,
+/// *Zero-width non-joiner*, *Zero-width joiner*), and the cluster ends after a
+/// `ZWNJ` and between two `ZWJ`s.
+fn trailing(categories: &[Category], from: usize) -> usize {
+    let mut at = from;
+    while let Some(class) = categories.get(at).copied() {
+        match class {
+            Category::Cgj => at = at.saturating_add(1),
+            Category::Zwnj => return at.saturating_add(1),
+            Category::Zwj => {
+                at = at.saturating_add(1);
+                if categories.get(at) == Some(&Category::Zwj) {
+                    return at;
+                }
+            }
+            _ => return at,
+        }
+    }
+    at
+}
+
+/// A walk over one cluster's characters, reading through the three that have
+/// no effect inside one.
+#[derive(Clone, Copy)]
+struct Walk<'a> {
+    categories: &'a [Category],
+    marks: &'a [bool],
+    /// The next character to read.
+    at: usize,
+    /// One past the last character taken.
+    taken: usize,
+}
+
+impl<'a> Walk<'a> {
+    const fn new(categories: &'a [Category], marks: &'a [bool], at: usize) -> Self {
+        Self {
+            categories,
+            marks,
+            at,
+            taken: at,
+        }
+    }
+
+    /// The next character the cluster can continue to, past `CGJ` always,
+    /// past `ZWNJ` where a mark follows it and past `ZWJ` unless another
+    /// follows; with its position.
+    fn next(&self, from: usize) -> Option<(usize, Category)> {
+        let mut at = from;
+        loop {
+            let class = self.categories.get(at).copied()?;
+            match class {
+                Category::Cgj => at = at.saturating_add(1),
+                Category::Zwnj => {
+                    if self.marks.get(at.saturating_add(1)) == Some(&true) {
+                        at = at.saturating_add(1);
+                    } else {
+                        return None;
+                    }
+                }
+                Category::Zwj => {
+                    if self.categories.get(at.saturating_add(1)) == Some(&Category::Zwj) {
+                        return None;
+                    }
+                    at = at.saturating_add(1);
+                }
+                other => return Some((at, other)),
+            }
+        }
+    }
+
+    /// The class of the next character, if the cluster can continue to it.
+    fn peek(&self) -> Option<Category> {
+        self.next(self.at).map(|(_, class)| class)
+    }
+
+    /// The class of the character after the next.
+    fn peek_second(&self) -> Option<Category> {
+        let (at, _) = self.next(self.at)?;
+        self.next(at.saturating_add(1)).map(|(_, class)| class)
+    }
+
+    /// Takes the next character.
+    fn take(&mut self) {
+        if let Some((at, _)) = self.next(self.at) {
+            self.at = at.saturating_add(1);
+            self.taken = self.at;
+        }
+    }
+
+    /// Takes the next character where it is `class`.
+    fn optional(&mut self, class: Category) {
+        if self.peek() == Some(class) {
+            self.take();
+        }
+    }
+
+    /// Takes every next character that is `class`.
+    fn many(&mut self, class: Category) {
+        while self.peek() == Some(class) {
+            self.take();
+        }
+    }
+
+    /// Where the cluster ends, its trailing joiners included.
+    fn end(&self) -> usize {
+        trailing(self.categories, self.taken)
+    }
+}
+
+/// The standard and virama-terminated clusters, which share their base and
+/// halant chain: where each ends, if it matches.
+fn base_led(categories: &[Category], marks: &[bool], at: usize) -> (Option<usize>, Option<usize>) {
+    use Category as C;
+    let mut walk = Walk::new(categories, marks, at);
+    if matches!(walk.peek(), Some(C::R | C::Cs)) {
+        walk.take();
+    }
+    if !matches!(walk.peek(), Some(C::B | C::Gb)) {
+        return (None, None);
+    }
+    walk.take();
+    walk.optional(C::Vs);
+    walk.many(C::CmAbv);
+    walk.many(C::CmBlw);
+    loop {
+        match walk.peek() {
+            Some(C::H) if walk.peek_second() == Some(C::B) => {
+                walk.take();
+                walk.take();
+                walk.optional(C::Vs);
+            }
+            Some(C::Sub) => walk.take(),
+            _ => break,
+        }
+        walk.many(C::CmAbv);
+        walk.many(C::CmBlw);
+    }
+    let virama = matches!(walk.peek(), Some(C::H | C::Rk)).then(|| {
+        let mut ended = walk;
+        ended.take();
+        ended.end()
+    });
+    for class in [C::MPre, C::MAbv, C::MBlw, C::MPst] {
+        walk.optional(class);
+    }
+    for class in [
+        C::VPre,
+        C::VAbv,
+        C::VBlw,
+        C::VPst,
+        C::VmPre,
+        C::VmAbv,
+        C::VmBlw,
+        C::VmPst,
+        C::FAbv,
+        C::FBlw,
+        C::FPst,
+    ] {
+        walk.many(class);
+    }
+    walk.optional(C::Fm);
+    (Some(walk.end()), virama)
+}
+
+/// The numeral and number-joiner-terminated clusters: where each ends.
+fn numbers(categories: &[Category], marks: &[bool], at: usize) -> (Option<usize>, Option<usize>) {
+    use Category as C;
+    let mut walk = Walk::new(categories, marks, at);
+    if walk.peek() != Some(C::N) {
+        return (None, None);
+    }
+    walk.take();
+    walk.optional(C::Vs);
+    while walk.peek() == Some(C::Hn) && walk.peek_second() == Some(C::N) {
+        walk.take();
+        walk.take();
+        walk.optional(C::Vs);
+    }
+    let joined = (walk.peek() == Some(C::Hn)).then(|| {
+        let mut ended = walk;
+        ended.take();
+        ended.end()
+    });
+    (Some(walk.end()), joined)
+}
+
+/// The symbol cluster: where it ends.
+fn symbol(categories: &[Category], marks: &[bool], at: usize) -> Option<usize> {
+    use Category as C;
+    let mut walk = Walk::new(categories, marks, at);
+    if !matches!(walk.peek(), Some(C::S | C::Gb)) {
+        return None;
+    }
+    walk.take();
+    walk.optional(C::Vs);
+    walk.many(C::CmAbv);
+    walk.many(C::CmBlw);
+    Some(walk.end())
+}
+
+/// The hieroglyph cluster: where it ends. A cluster a joiner ends is one, as
+/// the specification asks for text entered a character at a time.
+fn hieroglyph(categories: &[Category], marks: &[bool], at: usize) -> Option<usize> {
+    use Category as C;
+    let mut walk = Walk::new(categories, marks, at);
+    let mut matched = false;
+    loop {
+        let mut unit = walk;
+        unit.many(C::Sb);
+        if unit.peek() != Some(C::G) {
+            break;
+        }
+        unit.take();
+        for class in [C::Vs, C::Hr, C::Hm] {
+            unit.optional(class);
+        }
+        unit.many(C::Se);
+        walk = unit;
+        matched = true;
+        if walk.peek() != Some(C::J) {
+            break;
+        }
+        walk.take();
+    }
+    matched.then(|| walk.end())
+}
+
+/// The independent cluster: where it ends.
+fn independent(categories: &[Category], marks: &[bool], at: usize) -> Option<usize> {
+    use Category as C;
+    let mut walk = Walk::new(categories, marks, at);
+    if !matches!(walk.peek(), Some(C::Ind | C::O | C::Rsv | C::Wj)) {
+        return None;
+    }
+    walk.take();
+    walk.optional(C::Vs);
+    Some(walk.end())
+}
+
+/// Milestone 5's cluster over a run, with the two changes the corpus states:
+/// a halant joins the next base across the dependents between them, and
+/// `CGJ` continues the cluster it stands in.
+fn permissive(text: &[char]) -> Vec<(u16, ClusterType)> {
+    let mut out = Vec::with_capacity(text.len());
     let mut current = 0u16;
+    let mut kind = ClusterType::Independent;
     let mut previous = Role::Other;
+    // A halant has come since the last base, with only dependents after it.
+    let mut halant_open = false;
     for c in text.iter().copied() {
-        let role = category(c).role();
+        let class = category(c);
+        if class == Category::Cgj {
+            // It continues the cluster it stands in, and is no part of what
+            // the rules below read.
+            out.push(if previous == Role::Other {
+                (0, ClusterType::Independent)
+            } else {
+                (current, kind)
+            });
+            continue;
+        }
+        let role = class.role();
         let starts = match role {
-            // A base starts a syllable unless a halant just said it does not.
-            Role::Base => previous != Role::Halant,
+            // A base starts a syllable unless a halant said it does not.
+            Role::Base => !halant_open,
             // A mark with no base before it is a syllable of its own, which is
             // the "broken cluster" USE names. It still gets a number, so the
             // features that would fix it are applied to it and to nothing
             // else.
-            Role::Halant | Role::PreBase | Role::Mark => matches!(previous, Role::Other),
+            Role::Halant | Role::PreBase | Role::Mark => previous == Role::Other,
             Role::Other => false,
         };
         if starts {
             current = current.saturating_add(1);
+            kind = if role == Role::Base {
+                ClusterType::Standard
+            } else {
+                ClusterType::Broken
+            };
         }
-        out.push(if role == Role::Other { 0 } else { current });
+        out.push(if role == Role::Other {
+            (0, ClusterType::Independent)
+        } else {
+            (current, kind)
+        });
+        halant_open = match role {
+            Role::Halant => true,
+            Role::Base | Role::Other => false,
+            Role::PreBase | Role::Mark => halant_open,
+        };
         previous = role;
     }
     out
@@ -858,7 +1346,20 @@ pub(crate) fn reorder(categories: &[Category]) -> Option<Vec<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{category, is_brahmic, reorder, syllables, Category, Role};
+    use super::{
+        category, clusters, is_brahmic, reorder, takes_published_grammar, Category, ClusterType,
+        Role,
+    };
+    use crate::unicode::Script;
+
+    /// Milestone 5's syllable numbers for `text`, as a Devanagari run keeps
+    /// them.
+    fn syllables(text: &[char]) -> Vec<u16> {
+        clusters(text, Script::Devanagari)
+            .into_iter()
+            .map(|(number, _)| number)
+            .collect()
+    }
 
     /// Tai Tham, and the case text-rendering-tests SHLANA-1/21 states: a
     /// consonant and a vowel typed in that order and drawn in the other.
@@ -1339,5 +1840,250 @@ mod tests {
         // Brahmic plan by it.
         assert_eq!(category('\u{2D30}'), Category::B);
         assert!(!is_brahmic('\u{2D30}'));
+    }
+
+    /// The clusters `text` cuts into under `script`, as `(number, type)`.
+    fn cut(text: &str, script: Script) -> Vec<(u16, ClusterType)> {
+        clusters(&text.chars().collect::<Vec<char>>(), script)
+    }
+
+    /// Which runs take the published grammar: the scripts the
+    /// specification's table lists, Tai Tham excepted, and no other.
+    #[test]
+    fn the_published_grammar_is_the_listed_scripts_but_tai_tham() {
+        for script in [
+            Script::Balinese,
+            Script::Javanese,
+            Script::Sundanese,
+            Script::Sinhala,
+            Script::Tibetan,
+            Script::EgyptianHieroglyphs,
+        ] {
+            assert!(takes_published_grammar(script), "{script:?}");
+        }
+        for script in [
+            Script::TaiTham,
+            Script::Kannada,
+            Script::Devanagari,
+            Script::Thai,
+            Script::Khmer,
+            Script::Myanmar,
+            Script::Latin,
+        ] {
+            assert!(!takes_published_grammar(script), "{script:?}");
+        }
+    }
+
+    /// `< IND | O | Rsv | WJ > [VS]`: a Balinese punctuation mark and the
+    /// selector after it stand alone, and alone is outside every syllable.
+    #[test]
+    fn an_independent_cluster_is_one_character_and_its_selector() {
+        use ClusterType::Independent;
+        assert_eq!(
+            cut("\u{1B5A}\u{FE00}", Script::Balinese),
+            [(0, Independent), (0, Independent)]
+        );
+        // A space between two words is one too.
+        assert_eq!(
+            cut("\u{1B13} \u{1B13}", Script::Balinese),
+            [
+                (1, ClusterType::Standard),
+                (0, Independent),
+                (2, ClusterType::Standard)
+            ]
+        );
+    }
+
+    /// The standard cluster, with the halant chain `SHBALI-2/1` types: `KA
+    /// ADEG-ADEG PA TALING` is one cluster, the pre-base vowel in it.
+    #[test]
+    fn a_standard_cluster_takes_its_halant_chain_and_its_vowels() {
+        use ClusterType::Standard;
+        assert_eq!(
+            cut("\u{1B13}\u{1B36}", Script::Balinese),
+            [(1, Standard); 2]
+        );
+        assert_eq!(
+            cut("\u{1B13}\u{1B44}\u{1B27}\u{1B3E}", Script::Balinese),
+            [(1, Standard); 4]
+        );
+        // Two bases with no halant between them are two clusters.
+        assert_eq!(
+            cut("\u{1B13}\u{1B27}", Script::Balinese),
+            [(1, Standard), (2, Standard)]
+        );
+    }
+
+    /// A base and a halant with no base after it end a virama-terminated
+    /// cluster, at the run's end and before a space alike.
+    #[test]
+    fn a_trailing_halant_ends_a_virama_terminated_cluster() {
+        use ClusterType::ViramaTerminated;
+        assert_eq!(
+            cut("\u{1B13}\u{1B44}", Script::Balinese),
+            [(1, ViramaTerminated); 2]
+        );
+        assert_eq!(
+            cut("\u{1B13}\u{1B44} ", Script::Balinese),
+            [
+                (1, ViramaTerminated),
+                (1, ViramaTerminated),
+                (0, ClusterType::Independent)
+            ]
+        );
+    }
+
+    /// `N [VS] (HN N [VS])* HN` and `N [VS] (HN N [VS])*`: Brahmi's joining
+    /// numbers.
+    #[test]
+    fn joining_numbers_make_numeral_clusters() {
+        assert_eq!(
+            cut("\u{11052}\u{1107F}\u{11053}", Script::Brahmi),
+            [(1, ClusterType::Numeral); 3]
+        );
+        assert_eq!(
+            cut("\u{11052}\u{1107F}", Script::Brahmi),
+            [(1, ClusterType::NumberJoinerTerminated); 2]
+        );
+    }
+
+    /// `< S | GB > [VS] (CMAbv)* (CMBlw)*`: `SHBALI-3/1`, a musical symbol and
+    /// the combining mark the override file makes a consonant modifier.
+    #[test]
+    fn a_symbol_takes_its_consonant_modifiers() {
+        assert_eq!(
+            cut("\u{1B66}\u{1B6B}", Script::Balinese),
+            [(1, ClusterType::Symbol); 2]
+        );
+    }
+
+    /// The hieroglyph cluster, joined and ended by a joiner alike.
+    #[test]
+    fn hieroglyphs_join_into_one_cluster() {
+        assert_eq!(
+            cut("\u{13000}\u{13430}\u{13001}", Script::EgyptianHieroglyphs),
+            [(1, ClusterType::Hieroglyph); 3]
+        );
+        assert_eq!(
+            cut("\u{13000}\u{13430}", Script::EgyptianHieroglyphs),
+            [(1, ClusterType::Hieroglyph); 2]
+        );
+        assert_eq!(
+            cut(
+                "\u{13437}\u{13000}\u{13440}\u{13438}",
+                Script::EgyptianHieroglyphs
+            ),
+            [(1, ClusterType::Hieroglyph); 4]
+        );
+    }
+
+    /// *Defective clusters*: `SHBALI-1/14` and `/15` type a pre-base vowel
+    /// after an above and a below vowel, which the standard pattern does not
+    /// take there, so it starts a cluster of its own, broken; a mark at the
+    /// start of a run is one too, one mark to a cluster.
+    #[test]
+    fn a_mark_that_starts_a_cluster_is_broken() {
+        use ClusterType::{Broken, Standard};
+        assert_eq!(
+            cut("\u{1B13}\u{1B36}\u{1B3E}", Script::Balinese),
+            [(1, Standard), (1, Standard), (2, Broken)]
+        );
+        assert_eq!(
+            cut("\u{1B13}\u{1B38}\u{1B3E}", Script::Balinese),
+            [(1, Standard), (1, Standard), (2, Broken)]
+        );
+        assert_eq!(
+            cut("\u{1B36}\u{1B38}", Script::Balinese),
+            [(1, Broken), (2, Broken)]
+        );
+        // A variation selector on its own is not broken, nor is `CGJ`.
+        assert_eq!(
+            cut("\u{FE00}", Script::Balinese),
+            [(0, ClusterType::Independent)]
+        );
+    }
+
+    /// `CGJ` stands anywhere inside a cluster and changes nothing; `ZWNJ`
+    /// ends the cluster after itself unless a mark follows; `ZWJ` joins what
+    /// follows unless that is another `ZWJ`.
+    #[test]
+    fn the_joiners_sit_where_the_grammar_puts_them() {
+        use ClusterType::{Independent, Standard};
+        assert_eq!(
+            cut("\u{1B13}\u{034F}\u{1B36}", Script::Balinese),
+            [(1, Standard); 3]
+        );
+        assert_eq!(
+            cut("\u{1B13}\u{200C}\u{1B13}", Script::Balinese),
+            [(1, Standard), (1, Standard), (2, Standard)]
+        );
+        assert_eq!(
+            cut("\u{1B13}\u{200C}\u{1B36}", Script::Balinese),
+            [(1, Standard); 3]
+        );
+        assert_eq!(
+            cut("\u{1B13}\u{1B44}\u{200D}\u{1B27}", Script::Balinese),
+            [(1, Standard); 4]
+        );
+        assert_eq!(
+            cut("\u{1B13}\u{200D}\u{200D}", Script::Balinese),
+            [(1, Standard), (1, Standard), (0, Independent)]
+        );
+    }
+
+    /// *Cluster length*: a cluster is cut after 31 characters, and a mark
+    /// that then starts one is broken.
+    #[test]
+    fn a_cluster_is_cut_after_thirty_one_characters() {
+        let text: String = core::iter::once('\u{1B13}')
+            .chain(core::iter::repeat_n('\u{1B36}', 33))
+            .collect();
+        let cut = cut(&text, Script::Balinese);
+        assert_eq!(cut.len(), 34);
+        assert!(cut
+            .get(..31)
+            .is_some_and(|first| first.iter().all(|slot| *slot == (1, ClusterType::Standard))));
+        assert_eq!(cut.get(31), Some(&(2, ClusterType::Broken)));
+        assert_eq!(cut.get(32), Some(&(3, ClusterType::Broken)));
+        assert_eq!(cut.get(33), Some(&(4, ClusterType::Broken)));
+    }
+
+    /// Milestone 5's cluster, which Tai Tham keeps, with the two changes the
+    /// corpus states: `SHLANA-7/5`'s halant joins its base across a tone mark
+    /// and `SHLANA-3/3`'s across `RA HAAM`, and `SHLANA-10/28`'s `CGJ` stays
+    /// inside its cluster, so the pre-base vowel after it is the cluster's.
+    #[test]
+    fn tai_tham_keeps_milestone_fives_cluster_with_its_two_changes() {
+        let numbers = |text: &str| -> Vec<u16> {
+            cut(text, Script::TaiTham)
+                .into_iter()
+                .map(|(number, _)| number)
+                .collect()
+        };
+        assert_eq!(
+            numbers("\u{1A37}\u{1A60}\u{1A76}\u{1A3E}\u{1A63}"),
+            [1, 1, 1, 1, 1]
+        );
+        assert_eq!(
+            numbers("\u{1A20}\u{1A6C}\u{1A62}\u{1A43}\u{1A60}\u{1A7A}\u{1A3C}"),
+            [1, 1, 1, 2, 2, 2, 2]
+        );
+        assert_eq!(
+            numbers("\u{1A32}\u{1A6C}\u{1A74}\u{1A75}\u{034F}\u{1A6F}\u{1A60}\u{1A36}"),
+            [1, 1, 1, 1, 1, 1, 1, 1]
+        );
+        // Out of the published order, and one cluster still: `SHLANA-2/2`'s
+        // tone mark before its vowel, with `SAKOT` and a consonant after.
+        assert_eq!(
+            numbers("\u{1A32}\u{1A75}\u{1A63}\u{1A60}\u{1A26}\u{1A7B}"),
+            [1, 1, 1, 1, 1, 1]
+        );
+        // A halant's join ends at the next base: the base after it starts a
+        // cluster of its own.
+        assert_eq!(numbers("\u{1A37}\u{1A60}\u{1A3E}\u{1A20}"), [1, 1, 1, 2]);
+        // A dependent with no base is a cluster of its own, and `CGJ` outside
+        // any cluster is in none.
+        assert_eq!(cut("\u{1A63}", Script::TaiTham), [(1, ClusterType::Broken)]);
+        assert_eq!(numbers("\u{034F}"), [0]);
     }
 }

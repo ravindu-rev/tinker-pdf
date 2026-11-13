@@ -1212,7 +1212,11 @@ What it does:
   subclasses, from `Indic_Syllabic_Category`, `Indic_Positional_Category`,
   `General_Category`, `Joining_Type` and `Script` with the specification's
   override tables ([design/shaping.md](../design/shaping.md), *Character
-  categories*), a syllable per Brahmic cluster, every `GSUB`
+  categories*), a syllable per Brahmic cluster — cut by USE's published
+  grammar, its cluster types recognised and a cluster that starts with a mark
+  broken, for a script the specification lists, and by milestone 5's cluster
+  for Tai Tham, whose corpus the grammar contradicts, and for the scripts it
+  does not list — every `GSUB`
   feature applied inside one syllable and never across two, USE's feature
   stages, the canonical decomposition of a Brahmic character that has one, and
   one reordering pause that moves a pre-base glyph to the front of its
