@@ -15,16 +15,33 @@
 //!   transition, under the ceiling [`crate::Limits::max_transitions`] puts on
 //!   a machine that never advances.
 //!
+//! and the tables:
+//!
+//! - [`Morx`], the extended glyph metamorphosis table: its chains, their
+//!   feature entries and sub-feature flags, each subtable's coverage, and the
+//!   subtables the chain runs; [`Selection`] is what a caller's OpenType
+//!   features ask of it;
+//! - [`Feat`], the feature name table, which says which features' settings
+//!   exclude one another.
+//!
 //! Everything is integer, as the rest of the crate is (`lib.rs`), and every
 //! read is a bounds check, so a truncated table or an offset past its end
 //! answers nothing and never panics (ruling 1). What a table asks for that
 //! this crate refuses is a [`crate::Warning`] naming where in the table it
 //! was asked ([`Site`]), recorded once a run (ruling 10).
 
+mod feat;
 mod lookup;
+mod morx;
 mod state;
 
+pub use feat::{Feat, FeatureName, FEAT};
 pub use lookup::{Lookup, LookupError, LookupFormat};
+pub use morx::{
+    aat_setting, AatSetting, Chain, FeatureEntry, Morx, Selection, Subtable, ANY_ORIENTATION,
+    CONTEXTUAL, DESCENDING, INSERTION, LIGATURE, LOGICAL, MORX, NONCONTEXTUAL, REARRANGEMENT,
+    VERTICAL,
+};
 pub use state::{
     Actions, Cursor, Entry, StateError, StateTable, Traversal, DELETED, DELETED_GLYPH,
     DONT_ADVANCE, END_OF_LINE, END_OF_TEXT, OUT_OF_BOUNDS,

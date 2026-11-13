@@ -278,6 +278,47 @@ pub enum Warning {
         /// The format it claimed.
         format: u16,
     },
+    /// A `morx` subtable of a type this crate does not run, so it was
+    /// skipped and the chain went on: 3 is reserved, a type above 5 is
+    /// unknown, and each type of the chapter's whose machine is not built
+    /// yet is refused by name until it is (ruling 3).
+    SubtableTypeNotRun {
+        /// The subtable.
+        site: aat::Site,
+        /// The type its coverage's low byte claimed.
+        kind: u8,
+    },
+    /// A `morx` chain whose header or feature entries could not be read, or
+    /// whose length runs past its table, so neither it nor any chain after
+    /// it ran: a chain's length is the only way to the next.
+    MalformedChain {
+        /// The table.
+        table: Tag,
+        /// The chain, counting from zero.
+        chain: u32,
+    },
+    /// An AAT table's chains and subtables reached
+    /// [`Limits::max_subtables`], so the rest of them were not read.
+    SubtableBudgetExceeded {
+        /// The table.
+        table: Tag,
+    },
+    /// A `morx` chain's feature entries passed
+    /// [`Limits::max_feature_entries`], so the ones past it were not read
+    /// and set no flag.
+    FeatureEntryBudgetExceeded {
+        /// The table.
+        table: Tag,
+        /// The chain, counting from zero.
+        chain: u32,
+    },
+    /// An OpenType feature tag a caller asked for that no AAT feature
+    /// answers (`docs/design/shaping.md`, *The mapping*), so it asked a
+    /// `morx` chain for nothing.
+    FeatureNotInAat {
+        /// The tag.
+        tag: Tag,
+    },
 }
 
 /// What positioning does with the advance a mark glyph arrived with.

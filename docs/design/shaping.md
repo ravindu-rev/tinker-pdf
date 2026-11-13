@@ -927,19 +927,30 @@ non-exclusive except those the registry marks exclusive in the mapping above.
 Every refusal is a typed `Warning` recorded once a run (rulings 2 and 10),
 each naming where in its table it was asked, the table, chain and subtable
 (`aat::Site`): a `mort` table not run (and, until FT-07c.10, `morx` itself —
-FT-07c.2, `Warning::TableNotRun`); a subtable type reserved or unknown; a
-lookup format unknown (`Warning::UnknownLookupFormat`); a machine stopped at
-its ceiling (`Warning::TransitionBudgetExceeded`), or at a state, an entry or
-a class column its tables do not hold (`Warning::MalformedAatSubtable`); a
-contextual index past its table; a component or kerning stack full or empty;
-a glyph insertion past `Limits::max_glyphs`; a `kerx` variation tuple or
-vertical subtable refused; a control-point action on a CFF face; an OpenType
-tag no AAT feature answers. `Limits::max_transitions` is the ceiling on one
+FT-07c.2, `Warning::TableNotRun`); a subtable type reserved or unknown, or of
+a machine not built yet (`Warning::SubtableTypeNotRun`); a chain whose header
+or feature entries cannot be read or whose length runs past its table, which
+ends the walk, a chain's length being the only way to the next
+(`Warning::MalformedChain`); a lookup format unknown
+(`Warning::UnknownLookupFormat`); a subtable that cannot be read, or a machine
+stopped at a state, an entry or a class column its tables do not hold
+(`Warning::MalformedAatSubtable`), or at its ceiling
+(`Warning::TransitionBudgetExceeded`); a contextual index past its table; a
+component or kerning stack full or empty; a glyph insertion past
+`Limits::max_glyphs`; a `kerx` variation tuple or vertical subtable refused; a
+control-point action on a CFF face; an OpenType tag no AAT feature answers
+(`Warning::FeatureNotInAat`). `Limits::max_transitions` is the ceiling on one
 machine's transitions in one subtable — `max(4 096, 32 × (glyphs + 1))`,
 scaled as `Limits::for_glyphs` scales the others — past which the subtable
-stops, leaving the run as it stood. The stacks are the chapters' sizes, 16
-components and 8 kerning glyphs; every read is `read::Bytes`', so a truncated
-table or an offset past its end answers `None` (ruling 1).
+stops, leaving the run as it stood. Every count a table states that a run
+spends is bounded the same way: `Limits::max_subtables` (4 096) on the chains
+and subtables of one table read and run, each counting one
+(`Warning::SubtableBudgetExceeded`), and `Limits::max_feature_entries` (4 096)
+on the feature entries of one chain read to compute its flags
+(`Warning::FeatureEntryBudgetExceeded`), both a face's ceilings that
+`for_glyphs` leaves alone. The stacks are the chapters' sizes, 16 components
+and 8 kerning glyphs; every read is `read::Bytes`', so a truncated table or an
+offset past its end answers `None` (ruling 1).
 
 #### The manual's worked examples
 

@@ -588,6 +588,29 @@ impl Buffer {
         }
     }
 
+    /// Removes every glyph whose index is `glyph`, and says how many: an AAT
+    /// chain's deleted glyphs, `0xFFFF`, which leave the run when its chain
+    /// ends. One pass, the props kept in step.
+    pub(crate) fn remove_every(&mut self, glyph: u16) -> usize {
+        let keep: Vec<bool> = self.glyphs.iter().map(|g| g.glyph != glyph).collect();
+        let mut at = 0usize;
+        self.props.retain(|_| {
+            let kept = keep.get(at).copied().unwrap_or(true);
+            at += 1;
+            kept
+        });
+        let before = self.glyphs.len();
+        self.glyphs.retain(|g| g.glyph != glyph);
+        before - self.glyphs.len()
+    }
+
+    /// Reverses the run in place, each glyph with its props: a right-to-left
+    /// run turned into the layout order an AAT chain reads, and back.
+    pub(crate) fn reverse(&mut self) {
+        self.glyphs.reverse();
+        self.props.reverse();
+    }
+
     /// A fresh ligature serial, or zero once the run has made 65 534 of them.
     ///
     /// Zero is the "not a ligature" sentinel, so running out means later
@@ -850,6 +873,52 @@ mod tests {
         );
         assert!(buffer.props_mut(1).is_some());
         assert!(buffer.props_mut(2).is_none());
+    }
+
+    /// Every glyph of one index leaves, the rest keep their clusters and
+    /// order, and the props stay in step.
+    #[test]
+    fn removing_a_glyph_everywhere_keeps_the_vectors_in_step() {
+        let mut buffer = Buffer::from_glyphs(&[0xFFFF, 3, 0xFFFF, 0xFFFF, 4, 0xFFFF]);
+        buffer.set_mask(1, 7);
+        buffer.set_mask(4, 9);
+        assert_eq!(buffer.remove_every(0xFFFF), 4);
+        assert_eq!(
+            buffer
+                .glyphs()
+                .iter()
+                .map(|g| (g.glyph, g.cluster))
+                .collect::<Vec<_>>(),
+            vec![(3, 1), (4, 4)]
+        );
+        assert_eq!(buffer.props_mask(0), 7);
+        assert_eq!(buffer.props_mask(1), 9);
+        assert!(buffer.props_mut(2).is_none(), "props fell out of step");
+        assert_eq!(buffer.remove_every(0xFFFF), 0);
+    }
+
+    /// Reversing turns glyphs and props round together, and twice is the
+    /// run again.
+    #[test]
+    fn reversing_twice_is_the_run_again() {
+        let mut buffer = Buffer::from_glyphs(&[5, 6, 7]);
+        buffer.set_mask(0, 3);
+        buffer.reverse();
+        assert_eq!(
+            buffer
+                .glyphs()
+                .iter()
+                .map(|g| (g.glyph, g.cluster))
+                .collect::<Vec<_>>(),
+            vec![(7, 2), (6, 1), (5, 0)]
+        );
+        assert_eq!(buffer.props_mask(2), 3);
+        buffer.reverse();
+        assert_eq!(
+            buffer.glyphs().iter().map(|g| g.glyph).collect::<Vec<_>>(),
+            vec![5, 6, 7]
+        );
+        assert_eq!(buffer.props_mask(0), 3);
     }
 
     #[test]

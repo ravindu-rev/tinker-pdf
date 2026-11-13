@@ -963,8 +963,31 @@ What it does:
   is `max(4 096, 32 × (glyphs + 1))` for a run, and
   `Warning::MalformedAatSubtable` where it needs a state, an entry or a class
   column its tables do not hold, each naming the table, chain and subtable
-  (`aat::Site`). No run is shaped through any of it: the refused-by-name
-  table below says what a run over such a face does.
+  (`aat::Site`). `aat::Morx` reads a `morx` of version 2 or 3: its chains,
+  each one's default flags and feature entries, and its subtables' coverage
+  and sub-feature flags (version 3's glyph coverage arrays are not read).
+  `Morx::run` runs the chains over a run as the *Feature Table* section
+  says — the flags from a chain's defaults, each requested entry in table
+  order setting `(flags & disable) | enable` — each subtable whose flags the
+  chain's share and whose coverage takes the run's orientation (vertical in
+  an upright run, horizontal along a line and sideways), over the run in
+  layout order, a right-to-left run reversed for the chain and back, each
+  walking it the way bits 30 and 28 choose; glyphs made `0xFFFF` leave the
+  run when the chains end. The noncontextual subtable runs; a reserved,
+  unknown or not yet built type is skipped and named
+  (`Warning::SubtableTypeNotRun`). `aat::Selection::from_opentype` turns a
+  caller's `with_features` and `with_settings` into the settings asked for,
+  by the design's table (`aat::aat_setting`): named features start from no
+  flag, a tag set to 0 asks a non-exclusive feature's off-setting and an
+  exclusive one nothing, an exclusive feature keeps the last setting asked —
+  exclusive where `aat::Feat`, the face's `feat`, says so, or where it does
+  not list the feature, where the registry does — `kern` asks nothing of
+  `morx`, and a tag with no row is named (`Warning::FeatureNotInAat`). A
+  chain that cannot be read ends the walk (`Warning::MalformedChain`), and
+  `Limits::max_subtables` and `Limits::max_feature_entries` bound the chains,
+  subtables and feature entries a run reads, each refused by name. No run is
+  shaped through any of it: the refused-by-name table below says what a run
+  over such a face does.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

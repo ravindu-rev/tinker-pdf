@@ -19,13 +19,17 @@ use std::collections::BTreeMap;
 use tinker_pdf_font::Sfnt;
 
 use tinker_pdf_shape::aat::{
-    Cursor, Entry, Lookup, LookupError, LookupFormat, Site, StateError, StateTable, Traversal,
-    DELETED, DELETED_GLYPH, END_OF_TEXT, OUT_OF_BOUNDS,
+    aat_setting, AatSetting, Cursor, Entry, Feat, FeatureEntry, Lookup, LookupError, LookupFormat,
+    Morx, Selection, Site, StateError, StateTable, Traversal, ANY_ORIENTATION, CONTEXTUAL, DELETED,
+    DELETED_GLYPH, END_OF_TEXT, INSERTION, LIGATURE, NONCONTEXTUAL, OUT_OF_BOUNDS, REARRANGEMENT,
+    VERTICAL,
 };
 use tinker_pdf_shape::bidi::{BaseDirection, Level};
 use tinker_pdf_shape::shape::Run;
 use tinker_pdf_shape::unicode::Script;
-use tinker_pdf_shape::{Buffer, Limits, Orientation, ShapedGlyph, ShapedRun, Shaper, Tag, Warning};
+use tinker_pdf_shape::{
+    Buffer, Direction, Limits, Orientation, ShapedGlyph, ShapedRun, Shaper, Tag, Warning,
+};
 
 // --- bytes ---------------------------------------------------------------
 
@@ -202,11 +206,11 @@ fn morx_table(version: u16, chains: &[Vec<u8>]) -> Vec<u8> {
 
 /// One feature entry: a feature type and setting, and the flags it enables
 /// and the complement of those it disables.
-type FeatureEntry = (u16, u16, u32, u32);
+type FeatureRow = (u16, u16, u32, u32);
 
 /// One `morx` chain: its default flags, its feature entries in table order,
 /// and its subtables.
-fn chain(default_flags: u32, features: &[FeatureEntry], subtables: &[Vec<u8>]) -> Vec<u8> {
+fn chain(default_flags: u32, features: &[FeatureRow], subtables: &[Vec<u8>]) -> Vec<u8> {
     let mut body: Vec<u8> = Vec::new();
     for (kind, setting, enable, disable) in features {
         body.extend(u16s(&[*kind, *setting]));
@@ -1358,4 +1362,1061 @@ fn a_truncated_table_answers_nothing_and_never_panics() {
             "offset at {slot}"
         );
     }
+}
+
+// --- the morx chain (FT-07c.5) -------------------------------------------
+//
+// Chains, their feature entries and flags, each subtable's coverage, the
+// settings a caller's OpenType tags ask for, `feat`'s exclusive features,
+// and the noncontextual subtable, the first type the chain runs.
+
+/// A noncontextual subtable of `coverage`'s orientation bits under
+/// sub-feature flags `flags`, its lookup table `lookup`.
+fn noncontextual_with(coverage: u32, flags: u32, lookup: &[u8]) -> Vec<u8> {
+    subtable(coverage | u32::from(NONCONTEXTUAL), flags, lookup)
+}
+
+/// A run of `glyphs` set `direction`, each glyph's cluster its position.
+fn run_of(glyphs: &[u16], direction: Direction) -> Buffer {
+    let mut buffer = Buffer::from_glyphs(glyphs);
+    buffer.set_direction(direction);
+    buffer
+}
+
+/// The glyphs `table`'s chains leave of `glyphs` under `selection` and
+/// `limits`, run `direction`, and what they refused.
+fn chained_under(
+    table: &[u8],
+    glyphs: &[u16],
+    direction: Direction,
+    selection: &Selection,
+    limits: &Limits,
+) -> (Vec<u16>, Vec<Warning>) {
+    let morx = Morx::parse(table).expect("a readable morx");
+    let mut buffer = run_of(glyphs, direction);
+    let warnings = morx.run(&mut buffer, selection, limits);
+    (buffer.glyphs().iter().map(|g| g.glyph).collect(), warnings)
+}
+
+/// [`chained_under`] the default limits.
+fn chained(
+    table: &[u8],
+    glyphs: &[u16],
+    direction: Direction,
+    selection: &Selection,
+) -> (Vec<u16>, Vec<Warning>) {
+    chained_under(table, glyphs, direction, selection, &Limits::DEFAULT)
+}
+
+/// A selection asking for `settings` over the chains' defaults.
+fn asking(settings: &[(u16, u16)]) -> Selection {
+    Selection {
+        start_at_defaults: true,
+        settings: settings.to_vec(),
+    }
+}
+
+/// The *Hierarchical Ligature Tables* and *Stand-Alone Ligature Tables*
+/// examples of the `mort` chapter number no setting, naming them
+/// "mandatory, normal, optional, and suppress"; the transcription numbers
+/// them 0 to 3 of feature type 1.
+const MANDATORY: (u16, u16) = (1, 0);
+/// See [`MANDATORY`].
+const NORMAL: (u16, u16) = (1, 1);
+/// See [`MANDATORY`].
+const OPTIONAL: (u16, u16) = (1, 2);
+/// See [`MANDATORY`].
+const SUPPRESS: (u16, u16) = (1, 3);
+
+/// A chain of the four ligature settings' feature entries, `(enable,
+/// disable)` each in the order the examples list them, over three
+/// noncontextual subtables of the given sub-feature flags and glyph maps;
+/// its default flags are 0, the examples stating none.
+fn ligature_chain(entries: [(u32, u32); 4], subtables: [(u32, &[(u16, u16)]); 3]) -> Vec<u8> {
+    let settings = [MANDATORY, NORMAL, OPTIONAL, SUPPRESS];
+    let features: Vec<FeatureRow> = settings
+        .iter()
+        .zip(entries)
+        .map(|((feature, setting), (enable, disable))| (*feature, *setting, enable, disable))
+        .collect();
+    let subtables: Vec<Vec<u8>> = subtables
+        .iter()
+        .map(|(flags, pairs)| noncontextual(*flags, pairs))
+        .collect();
+    morx_table(2, &[chain(0, &features, &subtables)])
+}
+
+/// A chain runs the subtables its flags select: from its default flags, a
+/// requested feature entry's `(flags & disable) | enable` in table order,
+/// later entries taking precedence; named features start from none. Held
+/// to the `mort` chapter's two ligature-hierarchy examples' flags.
+#[test]
+fn a_chain_runs_the_subtables_its_flags_select() {
+    // Two subtables: flag 1 maps glyph 10 to 20, flag 2 maps it to 30. The
+    // default flags pick the first, and `liga`'s entry swaps them.
+    let swap = morx_table(
+        2,
+        &[chain(
+            1,
+            &[(1, 2, 2, !1u32)],
+            &[noncontextual(1, &[(10, 20)]), noncontextual(2, &[(10, 30)])],
+        )],
+    );
+    let ltr = Direction::LeftToRight;
+    assert_eq!(chained(&swap, &[10], ltr, &Selection::defaults()).0, [20]);
+    assert_eq!(chained(&swap, &[10], ltr, &asking(&[(1, 2)])).0, [30]);
+    let (liga, warnings) = Selection::from_opentype(None, &[(Tag::new(b"liga"), 1)], None);
+    assert!(warnings.is_empty());
+    assert_eq!(chained(&swap, &[10], ltr, &liga).0, [30]);
+    // A caller who names its own features starts from no flag at all.
+    let none = Selection {
+        start_at_defaults: false,
+        settings: Vec::new(),
+    };
+    assert_eq!(chained(&swap, &[10], ltr, &none).0, [10]);
+    let named = Selection {
+        start_at_defaults: false,
+        settings: vec![(1, 2)],
+    };
+    assert_eq!(chained(&swap, &[10], ltr, &named).0, [30]);
+    let morx = Morx::parse(&swap).expect("readable");
+    let (chains, warnings) = morx.chains(&Limits::DEFAULT);
+    assert!(warnings.is_empty());
+    assert_eq!(chains[0].flags(&Selection::defaults()), 1);
+    assert_eq!(chains[0].flags(&asking(&[(1, 2)])), 2);
+    assert_eq!(chains[0].flags(&none), 0);
+
+    // *Hierarchical Ligature Tables*: each setting enables its subtable and
+    // the ones beneath it — mandatory `fi`, normal `æ`, optional `Æ`, here
+    // glyphs 1, 2 and 3 made 11, 12 and 13.
+    let hierarchical = ligature_chain(
+        [
+            (0x0000_0001, 0xFFFF_FFF9),
+            (0x0000_0003, 0xFFFF_FFFB),
+            (0x0000_0007, 0xFFFF_FFFF),
+            (0x0000_0000, 0xFFFF_FFF8),
+        ],
+        [(1, &[(1, 11)]), (2, &[(2, 12)]), (4, &[(3, 13)])],
+    );
+    let glyphs = [1u16, 2, 3];
+    for (asked, expected) in [
+        (vec![MANDATORY], [11, 2, 3]),
+        (vec![NORMAL], [11, 12, 3]),
+        (vec![OPTIONAL], [11, 12, 13]),
+        (vec![SUPPRESS], [1, 2, 3]),
+        (vec![], [1, 2, 3]),
+        // Later entries take precedence: optional after mandatory enables
+        // everything, suppress after optional nothing.
+        (vec![OPTIONAL, MANDATORY], [11, 12, 13]),
+        (vec![SUPPRESS, OPTIONAL], [1, 2, 3]),
+    ] {
+        assert_eq!(
+            chained(&hierarchical, &glyphs, ltr, &asking(&asked)).0,
+            expected,
+            "hierarchical, {asked:?}"
+        );
+    }
+
+    // *Stand-Alone Ligature Tables*: each setting enables one subtable, each
+    // holding every ligature of the settings beneath it, so "at most one
+    // subtable is applied", the one of the setting with the highest
+    // precedence.
+    let stand_alone_entries = [
+        (0x0000_0001, 0xFFFF_FFF9),
+        (0x0000_0002, 0xFFFF_FFFA),
+        (0x0000_0004, 0xFFFF_FFFC),
+        (0x0000_0000, 0xFFFF_FFF8),
+    ];
+    let stand_alone = ligature_chain(
+        stand_alone_entries,
+        [
+            (1, &[(1, 11)]),
+            (2, &[(1, 11), (2, 12)]),
+            (4, &[(1, 11), (2, 12), (3, 13)]),
+        ],
+    );
+    for (asked, expected) in [
+        (vec![MANDATORY], [11, 2, 3]),
+        (vec![NORMAL], [11, 12, 3]),
+        (vec![OPTIONAL], [11, 12, 13]),
+        (vec![SUPPRESS], [1, 2, 3]),
+        (vec![MANDATORY, OPTIONAL], [11, 12, 13]),
+        (vec![NORMAL, MANDATORY], [11, 12, 3]),
+    ] {
+        assert_eq!(
+            chained(&stand_alone, &glyphs, ltr, &asking(&asked)).0,
+            expected,
+            "stand-alone, {asked:?}"
+        );
+    }
+    let morx = Morx::parse(&stand_alone).expect("readable");
+    let (chains, _) = morx.chains(&Limits::DEFAULT);
+    for (asked, flags) in [(MANDATORY, 1), (NORMAL, 2), (OPTIONAL, 4), (SUPPRESS, 0)] {
+        assert_eq!(chains[0].flags(&asking(&[asked])), flags, "{asked:?}");
+    }
+
+    // "You can also use this feature table with the subtables from the
+    // example by changing their subFeatureFlags to 0x00000007, 0x00000006,
+    // and 0x00000004": the hierarchical subtables under the stand-alone
+    // entries behave as the hierarchy does.
+    let mixed = ligature_chain(
+        stand_alone_entries,
+        [(7, &[(1, 11)]), (6, &[(2, 12)]), (4, &[(3, 13)])],
+    );
+    for (asked, expected) in [
+        (vec![MANDATORY], [11, 2, 3]),
+        (vec![NORMAL], [11, 12, 3]),
+        (vec![OPTIONAL], [11, 12, 13]),
+        (vec![SUPPRESS], [1, 2, 3]),
+    ] {
+        assert_eq!(
+            chained(&mixed, &glyphs, ltr, &asking(&asked)).0,
+            expected,
+            "flags 7, 6 and 4, {asked:?}"
+        );
+    }
+
+    // Chains run in order, each from its own defaults: the second chain sees
+    // what the first made.
+    let two = morx_table(
+        2,
+        &[
+            chain(1, &[], &[noncontextual(1, &[(10, 20)])]),
+            chain(2, &[], &[noncontextual(2, &[(20, 40)])]),
+        ],
+    );
+    assert_eq!(
+        chained(&two, &[10, 20], ltr, &Selection::defaults()).0,
+        [40, 40]
+    );
+}
+
+/// The *Feature Name Table Example* of the `feat` chapter, every byte at
+/// offsets 0 to 87, with one correction: its number-spacing feature's
+/// `nSettings`, printed 1, is read as the 2 the two settings it lists at 80
+/// and 84 make.
+fn feat_example() -> Vec<u8> {
+    let mut out = 0x0001_0000u32.to_be_bytes().to_vec();
+    out.extend(u16s(&[4, 0]));
+    out.extend(0u32.to_be_bytes());
+    // All typographic features (0): one setting at 60, non-exclusive.
+    out.extend(u16s(&[0, 1]));
+    out.extend(60u32.to_be_bytes());
+    out.extend(u16s(&[0, 260]));
+    // Ligatures (1): one setting at 64, non-exclusive.
+    out.extend(u16s(&[1, 1]));
+    out.extend(64u32.to_be_bytes());
+    out.extend(u16s(&[0, 256]));
+    // Letter case (3): three settings at 68, exclusive, the first the
+    // default.
+    out.extend(u16s(&[3, 3]));
+    out.extend(68u32.to_be_bytes());
+    out.extend(u16s(&[0x8000, 262]));
+    // Number spacing (6): two settings at 80 — the correction — exclusive,
+    // the second (proportional) the default.
+    out.extend(u16s(&[6, 2]));
+    out.extend(80u32.to_be_bytes());
+    out.extend(u16s(&[0xC001, 258]));
+    // The settings.
+    out.extend(u16s(&[0, 261]));
+    out.extend(u16s(&[2, 257]));
+    out.extend(u16s(&[0, 268, 3, 264, 4, 265]));
+    out.extend(u16s(&[0, 259, 1, 260]));
+    assert_eq!(out.len(), 88, "the example's 88 bytes");
+    out
+}
+
+/// The selection `settings`, by tag name, make over the faces' defaults.
+fn ask(settings: &[(&[u8; 4], u32)], feat: Option<&Feat<'_>>) -> (Selection, Vec<Warning>) {
+    let settings: Vec<(Tag, u32)> = settings
+        .iter()
+        .map(|(name, value)| (Tag::new(name), *value))
+        .collect();
+    Selection::from_opentype(None, &settings, feat)
+}
+
+/// An exclusive feature keeps the last setting asked of it, its siblings
+/// not asked, and asks nothing when set to 0; a non-exclusive one asks for
+/// each setting, and for its off-setting when set to 0. Exclusivity is
+/// `feat`'s where the face lists the feature and the registry's otherwise;
+/// held to the `feat` chapter's example.
+#[test]
+fn an_exclusive_feature_setting_turns_its_siblings_off() {
+    let tag = |bytes: &[u8; 4]| Tag::new(bytes);
+
+    // The registry's exclusive Number Spacing (6): the last asked wins.
+    let (selection, warnings) = ask(&[(b"tnum", 1), (b"pnum", 1)], None);
+    assert!(warnings.is_empty());
+    assert!(selection.start_at_defaults);
+    assert_eq!(selection.settings, vec![(6, 1)]);
+    assert_eq!(
+        ask(&[(b"pnum", 1), (b"tnum", 1)], None).0.settings,
+        vec![(6, 0)]
+    );
+    // Set to 0, an exclusive feature asks nothing; its defaults stand.
+    assert!(ask(&[(b"smcp", 0)], None).0.settings.is_empty());
+    assert_eq!(
+        ask(&[(b"pcap", 1), (b"smcp", 0)], None).0.settings,
+        vec![(37, 2)]
+    );
+    // A tag set twice is its last setting.
+    assert!(ask(&[(b"smcp", 1), (b"smcp", 0)], None)
+        .0
+        .settings
+        .is_empty());
+    // The registry's non-exclusive Ligatures (1): every setting asked, and
+    // the off-setting, one past the on, for a tag set to 0.
+    assert_eq!(
+        ask(&[(b"liga", 1), (b"dlig", 1)], None).0.settings,
+        vec![(1, 2), (1, 4)]
+    );
+    assert_eq!(
+        ask(&[(b"liga", 0), (b"dlig", 1)], None).0.settings,
+        vec![(1, 3), (1, 4)]
+    );
+    // Two tags of one setting ask it once.
+    assert_eq!(
+        ask(&[(b"vert", 1), (b"vrt2", 1)], None).0.settings,
+        vec![(4, 0)]
+    );
+
+    // The `feat` example.
+    let bytes = feat_example();
+    let feat = Feat::parse(&bytes).expect("a readable feat");
+    assert_eq!(feat.feature_count(), 4);
+    assert_eq!(feat.exclusive(0), Some(false));
+    assert_eq!(feat.exclusive(1), Some(false));
+    assert_eq!(feat.exclusive(3), Some(true));
+    assert_eq!(feat.exclusive(6), Some(true));
+    assert_eq!(feat.exclusive(2), None, "not listed");
+    let letter_case = feat.feature(3).expect("listed");
+    assert_eq!(
+        (0..4).map(|n| letter_case.setting(n)).collect::<Vec<_>>(),
+        vec![Some((0, 268)), Some((3, 264)), Some((4, 265)), None]
+    );
+    assert_eq!(letter_case.default_index(), 0);
+    assert_eq!(
+        letter_case.default_setting(),
+        Some(0),
+        "upper and lower case"
+    );
+    let spacing = feat.feature(6).expect("listed");
+    assert_eq!(spacing.setting_count, 2);
+    assert_eq!(spacing.setting(0), Some((0, 259)));
+    assert_eq!(spacing.setting(1), Some((1, 260)));
+    assert_eq!(spacing.default_index(), 1);
+    assert_eq!(spacing.default_setting(), Some(1), "proportional");
+    assert_eq!(spacing.name_index, 258);
+    assert_eq!(feat.feature(1).and_then(|f| f.setting(0)), Some((2, 257)));
+    assert_eq!(feat.feature(0).and_then(|f| f.setting(0)), Some((0, 261)));
+    let order: Vec<u16> = (0..4)
+        .filter_map(|n| feat.feature_at(n))
+        .map(|f| f.feature)
+        .collect();
+    assert_eq!(order, vec![0, 1, 3, 6]);
+
+    // Under the example's `feat`, number spacing stays exclusive, and a
+    // chain whose two subtables are its two settings runs the one asked
+    // last and not its sibling.
+    let spacing_chain = morx_table(
+        2,
+        &[chain(
+            0,
+            &[(6, 0, 1, !3u32), (6, 1, 2, !3u32)],
+            &[noncontextual(1, &[(5, 50)]), noncontextual(2, &[(5, 60)])],
+        )],
+    );
+    let (selection, _) = ask(&[(b"tnum", 1), (b"pnum", 1)], Some(&feat));
+    assert_eq!(selection.settings, vec![(6, 1)]);
+    let ltr = Direction::LeftToRight;
+    assert_eq!(chained(&spacing_chain, &[5], ltr, &selection).0, [60]);
+    let (selection, _) = ask(&[(b"pnum", 1), (b"tnum", 1)], Some(&feat));
+    assert_eq!(chained(&spacing_chain, &[5], ltr, &selection).0, [50]);
+
+    // A `feat` that marks a registry-exclusive feature non-exclusive asks
+    // every setting, and one that marks a non-exclusive feature exclusive
+    // keeps the last.
+    let mut table = 0x0001_0000u32.to_be_bytes().to_vec();
+    table.extend(u16s(&[2, 0]));
+    table.extend(0u32.to_be_bytes());
+    table.extend(u16s(&[1, 0]));
+    table.extend(36u32.to_be_bytes());
+    table.extend(u16s(&[0x8000, 300]));
+    table.extend(u16s(&[6, 0]));
+    table.extend(36u32.to_be_bytes());
+    table.extend(u16s(&[0x0000, 301]));
+    let flipped = Feat::parse(&table).expect("readable");
+    assert_eq!(
+        ask(&[(b"tnum", 1), (b"pnum", 1)], Some(&flipped))
+            .0
+            .settings,
+        vec![(6, 0), (6, 1)]
+    );
+    assert_eq!(
+        ask(&[(b"liga", 1), (b"dlig", 1)], Some(&flipped))
+            .0
+            .settings,
+        vec![(1, 4)]
+    );
+    assert!(
+        ask(&[(b"liga", 0)], Some(&flipped)).0.settings.is_empty(),
+        "an exclusive feature set to 0 asks nothing"
+    );
+
+    // Named features start from no flag; each asks its on-setting, and a
+    // setting over a named tag replaces it.
+    let named = [tag(b"liga"), tag(b"smcp")];
+    let (selection, warnings) = Selection::from_opentype(Some(&named), &[], None);
+    assert!(warnings.is_empty());
+    assert!(!selection.start_at_defaults);
+    assert_eq!(selection.settings, vec![(1, 2), (37, 1)]);
+    let (selection, _) = Selection::from_opentype(Some(&named), &[(tag(b"liga"), 0)], None);
+    assert_eq!(selection.settings, vec![(1, 3), (37, 1)]);
+    let (selection, _) = Selection::from_opentype(Some(&[]), &[], None);
+    assert!(!selection.start_at_defaults);
+    assert!(selection.settings.is_empty());
+
+    // A tag no AAT feature answers asks nothing and is named once; `kern`
+    // is no `morx` feature and is not named.
+    let (selection, warnings) = ask(
+        &[
+            (b"mark", 1),
+            (b"mark", 0),
+            (b"kern", 0),
+            (b"xxxx", 1),
+            (b"liga", 1),
+        ],
+        None,
+    );
+    assert_eq!(selection.settings, vec![(1, 2)]);
+    assert_eq!(
+        warnings,
+        vec![
+            Warning::FeatureNotInAat { tag: tag(b"mark") },
+            Warning::FeatureNotInAat { tag: tag(b"xxxx") },
+        ]
+    );
+}
+
+/// Every row of the design's table, *The mapping*: each OpenType tag, the
+/// AAT feature type and on-setting it asks for, and whether the registry
+/// marks the feature exclusive.
+#[test]
+fn every_opentype_tag_of_the_mapping_asks_its_aat_feature() {
+    let rows: &[(&[u8; 4], u16, u16, bool)] = &[
+        (b"rlig", 1, 0, false),
+        (b"liga", 1, 2, false),
+        (b"dlig", 1, 4, false),
+        (b"clig", 1, 18, false),
+        (b"hlig", 1, 20, false),
+        (b"calt", 36, 0, false),
+        (b"swsh", 36, 2, false),
+        (b"cswh", 36, 4, false),
+        (b"smcp", 37, 1, true),
+        (b"pcap", 37, 2, true),
+        (b"c2sc", 38, 1, true),
+        (b"c2pc", 38, 2, true),
+        (b"onum", 21, 0, true),
+        (b"lnum", 21, 1, true),
+        (b"tnum", 6, 0, true),
+        (b"pnum", 6, 1, true),
+        (b"afrc", 11, 1, true),
+        (b"frac", 11, 2, true),
+        (b"sups", 10, 1, true),
+        (b"subs", 10, 2, true),
+        (b"ordn", 10, 3, true),
+        (b"sinf", 10, 4, true),
+        (b"zero", 14, 4, false),
+        (b"mgrk", 15, 10, false),
+        (b"case", 33, 0, false),
+        (b"cpsp", 33, 2, false),
+        (b"salt", 17, 1, true),
+        (b"titl", 19, 4, true),
+        (b"pwid", 22, 0, true),
+        (b"fwid", 22, 1, true),
+        (b"hwid", 22, 2, true),
+        (b"twid", 22, 3, true),
+        (b"qwid", 22, 4, true),
+        (b"trad", 20, 0, true),
+        (b"smpl", 20, 1, true),
+        (b"jp78", 20, 2, true),
+        (b"jp83", 20, 3, true),
+        (b"jp90", 20, 4, true),
+        (b"expt", 20, 10, true),
+        (b"jp04", 20, 11, true),
+        (b"hojo", 20, 12, true),
+        (b"nlck", 20, 13, true),
+        (b"tnam", 20, 14, true),
+        (b"ruby", 28, 2, false),
+        (b"ital", 32, 2, false),
+        (b"hkna", 34, 0, false),
+        (b"vkna", 34, 2, false),
+        (b"vert", 4, 0, false),
+        (b"vrt2", 4, 0, false),
+    ];
+    for (name, feature, selector, exclusive) in rows {
+        assert_eq!(
+            aat_setting(Tag::new(name)),
+            Some(AatSetting {
+                feature: *feature,
+                selector: *selector,
+                exclusive: *exclusive,
+            }),
+            "{}",
+            Tag::new(name)
+        );
+    }
+    // `ss01` to `ss20`: Stylistic Alternatives (35), the nth set at 2n.
+    for n in 1..=20u16 {
+        let name = format!("ss{n:02}");
+        let bytes: [u8; 4] = name.as_bytes().try_into().expect("four bytes");
+        assert_eq!(
+            aat_setting(Tag::new(&bytes)),
+            Some(AatSetting {
+                feature: 35,
+                selector: 2 * n,
+                exclusive: false,
+            }),
+            "{name}"
+        );
+    }
+    // `kern` turns `kerx` off and asks nothing of `morx`; a tag with no row
+    // asks nothing.
+    for name in [b"kern", b"mark", b"locl", b"ss21", b"ccmp"] {
+        assert_eq!(aat_setting(Tag::new(name)), None, "{}", Tag::new(name));
+    }
+}
+
+/// A subtable runs where its coverage takes the run's orientation: one for
+/// vertical text in an upright run alone, one for horizontal text along a
+/// line and in a sideways run, and one for both everywhere.
+#[test]
+fn a_subtable_for_the_other_orientation_is_skipped() {
+    let table = morx_table(
+        2,
+        &[chain(
+            1,
+            &[],
+            &[
+                noncontextual_with(VERTICAL, 1, &lookup_single(&[(10, 20)])),
+                noncontextual_with(0, 1, &lookup_single(&[(11, 21)])),
+                noncontextual_with(ANY_ORIENTATION, 1, &lookup_single(&[(12, 22)])),
+            ],
+        )],
+    );
+    let glyphs = [10u16, 11, 12];
+    let defaults = Selection::defaults();
+    for direction in [Direction::LeftToRight, Direction::RightToLeft] {
+        assert_eq!(
+            chained(&table, &glyphs, direction, &defaults).0,
+            [10, 21, 22],
+            "{direction:?}"
+        );
+    }
+    assert_eq!(
+        chained(&table, &glyphs, Direction::TopToBottom, &defaults).0,
+        [20, 11, 22]
+    );
+    let morx = Morx::parse(&table).expect("readable");
+    let (chains, _) = morx.chains(&Limits::DEFAULT);
+    let applies: Vec<(bool, bool)> = chains[0]
+        .subtables()
+        .iter()
+        .map(|s| (s.applies(false), s.applies(true)))
+        .collect();
+    assert_eq!(applies, vec![(false, true), (true, false), (true, true)]);
+}
+
+/// The `mort` chapter's *Example: Non-contextual Glyph Substitution* carried
+/// into a `morx`: its chain's default flags, its three feature entries —
+/// vertical substitution on and off, and glyph effects off — and its one
+/// subtable, the lookup at its offsets 64 to 87 mapping the horizontal
+/// parentheses, glyphs 11 and 12, to the vertical ones, 135 and 136. Its
+/// coverage is read as the bit says, vertical text: the comment calling it
+/// horizontal contradicts both the bit and the example's purpose. The `mort`
+/// header's fields widen to `morx`'s and its 16-bit coverage `0x8004` to
+/// `0x80000004`.
+fn noncontextual_example() -> Vec<u8> {
+    let lookup = {
+        let mut out = u16s(&[6, 4, 2, 8, 1, 0]);
+        out.extend(u16s(&[11, 135, 12, 136]));
+        out.extend(u16s(&[0xFFFF, 0]));
+        out
+    };
+    assert_eq!(lookup.len(), 24, "offsets 64 to 87");
+    morx_table(
+        2,
+        &[chain(
+            0x0000_0001,
+            &[
+                (4, 0, 0x0000_0001, 0xFFFF_FFFF),
+                (4, 1, 0x0000_0000, 0xFFFF_FFFE),
+                (0, 1, 0x0000_0000, 0x0000_0000),
+            ],
+            &[subtable(0x8000_0004, 0x0000_0001, &lookup)],
+        )],
+    )
+}
+
+/// A noncontextual subtable maps each glyph its lookup covers with a value
+/// other than 0 and leaves every other, in every lookup format; held to the
+/// `mort` chapter's noncontextual example.
+#[test]
+fn a_noncontextual_subtable_maps_every_glyph_it_covers() {
+    let upright = Direction::TopToBottom;
+    let ltr = Direction::LeftToRight;
+    let example = noncontextual_example();
+    let defaults = Selection::defaults();
+    assert_eq!(
+        chained(&example, &[11, 12, 13], upright, &defaults),
+        (vec![135, 136, 13], vec![])
+    );
+    assert_eq!(
+        chained(&example, &[11, 12, 13], ltr, &defaults).0,
+        [11, 12, 13],
+        "a vertical subtable along a line"
+    );
+    // Vertical substitution off, asked as the setting or as `vert` set to
+    // 0, and glyph effects off, each clears the flag.
+    for selection in [
+        asking(&[(4, 1)]),
+        Selection::from_opentype(None, &[(Tag::new(b"vert"), 0)], None).0,
+        asking(&[(0, 1)]),
+    ] {
+        assert_eq!(
+            chained(&example, &[11, 12], upright, &selection).0,
+            [11, 12],
+            "{selection:?}"
+        );
+    }
+    assert_eq!(
+        chained(&example, &[11, 12], upright, &asking(&[(4, 0)])).0,
+        [135, 136]
+    );
+
+    // Every format, mapping glyphs 20 to 24 to 120 to 124 but 22, whose
+    // value is 0, "do nothing"; every glyph from 0 to 40 asked.
+    let values: [(u16, u16); 5] = [(20, 120), (21, 121), (22, 0), (23, 123), (24, 124)];
+    let mut simple = vec![0u16; 25];
+    for (glyph, value) in values {
+        simple[usize::from(glyph)] = value;
+    }
+    let lookups = [
+        lookup_simple(&simple),
+        lookup_segments(
+            2,
+            &values
+                .iter()
+                .map(|(glyph, value)| (*glyph, *glyph, u64::from(*value)))
+                .collect::<Vec<_>>(),
+        ),
+        lookup_segment_array(&[(
+            20,
+            values.iter().map(|(_, value)| *value).collect::<Vec<u16>>(),
+        )]),
+        lookup_single(&values),
+        lookup_trimmed(20, &values.map(|(_, value)| value)),
+        lookup_extended(2, 20, &values.map(|(_, value)| u64::from(value))),
+    ];
+    let glyphs: Vec<u16> = (0..=40).collect();
+    let expected: Vec<u16> = glyphs
+        .iter()
+        .map(|glyph| match values.iter().find(|(of, _)| of == glyph) {
+            Some((_, value)) if *value != 0 => *value,
+            _ => *glyph,
+        })
+        .collect();
+    for lookup in &lookups {
+        let table = morx_table(2, &[chain(1, &[], &[noncontextual_with(0, 1, lookup)])]);
+        let (out, warnings) = chained(&table, &glyphs, ltr, &defaults);
+        assert_eq!(
+            out,
+            expected,
+            "format {}",
+            u16::from_be_bytes([lookup[0], lookup[1]])
+        );
+        assert!(warnings.is_empty());
+    }
+}
+
+/// A right-to-left run is held in layout order while its chain runs and
+/// handed back in logical order, its clusters where they were.
+#[test]
+fn a_right_to_left_run_comes_back_in_logical_order() {
+    let table = morx_table(2, &[chain(1, &[], &[noncontextual(1, &[(2, 20)])])]);
+    let morx = Morx::parse(&table).expect("readable");
+    let mut buffer = run_of(&[1, 2, 3], Direction::RightToLeft);
+    assert!(morx
+        .run(&mut buffer, &Selection::defaults(), &Limits::DEFAULT)
+        .is_empty());
+    let out: Vec<(u16, u32)> = buffer
+        .glyphs()
+        .iter()
+        .map(|g| (g.glyph, g.cluster))
+        .collect();
+    assert_eq!(out, vec![(1, 0), (20, 1), (3, 2)]);
+    assert_eq!(buffer.direction(), Direction::RightToLeft);
+}
+
+/// A glyph a subtable makes `0xFFFF` is deleted: no later subtable maps it,
+/// and it leaves the run when the chains end, the glyphs around it keeping
+/// their clusters.
+#[test]
+fn a_deleted_glyph_leaves_the_run_when_the_chains_end() {
+    let table = morx_table(
+        2,
+        &[
+            chain(
+                1,
+                &[],
+                &[
+                    noncontextual(1, &[(10, DELETED)]),
+                    noncontextual(1, &[(DELETED, 77), (11, 21)]),
+                ],
+            ),
+            chain(1, &[], &[noncontextual(1, &[(DELETED, 78)])]),
+        ],
+    );
+    let morx = Morx::parse(&table).expect("readable");
+    let mut buffer = run_of(&[9, 10, 11, 10], Direction::LeftToRight);
+    assert!(morx
+        .run(&mut buffer, &Selection::defaults(), &Limits::DEFAULT)
+        .is_empty());
+    let out: Vec<(u16, u32)> = buffer
+        .glyphs()
+        .iter()
+        .map(|g| (g.glyph, g.cluster))
+        .collect();
+    assert_eq!(out, vec![(9, 0), (21, 2)]);
+}
+
+/// A subtable of a type this crate does not run is skipped and named, the
+/// chain going on past it: 3, reserved, a type above 5, unknown, and each
+/// type whose machine is not built yet.
+#[test]
+fn a_reserved_unknown_or_unbuilt_subtable_type_is_skipped_and_named() {
+    for kind in [3u8, 6, 200] {
+        let table = morx_table(
+            2,
+            &[chain(
+                1,
+                &[],
+                &[
+                    subtable(0x2000_0000 | u32::from(kind), 1, &[0; 16]),
+                    noncontextual(1, &[(10, 20)]),
+                ],
+            )],
+        );
+        let (out, warnings) = chained(
+            &table,
+            &[10],
+            Direction::LeftToRight,
+            &Selection::defaults(),
+        );
+        assert_eq!(out, [20], "type {kind}: the chain went on");
+        assert_eq!(
+            warnings,
+            vec![Warning::SubtableTypeNotRun {
+                site: site(0),
+                kind
+            }]
+        );
+    }
+    // Each type of the chapter's not run yet leaves this list when its
+    // machine lands.
+    for kind in [REARRANGEMENT, CONTEXTUAL, LIGATURE, INSERTION] {
+        let table = morx_table(
+            2,
+            &[chain(
+                1,
+                &[],
+                &[subtable(0x2000_0000 | u32::from(kind), 1, &[0; 16])],
+            )],
+        );
+        let (_, warnings) = chained(
+            &table,
+            &[10],
+            Direction::LeftToRight,
+            &Selection::defaults(),
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::SubtableTypeNotRun {
+                site: site(0),
+                kind
+            }]
+        );
+    }
+}
+
+/// A table of a version other than 2 or 3 is no `morx`; a chain the table
+/// cannot hold ends the walk and is named, the chains before it run; a
+/// subtable its chain cannot hold ends its chain's subtables and is named;
+/// a lookup it cannot read is named; and version 3's coverage arrays after
+/// a chain's last subtable are not read.
+#[test]
+fn a_chain_or_subtable_the_table_cannot_hold_is_named() {
+    for version in [0u16, 1, 4, 0xFFFF] {
+        assert!(
+            Morx::parse(&morx_table(version, &[])).is_none(),
+            "{version}"
+        );
+    }
+    assert!(Morx::parse(&[0, 2, 0, 0, 0]).is_none(), "a cut header");
+    let good = chain(1, &[], &[noncontextual(1, &[(10, 20)])]);
+    let ltr = Direction::LeftToRight;
+    let defaults = Selection::defaults();
+
+    // Version 3, a coverage array after the chain's last subtable: an
+    // offset of 0 and a bitfield, read by no one.
+    let mut with_coverage = good.clone();
+    with_coverage.extend(u32s(&[0, 0xFFFF_FFFF]));
+    let length = count32(with_coverage.len());
+    with_coverage[4..8].copy_from_slice(&length.to_be_bytes());
+    let three = morx_table(3, &[with_coverage]);
+    assert_eq!(chained(&three, &[10], ltr, &defaults), (vec![20], vec![]));
+
+    // A chain shorter than its header, and one longer than the table.
+    let mut short = good.clone();
+    short[4..8].copy_from_slice(&8u32.to_be_bytes());
+    let mut long = good.clone();
+    long[4..8].copy_from_slice(&4_000u32.to_be_bytes());
+    for bad in [short, long] {
+        let table = morx_table(2, &[good.clone(), bad]);
+        assert_eq!(
+            chained(&table, &[10], ltr, &defaults),
+            (
+                vec![20],
+                vec![Warning::MalformedChain {
+                    table: Tag::new(b"morx"),
+                    chain: 1
+                }]
+            )
+        );
+    }
+    // A chain count past the chains the table holds.
+    let mut claims = morx_table(2, &[good.clone()]);
+    claims[4..8].copy_from_slice(&3u32.to_be_bytes());
+    assert_eq!(
+        chained(&claims, &[10], ltr, &defaults),
+        (
+            vec![20],
+            vec![Warning::MalformedChain {
+                table: Tag::new(b"morx"),
+                chain: 1
+            }]
+        )
+    );
+    // Feature entries past the chain: the chain cannot say where its
+    // subtables are.
+    let mut entries = chain(1, &[(1, 0, 1, 0)], &[]);
+    entries[8..12].copy_from_slice(&900u32.to_be_bytes());
+    let table = morx_table(2, &[entries]);
+    assert_eq!(
+        chained(&table, &[10], ltr, &defaults).1,
+        vec![Warning::MalformedChain {
+            table: Tag::new(b"morx"),
+            chain: 0
+        }]
+    );
+
+    // A subtable shorter than its header, and one longer than its chain:
+    // the subtables before it run, the ones after it do not, and the next
+    // chain runs.
+    for length in [4u32, 4_000] {
+        let mut bad = noncontextual(1, &[(11, 21)]);
+        bad[0..4].copy_from_slice(&length.to_be_bytes());
+        let first = chain(
+            1,
+            &[],
+            &[
+                noncontextual(1, &[(10, 20)]),
+                bad,
+                noncontextual(1, &[(12, 22)]),
+            ],
+        );
+        let second = chain(1, &[], &[noncontextual(1, &[(13, 23)])]);
+        let table = morx_table(2, &[first, second]);
+        assert_eq!(
+            chained(&table, &[10, 11, 12, 13], ltr, &defaults),
+            (
+                vec![20, 11, 12, 23],
+                vec![Warning::MalformedAatSubtable { site: site(1) }]
+            ),
+            "length {length}"
+        );
+    }
+
+    // A lookup of a format the manual does not define, one cut short, and
+    // one whose value is no glyph index.
+    let odd = morx_table(
+        2,
+        &[chain(
+            1,
+            &[],
+            &[noncontextual_with(0, 1, &u16s(&[7, 0, 0]))],
+        )],
+    );
+    assert_eq!(
+        chained(&odd, &[10], ltr, &defaults),
+        (
+            vec![10],
+            vec![Warning::UnknownLookupFormat {
+                site: site(0),
+                format: 7
+            }]
+        )
+    );
+    let cut = morx_table(
+        2,
+        &[chain(1, &[], &[noncontextual_with(0, 1, &u16s(&[6, 4]))])],
+    );
+    assert_eq!(
+        chained(&cut, &[10], ltr, &defaults),
+        (
+            vec![10],
+            vec![Warning::MalformedAatSubtable { site: site(0) }]
+        )
+    );
+    let wide = morx_table(
+        2,
+        &[chain(
+            1,
+            &[],
+            &[noncontextual_with(
+                0,
+                1,
+                &lookup_pairs(4, &[(10, 0x0001_0000), (11, 21)]),
+            )],
+        )],
+    );
+    assert_eq!(
+        chained(&wide, &[10, 11], ltr, &defaults),
+        (
+            vec![10, 21],
+            vec![Warning::MalformedAatSubtable { site: site(0) }]
+        )
+    );
+}
+
+/// Past `Limits::max_subtables` — chains and subtables each counting one —
+/// nothing more is read, and past `Limits::max_feature_entries` a chain's
+/// later entries are not read; each is named, and what was read runs.
+#[test]
+fn the_subtable_and_feature_entry_ceilings_are_refused_by_name() {
+    let table = morx_table(
+        2,
+        &[
+            chain(
+                1,
+                &[],
+                &[noncontextual(1, &[(10, 20)]), noncontextual(1, &[(11, 21)])],
+            ),
+            chain(
+                1,
+                &[],
+                &[noncontextual(1, &[(12, 22)]), noncontextual(1, &[(13, 23)])],
+            ),
+        ],
+    );
+    let glyphs = [10u16, 11, 12, 13];
+    let ltr = Direction::LeftToRight;
+    let defaults = Selection::defaults();
+    let budget = Warning::SubtableBudgetExceeded {
+        table: Tag::new(b"morx"),
+    };
+    for (ceiling, expected, refused) in [
+        (6u32, vec![20u16, 21, 22, 23], false),
+        (5, vec![20, 21, 22, 13], true),
+        (4, vec![20, 21, 12, 13], true),
+        (3, vec![20, 21, 12, 13], true),
+        (2, vec![20, 11, 12, 13], true),
+        (0, vec![10, 11, 12, 13], true),
+    ] {
+        let limits = Limits {
+            max_subtables: ceiling,
+            ..Limits::DEFAULT
+        };
+        let (out, warnings) = chained_under(&table, &glyphs, ltr, &defaults, &limits);
+        assert_eq!(out, expected, "ceiling {ceiling}");
+        assert_eq!(
+            warnings,
+            if refused { vec![budget] } else { vec![] },
+            "ceiling {ceiling}"
+        );
+    }
+
+    // Two feature entries and a ceiling of one: the second, which would swap
+    // the subtables, is not read, and the subtables are still found.
+    let swap = morx_table(
+        2,
+        &[chain(
+            1,
+            &[(9, 9, 0, 0xFFFF_FFFF), (1, 2, 2, !1u32)],
+            &[noncontextual(1, &[(10, 20)]), noncontextual(2, &[(10, 30)])],
+        )],
+    );
+    let limits = Limits {
+        max_feature_entries: 1,
+        ..Limits::DEFAULT
+    };
+    let (out, warnings) = chained_under(&swap, &[10], ltr, &asking(&[(1, 2)]), &limits);
+    assert_eq!(out, [20]);
+    assert_eq!(
+        warnings,
+        vec![Warning::FeatureEntryBudgetExceeded {
+            table: Tag::new(b"morx"),
+            chain: 0
+        }]
+    );
+    let morx = Morx::parse(&swap).expect("readable");
+    let (chains, _) = morx.chains(&limits);
+    assert_eq!(chains[0].features().len(), 1);
+    assert_eq!(chains[0].subtables().len(), 2);
+}
+
+/// A chain's parts read back as the table states them: its default flags,
+/// its feature entries in order, and each subtable's index, coverage, type,
+/// flags and body.
+#[test]
+fn a_chain_reads_back_as_written() {
+    let table = noncontextual_example();
+    let morx = Morx::parse(&table).expect("readable");
+    assert_eq!(morx.version(), 2);
+    assert_eq!(morx.chain_count(), 1);
+    let (chains, warnings) = morx.chains(&Limits::DEFAULT);
+    assert!(warnings.is_empty());
+    let chain = &chains[0];
+    assert_eq!(chain.index(), 0);
+    assert_eq!(chain.default_flags(), 1);
+    assert_eq!(
+        chain.features(),
+        &[
+            FeatureEntry {
+                feature: 4,
+                setting: 0,
+                enable: 1,
+                disable: 0xFFFF_FFFF
+            },
+            FeatureEntry {
+                feature: 4,
+                setting: 1,
+                enable: 0,
+                disable: 0xFFFF_FFFE
+            },
+            FeatureEntry {
+                feature: 0,
+                setting: 1,
+                enable: 0,
+                disable: 0
+            },
+        ]
+    );
+    let sub = chain.subtables()[0];
+    assert_eq!(
+        (sub.index(), sub.coverage, sub.kind(), sub.sub_feature_flags),
+        (0, 0x8000_0004, NONCONTEXTUAL, 1)
+    );
+    assert_eq!(sub.body().len(), 24);
+    assert_eq!(&sub.body()[..2], &[0, 6]);
 }

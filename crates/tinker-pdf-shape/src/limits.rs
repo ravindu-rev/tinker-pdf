@@ -184,12 +184,35 @@ pub struct Limits {
     /// and ceilings*), so a machine that looks at each glyph a few times
     /// over a long paragraph is never mistaken for one that loops.
     pub max_transitions: u32,
+
+    /// How many chains and subtables of one AAT table are read and run,
+    /// each chain and each subtable counting one.
+    ///
+    /// **Four thousand and ninety-six.** A `morx` states its chain count and
+    /// each chain its subtable count in thirty-two bits, and every run walks
+    /// every one of them, so a table of thousands of empty subtables would
+    /// make every run cost the table. A shipped face's chains hold tens to a
+    /// few hundred subtables; past the ceiling the rest are not read and the
+    /// table is named ([`crate::Warning::SubtableBudgetExceeded`]). A face's
+    /// ceiling, which [`Limits::for_glyphs`] leaves alone.
+    pub max_subtables: u32,
+
+    /// How many feature entries of one `morx` chain are read.
+    ///
+    /// **Four thousand and ninety-six.** A chain states its entry count in
+    /// thirty-two bits and every run reads every entry to compute the chain's
+    /// flags, so the count is a cost a hostile face chooses. A shipped
+    /// chain's entries are a few for each of its feature settings; past the
+    /// ceiling the rest are not read and set no flag, and the chain is named
+    /// ([`crate::Warning::FeatureEntryBudgetExceeded`]). A face's ceiling,
+    /// which [`Limits::for_glyphs`] leaves alone.
+    pub max_feature_entries: u32,
 }
 
 impl Limits {
     /// The ceilings a run of ordinary length is shaped under.
     ///
-    /// The two work numbers are absolute here and scaled by
+    /// The work numbers are absolute here and scaled by
     /// [`Limits::for_glyphs`] where the run's length is known, which is the
     /// distinction the layout crate's own budgets already draw: a fixed
     /// ceiling bounds a hostile input, and a scaled one keeps a legitimate
@@ -206,6 +229,8 @@ impl Limits {
         max_passes: 64,
         max_rule_candidates: 1_024,
         max_transitions: 4_096,
+        max_subtables: 4_096,
+        max_feature_entries: 4_096,
     };
 
     /// The default ceilings, with the three work numbers scaled to a run of
@@ -344,5 +369,21 @@ mod tests {
         assert_eq!(Limits::DEFAULT.max_attribute_runs, 256);
         assert_eq!(Limits::DEFAULT.max_passes, 64);
         assert_eq!(Limits::DEFAULT.max_rule_candidates, 1_024);
+    }
+
+    /// The AAT table ceilings are a face's: no run length moves how many
+    /// chains, subtables and feature entries are read.
+    #[test]
+    fn scaling_leaves_the_aat_table_ceilings_alone() {
+        for count in [0usize, 1, 1_000, 1 << 20, usize::MAX] {
+            let limits = Limits::for_glyphs(count);
+            assert_eq!(limits.max_subtables, Limits::DEFAULT.max_subtables);
+            assert_eq!(
+                limits.max_feature_entries,
+                Limits::DEFAULT.max_feature_entries
+            );
+        }
+        assert_eq!(Limits::DEFAULT.max_subtables, 4_096);
+        assert_eq!(Limits::DEFAULT.max_feature_entries, 4_096);
     }
 }
