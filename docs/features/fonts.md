@@ -1342,8 +1342,9 @@ could show was right.
 **Nothing outside the vendored corpora is admissible.** Unicode's
 text-rendering-tests at `26cfb96` — the commit vendored here — has no shaping
 section beyond those already vendored (`SHARAN`, `SHBALI`, `SHKNDA`,
-`SHLANA`); every other section tests a font format (`AVAR`, `CFF`, `GVAR`,
-`MORX` and the like). HarfBuzz's suite at `3c4d303` has in-house cases in
+`SHLANA`, and AAT's `MORX` and `MORT`, which `tests/text_rendering.rs`
+declines by name until `Shaper::shape` runs a face's `morx` chain); every
+other section tests a font format (`AVAR`, `CFF`, `GVAR` and the like). HarfBuzz's suite at `3c4d303` has in-house cases in
 eighteen of the scripts this page lists as unverified — one of them Syriac,
 none Sundanese, N'Ko, Thaana, Mandaic, Hanifi Rohingya or Tagalog — and none
 of them can be a fixture here, for two reasons that each suffice. Their

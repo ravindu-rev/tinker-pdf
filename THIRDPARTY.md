@@ -561,20 +561,24 @@ the people who publish the tests.
 | `testcases/CMAP-{1,2,3,4}.html`, `GSUB-{1,2,3}.html`, `GPOS-{1,2,3,4,5}.html` | The twelve sections milestone 2 is graded on, **verbatim** — parsed by `tests/text_rendering.rs` rather than distilled first, so nothing stands between what upstream wrote and what the test asserts |
 | `testcases/SHARAN-1.html` | Milestone 4's whole bar: Nasta‘līq, the one Arabic-script section the corpus has |
 | `testcases/SHBALI-{1,2,3}.html`, `SHKNDA-{1,2,3}.html`, `SHLANA-{1,…,10}.html` | Milestone 5's: Balinese, Kannada and Tai Tham — the corpus's only Indic and Southeast Asian sections |
-| `fonts/*.ttf`, `fonts/*.otf` | The sixteen faces those sections name |
+| `testcases/MORX-{1,…,14,16,…,42}.html`, `MORT-1.html` | The forty-two AAT sections `docs/design/shaping.md`'s *AAT shaping* names: forty-one of the `morx` table, there being no `MORX-15` at this commit, and one of `mort`, its predecessor |
+| `fonts/*.ttf`, `fonts/*.otf` | The fifty-three faces those sections name: sixteen for the twenty-nine OpenType sections, and thirty-seven, `TestMORX*.ttf`, `TestAATMorx.ttf` and `TestAATMort.ttf`, for the AAT ones |
 | `LICENSE` | Upstream's own |
 
-Only those twenty-nine sections are vendored. The AAT (`MORX`, `MORT`),
-variable (`GVAR`, `CVAR`, `AVAR`, `HVAR`) and outline (`CFF`, `GLYF`, `SFNT`)
-sections are not: `morx` is a stated non-goal, the variable ones are deferred
-under ruling 3, and the outline ones test a rasterizer this crate is not.
+Only those seventy-one sections are vendored. The variable (`GVAR`, `CVAR`,
+`AVAR`, `HVAR`) and outline (`CFF`, `GLYF`, `SFNT`) sections are not: the
+variable ones are deferred under ruling 3, and the outline ones test a
+rasterizer this crate is not.
 
 The seventeen shaping sections and their six faces arrived with milestones 4
-and 5, fetched at the same pinned commit as the first twelve so that one
-`ft:render` string cannot be describing a face from a different revision. What
-each of them adjudicates — and, for the ones this repository declines, why —
-is in `crates/tinker-pdf-shape/tests/text_rendering.rs`, which is the file that
-has to stay honest about them; this table only says where the bytes came from.
+and 5, and the forty-two AAT sections and their thirty-seven faces with the
+AAT shaping row, each fetched at the same pinned commit as the first twelve so
+that one `ft:render` string cannot be describing a face from a different
+revision; each file's git blob hash was checked against that commit's tree
+when it was fetched. What each of them adjudicates — and, for the ones this
+repository declines, why — is in
+`crates/tinker-pdf-shape/tests/text_rendering.rs`, which is the file that has
+to stay honest about them; this table only says where the bytes came from.
 
 Upstream's README states that *"the contents of this repository are governed by
 the Unicode Terms of Use and are released under LICENSE"*, and that LICENSE is
