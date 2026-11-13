@@ -50,9 +50,9 @@ architecture's Concurrency section (row P-15).
   pooled operation inside a worker runs on that worker.
 - **The bindings and the C ABI.** Projecting `Parallelism` onto every
   surface is SU-12's, as each facade item is.
-- **RC-16's serial band sink**, which renders a page in bands to a writer to
-  bound memory, one band after another. The bands here are for speed and are
-  stitched into one bitmap.
+- **RC-16's serial band sink** ([banded-output](banded-output.md)), which
+  renders a page in bands to a writer to bound memory, one band after another.
+  The bands here are for speed and are stitched into one bitmap.
 - **Deciding image runs in the page frame.** Ruling 5's named exception is
   RC-21's, behind H-15; the band cuts here keep it out of a stitched page
   without changing how a run is decided.
