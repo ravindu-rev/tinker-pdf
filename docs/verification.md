@@ -1235,6 +1235,18 @@ the child is this repository's own, so it hosts and adjudicates nothing. A
 timed run needs the release `tpdf` built before it measures, and
 `cargo test --benches` needs a debug one built first.
 
+The render group's second render, `a second render of the quarter-size JPEG
+page at 300 dpi under a 64 MiB budget`, opens its page under the budget P-16
+sets for it, stated at open, and draws it at 150 dpi untimed before the
+render at 300 dpi it times: at both resolutions its JPEG is drawn larger than
+half its samples, so both ask its full-size decode and the timed render is
+served by the document's cache. Its definition holds that before its runs —
+the second render decodes no image, misses nothing the document keeps and
+draws the bytes a first render at 300 dpi draws — and tier P's relation
+holds it at 30 % of `the quarter-size JPEG page at 300 dpi`, the first
+render. The planning baseline keeps nothing past a render, so its arm
+decodes everything again.
+
 **An operation is defined when criterion first runs it.** The harness runs an
 operation's definition — what it builds and checks, its routine — the first
 time criterion calls the routine, outside the time criterion takes, and keeps
@@ -1982,6 +1994,21 @@ thread's arena keeps after they are freed, and with it the peak. An eighth
 case runs it again with the allocator held to one arena besides
 (`MALLOC_ARENA_MAX=1`).
 
+Every case runs again under a cache budget, its name ending `-under-64-mib`:
+its operation on its input, every document it opens opened with 64 MiB
+stated at open (`OpenOptions::with_cache_limits`), so what its renders
+compute is kept across them and its parsed objects are charged beside, the
+open case's through the CLI's own open, which states the budget on its
+streamed open and its buffered one alike (`open_on_demand_with`). The budget
+is the one `docs/design/performance.md` sets for every case (P-16, "MS-05's
+reading, and a stated budget"): room for all any case's renders compute, so
+none draws from a reduced decode. A budget bounds what a document keeps, not
+what an operation needs to run, so the parent holds each budgeted case, in
+the same run, to the peak of the case it extends plus the budget, and names
+one that passes it as a finding against what held the bytes
+(`a_budgeted_case_holds_its_case_plus_its_budget` holds the rule on every
+target).
+
 The parent holds each case to its build's figure in `peak_memory.tsv`, the
 default and `bundled-fonts` builds each with their own, plus the 2 % the corpus
 bars give their peaks, and fails a case the table has no line for. Each figure
@@ -1990,7 +2017,8 @@ spread between them recorded in the table, so a local run on another machine
 reads its peaks beside that machine. A case named `unheld`, by the owner's word
 (H-78), is measured and printed and held to nothing: one whose two runs spread
 by 2 % or more, or one whose two runs have not been read, as the two threaded
-cases' have not under their waves and their allocator.
+cases' have not under their waves and their allocator, nor any budgeted
+case's; a budgeted case is held to its budget all the same.
 `TINKER_PEAK_RECORD` prints each case's line for the table instead of holding
 it:
 

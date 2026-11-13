@@ -19,6 +19,15 @@
 //! [`the_open_case_reads_its_file_on_demand`] runs that case alone and holds
 //! its peak below the file's length.
 //!
+//! Every case runs twice: as it is, and under a cache budget stated at open,
+//! [`BUDGET`], its name then ending [`UNDER_BUDGET`]
+//! (`docs/design/performance.md`, P-16, "MS-05's reading, and a stated
+//! budget"). A budget bounds what a document keeps, not what an operation
+//! needs to run, so a budgeted case holds its budget when its peak is at most
+//! the peak of the case it extends, read in the same run, plus the budget:
+//! what the case's caches held unasked moves under the budget, and nothing
+//! they hold passes it ([`over_budget`]).
+//!
 //! The parent holds each case to its figure for this build in
 //! `peak_memory.tsv` plus [`TOLERANCE_PERCENT`], the tolerance the corpus bars
 //! give their peaks (`PEAK_TOLERANCE_PERCENT`, `xtask/src/ratchet.rs`), and
@@ -34,7 +43,8 @@
 //! adjudicates nothing.
 //!
 //! The run is Linux-only and `#[ignore]`d: it renders at 300 dpi, merges four
-//! hundred pages and reads ten thousand, which is a release binary's work.
+//! hundred pages and reads ten thousand, each twice, which is a release
+//! binary's work.
 //! What it decides with the numbers is plain functions, tested on every
 //! target.
 
@@ -86,8 +96,10 @@ const BUILDS: [&str; 2] = ["default", "bundled-fonts"];
 /// `png-20-on-4-one-arena` is `png-20-on-4` again with the platform
 /// allocator held to one arena besides ([`allocator`]), so the threaded
 /// render is held both where its threads allocate from arenas of their own
-/// and where they share one.
-const CASES: [&str; 8] = [
+/// and where they share one. The eight after the first eight are those eight
+/// again, each under [`BUDGET`] stated at open ([`operation`]), so a case
+/// and its budgeted twin are read in one run.
+const CASES: [&str; 16] = [
     "png-300",
     "jpeg-300",
     "jpx-72",
@@ -96,7 +108,74 @@ const CASES: [&str; 8] = [
     "text-10000",
     "merge-4x100",
     OPEN,
+    "png-300-under-64-mib",
+    "jpeg-300-under-64-mib",
+    "jpx-72-under-64-mib",
+    "png-20-on-4-under-64-mib",
+    "png-20-on-4-one-arena-under-64-mib",
+    "text-10000-under-64-mib",
+    "merge-4x100-under-64-mib",
+    "open-23mb-under-64-mib",
 ];
+
+/// The cache budget every budgeted case states at open: P-16's for MS-05,
+/// one for every case, as MS-04's second render states it
+/// (`docs/design/performance.md`, P-16, "MS-05's reading, and a stated
+/// budget"). Room for what any case's renders compute — the largest,
+/// `jpeg-300`'s A4 JPEG decoded at full size, 26 MB — so that none is drawn
+/// from a reduced decode and each reads what keeping costs.
+const BUDGET: u64 = 64 << 20;
+
+/// What a budgeted case's name ends in: the case before it, run with
+/// [`BUDGET`] stated at open.
+const UNDER_BUDGET: &str = "-under-64-mib";
+
+/// The operation `case` performs and the budget it states at open: the case
+/// itself and none, or, for a case whose name ends [`UNDER_BUDGET`], the case
+/// its name extends and [`BUDGET`].
+fn operation(case: &str) -> (&str, Option<u64>) {
+    match case.strip_suffix(UNDER_BUDGET) {
+        Some(base) => (base, Some(BUDGET)),
+        None => (case, None),
+    }
+}
+
+/// What every document `case` opens is opened with: its budget stated at
+/// open, where it states one, so that the document's parsed objects and
+/// what its renders compute are charged to it together.
+fn open_options(case: &str) -> tinker_pdf::OpenOptions {
+    let options = tinker_pdf::OpenOptions::default();
+    match operation(case).1 {
+        Some(bytes) => options.with_cache_limits(tinker_pdf::CacheLimits::new(bytes)),
+        None => options,
+    }
+}
+
+/// What holding each budgeted case of `measured` to its budget finds: a line
+/// for each whose peak passes the peak of the case it extends, read in the
+/// same run, by more than the budget it states, and one for each whose case
+/// was not measured beside it. Empty when every budgeted case holds.
+fn over_budget(measured: &[(&str, u64)]) -> Vec<String> {
+    measured
+        .iter()
+        .filter_map(|&(case, bytes)| {
+            let (base, budget) = operation(case);
+            let budget = budget?;
+            let Some(&(_, unbudgeted)) = measured.iter().find(|(other, _)| *other == base) else {
+                return Some(format!(
+                    "{case}: {base} was not measured beside it, so its budget holds nothing"
+                ));
+            };
+            (bytes > unbudgeted.saturating_add(budget)).then(|| {
+                format!(
+                    "{case}: a peak of {bytes} bytes, past {base}'s {unbudgeted} and the {budget} \
+                     bytes the case states: a finding against what held them, never a larger \
+                     budget"
+                )
+            })
+        })
+        .collect()
+}
 
 /// The case that opens the 23 MB image file as `tpdf info` opens it.
 const OPEN: &str = "open-23mb";
@@ -268,13 +347,13 @@ fn open_pages(dir: &Path) -> u32 {
 }
 
 /// Writes `case`'s input files into `dir`, from the benchmark set's
-/// generators.
+/// generators: a budgeted case's are the case's it extends.
 fn write_inputs(case: &str, dir: &Path) {
     let write = |name: &str, bytes: &[u8]| {
         written_support::authored(name, bytes);
         write_input(dir, name, bytes);
     };
-    match case {
+    match operation(case).0 {
         "png-300" => write("png-300.pdf", &inputs::dense(1, 0)),
         "jpeg-300" => write("jpeg-300.pdf", &inputs::jpeg_page()),
         "jpx-72" => write("jpx-72.pdf", &inputs::jpx_page()),
@@ -290,11 +369,12 @@ fn write_inputs(case: &str, dir: &Path) {
                 );
             }
             // The merge the child measures, made and held here, where no peak
-            // is read: the save is the same bytes in either process.
+            // is read: the save is the same bytes in either process, and
+            // under a budget, which keeps what is read and writes nothing.
             written_support::rewritten(
                 "the four parts merged",
                 read_input(dir, "merge-4x100-0.pdf"),
-                merged(dir),
+                merged(dir, &open_options(case)),
             );
         }
         OPEN => write_open_input(dir, inputs::image_file()),
@@ -305,7 +385,7 @@ fn write_inputs(case: &str, dir: &Path) {
 
 /// The platform allocator's settings `case`'s child runs under, as the
 /// environment it is started with: the allocator reads them at the child's
-/// start.
+/// start. A budgeted case runs under its case's.
 ///
 /// The threaded cases hold glibc's mmap threshold at the 128 KiB it starts
 /// at (`MALLOC_MMAP_THRESHOLD_`), which stops it rising to the size of the
@@ -320,6 +400,7 @@ fn write_inputs(case: &str, dir: &Path) {
 /// (`MALLOC_ARENA_MAX`). Every other case runs under the allocator as it
 /// comes.
 fn allocator(case: &str) -> Vec<(&'static str, &'static str)> {
+    let case = operation(case).0;
     let mut settings = Vec::new();
     if case.starts_with(THREADED) {
         settings.push(("MALLOC_MMAP_THRESHOLD_", "131072"));
@@ -399,12 +480,17 @@ fn in_waves(pages: u32, workers: u32, draw: impl Fn(u32, u32) + Sync) {
     });
 }
 
-/// The operation `case` names, on the input its parent wrote into `dir`.
+/// The operation `case` names, on the input its parent wrote into `dir`,
+/// every document it opens opened with the budget the case states, if any
+/// ([`open_options`]).
 fn perform(case: &str, dir: &Path) {
     use std::hint::black_box;
     use tinker_pdf::{Document, RenderOptions};
 
-    let open = |name: &str| Document::open(read_input(dir, name)).expect("the input opens");
+    let options = open_options(case);
+    let case = operation(case).0;
+    let open =
+        |name: &str| Document::open_with(read_input(dir, name), &options).expect("the input opens");
     let png = |doc: &Document, index: u32, dpi: f64| {
         let page = doc.page(index).expect("the page");
         page.render(&RenderOptions::at_dpi(dpi))
@@ -452,7 +538,7 @@ fn perform(case: &str, dir: &Path) {
         // editor, every page of the others imported after its own, saved with
         // stream deduplication and the programs kept as they are.
         "merge-4x100" => {
-            black_box(merged(dir));
+            black_box(merged(dir, &options));
         }
         // What `tpdf info` does to its file: the CLI's own open, which keeps
         // the document streamed only when it answers as a buffered open of the
@@ -460,7 +546,7 @@ fn perform(case: &str, dir: &Path) {
         OPEN => {
             let path = dir.join(OPEN_FILE);
             let path = path.to_str().expect("the input's path in UTF-8");
-            let (doc, kept) = source::open_on_demand(path).expect("the input opens");
+            let (doc, kept) = source::open_on_demand_with(path, &options).expect("the input opens");
             assert!(doc.is_streamed(), "the CLI's open keeps the file streamed");
             let pages = doc.page_count();
             let file = kept.expect("the source a streamed document reads through");
@@ -491,10 +577,11 @@ fn peak_memory_child() {
     println!("{REPORT} {case} {peak}");
 }
 
-/// Every case, a process each, held to this build's figures or, with the
-/// record switch set, printed for the table.
+/// Every case, a process each, held to this build's figures and each
+/// budgeted case to its budget ([`over_budget`]) or, with the record switch
+/// set, printed for the table.
 #[test]
-#[ignore = "eight processes, one rendering at 300 dpi and one reading ten thousand pages: a \
+#[ignore = "sixteen processes, two rendering at 300 dpi and two reading ten thousand pages: a \
             release binary's run"]
 fn peak_memory_of_every_case() {
     if !cfg!(target_os = "linux") {
@@ -517,7 +604,8 @@ fn peak_memory_of_every_case() {
         return;
     }
     let committed = figures(TABLE).unwrap_or_else(|error| panic!("{error}"));
-    let problems = judge(&committed, BUILD, &measured);
+    let mut problems = judge(&committed, BUILD, &measured);
+    problems.extend(over_budget(&measured));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
@@ -565,13 +653,105 @@ fn the_open_case_reads_its_file_on_demand() {
 
 /// The open case's operation, in this process and on every target, over a
 /// small document written as its input: the CLI's open keeps the file
-/// streamed and counts the pages the buffered open wrote beside it.
+/// streamed and counts the pages the buffered open wrote beside it, with no
+/// budget and under the budgeted case's, which the streamed open states.
 #[test]
 fn the_open_case_counts_a_file_it_keeps_streamed() {
     let dir = input_dir("open-case-in-process");
     write_open_input(&dir, inputs::small(3).into());
     assert_eq!(open_pages(&dir), 3, "the buffered open's count");
     perform(OPEN, &dir);
+    let budgeted = format!("{OPEN}{UNDER_BUDGET}");
+    perform(&budgeted, &dir);
+    let path = dir.join(OPEN_FILE);
+    let (doc, _) =
+        source::open_on_demand_with(path.to_str().expect("UTF-8"), &open_options(&budgeted))
+            .expect("the input opens");
+    assert_eq!(
+        doc.cache_limits(),
+        Some(tinker_pdf::CacheLimits::new(BUDGET)),
+        "the budgeted open states its budget"
+    );
+}
+
+/// **A budgeted case is its case under the budget**: its name is the case's
+/// and [`UNDER_BUDGET`], it performs the case's operation on the case's
+/// input under [`BUDGET`] stated at open, and every case has its budgeted
+/// twin in the run, so each is read beside the other.
+#[test]
+fn every_case_runs_again_under_its_budget() {
+    assert_eq!(operation("png-300"), ("png-300", None));
+    assert_eq!(
+        operation("png-300-under-64-mib"),
+        ("png-300", Some(64 << 20))
+    );
+    assert_eq!(
+        operation("png-20-on-4-one-arena-under-64-mib"),
+        ("png-20-on-4-one-arena", Some(BUDGET))
+    );
+    assert_eq!(open_options("jpeg-300").cache_limits, None);
+    assert_eq!(
+        open_options("jpeg-300-under-64-mib").cache_limits,
+        Some(tinker_pdf::CacheLimits::new(BUDGET))
+    );
+    let (plain, budgeted): (Vec<&str>, Vec<&str>) =
+        CASES.iter().partition(|case| operation(case).1.is_none());
+    assert_eq!(plain.len(), budgeted.len(), "one budgeted twin a case");
+    for case in &plain {
+        assert!(
+            budgeted.contains(&format!("{case}{UNDER_BUDGET}").as_str()),
+            "{case} has no budgeted twin"
+        );
+    }
+    for case in &budgeted {
+        assert!(plain.contains(&operation(case).0), "{case} extends no case");
+    }
+}
+
+/// **A budgeted case holds its case's peak plus its budget, and no more**:
+/// a peak at exactly the case's own read in the run plus [`BUDGET`] holds, a
+/// byte more fails that case alone, a peak below its case's holds, and a
+/// budgeted case whose case the run did not read is named, since its budget
+/// would hold nothing.
+#[test]
+fn a_budgeted_case_holds_its_case_plus_its_budget() {
+    let measured = [
+        ("png-300", 1_000),
+        ("png-300-under-64-mib", 1_000 + BUDGET),
+        ("jpx-72", 5_000),
+        ("jpx-72-under-64-mib", 4_000),
+    ];
+    assert!(
+        over_budget(&measured).is_empty(),
+        "{:?}",
+        over_budget(&measured)
+    );
+    let over = [
+        ("png-300", 1_000),
+        ("png-300-under-64-mib", 1_001 + BUDGET),
+        ("jpx-72", 5_000),
+        ("jpx-72-under-64-mib", 5_000),
+    ];
+    let problems = over_budget(&over);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].starts_with(&format!(
+            "png-300-under-64-mib: a peak of {} bytes, past png-300's 1000",
+            1_001 + BUDGET
+        )),
+        "{problems:?}"
+    );
+    let alone = [("text-10000-under-64-mib", 1)];
+    let problems = over_budget(&alone);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].starts_with("text-10000-under-64-mib: text-10000 was not measured"),
+        "{problems:?}"
+    );
+    assert!(
+        over_budget(&[("merge-4x100", u64::MAX)]).is_empty(),
+        "a case states no budget to hold"
+    );
 }
 
 /// The waves hold whichever thread finishes first: worker `k` draws pages
@@ -635,6 +815,12 @@ fn each_case_states_the_allocator_it_runs_under() {
         assert!(allocator(case).is_empty(), "{case}");
     }
     assert!(allocator("hold-64-mib").is_empty());
+    // A budgeted case runs under its case's allocator.
+    assert_eq!(allocator("png-20-on-4-under-64-mib"), [threshold]);
+    assert_eq!(
+        allocator("png-20-on-4-one-arena-under-64-mib"),
+        [threshold, ("MALLOC_ARENA_MAX", "1")]
+    );
 }
 
 #[test]
@@ -677,7 +863,8 @@ fn a_case_named_unheld_is_held_to_nothing() {
 }
 
 /// The committed table reads and names every case in both builds, leaving
-/// unheld only the threaded cases.
+/// unheld only the threaded cases and the budgeted ones, whose first runs
+/// have not been read.
 #[test]
 fn the_committed_table_names_every_case_in_both_builds() {
     let committed = figures(TABLE).unwrap_or_else(|error| panic!("{error}"));
@@ -689,7 +876,7 @@ fn the_committed_table_names_every_case_in_both_builds() {
                 .unwrap_or_else(|| panic!("{case}: no line for the {build} build"));
             assert_eq!(
                 line.bytes.is_none(),
-                case.starts_with(THREADED),
+                case.starts_with(THREADED) || operation(case).1.is_some(),
                 "{case} in the {build} build"
             );
         }
@@ -784,16 +971,16 @@ fn the_committed_table_names_only_builds_and_cases() {
 }
 
 /// `tpdf merge`'s shape, as the write group times it, over the four parts the
-/// parent wrote into `dir`: the first file's editor, every page of the others
-/// imported after its own, saved with stream deduplication and the programs
-/// kept as they are.
-fn merged(dir: &Path) -> Vec<u8> {
+/// parent wrote into `dir`, each opened with `options`: the first file's
+/// editor, every page of the others imported after its own, saved with
+/// stream deduplication and the programs kept as they are.
+fn merged(dir: &Path, options: &tinker_pdf::OpenOptions) -> Vec<u8> {
     use tinker_pdf::write::{self, FontPolicy, ImagePolicy, SaveOptions};
     use tinker_pdf::{Document, WriteMode, WriteOptions};
 
     let parts: Vec<Document> = (0..4)
         .map(|seed| {
-            Document::open(read_input(dir, &format!("merge-4x100-{seed}.pdf")))
+            Document::open_with(read_input(dir, &format!("merge-4x100-{seed}.pdf")), options)
                 .expect("the input opens")
         })
         .collect();

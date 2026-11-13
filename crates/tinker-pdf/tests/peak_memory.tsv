@@ -3,7 +3,7 @@
 # Three tab-separated fields: build, case, bytes.
 #
 #   build   default or bundled-fonts, the build the figure was read in
-#   case    one of the probe's seven, as CASES in peak_memory.rs names it
+#   case    one of the probe's cases, as CASES in peak_memory.rs names it
 #   bytes   the child's VmHWM, in bytes
 #
 # A run holds each case to its build's figure plus 2 % and fails a case with
@@ -27,6 +27,11 @@
 # arena besides (`allocator` and `in_waves` in peak_memory.rs), are held to
 # nothing until two local runs of each build read them within 2 % of each
 # other (MS-25.2b).
+#
+# Each case ending -under-64-mib is the case before it run under a 64 MiB
+# cache budget stated at open (P-16): held to nothing here until its first
+# runs are read, and held in every run to the peak of the case it extends,
+# read in the same run, plus the 64 MiB (`over_budget` in peak_memory.rs).
 
 default	png-300	88739840
 default	jpeg-300	138256384
@@ -36,6 +41,14 @@ default	png-20-on-4-one-arena	unheld
 default	text-10000	31047680
 default	merge-4x100	528793600
 default	open-23mb	28991488
+default	png-300-under-64-mib	unheld
+default	jpeg-300-under-64-mib	unheld
+default	jpx-72-under-64-mib	unheld
+default	png-20-on-4-under-64-mib	unheld
+default	png-20-on-4-one-arena-under-64-mib	unheld
+default	text-10000-under-64-mib	unheld
+default	merge-4x100-under-64-mib	unheld
+default	open-23mb-under-64-mib	unheld
 bundled-fonts	png-300	88317952
 bundled-fonts	jpeg-300	138153984
 bundled-fonts	jpx-72	231383040
@@ -44,3 +57,11 @@ bundled-fonts	png-20-on-4-one-arena	unheld
 bundled-fonts	text-10000	30760960
 bundled-fonts	merge-4x100	528838656
 bundled-fonts	open-23mb	29278208
+bundled-fonts	png-300-under-64-mib	unheld
+bundled-fonts	jpeg-300-under-64-mib	unheld
+bundled-fonts	jpx-72-under-64-mib	unheld
+bundled-fonts	png-20-on-4-under-64-mib	unheld
+bundled-fonts	png-20-on-4-one-arena-under-64-mib	unheld
+bundled-fonts	text-10000-under-64-mib	unheld
+bundled-fonts	merge-4x100-under-64-mib	unheld
+bundled-fonts	open-23mb-under-64-mib	unheld

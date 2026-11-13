@@ -34,7 +34,7 @@ use support::{inputs, Group, Per};
 #[cfg(not(tinker_planning_baseline))]
 use tinker_pdf::{
     write::{self, AppendOptions},
-    DisplayList, Parallelism,
+    CacheLimits, DisplayList, OpenOptions, Parallelism,
 };
 use tinker_pdf::{Bitmap, Document, Page, RenderOptions, RenderWarning, SampleCodec};
 #[cfg(not(tinker_planning_baseline))]
@@ -169,6 +169,67 @@ fn paths_under(op: &mut support::Op<'_>, coverage: Coverage, what: &str) {
     let _ = what;
     op.per(renders(&many_page, 150.0, 1));
     op.iter(move || black_box(many_page.render(&options)));
+}
+
+/// The budget MS-04's second render states, at open
+/// (`docs/design/performance.md`, P-16, "MS-05's reading, and a stated
+/// budget"): room for everything the quarter-size JPEG page's renders compute
+/// — its JPEG at full size, 620 by 877 samples, and the frame beside it — and
+/// for its parsed objects, so nothing the second render asks has left.
+#[cfg(not(tinker_planning_baseline))]
+const SECOND_RENDER_BUDGET: u64 = 64 << 20;
+
+/// `bytes` opened under the second render's budget, stated at open, so that
+/// the document keeps what its renders compute across them.
+#[cfg(not(tinker_planning_baseline))]
+fn under_the_budget(bytes: Vec<u8>) -> Document {
+    Document::open_with(
+        bytes,
+        &OpenOptions::default().with_cache_limits(CacheLimits::new(SECOND_RENDER_BUDGET)),
+    )
+    .expect("the page opens")
+}
+
+/// The planning baseline keeps nothing past a render: its arm opens the page
+/// as it is, and its second render decodes everything again.
+#[cfg(tinker_planning_baseline)]
+fn under_the_budget(bytes: Vec<u8>) -> Document {
+    Document::open(bytes).expect("the page opens")
+}
+
+/// Before its runs, the second render is held to what it times: drawn after
+/// the page's render at 150 dpi under the budget, it decodes no image and
+/// misses nothing the document keeps, and it draws what a first render of
+/// the page at 300 dpi draws, byte for byte, saying nothing.
+#[cfg(not(tinker_planning_baseline))]
+fn served_by_the_cache(bytes: &[u8]) {
+    let page = under_the_budget(bytes.to_vec()).page(0).expect("a page");
+    black_box(page.render(&RenderOptions::at_dpi(150.0)));
+    let second = page.render(&RenderOptions {
+        stats: true,
+        ..RenderOptions::at_dpi(300.0)
+    });
+    let stats = second.stats.expect("a counted render hands its stats back");
+    assert_eq!(
+        (stats.images_decoded, stats.cache_misses),
+        (0, 0),
+        "the second render is served by the document's cache: {stats:?}"
+    );
+    assert!(stats.cache_hits > 0, "it found what it draws: {stats:?}");
+    assert!(
+        second.warnings.is_empty(),
+        "the page draws cleanly: {:?}",
+        second.warnings
+    );
+    let first = Document::open(bytes.to_vec())
+        .expect("the page opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::at_dpi(300.0));
+    assert!(
+        second.data == first.data,
+        "the second render draws the page a first render draws"
+    );
 }
 
 /// One of the fixtures committed under `fuzz/corpus/render_page/`, opened.
@@ -899,19 +960,26 @@ fn render(c: &mut Criterion) {
         op.per(renders(&jpeg_quarter, 300.0, 1));
         op.iter(|| black_box(jpeg_quarter.render(&RenderOptions::at_dpi(300.0))));
     });
-    // The page opened afresh and drawn once at 72 dpi, untimed, so the timed
-    // render at 300 dpi is the second the page sees.
+    // The page opened afresh under the budget the operation states and drawn
+    // once at 150 dpi, untimed, so the timed render at 300 dpi is the second
+    // the page sees and is served by the document's cache: at both
+    // resolutions the JPEG is drawn larger than half its samples, so both
+    // draws ask its full-size decode, which the first keeps
+    // (`docs/design/performance.md`, P-16, "What a second render at another
+    // dpi reuses"). The planning baseline has no cache, and its arm draws the
+    // page a second time decoding everything again.
     group.operation(
-        "a second render of the quarter-size JPEG page at 300 dpi",
+        "a second render of the quarter-size JPEG page at 300 dpi under a 64 MiB budget",
         |op| {
             op.per(renders(&jpeg_quarter, 300.0, 1));
+            #[cfg(not(tinker_planning_baseline))]
+            served_by_the_cache(&jpeg_quarter_bytes);
             op.iter_batched(
                 || {
-                    let page = Document::open(jpeg_quarter_bytes.clone())
-                        .expect("it opens")
+                    let page = under_the_budget(jpeg_quarter_bytes.clone())
                         .page(0)
                         .expect("a page");
-                    black_box(page.render(&RenderOptions::at_dpi(72.0)));
+                    black_box(page.render(&RenderOptions::at_dpi(150.0)));
                     page
                 },
                 |page| black_box(page.render(&RenderOptions::at_dpi(300.0))),

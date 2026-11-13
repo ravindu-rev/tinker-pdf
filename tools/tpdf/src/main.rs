@@ -5372,6 +5372,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n"
         let streamed = source::open_by_rule(
             &path,
             Arc::clone(&counting) as Arc<dyn tinker_pdf::ByteSource>,
+            &tinker_pdf::OpenOptions::default(),
         )
         .expect("it opens");
         assert!(

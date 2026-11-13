@@ -11,7 +11,7 @@ use std::io;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use tinker_pdf::{ByteSource, Document, OpenError, SourceMiss};
+use tinker_pdf::{ByteSource, Document, OpenError, OpenOptions, SourceMiss};
 
 /// A file, read at offsets.
 ///
@@ -157,21 +157,26 @@ pub enum Unopened {
     Open(OpenError),
 }
 
-/// A document opened by the rule, through `source`: streamed, and kept when
-/// it answers as a buffered open of the same bytes would
-/// (`CosDocument::answers_as_buffered`, asked before anything else is read);
-/// otherwise `path` read whole and opened from the buffer.
+/// A document opened by the rule, through `source`, stating `options`:
+/// streamed, and kept when it answers as a buffered open of the same bytes
+/// would (`CosDocument::answers_as_buffered`, asked before anything else is
+/// read); otherwise `path` read whole and opened from the buffer. Both opens
+/// state the same options, a cache budget among them.
 ///
 /// # Errors
 /// The whole read's, or the buffered open's.
-pub fn open_by_rule(path: &str, source: Arc<dyn ByteSource>) -> Result<Document, Unopened> {
-    if let Ok(document) = Document::open_streaming(source) {
+pub fn open_by_rule(
+    path: &str,
+    source: Arc<dyn ByteSource>,
+    options: &OpenOptions,
+) -> Result<Document, Unopened> {
+    if let Ok(document) = Document::open_streaming_with(source, options) {
         if document.cos().answers_as_buffered() {
             return Ok(document);
         }
     }
     let bytes = read_whole(path).map_err(Unopened::Read)?;
-    Document::open(bytes).map_err(Unopened::Open)
+    Document::open_with(bytes, options).map_err(Unopened::Open)
 }
 
 /// `path` opened on demand, by the rule, and its file source when the
@@ -180,10 +185,21 @@ pub fn open_by_rule(path: &str, source: Arc<dyn ByteSource>) -> Result<Document,
 /// # Errors
 /// As [`open_by_rule`].
 pub fn open_on_demand(path: &str) -> Result<(Document, Option<Arc<FileSource>>), Unopened> {
+    open_on_demand_with(path, &OpenOptions::default())
+}
+
+/// [`open_on_demand`], stating `options` ([`open_by_rule`]).
+///
+/// # Errors
+/// As [`open_by_rule`].
+pub fn open_on_demand_with(
+    path: &str,
+    options: &OpenOptions,
+) -> Result<(Document, Option<Arc<FileSource>>), Unopened> {
     let file = Arc::new(
         FileSource::open(path).map_err(|e| Unopened::Read(format!("reading {path}: {e}")))?,
     );
-    let document = open_by_rule(path, Arc::clone(&file) as Arc<dyn ByteSource>)?;
+    let document = open_by_rule(path, Arc::clone(&file) as Arc<dyn ByteSource>, options)?;
     let kept = document.cos().is_streamed().then_some(file);
     Ok((document, kept))
 }

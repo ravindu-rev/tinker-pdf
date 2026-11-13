@@ -209,7 +209,8 @@
           "per_iteration": 125458, "calls": 1, "gate": { "floor": 1 } },
         { "name": "the quarter-size JPEG page at 300 dpi", "unit": "pixels",
           "per_iteration": 544360, "calls": 1, "gate": { "floor": 1 } },
-        { "name": "a second render of the quarter-size JPEG page at 300 dpi", "unit": "pixels",
+        { "name": "a second render of the quarter-size JPEG page at 300 dpi under a 64 MiB budget",
+          "unit": "pixels",
           "per_iteration": 544360, "calls": 1,
           "gate": { "floor": 1, "relations": [
             { "to": "the quarter-size JPEG page at 300 dpi", "at_most": 0.3 } ] } },
@@ -595,7 +596,7 @@
         "render/render an ICC page under each rendering intent at 150 dpi",
         "render/the half-size JPEG page at 72 dpi",
         "render/the quarter-size JPEG page at 300 dpi",
-        "render/a second render of the quarter-size JPEG page at 300 dpi",
+        "render/a second render of the quarter-size JPEG page at 300 dpi under a 64 MiB budget",
         "render/the quarter-size JPEG 2000 page at 72 dpi",
         "render/the half-size G4 scan page at 150 dpi",
         "render/the half-size JBIG2 scan page at 150 dpi",

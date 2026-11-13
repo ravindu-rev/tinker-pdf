@@ -862,7 +862,7 @@ each costs, and where the cost is read from:
 | Three checkouts, the toolchain and the cache | once | — | the run's log |
 | Three release builds of the thirteen bench binaries and `tpdf` | 3 × b, each bench binary a link under the release profile's thin LTO and single codegen unit (`Cargo.toml:86-88`) | — | the run's log |
 | 10 rounds × 3 builds × 138 operations, 11 iterations each | 330 × Σt | Σt, the time of one iteration of every operation, 207.7 s: 1 142 min | MS-04.10's figures |
-| Setup inside an iteration, untimed | 330 × s | s = 652 ms, the 72-dpi first render of `a second render of the JPEG page at 300 dpi` (`iter_batched`): 3.6 min | MS-04.10's figures |
+| Setup inside an iteration, untimed | 330 × s | s, the 150-dpi first render of `a second render of the quarter-size JPEG page at 300 dpi under a 64 MiB budget` (`iter_batched`), taken at tier P's 652 ms for the A4 JPEG page at 72 dpi, whose JPEG holds sixteen times its samples, as a bound: 3.6 min | MS-04.10's figures |
 | 4 140 processes: start, criterion's analysis, its files | 4 140 × p | — | the run's log |
 | Two calls of `bench-check --paired`, and keeping the rounds | once | — | the run's log |
 
@@ -1282,7 +1282,7 @@ text of the document the operation reads, so all six stay inside the group.
 | `render/render an ICC page under each rendering intent at 150 dpi` | pixels · 1240×1755 | `intents_page()`: in each of four columns, under one of Table 69's intents by `ri`, a fill, `photo(310, 438, 0)` and an axial shading in an `ICCBased` space over a profile carrying a table for each intent on a media white other than D50 (RC-01); held before it is timed to paint each column's fill, image and shading in four colours; the planning baseline, which reads no intent, draws the same page | not in tier P's table; floor 1 | untimed | built |
 | `render/the half-size JPEG page at 72 dpi` | pixels · 298×421 | `jpeg_page_part(2)` | 163 → 8.75, rescaled from A4's 652 → 35; 18.6× | in | built |
 | `render/the quarter-size JPEG page at 300 dpi` | pixels · 620×878 | `jpeg_page_part(4)` | 99.1 → 9.4, rescaled from A4's 1 585 → 150; 10.5× | in | built |
-| `render/a second render of the quarter-size JPEG page at 300 dpi` | pixels · 620×878 | `jpeg_page_part(4)`, after the same `Page` rendered at 72 dpi, untimed | not measured; relation ≤ 30 % of the first (`the quarter-size JPEG page at 300 dpi`) | in | built |
+| `render/a second render of the quarter-size JPEG page at 300 dpi under a 64 MiB budget` | pixels · 620×878 | `jpeg_page_part(4)` opened under a 64 MiB budget stated at open (`CacheLimits`, P-16), after the same `Page` rendered at 150 dpi, untimed: at both resolutions its JPEG is drawn larger than half its samples, so both renders ask its full-size decode and the second is served by the document's cache; held before it is timed to decode no image, miss nothing the document keeps and draw a first 300-dpi render's bytes; the planning baseline, which keeps nothing past a render, opens the page as it is | not measured; relation ≤ 30 % of the first (`the quarter-size JPEG page at 300 dpi`) | in | built |
 | `render/the quarter-size JPEG 2000 page at 72 dpi` | pixels · 149×211 | `jpx_page_part()` | 172 → 15.6, rescaled from A4's 2 753 → 250; 11× | in | built |
 | `render/the half-size G4 scan page at 150 dpi` | pixels · 620×878 | `g4_page(2)` | 160 → 12.5, rescaled from A4's 641 → 50; 12.8× | in | built |
 | `render/the half-size JBIG2 scan page at 150 dpi` | pixels · 620×878 | `jbig2_page(2)` | 219 → 20, rescaled from A4's 875 → 80; 10.9× | in | built |
@@ -3673,21 +3673,38 @@ budget, and nothing they hold passes it. P-16.11's exit holds every case to
 that, at the figures P-16.10a commits, and a case whose peak passes is a
 finding against the kind that held the bytes, never a larger budget.
 
+**The budget each states is 64 MiB**, stated at open, so that the parsed
+objects are charged beside the cache: one for every case, the threaded ones
+and the open of the 23 MB file through the CLI's own open among them, and for
+MS-04's second render. It is room for everything any case's renders compute —
+the largest, `jpeg-300`'s A4 JPEG at full size, 26 MB — so no case draws from
+a reduced decode (*Reduced-resolution decode*) and each case's figure under it
+reads what keeping costs. Each budgeted case is its case again, its name
+ending `-under-64-mib`, run in the same run, so the two peaks it is held
+between are one machine's at one moment; its line in `peak_memory.tsv` names
+it unheld until its first runs are read.
+
 #### What a second render at another dpi reuses
 
 A second render of a page under a stated budget large enough for the page
 reuses every decoded image the second resolution draws at the first's
 reduction (a decode is the same samples at every resolution that asks for it,
-and the resampler draws from it): every image but a JPEG, and a JPEG wherever
-the size it is drawn at gives the same reduction — one that gives another is
-decoded once at that one. It reuses every compiled transform, every
+and the resampler draws from it): every image but a JPEG or a JPEG 2000
+codestream, and those wherever the size they are drawn at gives the same
+reduction — one that gives another is decoded once at that one. It reuses
+every compiled transform, every
 form recording (a recording is a function of the stream and the invoking
 state, never of the canvas — ruling 5 — so a tile and the page hit it too),
 every parsed object and every font program; it rasterises its glyph masks
 again, since a mask's key is its quantised 2x2 and the dpi moves it, and it
 fills, composites and encodes the page again. The images are what the first
 render spent most of its time on in MS-04's 'a second render at another dpi',
-which P-16.11 holds at 30 % of the first.
+which P-16.11 holds at 30 % of the first. So that operation draws its
+quarter-size JPEG page first at 150 dpi, where its 620 by 877 JPEG is drawn
+over more than 438.5 pixels down, past what a half holds, and then at 300
+dpi: both ask the full-size decode, which the first keeps and the second
+reuses, where a first render at 72 dpi would ask a quarter's and leave the
+second to decode again.
 
 ### Milestones
 
