@@ -245,8 +245,12 @@ composites themselves, nested inside `glyf::outline`'s depth and component
 caps.
 
 It asserts what `cff_charstrings` asserts, through `glyf::outline` and the
-`sfnt` subsetter, glyph id for glyph id: the subset keeps every id
-(`crates/tinker-pdf-font/src/subset.rs`).
+`sfnt` subsetter, glyph id for glyph id — the subset keeps every id
+(`crates/tinker-pdf-font/src/subset.rs`) — with the advance the one `hmtx`
+states, and one more: every glyph draws one closed contour for each contour
+it holds, its components' included, so a flag run read one point short or a
+coordinate read in the wrong width shows as a contour that ends or starts in
+the wrong place.
 
 ### JPX codestreams: `jpx_codestream`
 

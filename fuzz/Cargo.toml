@@ -367,3 +367,9 @@ name = "cff_charstrings"
 path = "fuzz_targets/cff_charstrings.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "glyf_outlines"
+path = "fuzz_targets/glyf_outlines.rs"
+test = false
+doc = false

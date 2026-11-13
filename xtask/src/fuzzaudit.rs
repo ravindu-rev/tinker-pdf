@@ -198,6 +198,10 @@ const UNSIGNED: &[(&str, &str)] = &[
     ),
     ("form_script", "a generator over field and action shapes"),
     (
+        "glyf_outlines",
+        "a structured generator: the body chooses an sfnt's glyphs, components and tables",
+    ),
+    (
         "html",
         "HTML is text, and tag soup need not begin with any one tag",
     ),

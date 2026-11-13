@@ -11,6 +11,7 @@ use std::path::PathBuf;
 pub mod cff;
 pub mod content;
 pub mod cos;
+pub mod glyf;
 
 /// A target's input, read front to back as a sequence of decisions.
 ///

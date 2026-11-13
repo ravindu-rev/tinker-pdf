@@ -132,13 +132,13 @@ exception list is a check that has been talked out of firing. `svg` has a
 replay of its own in `crates/tinker-pdf-svg/src/tests.rs`.
 
 `cff_charstrings`, `content_stream`, `cos_syntax`, `crypt`, `crypt_ciphers`,
-`form_script`, `layout`, `render_page` and `signatures` are structured
-generators: the body is carved into fields rather than parsed as a format, so
-every seed reaches the code by construction and there is no reachability
-question of this shape to ask. The seeds of `cff_charstrings`,
-`content_stream` and `cos_syntax` are choice sequences their generators'
-`write_the_fuzz_seeds` write, each named for the feature it reaches
-([design/structured-fuzzing.md](design/structured-fuzzing.md)). `cos_document`,
+`form_script`, `glyf_outlines`, `layout`, `render_page` and `signatures` are
+structured generators: the body is carved into fields rather than parsed as a
+format, so every seed reaches the code by construction and there is no
+reachability question of this shape to ask. The seeds of `cff_charstrings`,
+`content_stream`, `cos_syntax` and `glyf_outlines` are choice sequences their
+generators' `write_the_fuzz_seeds` write, each named for the feature it
+reaches ([design/structured-fuzzing.md](design/structured-fuzzing.md)). `cos_document`,
 `cos_object`, `content_tokenizer`, `icc_profile` and `zip_archive` are covered
 by the signature check above or have no gate to fail at.
 
@@ -207,6 +207,8 @@ twice, so the analytic tier and the goldens remain what say a page is right.
 advance is the width it was written with, and a subset draws every glyph it
 keeps as the font did, which reaches the subsetter's renumbering across the
 bias edges with programs the byte-mutating `cff_subset` seldom builds.
+`glyf_outlines` does the same for `glyf`, and counts contours: every glyph
+must draw one closed contour for each contour it and its components hold.
 
 `cff_subset` is the strongest target and still not exempt: it fuzzes a
 *writer*, and its round trip goes through **this repository's own** parser, so
