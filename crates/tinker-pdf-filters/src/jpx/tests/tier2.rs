@@ -333,3 +333,40 @@ fn overlapping_volumes_emit_each_packet_once() {
     let got = tier2::decode_tiles(&parsed).expect("the layer split decodes");
     assert_eq!(got, want);
 }
+
+/// **A tile that starts inside a precinct sends that precinct in every
+/// positional order**, at every resolution.
+///
+/// B.12.1.3 to B.12.1.5 visit a precinct where its origin falls on the
+/// reference grid, and for the tile's first column also where the tile cuts
+/// a precinct short: "(x = tx0) AND (trx0 · 2^(NL − r) NOT divisible by
+/// 2^(PPx + NL − r))". Here the image starts one sample in, so at resolution
+/// 0 of one decomposition level `trx0` is 1 against two-wide precincts: the
+/// tile's first precinct there is a partial one, and its packet comes at
+/// `x = tx0`. Each of the four packets is empty, so a decoder that drops the
+/// partial precinct reads three and leaves one byte of the tile unread.
+#[test]
+fn a_tile_that_starts_inside_a_precinct_sends_it_in_every_positional_order() {
+    for order in 2..=4u8 {
+        let spec = Spec {
+            xsiz: 8,
+            xosiz: 1,
+            xtsiz: 8,
+            scod: 0x01,
+            progression: order,
+            // PPx = PPy = 1 at resolution 0 and 2 at resolution 1.
+            precincts: vec![0x11, 0x22],
+            ..Spec::default()
+        };
+        let stream = spec.codestream(&[(0, &[0u8; 4])]);
+        let parsed = codestream::parse(&stream).expect("well formed");
+        let tiles = tier2::decode_tiles(&parsed)
+            .unwrap_or_else(|refusal| panic!("progression order {order}: {refusal:?}"));
+        let resolution = &tiles[0].components[0].resolutions[0];
+        assert_eq!(
+            (resolution.pw, resolution.ph),
+            (2, 1),
+            "the first precinct of resolution 0 is a partial one"
+        );
+    }
+}

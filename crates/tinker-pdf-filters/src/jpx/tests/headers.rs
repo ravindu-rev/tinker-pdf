@@ -1501,6 +1501,34 @@ fn tile_parts_out_of_order_are_refused_and_short_ones_are_marked() {
     );
 }
 
+/// A.4.2: "Only the last tile-part in the codestream may contain a 0 for
+/// Psot. If the Psot is 0, this tile-part is assumed to contain all data
+/// until the EOC marker." The part's data stops before the EOC, so the
+/// codestream decodes as the one that states the part's length does.
+#[test]
+fn a_last_tile_part_whose_psot_is_zero_runs_to_the_eoc() {
+    let spec = Spec {
+        xtsiz: 2,
+        ..Spec::default()
+    };
+    let mut stated = spec.main_header();
+    stated.extend_from_slice(&tile_part(0, 0, 1, &[], &EMPTY_PACKETS));
+    let last = stated.len();
+    stated.extend_from_slice(&tile_part(1, 0, 1, &[], &EMPTY_PACKETS));
+    stated.extend_from_slice(&marker::EOC.to_be_bytes());
+    let mut zero = stated.clone();
+    // SOT, Lsot and Isot, then Psot's four bytes.
+    zero[last + 6..last + 10].copy_from_slice(&[0; 4]);
+
+    let limits = Limits::new(1 << 16);
+    let want = jpx_decode(&stated, &limits, &mut Vec::new()).expect("the stated lengths decode");
+    assert_eq!(
+        jpx_decode(&zero, &limits, &mut Vec::new()),
+        Ok(want),
+        "a Psot of zero read the EOC as the tile-part's data"
+    );
+}
+
 /// A.6.1: a coding style marker may only appear in a tile's *first* part.
 /// Honouring one in a later part would change how the earlier parts of the
 /// same tile should have been read, after they were read.

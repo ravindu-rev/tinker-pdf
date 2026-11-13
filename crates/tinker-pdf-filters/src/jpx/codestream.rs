@@ -1849,11 +1849,18 @@ fn tile_part<'a>(
     }
 
     // A.4.2: Psot is the whole tile-part from the first byte of SOT to the
-    // last byte of its data, and 0 means "to the end of the codestream" —
-    // which A.4.2 permits only in the last tile-part.
+    // last byte of its data, and 0 — which A.4.2 permits only in the last
+    // tile-part — means "this tile-part is assumed to contain all data until
+    // the EOC marker": the data stops short of the EOC that ends the
+    // codestream, and runs to the end of one cut off before it.
     let header_len = c.position() - start;
     let body_len = if psot == 0 {
-        c.remaining()
+        let rest = c.remaining();
+        if c.rest().ends_with(&marker::EOC.to_be_bytes()) {
+            rest - 2
+        } else {
+            rest
+        }
     } else {
         usize::try_from(psot)
             .ok()

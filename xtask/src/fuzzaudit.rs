@@ -215,6 +215,10 @@ const UNSIGNED: &[(&str, &str)] = &[
     ("inflate", "a raw DEFLATE stream begins with a bit field"),
     ("jbig2", "an embedded JBIG2 stream has no file header"),
     (
+        "jpx_codestream",
+        "a structured generator: the body chooses a codestream's markers, packets and code-block data",
+    ),
+    (
         "layout",
         "a structured generator: the body names a tree of boxes",
     ),

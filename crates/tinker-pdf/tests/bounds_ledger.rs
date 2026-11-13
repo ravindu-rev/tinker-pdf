@@ -693,6 +693,7 @@ const FUZZ_INFLATE: &str = include_str!("../../../fuzz/fuzz_targets/inflate.rs")
 const FUZZ_JBIG2: &str = include_str!("../../../fuzz/fuzz_targets/jbig2.rs");
 const FUZZ_JPEG: &str = include_str!("../../../fuzz/fuzz_targets/jpeg.rs");
 const FUZZ_JPX: &str = include_str!("../../../fuzz/fuzz_targets/jpx.rs");
+const FUZZ_JPX_CODESTREAM: &str = include_str!("../../../fuzz/fuzz_targets/jpx_codestream.rs");
 const FUZZ_JXR: &str = include_str!("../../../fuzz/fuzz_targets/jxr.rs");
 const FUZZ_LZW: &str = include_str!("../../../fuzz/fuzz_targets/lzw.rs");
 const FUZZ_PNG: &str = include_str!("../../../fuzz/fuzz_targets/png.rs");
@@ -706,6 +707,7 @@ const FUZZ_GEN_CFF: &str = include_str!("../../../fuzz/src/cff.rs");
 const FUZZ_GEN_CONTENT: &str = include_str!("../../../fuzz/src/content.rs");
 const FUZZ_GEN_COS: &str = include_str!("../../../fuzz/src/cos.rs");
 const FUZZ_GEN_GLYF: &str = include_str!("../../../fuzz/src/glyf.rs");
+const FUZZ_GEN_JPX: &str = include_str!("../../../fuzz/src/jpx.rs");
 const FONT_OUTLINE: &str = include_str!("../../tinker-pdf-font/src/outline.rs");
 const FONT_CFF_SUBSET: &str = include_str!("../../tinker-pdf-font/src/cff_subset.rs");
 const ARCHIVE_BZIP2: &str = include_str!("../../tinker-pdf-archive/src/bzip2.rs");
@@ -3856,6 +3858,44 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                  (estimate); the bare and the boxed input decode one after another",
             )],
             vec![(FUZZ_JPX, "_ => 1 << 20")],
+        ),
+        written(
+            "jpx_codestream",
+            vec![
+                buffer(
+                    Value(1 << 22),
+                    1,
+                    1,
+                    "the generated codestream, under 4 MiB at its generator's caps: images                      of 40 samples a side in four components over three tiles across, four                      layers, thirteen passes a code-block, and pieces of raw code-block data                      of twelve bytes, which the input's own length bounds (estimate)",
+                ),
+                buffer(
+                    Value(1 << 22),
+                    8,
+                    1,
+                    "the generator's model and its copies: the code-blocks with their                      pieces, the tag trees, each tile's packets and parts, and the                      codestream they are joined into (estimate)",
+                ),
+                buffer(
+                    Value(1 << 22),
+                    4,
+                    1,
+                    "the decode's state: each tile's data joined from its parts, and its                      precincts, code-blocks and coefficients (estimate)",
+                ),
+                buffer(
+                    Value(1 << 20),
+                    6,
+                    1,
+                    "the output at the target's ceiling, and the wavelet's 32-bit planes                      (estimate)",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_JPX, "pub const MAX_SIZE: i64 = 40;"),
+                (FUZZ_GEN_JPX, "pub const MAX_COMPONENTS: usize = 4;"),
+                (FUZZ_GEN_JPX, "pub const MAX_LAYERS: u16 = 4;"),
+                (FUZZ_GEN_JPX, "pub const MAX_TILES_ACROSS: i64 = 3;"),
+                (FUZZ_GEN_JPX, "pub const MAX_PASSES: u32 = 13;"),
+                (FUZZ_GEN_JPX, "pub const MAX_PIECE: usize = 12;"),
+                (FUZZ_JPX_CODESTREAM, "const CEILING: usize = 1 << 20;"),
+            ],
         ),
         written(
             "jxr",

@@ -373,3 +373,9 @@ name = "glyf_outlines"
 path = "fuzz_targets/glyf_outlines.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "jpx_codestream"
+path = "fuzz_targets/jpx_codestream.rs"
+test = false
+doc = false

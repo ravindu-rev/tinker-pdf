@@ -28,6 +28,7 @@ inflate	327	3	512
 jbig2	379	17	512
 jpeg	557	209	512
 jpx	336	13	512
+jpx_codestream	453	65	512
 jxr	334	11	512
 layout	1763	1025	512
 lzw	325	3	512

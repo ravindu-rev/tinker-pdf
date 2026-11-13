@@ -254,19 +254,30 @@ the wrong place.
 
 ### JPX codestreams: `jpx_codestream`
 
-The generator writes a codestream (T.800 Annex A) whose markers agree: SIZ's
-image and tile geometry and components; COD and COC's progression, layers,
-component transform, decomposition levels, code-block size and style, and
-wavelet; QCD and QCC, consistent with the wavelet and the levels; POC; and
-tile-parts whose `Psot` is honest. Packet headers follow the declared
-progression (Annex B) — the inclusion and zero-bit-plane tag trees, pass counts
-and lengths, empty packets — and code-block bytes come from `bytes`. One field
-may be broken, on a choice the generator records.
+The generator, `fuzz/src/jpx.rs`, writes a codestream (T.800 Annex A) whose
+markers agree: SIZ's image and tile geometry and components; COD and COC's
+progression, layers, component transform, decomposition levels, code-block size
+and style, and wavelet, in the main header and in a tile's first tile-part
+header; QCD and QCC, each fitting the wavelet and the levels of every
+tile-component it serves by A.6's precedence; POC volumes, in the main header
+and a tile's, the last covering what the others left; and tile-parts cut at
+packet boundaries and interleaved between tiles, `TNsot` stated or not, whose
+`Psot` is honest, or zero for the last. Packet headers follow the declared
+progression (Annex B) — the inclusion and zero-bit-plane tag trees, pass counts,
+`Lblock` and one length per codeword segment, empty packets — in the bit stream,
+in PPT or in PPM. Code-block data is the input's own bytes, kept to what an
+arithmetic coder can emit, or Annex D's coding of generated coefficients through
+an MQ encoder (C.2), D.6's raw bits and D.3's context model of the module's own,
+which is how segmentation symbols are written. One field may be broken, on a
+choice the generator records: set to a value the standard rules out.
 
 It asserts that a codestream with nothing broken decodes to the generated
 width, height and component count, and that one with a field broken decodes
-to them too or is refused with a message naming the marker that holds the
-field.
+to them too or is refused with a reason naming the field — its marker, T.800's
+name for it, or the words for what it is. The MQ encoder's decisions are held
+apart, by a unit test that reads them back through the engine's MQ decoder; a
+context the encoder forms otherwise than tier-1 then shows as a segmentation
+symbol that is not `1010`.
 
 ### XML and HTML: `xml_structured` and `html_structured`
 

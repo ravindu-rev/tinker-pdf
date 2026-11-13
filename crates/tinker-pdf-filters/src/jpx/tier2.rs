@@ -1340,11 +1340,17 @@ fn precinct_at(
 
     // The second half of each test is the tile's own first row and column:
     // the tile does not start on a precinct boundary, and its first precinct
-    // is a partial one that still has to be emitted.
-    let on_x = x % rpx == 0
-        || (x == u64::from(tx0) && ((u64::from(res.x0) << nb) % (1u64 << u32::from(res.ppx))) != 0);
-    let on_y = y % rpy == 0
-        || (y == u64::from(ty0) && ((u64::from(res.y0) << nb) % (1u64 << u32::from(res.ppy))) != 0);
+    // is a partial one that still has to be emitted. B.12.1.3 writes it
+    // "(x = tx0) AND (trx0 · 2^(NL − r) NOT divisible by 2^(PPx + NL − r))",
+    // the divisor carrying the levels as the multiplier does; a divisor of
+    // 2^PPx alone drops that first precinct at every resolution below the
+    // full one.
+    let (px_span, py_span) = (
+        1u64 << (nb + u32::from(res.ppx)).min(48),
+        1u64 << (nb + u32::from(res.ppy)).min(48),
+    );
+    let on_x = x % rpx == 0 || (x == u64::from(tx0) && ((u64::from(res.x0) << nb) % px_span) != 0);
+    let on_y = y % rpy == 0 || (y == u64::from(ty0) && ((u64::from(res.y0) << nb) % py_span) != 0);
     if !on_x || !on_y {
         return None;
     }

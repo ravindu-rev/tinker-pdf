@@ -315,7 +315,11 @@ zero and a packet already emitted is not emitted again (A.6.6 on `LYEpoc`),
 which is what makes "the layer always starts with the next one"; and a tile's
 own volumes may be spread across its tile-part headers (B.12.3's Figure
 B.15b), joined in `TPsot` order, provided the first tile-part header carries
-one.
+one. The three positional orders visit a precinct where its origin falls on
+the reference grid, and, where a tile cuts its first precinct short, at the
+tile's first row or column: B.12.1.3's test that `trx0 · 2^(NL − r)` is not a
+multiple of `2^(PPx + NL − r)`, at every resolution. A last tile-part whose
+`Psot` is zero holds the data up to the EOC (A.4.2).
 
 *What a skipped POC costs is pinned.* T.800 J.10's own
 two published packets, swapped and described by a two-volume POC, decode to

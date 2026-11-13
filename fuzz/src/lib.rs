@@ -12,6 +12,7 @@ pub mod cff;
 pub mod content;
 pub mod cos;
 pub mod glyf;
+pub mod jpx;
 
 /// A target's input, read front to back as a sequence of decisions.
 ///
