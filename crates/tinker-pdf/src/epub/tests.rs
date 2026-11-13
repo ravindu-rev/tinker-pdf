@@ -3218,6 +3218,7 @@ fn matching_faces() -> super::typeface::FaceSet {
             path: format!("fonts/{family}.otf"),
             program: coverage_program(ranges),
             resource: Vec::new(),
+            plans: tinker_pdf_shape::Plans::new(),
         }
     };
     FaceSet::of(vec![
