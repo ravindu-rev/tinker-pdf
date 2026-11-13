@@ -1,11 +1,11 @@
-//! Nine committed font corpora, replayed on stable, measured for *reach*.
+//! Ten committed font corpora, replayed on stable, measured for *reach*.
 //!
-//! `woff_seeds.rs` does the same for `fuzz/corpus/woff`. These nine share a
-//! file because they share a shape: eight of the nine targets open by parsing
+//! `woff_seeds.rs` does the same for `fuzz/corpus/woff`. These ten share a
+//! file because they share a shape: eight of the ten targets open by parsing
 //! their input — `let Some(x) = X::parse(data) else { return; }`, or
-//! `type42`'s `let Ok(…)` — and return at once where it does not parse, so a
-//! seed that does not parse makes the whole target a no-op and the fuzzer
-//! spends its budget mutating something that was never a font.
+//! `type42`'s and `cff2`'s `let Ok(…)` — and return at once where it does not
+//! parse, so a seed that does not parse makes the whole target a no-op and
+//! the fuzzer spends its budget mutating something that was never a font.
 //!
 //! # Why "it did not panic" is not the question here
 //!
