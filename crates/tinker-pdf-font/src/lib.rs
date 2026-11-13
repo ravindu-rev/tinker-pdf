@@ -31,7 +31,7 @@ pub use encoding::{
     BuiltInEncoding,
 };
 pub use outline::{Outline, Segment};
-pub use sfnt::Sfnt;
+pub use sfnt::{Sfnt, VerticalOrigins};
 pub use subset::{glyphs_for, subset};
 pub use symbolic::{substitute_glyph, SymbolRoute};
 pub use type1::Type1;

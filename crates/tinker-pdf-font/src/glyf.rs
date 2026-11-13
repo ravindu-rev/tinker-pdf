@@ -40,13 +40,22 @@ fn i16_at(data: &[u8], at: usize) -> Option<i16> {
 
 /// The `loca` table: where each glyph's data begins.
 fn glyph_range(sfnt: &Sfnt, glyph: u16) -> Option<(usize, usize)> {
+    let (start, end) = glyph_slot(sfnt, glyph)?;
+    // An empty range is a glyph with no outline, such as a space.
+    (end > start).then_some((start, end))
+}
+
+/// The two `loca` entries that bound a glyph's data, empty or not: `None`
+/// only for a face whose `head` or `loca` cannot say, or a glyph past the
+/// end of `loca`.
+fn glyph_slot(sfnt: &Sfnt, glyph: u16) -> Option<(usize, usize)> {
     let head = sfnt.table(0x6865_6164)?;
     // head.indexToLocFormat: 0 means 16-bit offsets stored halved.
     let long_format = i16_at(head, 50)? != 0;
     let loca = sfnt.table(0x6C6F_6361)?;
 
     let index = usize::from(glyph);
-    let (start, end) = if long_format {
+    Some(if long_format {
         (
             be32(loca, index * 4)? as usize,
             be32(loca, index * 4 + 4)? as usize,
@@ -56,10 +65,51 @@ fn glyph_range(sfnt: &Sfnt, glyph: u16) -> Option<(usize, usize)> {
             usize::from(be16(loca, index * 2)?) * 2,
             usize::from(be16(loca, index * 2 + 2)?) * 2,
         )
-    };
+    })
+}
 
-    // An empty range is a glyph with no outline, such as a space.
-    (end > start).then_some((start, end))
+/// A glyph's bounding box as its `glyf` header states it, in font units.
+///
+/// The four `FWORD`s every glyph's data begins with after its contour
+/// count, simple and composite alike, read as written: nothing here
+/// recomputes them from the points, because the `vmtx` clause defines a
+/// glyph's vertical origin against *this* `yMax` and a face's top side
+/// bearings were computed from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Bounds {
+    /// The leftmost x.
+    pub x_min: i16,
+    /// The lowest y.
+    pub y_min: i16,
+    /// The rightmost x.
+    pub x_max: i16,
+    /// The highest y: the top the `vmtx` clause adds a top side bearing to.
+    pub y_max: i16,
+}
+
+/// A glyph's bounds from its `glyf` header.
+///
+/// A glyph with no outline — a space, whose `loca` range is empty — has the
+/// origin point for its box, all four zero, so the vertical origin the `vmtx`
+/// clause builds from it is its top side bearing alone. `None` for a face with
+/// no `glyf`, `loca` or `head`, a glyph past the end of `loca`, and a glyph
+/// whose data is too short to hold the header.
+#[must_use]
+pub fn bounds(sfnt: &Sfnt, glyph: u16) -> Option<Bounds> {
+    let glyf = sfnt.table(0x676C_7966)?;
+    let (start, end) = glyph_slot(sfnt, glyph)?;
+    if end <= start {
+        // `glyph_range` reads the same two entries as no outline, and an
+        // outline with nothing in it has nothing to bound.
+        return Some(Bounds::default());
+    }
+    let data = glyf.get(start..end)?;
+    Some(Bounds {
+        x_min: i16_at(data, 2)?,
+        y_min: i16_at(data, 4)?,
+        x_max: i16_at(data, 6)?,
+        y_max: i16_at(data, 8)?,
+    })
 }
 
 /// Reads one glyph's outline in font units.
@@ -530,6 +580,64 @@ mod tests {
         g.extend_from_slice(&0i16.to_be_bytes());
         g.extend_from_slice(&100i16.to_be_bytes());
         g
+    }
+
+    /// The header's box is read as written, not recomputed from the points:
+    /// the triangle's points reach 100 on both axes and its header is made to
+    /// say otherwise, so a reader that bounded the points would answer 100.
+    #[test]
+    fn the_bounds_are_the_headers_as_written() {
+        let mut glyph = triangle();
+        glyph[2..4].copy_from_slice(&(-12i16).to_be_bytes()); // xMin
+        glyph[4..6].copy_from_slice(&(-34i16).to_be_bytes()); // yMin
+        glyph[6..8].copy_from_slice(&456i16.to_be_bytes()); // xMax
+        glyph[8..10].copy_from_slice(&789i16.to_be_bytes()); // yMax
+        let data = font_with_glyph(&glyph);
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(
+            bounds(&sfnt, 0),
+            Some(Bounds {
+                x_min: -12,
+                y_min: -34,
+                x_max: 456,
+                y_max: 789,
+            })
+        );
+    }
+
+    /// A glyph whose `loca` range is empty has the origin point for its box,
+    /// and a glyph past `loca` has no box at all.
+    #[test]
+    fn an_empty_glyph_is_bounded_at_its_origin_and_a_missing_one_not_at_all() {
+        let triangle = triangle();
+        let data = font_with_glyphs(&[triangle.as_slice(), &[][..]]);
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(bounds(&sfnt, 1), Some(Bounds::default()), "an empty glyph");
+        assert_eq!(bounds(&sfnt, 2), None, "past the end of loca");
+        assert_eq!(bounds(&sfnt, u16::MAX), None);
+    }
+
+    /// A glyph's data shorter than the ten bytes of its header, and a face
+    /// with no `glyf` at all, answer `None` rather than a box made up.
+    #[test]
+    fn a_truncated_header_or_a_missing_table_has_no_bounds() {
+        let data = font_with_glyph(&[0x00, 0x01, 0x00, 0x00]);
+        let sfnt = Sfnt::parse(&data).expect("a font");
+        assert_eq!(bounds(&sfnt, 0), None, "four bytes of a ten-byte header");
+
+        let mut head = vec![0u8; 54];
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        let mut face = Vec::new();
+        face.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        face.extend_from_slice(&1u16.to_be_bytes());
+        face.extend_from_slice(&[0; 6]);
+        face.extend_from_slice(b"head");
+        face.extend_from_slice(&0u32.to_be_bytes());
+        face.extend_from_slice(&28u32.to_be_bytes());
+        face.extend_from_slice(&(head.len() as u32).to_be_bytes());
+        face.extend_from_slice(&head);
+        let sfnt = Sfnt::parse(&face).expect("a font with only head");
+        assert_eq!(bounds(&sfnt, 0), None, "no glyf, no loca");
     }
 
     #[test]

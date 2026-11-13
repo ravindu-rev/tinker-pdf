@@ -59,6 +59,28 @@ a face with no `glyf` routes its `CFF ` table into the CFF path. Without that
 routing such a font would parse, find no `glyf`, and draw every glyph as an
 empty outline that reads as a legitimate space.
 
+**Vertical metrics** (the `vhea`, `vmtx` and `VORG` clauses).
+`Sfnt::vertical_advance` and `Sfnt::top_side_bearing` read `vmtx` the way
+`hmtx` is read: `vhea`'s `numOfLongVerMetrics` long entries, kept from the
+parse as `hhea`'s count is, the last advance repeating past them, and a side
+bearing each for the glyphs after them from the array that follows, up to
+`maxp`'s glyph count. `Sfnt::vorg_origin` reads `VORG`'s record for a glyph
+or its default, its count bounded by what the table holds and its records
+bisected where they are in order and scanned as written where they are not.
+`Sfnt::vertical_origin` is the `vmtx` clause's: the top side bearing plus the
+top of the glyph's box — the `yMax` of its `glyf` header (`glyf::bounds`) for
+TrueType outlines, beside which a `VORG` is ignored as its own clause
+requires; for CFF outlines `VORG`'s origin, or without one the top of the
+outline the charstring draws, control points included. A caller asking for
+many glyphs makes one `Sfnt::vertical_origins` view, which decides the source
+once and parses the `CFF ` table once where it is needed; `Sfnt` itself keeps
+nothing that borrows its bytes, so a face stays covariant in its lifetime. A
+glyph with no outline is bounded at its origin, so its origin is its side
+bearing; a `CFF2` face, which the CFF path does not read, has `VORG`'s origin
+or none. A face without the tables, a count of zero, or a
+read past a table's end answers `None`, and what a shaper sets then is
+[design/shaping.md](../design/shaping.md)'s *Vertical shaping*.
+
 **Type 1** (9.9, `/FontFile`). `Type1::parse` reads PFB, PFA and the bare
 bytes a PDF embeds: eexec decryption, the second decryption layer around each
 charstring with the font's own `/lenIV`, and Type 1 charstrings — `hsbw`'s
@@ -1005,6 +1027,17 @@ corpora already vendored here. So every name stays on the list.
   mapped. Each read gives back what was written, alike through the uncounted
   doors, and a subtable and a CMap written out of order still match the entry
   written first.
+- `crates/tinker-pdf-font/src/sfnt.rs`, `glyf.rs` and `cff.rs` — vertical
+  metrics against synthetic tables: every advance height, side bearing and
+  `VORG` origin reads back as written, the last advance repeating past the
+  long metrics; a face without `vhea` or `vmtx`, with a count of zero, a
+  `vhea` too short for its count or a `VORG` of another major version answers
+  `None`; a `vmtx` shorter than `vhea` claims answers `None` past its end; a
+  `VORG` beside `glyf` is ignored for the header's `yMax`; a CFF face takes
+  `VORG`'s origin, and without one its charstring's top; `VORG` records out of
+  order or overcounted are read as written; and `glyf::bounds` reads the
+  header as written, bounds an empty glyph at its origin and a missing one
+  not at all. The `sfnt` fuzz target asks for each of them.
 - `crates/tinker-pdf/src/fontlist.rs` — unit tests beside the listing:
   9.6.4's subset-tag shape in both directions (seven strings that are not a
   tag, each for its own reason), a descriptor deciding embedding, a

@@ -1,8 +1,11 @@
 //! TrueType and OpenType font programs: the tables metrics need.
 //!
-//! Wave 1 reads only what text extraction and layout require — the table
-//! directory, `head`, `hhea`, `hmtx`, `cmap` and `post`. Glyph outlines are
-//! wave 2; nothing here touches `glyf` or `CFF `.
+//! What text extraction and layout require — the table directory, `head`,
+//! `hhea`, `hmtx`, `cmap` and `post` — and the vertical metrics a column is
+//! shaped with: `vhea`, `vmtx` and `VORG`. Outlines are [`crate::glyf`]'s and
+//! [`crate::cff`]'s; the one place this reaches either is a glyph's vertical
+//! origin, which the `vmtx` clause defines against the top of the glyph's
+//! bounding box ([`Sfnt::vertical_origin`]).
 //!
 //! Beside the one `cmap` subtable text is looked up in, two more are read on
 //! their own for the route `docs/design/symbol-faces.md` settles: a Unicode
@@ -14,7 +17,16 @@
 
 use std::sync::OnceLock;
 
+use crate::cff::Cff;
+
 /// A parsed table directory over borrowed bytes.
+///
+/// What it keeps beside the bytes holds no borrow of them — the `cmap`
+/// subtables chosen and `VORG`'s order are numbers — so a face stays
+/// covariant in its lifetime and a `&'a Sfnt<'b>` can be handed wherever a
+/// shorter face is asked for. A parsed `CFF ` table borrows, so it is kept by
+/// [`VerticalOrigins`], the view a caller reading many origins makes once,
+/// and never here.
 #[derive(Clone, Debug)]
 pub struct Sfnt<'a> {
     /// The `cmap` subtable characters are looked up in, chosen at the first
@@ -26,6 +38,10 @@ pub struct Sfnt<'a> {
     /// The (3,0) symbol subtable [`Sfnt::glyph_for_symbol_code`] reads, chosen
     /// at its first lookup and kept.
     symbol_cmap: OnceLock<Option<CmapChoice>>,
+    /// Whether `VORG`'s records are in the ascending glyph order the clause
+    /// requires, checked at the first lookup and kept: in order they are
+    /// bisected, out of order scanned as written.
+    vorg_sorted: OnceLock<bool>,
     data: &'a [u8],
     tables: Vec<(u32, u32, u32)>,
     /// The `sfntVersion` of the directory these tables came from.
@@ -40,6 +56,10 @@ pub struct Sfnt<'a> {
     pub units_per_em: u16,
     /// Number of `hmtx` entries with their own advance, from `hhea`.
     num_h_metrics: u16,
+    /// Number of `vmtx` entries with their own advance height, from `vhea`'s
+    /// `numOfLongVerMetrics`; `None` for a face without a `vhea` that holds
+    /// the count.
+    num_v_metrics: Option<u16>,
 }
 
 fn be16(data: &[u8], at: usize) -> Option<u16> {
@@ -57,6 +77,11 @@ const TAG_HEAD: u32 = 0x6865_6164;
 const TAG_HHEA: u32 = 0x6868_6561;
 const TAG_MAXP: u32 = 0x6D61_7870;
 const TAG_POST: u32 = 0x706F_7374;
+const TAG_VHEA: u32 = 0x7668_6561;
+const TAG_VMTX: u32 = 0x766D_7478;
+const TAG_VORG: u32 = 0x564F_5247;
+const TAG_GLYF: u32 = 0x676C_7966;
+const TAG_CFF: u32 = 0x4346_4620;
 
 /// The `cmap` subtable a face's characters are looked up in (9.6.6.4).
 #[derive(Clone, Copy, Debug)]
@@ -123,11 +148,13 @@ impl<'a> Sfnt<'a> {
             cmap: OnceLock::new(),
             unicode_cmap: OnceLock::new(),
             symbol_cmap: OnceLock::new(),
+            vorg_sorted: OnceLock::new(),
             data,
             tables,
             version: tag,
             units_per_em: 1000,
             num_h_metrics: 0,
+            num_v_metrics: None,
         };
 
         if let Some(head) = sfnt.table_with(TAG_HEAD, steps) {
@@ -138,6 +165,11 @@ impl<'a> Sfnt<'a> {
         }
         if let Some(hhea) = sfnt.table_with(TAG_HHEA, steps) {
             sfnt.num_h_metrics = be16(hhea, 34).unwrap_or(0);
+        }
+        // `vhea` keeps its count where `hhea` keeps its own, at offset 34, in
+        // both of its versions.
+        if let Some(vhea) = sfnt.table_with(TAG_VHEA, steps) {
+            sfnt.num_v_metrics = be16(vhea, 34);
         }
 
         Some(sfnt)
@@ -185,6 +217,136 @@ impl<'a> Sfnt<'a> {
         }
         let index = glyph.min(self.num_h_metrics - 1);
         be16(hmtx, usize::from(index) * 4)
+    }
+
+    /// The face's glyph count, from `maxp`, where it has one.
+    fn glyph_count(&self) -> Option<u16> {
+        be16(self.table(TAG_MAXP)?, 4)
+    }
+
+    /// A glyph's advance height, in font units, from `vmtx`.
+    ///
+    /// `vmtx` is `hmtx` stood on end: `vhea`'s `numOfLongVerMetrics` entries
+    /// carry an advance height and a top side bearing each, and every glyph
+    /// past them repeats the last advance, as a monospaced face's glyphs do.
+    /// `None` for a face without a `vhea` or a `vmtx`, a count of zero, or an
+    /// entry past the end of the table: a `vmtx` shorter than `vhea` claims is
+    /// read as far as it goes and no further.
+    #[must_use]
+    pub fn vertical_advance(&self, glyph: u16) -> Option<u16> {
+        let count = self.num_v_metrics.filter(|count| *count > 0)?;
+        let vmtx = self.table(TAG_VMTX)?;
+        let index = glyph.min(count - 1);
+        be16(vmtx, usize::from(index) * 4)
+    }
+
+    /// A glyph's top side bearing, in font units, from `vmtx`: the distance
+    /// from its vertical origin down to the top of its bounding box.
+    ///
+    /// A glyph inside the long metrics reads its own; one past them reads the
+    /// array of side bearings after them, which the `vmtx` clause sizes to the
+    /// face's glyph count, so a glyph at or past `maxp`'s count has none.
+    /// `None` wherever [`Sfnt::vertical_advance`] is, and for a read past the
+    /// end of the table.
+    #[must_use]
+    pub fn top_side_bearing(&self, glyph: u16) -> Option<i16> {
+        let count = self.num_v_metrics.filter(|count| *count > 0)?;
+        let vmtx = self.table(TAG_VMTX)?;
+        let at = if glyph < count {
+            usize::from(glyph) * 4 + 2
+        } else {
+            if self.glyph_count().is_some_and(|glyphs| glyph >= glyphs) {
+                return None;
+            }
+            usize::from(count) * 4 + usize::from(glyph - count) * 2
+        };
+        be16(vmtx, at).map(|bearing| bearing as i16)
+    }
+
+    /// `VORG`'s vertical origin for a glyph: its record, or the table's
+    /// default for a glyph it has none for.
+    ///
+    /// As the table states it, whatever outlines the face has; which of the
+    /// two a column takes is [`Sfnt::vertical_origin`]'s question. `None` for
+    /// a face without a `VORG`, or one whose major version is not 1, the only
+    /// one written down. The record count is bounded by what the table holds,
+    /// and the records are bisected where they are in the ascending order the
+    /// clause requires and scanned as written where they are not, the first
+    /// match winning, as an out-of-order `cmap` subtable is.
+    #[must_use]
+    pub fn vorg_origin(&self, glyph: u16) -> Option<i16> {
+        let vorg = self.table(TAG_VORG)?;
+        if be16(vorg, 0)? != 1 {
+            return None;
+        }
+        let default = be16(vorg, 4)? as i16;
+        let count = usize::from(be16(vorg, 6)?).min(vorg.len().saturating_sub(8) / 4);
+        let record = |n: usize| -> Option<(u16, i16)> {
+            let at = 8 + n * 4;
+            Some((be16(vorg, at)?, be16(vorg, at + 2)? as i16))
+        };
+        let sorted = *self.vorg_sorted.get_or_init(|| {
+            (1..count).all(|n| match (record(n - 1), record(n)) {
+                (Some((before, _)), Some((after, _))) => before < after,
+                _ => false,
+            })
+        });
+        let found = if sorted {
+            let (mut low, mut high) = (0usize, count);
+            let mut hit = None;
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let Some((at, origin)) = record(middle) else {
+                    break;
+                };
+                match at.cmp(&glyph) {
+                    core::cmp::Ordering::Less => low = middle + 1,
+                    core::cmp::Ordering::Greater => high = middle,
+                    core::cmp::Ordering::Equal => {
+                        hit = Some(origin);
+                        break;
+                    }
+                }
+            }
+            hit
+        } else {
+            (0..count).find_map(|n| {
+                record(n)
+                    .filter(|(at, _)| *at == glyph)
+                    .map(|(_, origin)| origin)
+            })
+        };
+        Some(found.unwrap_or(default))
+    }
+
+    /// The y of a glyph's vertical origin, in font units: where a column's
+    /// pen stands above the glyph.
+    ///
+    /// [`VerticalOrigins::origin`] through a view made for this one glyph. A
+    /// caller asking for many glyphs makes the view once
+    /// ([`Sfnt::vertical_origins`]), because for a CFF face without `VORG` the
+    /// view is where the `CFF ` table is parsed.
+    #[must_use]
+    pub fn vertical_origin(&self, glyph: u16) -> Option<i32> {
+        self.vertical_origins().origin(glyph)
+    }
+
+    /// The face's vertical origins, for as many glyphs as a caller asks.
+    ///
+    /// Which source the face's origins come from is decided here, once: its
+    /// `glyf` headers for TrueType outlines, its `VORG` for CFF outlines that
+    /// carry one, and otherwise its `CFF ` table, parsed here and kept by the
+    /// view so a column of glyphs parses it once.
+    #[must_use]
+    pub fn vertical_origins(&self) -> VerticalOrigins<'_, 'a> {
+        let source = if self.table(TAG_GLYF).is_some() {
+            OriginSource::Glyf
+        } else if self.vorg_origin(0).is_some() {
+            OriginSource::Vorg
+        } else {
+            OriginSource::Cff(self.table(TAG_CFF).and_then(Cff::parse))
+        };
+        VerticalOrigins { face: self, source }
     }
 
     /// A character's glyph index, through the best `cmap` subtable available.
@@ -699,6 +861,74 @@ const MAC_STANDARD_NAMES: [&str; 258] = [
     "dcroat",
 ];
 
+/// Where a face's vertical origins come from, decided once per view.
+#[derive(Clone, Debug)]
+enum OriginSource<'a> {
+    /// TrueType outlines: each glyph's `glyf` header.
+    Glyf,
+    /// CFF outlines with a `VORG`, the `VORG` clause's shortcut past the box.
+    Vorg,
+    /// CFF outlines without one: each glyph's charstring, through the parsed
+    /// `CFF ` table, or nothing where the face has no table this crate reads.
+    Cff(Option<Cff<'a>>),
+}
+
+/// A face's vertical origins, read for as many glyphs as a caller asks
+/// ([`Sfnt::vertical_origins`]).
+///
+/// The `vmtx` clause's definition: a glyph's vertical origin is its top side
+/// bearing plus the top of its bounding box. Which box is a question for the
+/// face's outlines:
+///
+/// - **TrueType outlines** (a `glyf` table): the `yMax` its header states
+///   ([`crate::glyf::bounds`]). A `VORG` is ignored, as the `VORG` clause
+///   requires of a face with TrueType outlines.
+/// - **CFF outlines** (a `CFF ` table): `VORG`'s origin where the face has
+///   one, which is the clause's own shortcut past the box; without one, the top
+///   of the glyph's outline as its charstring draws it, control points
+///   included ([`crate::Outline::bounds`]) and rounded to a unit — the bounding
+///   box wherever the outline has a point at its topmost extreme. A `CFF2`
+///   face, which [`Cff`] does not read, has `VORG`'s origins or none.
+///
+/// A glyph with no outline has the origin point for its box, so its vertical
+/// origin is its top side bearing.
+#[derive(Clone, Debug)]
+pub struct VerticalOrigins<'s, 'a> {
+    face: &'s Sfnt<'a>,
+    source: OriginSource<'a>,
+}
+
+impl VerticalOrigins<'_, '_> {
+    /// The y of a glyph's vertical origin, in font units.
+    ///
+    /// `None` for a glyph with no top side bearing and no `VORG` to stand in
+    /// for one, or no box to add one to: a glyph past `loca`, a charstring the
+    /// face does not have, a face with no outline table this crate reads.
+    #[must_use]
+    pub fn origin(&self, glyph: u16) -> Option<i32> {
+        match &self.source {
+            OriginSource::Glyf => {
+                let top = crate::glyf::bounds(self.face, glyph)?.y_max;
+                let bearing = self.face.top_side_bearing(glyph)?;
+                Some(i32::from(top) + i32::from(bearing))
+            }
+            OriginSource::Vorg => self.face.vorg_origin(glyph).map(i32::from),
+            OriginSource::Cff(cff) => {
+                let bearing = self.face.top_side_bearing(glyph)?;
+                let outline = cff.as_ref()?.outline(glyph)?;
+                // An outline that draws nothing is bounded at its origin.
+                let top = outline.bounds().map_or(0, |(_, _, _, top)| {
+                    // `bounds` passes over every point that is not finite, so
+                    // `top` is finite; the clamp holds a hostile charstring's
+                    // inside `i32`.
+                    top.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+                });
+                Some(top.saturating_add(i32::from(bearing)))
+            }
+        }
+    }
+}
+
 /// Whether a format 4, 12 or 13 subtable's entries are in the order its
 /// format requires, every one readable, counting each entry read.
 ///
@@ -1165,6 +1395,268 @@ mod tests {
         // Every later code used to overflow the addition itself.
         assert_eq!(sfnt.glyph_for_char('A'), None);
         assert_eq!(sfnt.glyph_for_char('\u{1F600}'), None);
+    }
+
+    /// Builds an sfnt around several tables, in the order given.
+    fn face(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]);
+        let mut offset = 12 + tables.len() * 16;
+        let mut body = Vec::new();
+        for (tag, data) in tables {
+            out.extend_from_slice(*tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            offset += data.len();
+            body.extend_from_slice(data);
+        }
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A `head` at 1000 units per em, its `loca` long.
+    fn head() -> Vec<u8> {
+        let mut head = vec![0u8; 54];
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        head[50..52].copy_from_slice(&1i16.to_be_bytes());
+        head
+    }
+
+    /// A `maxp` stating `glyphs`.
+    fn maxp(glyphs: u16) -> Vec<u8> {
+        let mut maxp = vec![0u8; 6];
+        maxp[0..4].copy_from_slice(&0x0000_5000u32.to_be_bytes());
+        maxp[4..6].copy_from_slice(&glyphs.to_be_bytes());
+        maxp
+    }
+
+    /// A version 1.1 `vhea` whose `numOfLongVerMetrics` is `count`.
+    fn vhea(count: u16) -> Vec<u8> {
+        let mut vhea = vec![0u8; 36];
+        vhea[0..4].copy_from_slice(&0x0001_1000u32.to_be_bytes());
+        vhea[4..6].copy_from_slice(&500i16.to_be_bytes()); // vertTypoAscender
+        vhea[6..8].copy_from_slice(&(-500i16).to_be_bytes()); // vertTypoDescender
+        vhea[34..36].copy_from_slice(&count.to_be_bytes());
+        vhea
+    }
+
+    /// A `vmtx`: the long metrics, then the side bearings after them.
+    fn vmtx(long: &[(u16, i16)], bearings: &[i16]) -> Vec<u8> {
+        let mut vmtx = Vec::new();
+        for (advance, bearing) in long {
+            vmtx.extend_from_slice(&advance.to_be_bytes());
+            vmtx.extend_from_slice(&bearing.to_be_bytes());
+        }
+        for bearing in bearings {
+            vmtx.extend_from_slice(&bearing.to_be_bytes());
+        }
+        vmtx
+    }
+
+    /// A `VORG` of `default` and the records given, in the order given.
+    fn vorg(default: i16, records: &[(u16, i16)]) -> Vec<u8> {
+        let mut vorg = Vec::new();
+        vorg.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+        vorg.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+        vorg.extend_from_slice(&default.to_be_bytes());
+        vorg.extend_from_slice(&(records.len() as u16).to_be_bytes());
+        for (glyph, origin) in records {
+            vorg.extend_from_slice(&glyph.to_be_bytes());
+            vorg.extend_from_slice(&origin.to_be_bytes());
+        }
+        vorg
+    }
+
+    /// Every vertical metric reads back as the tables were written, and a
+    /// read past what they hold answers `None`.
+    ///
+    /// The face has no outline table, so its vertical origins are `VORG`'s:
+    /// a CFF face's shortcut, and the one source a face without a box has.
+    #[test]
+    fn vertical_metrics_read_from_vhea_vmtx_and_vorg() {
+        let data = face(&[
+            (b"VORG", &vorg(880, &[(2, 861), (3, 849)])),
+            (b"head", &head()),
+            (b"maxp", &maxp(4)),
+            (b"vhea", &vhea(2)),
+            (b"vmtx", &vmtx(&[(1000, 80), (900, 120)], &[50, 60])),
+        ]);
+        let sfnt = Sfnt::parse(&data).expect("a valid directory");
+
+        let advances: Vec<Option<u16>> = (0..4).map(|g| sfnt.vertical_advance(g)).collect();
+        assert_eq!(advances, [Some(1000), Some(900), Some(900), Some(900)]);
+        let bearings: Vec<Option<i16>> = (0..4).map(|g| sfnt.top_side_bearing(g)).collect();
+        assert_eq!(bearings, [Some(80), Some(120), Some(50), Some(60)]);
+        assert_eq!(sfnt.top_side_bearing(4), None, "past maxp's glyph count");
+
+        let origins: Vec<Option<i16>> = (0..5).map(|g| sfnt.vorg_origin(g)).collect();
+        assert_eq!(
+            origins,
+            [Some(880), Some(880), Some(861), Some(849), Some(880)],
+            "a record where the glyph has one, the default where it has none"
+        );
+        let vertical: Vec<Option<i32>> = (0..4).map(|g| sfnt.vertical_origin(g)).collect();
+        assert_eq!(vertical, [Some(880), Some(880), Some(861), Some(849)]);
+    }
+
+    /// `hmtx`'s rule on end: a glyph past the long metrics repeats the last
+    /// advance height, however far past, and reads its own side bearing from
+    /// the array after them.
+    #[test]
+    fn a_glyph_past_the_long_metrics_repeats_the_last_advance_height() {
+        let data = face(&[
+            (b"head", &head()),
+            (b"maxp", &maxp(4)),
+            (b"vhea", &vhea(1)),
+            (b"vmtx", &vmtx(&[(1000, 10)], &[20, 30, 40])),
+        ]);
+        let sfnt = Sfnt::parse(&data).expect("a valid directory");
+        for glyph in [0u16, 1, 2, 3, 500, u16::MAX] {
+            assert_eq!(sfnt.vertical_advance(glyph), Some(1000), "glyph {glyph}");
+        }
+        let bearings: Vec<Option<i16>> = (0..5).map(|g| sfnt.top_side_bearing(g)).collect();
+        assert_eq!(bearings, [Some(10), Some(20), Some(30), Some(40), None]);
+    }
+
+    /// No `vhea`, no `vmtx`, a count of zero, or a `vhea` too short to hold
+    /// its count: every vertical metric answers `None`, and so does `VORG`'s
+    /// with no `VORG` or one of a version nobody has written down.
+    #[test]
+    fn a_face_without_vertical_metrics_answers_none() {
+        let mut hhea = vec![0u8; 36];
+        hhea[34..36].copy_from_slice(&1u16.to_be_bytes());
+        let hmtx = [1000u16.to_be_bytes(), 0u16.to_be_bytes()].concat();
+        let long = vmtx(&[(1000, 10)], &[]);
+        let short_vhea = vhea(1)[..34].to_vec();
+        let mut future = vorg(880, &[]);
+        future[0..2].copy_from_slice(&2u16.to_be_bytes());
+
+        let faces: [(&str, Vec<u8>); 6] = [
+            (
+                "horizontal metrics only",
+                face(&[(b"head", &head()), (b"hhea", &hhea), (b"hmtx", &hmtx)]),
+            ),
+            (
+                "a vmtx and no vhea",
+                face(&[(b"head", &head()), (b"vmtx", &long)]),
+            ),
+            (
+                "a vhea and no vmtx",
+                face(&[(b"head", &head()), (b"vhea", &vhea(1))]),
+            ),
+            (
+                "a vhea counting no metric",
+                face(&[(b"head", &head()), (b"vhea", &vhea(0)), (b"vmtx", &long)]),
+            ),
+            (
+                "a vhea too short to hold its count",
+                face(&[(b"head", &head()), (b"vhea", &short_vhea), (b"vmtx", &long)]),
+            ),
+            (
+                "a VORG of major version 2",
+                face(&[(b"VORG", &future), (b"head", &head())]),
+            ),
+        ];
+        for (what, data) in &faces {
+            let sfnt = Sfnt::parse(data).expect("a valid directory");
+            for glyph in [0u16, 1, 7] {
+                assert_eq!(sfnt.vertical_advance(glyph), None, "{what}");
+                assert_eq!(sfnt.top_side_bearing(glyph), None, "{what}");
+                assert_eq!(sfnt.vorg_origin(glyph), None, "{what}");
+                assert_eq!(sfnt.vertical_origin(glyph), None, "{what}");
+            }
+        }
+        let horizontal = Sfnt::parse(&faces[0].1).expect("a valid directory");
+        assert_eq!(horizontal.advance(0), Some(1000), "and hmtx still reads");
+    }
+
+    /// A `vmtx` shorter than its `vhea` claims is read as far as it goes: the
+    /// entries it holds answer, and every one past its end answers `None`
+    /// rather than a number read from beyond the table.
+    #[test]
+    fn a_vmtx_shorter_than_vhea_claims_answers_none_past_its_end() {
+        let data = face(&[
+            (b"head", &head()),
+            (b"vhea", &vhea(3)),
+            (b"vmtx", &vmtx(&[(1000, 10)], &[])),
+            (b"zzzz", &[0xAB; 16]),
+        ]);
+        let sfnt = Sfnt::parse(&data).expect("a valid directory");
+        assert_eq!(sfnt.vertical_advance(0), Some(1000));
+        assert_eq!(sfnt.top_side_bearing(0), Some(10));
+        for glyph in [1u16, 2, 3, 9] {
+            assert_eq!(sfnt.vertical_advance(glyph), None, "glyph {glyph}");
+            assert_eq!(sfnt.top_side_bearing(glyph), None, "glyph {glyph}");
+        }
+    }
+
+    /// A face with TrueType outlines takes its vertical origin from `glyf`'s
+    /// `yMax` and `vmtx`, and its `VORG` is ignored, as the `VORG` clause
+    /// requires — however much the two disagree.
+    #[test]
+    fn a_vorg_beside_glyf_is_ignored() {
+        // Glyph 0 is empty; glyph 1 is a header whose box tops out at 700.
+        let mut glyf = Vec::new();
+        glyf.extend_from_slice(&1i16.to_be_bytes()); // numberOfContours
+        for edge in [0i16, -100, 500, 700] {
+            glyf.extend_from_slice(&edge.to_be_bytes());
+        }
+        let loca: Vec<u8> = [0u32, 0, 10].iter().flat_map(|o| o.to_be_bytes()).collect();
+        let data = face(&[
+            (b"VORG", &vorg(880, &[(1, 999)])),
+            (b"glyf", &glyf),
+            (b"head", &head()),
+            (b"loca", &loca),
+            (b"maxp", &maxp(2)),
+            (b"vhea", &vhea(2)),
+            (b"vmtx", &vmtx(&[(1000, 90), (1000, 100)], &[])),
+        ]);
+        let sfnt = Sfnt::parse(&data).expect("a valid directory");
+        assert_eq!(
+            sfnt.vorg_origin(1),
+            Some(999),
+            "the table itself still reads"
+        );
+        assert_eq!(
+            sfnt.vertical_origin(1),
+            Some(800),
+            "yMax 700 and a bearing of 100"
+        );
+        assert_eq!(
+            sfnt.vertical_origin(0),
+            Some(90),
+            "an empty glyph's box is its origin, so its bearing is its origin"
+        );
+        assert_eq!(sfnt.vertical_origin(2), None, "past the end of loca");
+    }
+
+    /// `VORG` records out of the order the clause requires are scanned as
+    /// written and the first match wins; a count past what the table holds
+    /// reads only the records that are there.
+    #[test]
+    fn a_vorg_out_of_order_or_overcounted_is_read_as_written() {
+        let data = face(&[
+            (b"VORG", &vorg(880, &[(5, 700), (2, 600), (5, 650)])),
+            (b"head", &head()),
+        ]);
+        let sfnt = Sfnt::parse(&data).expect("a valid directory");
+        assert_eq!(
+            sfnt.vorg_origin(5),
+            Some(700),
+            "the first record for glyph 5"
+        );
+        assert_eq!(sfnt.vorg_origin(2), Some(600));
+        assert_eq!(sfnt.vorg_origin(3), Some(880), "the default");
+
+        let mut overcounted = vorg(880, &[(4, 777)]);
+        overcounted[6..8].copy_from_slice(&1000u16.to_be_bytes());
+        let data = face(&[(b"VORG", &overcounted), (b"head", &head())]);
+        let sfnt = Sfnt::parse(&data).expect("a valid directory");
+        assert_eq!(sfnt.vorg_origin(4), Some(777));
+        assert_eq!(sfnt.vorg_origin(9), Some(880));
     }
 
     #[test]

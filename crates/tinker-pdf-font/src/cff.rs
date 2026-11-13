@@ -3660,4 +3660,99 @@ mod tests {
         let cff = Cff::parse(&program).expect("a CFF font of random charstrings");
         assert_eq!(assert_reused_path_is_fresh_path(&cff, "generated"), 300);
     }
+
+    /// An `OTTO` face around a CFF program, with `vhea`, `vmtx` and, where
+    /// given, a `VORG`.
+    fn vertical_cff_face(program: &[u8], vorg: Option<&[u8]>) -> Vec<u8> {
+        let mut head = vec![0u8; 54];
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        let mut maxp = vec![0u8; 6];
+        maxp[0..4].copy_from_slice(&0x0000_5000u32.to_be_bytes());
+        maxp[4..6].copy_from_slice(&3u16.to_be_bytes());
+        let mut vhea = vec![0u8; 36];
+        vhea[0..4].copy_from_slice(&0x0001_1000u32.to_be_bytes());
+        vhea[34..36].copy_from_slice(&3u16.to_be_bytes());
+        let mut vmtx = Vec::new();
+        for bearing in [30i16, 40, 50] {
+            vmtx.extend_from_slice(&1000u16.to_be_bytes());
+            vmtx.extend_from_slice(&bearing.to_be_bytes());
+        }
+        let mut tables: Vec<(&[u8; 4], &[u8])> = vec![(b"CFF ", program)];
+        if let Some(vorg) = vorg {
+            tables.push((b"VORG", vorg));
+        }
+        tables.extend([
+            (b"head", head.as_slice()),
+            (b"maxp", maxp.as_slice()),
+            (b"vhea", vhea.as_slice()),
+            (b"vmtx", vmtx.as_slice()),
+        ]);
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x4F54_544Fu32.to_be_bytes()); // OTTO
+        out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]);
+        let mut offset = 12 + tables.len() * 16;
+        let mut body = Vec::new();
+        for (tag, data) in &tables {
+            out.extend_from_slice(*tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            offset += data.len();
+            body.extend_from_slice(data);
+        }
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// **A CFF face's vertical origin**: `VORG`'s where it has one, and the
+    /// `vmtx` clause's top side bearing plus the top of the box where it does
+    /// not — the box being what the charstring draws.
+    ///
+    /// [`three_glyph_program`]'s glyph 1 moves to (50, 50) and draws up to
+    /// (150, 150), so its top is 150 and its origin 150 plus its bearing of
+    /// 40; glyph 0 draws nothing, so its box is its origin and its origin its
+    /// bearing of 30. Glyph 2 ends in a subroutine call and is measured the
+    /// way it is drawn. With a `VORG`, every glyph takes the table's word.
+    #[test]
+    fn a_cff_face_takes_its_vertical_origin_from_vorg_or_its_outline() {
+        let program = three_glyph_program();
+        let data = vertical_cff_face(&program, None);
+        let face = crate::Sfnt::parse(&data).expect("an OTTO face");
+        assert_eq!(
+            face.vertical_origin(0),
+            Some(30),
+            "an empty glyph: its bearing"
+        );
+        assert_eq!(
+            face.vertical_origin(1),
+            Some(190),
+            "a top of 150 and a bearing of 40"
+        );
+        let drawn = Cff::parse(&program)
+            .and_then(|cff| cff.outline(2))
+            .and_then(|outline| outline.bounds())
+            .map(|(_, _, _, top)| top.round() as i32)
+            .expect("glyph 2 draws");
+        assert_eq!(face.vertical_origin(2), Some(drawn + 50));
+        assert_eq!(
+            face.vertical_origin(3),
+            None,
+            "no side bearing past maxp's count"
+        );
+
+        let mut vorg = Vec::new();
+        for value in [1u16, 0, 880, 1, 1] {
+            vorg.extend_from_slice(&value.to_be_bytes());
+        }
+        vorg.extend_from_slice(&861i16.to_be_bytes());
+        let data = vertical_cff_face(&program, Some(&vorg));
+        let face = crate::Sfnt::parse(&data).expect("an OTTO face");
+        let origins: Vec<Option<i32>> = (0..4).map(|g| face.vertical_origin(g)).collect();
+        assert_eq!(
+            origins,
+            [Some(880), Some(861), Some(880), Some(880)],
+            "VORG's record for glyph 1 and its default for the rest"
+        );
+    }
 }

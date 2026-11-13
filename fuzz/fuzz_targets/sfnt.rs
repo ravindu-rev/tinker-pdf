@@ -24,7 +24,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use std::collections::BTreeSet;
-use tinker_pdf_font::{glyphs_for, subset, substitute_glyph, BuiltInEncoding, Sfnt};
+use tinker_pdf_font::{glyf, glyphs_for, subset, substitute_glyph, BuiltInEncoding, Sfnt};
 
 fuzz_target!(|data: &[u8]| {
     let Some(font) = Sfnt::parse(data) else {
@@ -35,6 +35,7 @@ fuzz_target!(|data: &[u8]| {
     // `table` is the one place that has to disbelieve all of them.
     for tag in [
         b"head", b"hhea", b"hmtx", b"maxp", b"cmap", b"post", b"name", b"OS/2", b"loca", b"CFF ",
+        b"vhea", b"vmtx", b"VORG",
     ] {
         let _ = font.table(u32::from_be_bytes(*tag));
     }
@@ -73,9 +74,17 @@ fuzz_target!(|data: &[u8]| {
     ] {
         let _ = substitute_glyph(data, encoding, name, code);
     }
-    // `hmtx` past `numberOfHMetrics`, where the last advance repeats.
-    for glyph in 0..64u16 {
+    // `hmtx` past `numberOfHMetrics`, where the last advance repeats, and the
+    // vertical metrics the same way: `vmtx` past `numOfLongVerMetrics`, the
+    // side bearings after it, `VORG`'s records bisected or scanned, and the
+    // vertical origin, which reaches `glyf`'s header or a CFF charstring.
+    for glyph in (0..64u16).chain([u16::MAX - 1, u16::MAX]) {
         let _ = font.advance(glyph);
+        let _ = font.vertical_advance(glyph);
+        let _ = font.top_side_bearing(glyph);
+        let _ = font.vorg_origin(glyph);
+        let _ = font.vertical_origin(glyph);
+        let _ = glyf::bounds(&font, glyph);
     }
 
     // The subsetter reads the directory and writes a new one, so a hostile
