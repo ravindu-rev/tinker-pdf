@@ -22,6 +22,9 @@ use tinker_pdf::{
     TrustAnchors, ValidationData, WriteMode, WriteOptions,
 };
 
+mod written_support;
+use written_support::rewritten;
+
 const BASE: &[u8] = include_bytes!("signature_support/no-signed-attributes.pdf");
 const ROOT: &[u8] = include_bytes!("signature_support/no-signed-attributes-root.der");
 const CRL: &[u8] = include_bytes!("signature_support/no-signed-attributes-crl.der");
@@ -63,7 +66,9 @@ fn signer_certificate(document: &Document) -> Vec<u8> {
 }
 
 /// `BASE` with a store holding the signer's certificate, the root, the CRL and
-/// the OCSP response, all filed under the one signature.
+/// the OCSP response, all filed under the one signature, held to the
+/// validate-on-save helper as an update of `BASE`.
+#[track_caller]
 fn with_store() -> Vec<u8> {
     let document = Document::open(BASE.to_vec()).expect("opens");
     let mut data = ValidationData::new();
@@ -74,7 +79,9 @@ fn with_store() -> Vec<u8> {
     data.gathered_at = Some(GATHERED);
     let mut editor = document.editor();
     assert!(editor.add_validation_data(&data));
-    editor.save(&incremental())
+    let out = editor.save(&incremental());
+    rewritten("BASE with a security store", BASE, &out);
+    out
 }
 
 fn decoded(document: &Document, references: &[tinker_pdf::ObjRef]) -> Vec<Vec<u8>> {
@@ -182,7 +189,11 @@ fn a_second_round_extends_the_store_and_writes_nothing_twice() {
     data.signatures = vec![first.signatures()[0].contents.clone()];
     let mut editor = first.editor();
     assert!(editor.add_validation_data(&data));
-    let second = Document::open(editor.save(&incremental())).expect("reopens");
+    let second = rewritten(
+        "BASE with its security store extended",
+        BASE,
+        editor.save(&incremental()),
+    );
     let after = second.security_store().expect("a /DSS");
 
     assert_eq!(
@@ -271,7 +282,7 @@ fn a_malformed_store_is_read_leniently_and_says_what_it_skipped() {
     }));
     let out = editor.save(&incremental());
 
-    let document = Document::open(out).expect("reopens");
+    let document = rewritten("BASE with a malformed store", BASE, out);
     let store = document
         .security_store()
         .expect("a /DSS, direct in the catalog");
@@ -300,8 +311,10 @@ fn a_malformed_store_is_read_leniently_and_says_what_it_skipped() {
 }
 
 /// `BASE` with the catalog's `/DSS` set to what `dss` builds, saved
-/// incrementally. Names are interned per document, so `dss` is handed the
-/// document it builds for.
+/// incrementally and held to the validate-on-save helper as an update of
+/// `BASE`. Names are interned per document, so `dss` is handed the document it
+/// builds for.
+#[track_caller]
 fn with_dss(dss: impl FnOnce(&tinker_pdf_cos::CosDocument) -> tinker_pdf_cos::Object) -> Vec<u8> {
     let document = Document::open(BASE.to_vec()).expect("opens");
     let mut editor = document.editor();
@@ -310,7 +323,9 @@ fn with_dss(dss: impl FnOnce(&tinker_pdf_cos::CosDocument) -> tinker_pdf_cos::Ob
     assert!(editor.update_catalog(|catalog| {
         catalog.insert(dss_key, dss);
     }));
-    editor.save(&incremental())
+    let out = editor.save(&incremental());
+    rewritten("BASE with a /DSS of its own", BASE, &out);
+    out
 }
 
 /// Ruling 10, for the members whose *type* is wrong: each skip is named,
@@ -411,15 +426,10 @@ fn a_store_that_is_not_a_dictionary_is_named_and_a_null_one_is_none() {
     assert!(document.security_store().is_none());
 }
 
+/// The update owns what it appended and leaves the rest of the file no worse
+/// than `BASE`, which is the validate-on-save helper's rule for an update of a
+/// file this engine did not write.
 #[test]
 fn the_update_adds_nothing_the_strict_validator_refuses() {
-    let rendered = |pdf: &[u8]| {
-        Document::open(pdf.to_vec())
-            .expect("opens")
-            .validate()
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(rendered(&with_store()), rendered(BASE));
+    rewritten("BASE with a security store", BASE, with_store());
 }

@@ -403,6 +403,7 @@ mod tests {
 
     use tinker_pdf_cos::CosDocument;
 
+    use crate::subset::tests_support::written_support::authored;
     use crate::subset::tests_support::{
         draws, face, glyph_of, only_program, open, program_named, whole_face_document,
     };
@@ -422,6 +423,7 @@ mod tests {
         let source = whole_face_document(&[(40.0, "Hello")]);
         let mut editor = editor_over(source);
         let saved = save(&mut editor, &SaveOptions::default());
+        authored("the whole face, saved by default", &saved.bytes);
 
         assert!(saved.fonts.removed(), "a rewrite removes them");
         let report = saved.fonts.report().expect("a pass ran");
@@ -450,6 +452,7 @@ mod tests {
             },
         );
 
+        authored("the whole face, kept", &saved.bytes);
         assert_eq!(saved.fonts, SubsetOutcome::Kept);
         assert!(saved.fonts.report().is_none(), "no pass ran, so no report");
         assert!(
@@ -487,6 +490,8 @@ mod tests {
             save(&mut editor, &SaveOptions::default()).bytes
         };
 
+        authored("the whole face, through the cos door", &through_cos);
+        authored("the whole face, through the facade door", &through_facade);
         let cos_out = Arc::new(CosDocument::open(through_cos).expect("it opens"));
         let facade_out = Arc::new(CosDocument::open(through_facade).expect("it opens"));
         assert_eq!(
@@ -516,6 +521,7 @@ mod tests {
             },
         );
 
+        authored("the whole face, cut in an update", &saved.bytes);
         assert!(
             matches!(saved.fonts, SubsetOutcome::CutButTheOriginalsRemain(_)),
             "an append cannot remove anything: {:?}",
@@ -575,6 +581,7 @@ mod tests {
         assert_eq!(report.glyphs, REMOVED.chars().count());
 
         let saved = save(&mut editor, &SaveOptions::default());
+        authored("a redacted page, saved by default", &saved.bytes);
         assert!(
             saved.fonts.removed(),
             "the one program was cut and nothing was left whole: {:?}",
@@ -635,6 +642,7 @@ mod tests {
             },
         );
         assert!(!saved.fonts.removed());
+        authored("a redacted page, its programs kept", &saved.bytes);
 
         let whole = only_program(&open(saved.bytes));
         for ch in REMOVED.chars() {

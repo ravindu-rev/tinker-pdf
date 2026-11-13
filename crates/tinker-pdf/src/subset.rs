@@ -1928,6 +1928,13 @@ pub(crate) mod tests_support {
     pub use tinker_pdf_cos::{DocumentBuilder, WriteMode, WriteOptions};
     pub use tinker_pdf_font::{glyf, Sfnt};
 
+    /// The validate-on-save helper's facade reading, compiled once for this
+    /// crate's own test modules: `write.rs`'s and `redact.rs`'s reach it
+    /// through here.
+    #[path = "../../../tests/written_support/mod.rs"]
+    pub mod written_support;
+    use written_support::{authored, rewritten};
+
     /// Liberation Serif Regular, read from the directory `bundled-fonts`
     /// embeds it from.
     ///
@@ -1970,11 +1977,16 @@ pub(crate) mod tests_support {
         panic!("no font is named {}", String::from_utf8_lossy(suffix));
     }
 
+    /// The editor's document rewritten, held to the validate-on-save helper as
+    /// a rewrite of the bytes the editor was opened over.
+    #[track_caller]
     pub fn saved(editor: &DocumentEditor) -> Vec<u8> {
-        editor.save(&WriteOptions {
+        let out = editor.save(&WriteOptions {
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
-        })
+        });
+        rewritten("a rewrite", editor.document().bytes(), &out);
+        out
     }
 
     /// One page of text, over **the whole face**.
@@ -1982,6 +1994,7 @@ pub(crate) mod tests_support {
     /// `set_subset_fonts(false)` is the fixture: what the rewrite has to meet
     /// is a program nothing has cut down, which is what a document from any
     /// other producer hands it.
+    #[track_caller]
     pub fn whole_face_document(lines: &[(f64, &str)]) -> Vec<u8> {
         let mut builder = DocumentBuilder::new();
         builder.set_subset_fonts(false);
@@ -1994,10 +2007,13 @@ pub(crate) mod tests_support {
                 page.text(b"F0", 24.0, 20.0, *y, text);
             }
         });
-        builder.finish()
+        let bytes = builder.finish();
+        authored("one page over the whole face", &bytes);
+        bytes
     }
 
-    /// Runs the pass and writes the result whole (9.9).
+    /// Runs the pass and writes the result whole (9.9), held by [`saved`].
+    #[track_caller]
     pub fn subset(bytes: Vec<u8>) -> (Vec<u8>, SubsetReport) {
         let mut editor = DocumentEditor::new(open(bytes));
         let report = apply(&mut editor);
@@ -2864,6 +2880,7 @@ mod what_counts_as_used {
             page.text(b"F0", 24.0, 20.0, 40.0, "");
         });
         let built = builder.finish();
+        written_support::authored("a named but undrawn font is cut to nothing", &built);
         let whole = only_program(&open(built.clone()));
 
         let (after, report) = subset(built);
@@ -2930,6 +2947,7 @@ mod composite_glyphs {
             ));
         });
         let before = builder.finish();
+        written_support::authored("the components of a shown composite glyph survive", &before);
         let (after, report) = subset(before.clone());
         let cut = only_program(&open(after.clone()));
 
@@ -3024,7 +3042,12 @@ mod refusals {
         builder.add_page(200.0, 100.0, |page| {
             page.text(b"Helvetica", 24.0, 20.0, 40.0, "Handgloves");
         });
-        let (_, report) = subset(builder.finish());
+        let built = builder.finish();
+        written_support::authored(
+            "a document with no embedded program reports nothing",
+            &built,
+        );
+        let (_, report) = subset(built);
         assert_eq!(report, SubsetReport::default());
     }
 }
@@ -3103,7 +3126,19 @@ mod document_refusals {
         let mut editor = DocumentEditor::new(Arc::clone(&doc));
         editor.delete(font);
 
-        let (after, report) = subset(saved(&editor));
+        // Damage on purpose: the page still names the font it lost.
+        let damaged = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        written_support::expecting(
+            "the font dictionary deleted by hand",
+            &damaged,
+            &[written_support::Expected::Defect(
+                crate::DefectKind::ResourceUnresolved,
+            )],
+        );
+        let (after, report) = subset(damaged);
         assert_eq!(report.subsetted, Vec::new());
         assert_eq!(report.untouched.len(), 1, "{:?}", report.untouched);
         assert_eq!(report.untouched[0].reason, UntouchedReason::NoFontNamesIt);
@@ -3255,7 +3290,12 @@ mod document_refusals {
             page.text(b"F0", 24.0, 20.0, 40.0, "Handgloves");
         });
 
-        let (after, report) = subset(builder.finish());
+        let built = builder.finish();
+        written_support::authored(
+            "a font whose codes resolve only by guess is left whole and reported",
+            &built,
+        );
+        let (after, report) = subset(built);
         assert_eq!(report.subsetted, Vec::new());
         assert_eq!(report.untouched.len(), 1, "{:?}", report.untouched);
         assert_eq!(report.untouched[0].reason, UntouchedReason::CodeNotMapped);
@@ -3290,7 +3330,9 @@ mod identity_and_naming {
             page.text(b"F1", 24.0, 20.0, 20.0, "zzz");
         });
 
-        let (after, report) = subset(builder.finish());
+        let built = builder.finish();
+        written_support::authored("two fonts in one scope each keep their own glyphs", &built);
+        let (after, report) = subset(built);
         assert_eq!(report.subsetted.len(), 2, "{report:?}");
         let doc = open(after);
         let serif = program_named(&doc, b"LiberationSerif");
@@ -3504,6 +3546,11 @@ mod type3_fonts {
         let doc = open(document("[65 /a /b]", "BT /T3 20 Tf 10 10 Td (A) Tj ET"));
         let mut editor = DocumentEditor::new(doc);
         let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
+        written_support::rewritten(
+            "a Type 3 font left whole",
+            editor.document().bytes(),
+            &saved.bytes,
+        );
         assert!(
             !saved.fonts.removed(),
             "/V3's procedure is still in the file"
@@ -3515,6 +3562,11 @@ mod type3_fonts {
         ));
         let mut editor = DocumentEditor::new(doc);
         let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
+        written_support::rewritten(
+            "a Type 3 font measured whole",
+            editor.document().bytes(),
+            &saved.bytes,
+        );
         assert!(saved.fonts.removed(), "every procedure was measured");
     }
 
@@ -3678,7 +3730,23 @@ mod type3_fonts {
                 "6 0 obj\n<< /Filter /FlateDecode /Length 4 >>\nstream\nnope\nendstream\nendobj\n",
                 1,
             );
-        let (_, report) = subset(undecodable.into_bytes());
+        // Damage on purpose, copied through: the procedure that does not
+        // decode is kept as it was.
+        let mut editor = DocumentEditor::new(open(undecodable.into_bytes()));
+        let report = apply(&mut editor);
+        let out = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        written_support::expecting(
+            "an undecodable procedure, subset",
+            &out,
+            &[written_support::Expected::Defect(
+                crate::DefectKind::RepairedWhileReading(crate::WarningKind::Filter(
+                    tinker_pdf_filters::Warning::RawDeflateFallback,
+                )),
+            )],
+        );
         assert_eq!(
             (report.type3[0].kept, report.type3[0].emptied),
             (2, 0),

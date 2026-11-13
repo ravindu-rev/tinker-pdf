@@ -66,6 +66,8 @@ use tinker_pdf_crypto::sha2::Sha256;
 
 mod render_support;
 use render_support::curvy_font;
+mod written_support;
+use written_support::rewritten;
 
 // ---- a signer that holds a real key ----------------------------------------
 
@@ -318,6 +320,9 @@ fn request<'a>(signer: &'a dyn Signer, appearance: SignatureAppearance) -> Signi
     request
 }
 
+/// The fixture signed under a seal drawn with `appearance`, held to the
+/// validate-on-save helper as an update of it, over the bytes a reader gets.
+#[track_caller]
 fn signed(appearance: SignatureAppearance) -> (Vec<u8>, usize) {
     let original = simple_text();
     let signer = RsaSigner::committed();
@@ -326,6 +331,7 @@ fn signed(appearance: SignatureAppearance) -> (Vec<u8>, usize) {
         .editor()
         .save_signed(&incremental(), &request(&signer, appearance))
         .expect("signing succeeds");
+    rewritten("simple-text.pdf, signed under a seal", &original, &bytes);
     (bytes, original.len())
 }
 
@@ -428,7 +434,6 @@ fn a_visible_signature_verifies() {
         verdict.chain
     );
     assert!(verdict.is_trusted(), "{verdict:?}");
-    assert!(document.validate().is_empty(), "{:?}", document.validate());
 }
 
 /// The appearance is an object of the signed update, and the `/ByteRange`
@@ -658,7 +663,11 @@ fn a_name_the_font_cannot_draw_is_reported() {
         .collect();
     assert_eq!(named, vec!['\u{674E}', '\u{767D}']);
 
-    let reopened = Document::open(bytes).expect("reopens");
+    let reopened = rewritten(
+        "simple-text.pdf, signed by a name the font cannot draw",
+        simple_text(),
+        bytes,
+    );
     let verdicts = reopened.verify_signatures(&TrustAnchors::new(), None);
     assert_eq!(verdicts[0].signature, SignatureCheck::Verified);
 }

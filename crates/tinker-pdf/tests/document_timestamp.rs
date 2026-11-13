@@ -33,6 +33,9 @@ use tinker_pdf::{
 };
 use tinker_pdf_pki::TimeStampToken;
 
+mod written_support;
+use written_support::{expecting, rewritten, Expected};
+
 const STAMPED_PDF: &[u8] = include_bytes!("signature_support/document-timestamp.pdf");
 const STAMPED_TSA_ROOT: &[u8] = include_bytes!("signature_support/document-timestamp-tsa-root.der");
 
@@ -208,8 +211,10 @@ fn incremental() -> WriteOptions {
     }
 }
 
-/// `BASE` with a document timestamp added, and the digest the engine handed
-/// its timestamper.
+/// `BASE` with a document timestamp added, held to the validate-on-save helper
+/// as an update of `BASE` over the bytes a reader gets, and the digest the
+/// engine handed its timestamper.
+#[track_caller]
 fn engine_timestamped() -> (Vec<u8>, Vec<u8>) {
     let document = Document::open(BASE.to_vec()).expect("the base opens");
     let mut editor = document.editor();
@@ -224,6 +229,7 @@ fn engine_timestamped() -> (Vec<u8>, Vec<u8>) {
     let out = editor
         .save_timestamped(&incremental(), &request)
         .expect("the timestamp is written");
+    rewritten("BASE, sealed with a document timestamp", BASE, &out);
     let asked = stamper
         .asked
         .borrow()
@@ -304,19 +310,17 @@ fn a_document_timestamp_this_engine_wrote_validates_against_a_real_token() {
     );
     assert!(stamped.is_trusted(), "{stamped:?}");
 
-    // The strict structural validator reads it back with the repairs off and
-    // finds nothing the update added: the base's own one defect — the fixture
-    // script writes no binary comment after the header — is all there is.
-    let rendered = |pdf: &[u8]| {
-        Document::open(pdf.to_vec())
-            .expect("opens")
-            .validate()
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(rendered(&out), rendered(BASE));
-    assert_eq!(rendered(BASE).len(), 1, "{:?}", rendered(BASE));
+    // The strict structural validator reads the update back with the repairs
+    // off and finds nothing it added, which `engine_timestamped` held: the
+    // base's own one defect — the fixture script writes no binary comment
+    // after the header — is all there is.
+    expecting(
+        "the base",
+        BASE,
+        &[Expected::Defect(
+            tinker_pdf::DefectKind::BinaryCommentMissing,
+        )],
+    );
 
     // And the reader agrees with the writer about what was covered: the
     // same spans, digested again, are the imprint.

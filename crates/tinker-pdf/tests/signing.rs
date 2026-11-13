@@ -14,9 +14,14 @@
 use std::cell::RefCell;
 
 use tinker_pdf::{
-    Coverage, Defect, DigestAlgorithm, Document, SignError, SignRefused, Signer, SigningRequest,
+    Coverage, DigestAlgorithm, Document, SignError, SignRefused, Signer, SigningRequest,
     SigningTarget, WriteMode, WriteOptions,
 };
+
+// Every signed save is held to the validate-on-save helper as an update of
+// the fixture, over the bytes a reader gets: after the signature is written.
+mod written_support;
+use written_support::rewritten;
 
 // ---- signers, none of which hold a key ------------------------------------
 
@@ -115,6 +120,7 @@ fn a_signed_save_leaves_the_original_bytes_alone() {
         .editor()
         .save_signed(&incremental(), &request(&signer, 2048))
         .expect("signing succeeds");
+    rewritten("simple-text.pdf, signed", &original, &signed);
 
     assert!(
         signed.starts_with(&original),
@@ -143,7 +149,11 @@ fn the_digest_the_signer_saw_is_the_digest_the_reader_recomputes() {
             .save_signed(&incremental(), &request(&signer, 2048))
             .expect("signing succeeds");
 
-        let reopened = Document::open(signed).expect("the signed file reopens");
+        let reopened = rewritten(
+            &format!("simple-text.pdf, signed over {algorithm:?}"),
+            fixture(),
+            signed,
+        );
         let signatures = reopened.signatures();
         assert_eq!(signatures.len(), 1, "{algorithm:?}");
         let recomputed = signatures[0]
@@ -167,7 +177,7 @@ fn the_signature_covers_the_whole_file_and_carries_what_the_signer_returned() {
         .save_signed(&incremental(), &request(&signer, 2048))
         .expect("signing succeeds");
 
-    let reopened = Document::open(signed).expect("reopens");
+    let reopened = rewritten("simple-text.pdf, signed", fixture(), signed);
     let signature = &reopened.signatures()[0];
     assert_eq!(signature.coverage, Coverage::WholeFile);
     assert_eq!(signature.field.as_deref(), Some("Signature1"));
@@ -209,12 +219,9 @@ fn the_signed_file_passes_the_strict_structural_validator() {
         .save_signed(&incremental(), &request(&signer, 2048))
         .expect("signing succeeds");
 
-    let defects = Document::open(signed).expect("reopens").validate();
-    assert!(
-        defects.is_empty(),
-        "ruling 13's validator reads it back with the repairs off: {:?}",
-        defects.iter().map(Defect::to_string).collect::<Vec<_>>()
-    );
+    // Ruling 13's validator reads it back with the repairs off, and the
+    // fixture is clean, so its update must be too.
+    rewritten("simple-text.pdf, signed", fixture(), signed);
 }
 
 /// Signing twice, which is what a countersignature is.
@@ -230,6 +237,7 @@ fn a_second_signature_leaves_the_first_covering_its_own_revision() {
         .editor()
         .save_signed(&incremental(), &request(&first_signer, 2048))
         .expect("the first signature");
+    rewritten("simple-text.pdf, signed once", fixture(), &once);
 
     let second_signer = Recorder::new(DigestAlgorithm::Sha256, 300);
     let mut second_request = request(&second_signer, 2048);
@@ -247,7 +255,7 @@ fn a_second_signature_leaves_the_first_covering_its_own_revision() {
         "the first signature's bytes must survive the second"
     );
 
-    let reopened = Document::open(twice).expect("reopens");
+    let reopened = rewritten("simple-text.pdf, signed twice", fixture(), twice);
     let mut signatures = reopened.signatures();
     signatures.sort_by(|a, b| a.field.cmp(&b.field));
     assert_eq!(signatures.len(), 2);
@@ -322,6 +330,7 @@ fn signing_a_field_that_is_already_signed_is_refused() {
         .editor()
         .save_signed(&incremental(), &request(&signer, 2048))
         .expect("the first signature");
+    rewritten("simple-text.pdf, signed once", fixture(), &once);
 
     let again = Recorder::new(DigestAlgorithm::Sha256, 300);
     let mut over_the_top = request(&again, 2048);
@@ -369,6 +378,7 @@ fn an_existing_empty_signature_field_can_be_filled() {
         .editor()
         .save_signed(&incremental(), &prepared_request)
         .expect("preparing");
+    rewritten("simple-text.pdf, prepared", fixture(), &prepared);
 
     // A second field, this time targeting the first by name, must be refused —
     // which is the assertion above. Targeting a *fresh* name creates one.
@@ -383,7 +393,7 @@ fn an_existing_empty_signature_field_can_be_filled() {
         .save_signed(&incremental(), &second)
         .expect("signing the second field");
 
-    let reopened = Document::open(signed).expect("reopens");
+    let reopened = rewritten("simple-text.pdf, signed in two fields", fixture(), signed);
     let names: Vec<Option<String>> = reopened
         .signatures()
         .into_iter()

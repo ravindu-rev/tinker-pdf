@@ -7,10 +7,10 @@
 //! Open a document this repository's builder wrote, edit it through the
 //! editor the facade hands out, save it **both ways** — an incremental update
 //! and a rewrite — reopen each through `Document::open`, and ask the public
-//! read API for what was written. Then hand the saved file to the strict
-//! validator, which reads it again with the leniency ladder off: a setter
-//! whose output this reader repairs in silence would pass the first half and
-//! not the second.
+//! read API for what was written. Every file is held to the validate-on-save
+//! helper, whose strict validator reads it again with the leniency ladder
+//! off: a setter whose output this reader repairs in silence would pass the
+//! first half and not the second.
 //!
 //! Both save modes, because they build different object sets and a setter
 //! that reached only one of them is the defect `page_operations.rs` was
@@ -24,7 +24,11 @@ use tinker_pdf::{
     SanitiseReport, Target, Trapped, ViewerPreferences, WriteMode, WriteOptions,
 };
 
+mod written_support;
+use written_support::authored;
+
 /// Three pages of text, a title, and nothing else the tests below write.
+#[track_caller]
 fn plain() -> Document {
     let mut builder = DocumentBuilder::new();
     builder.add_base_font(b"F0", b"Helvetica");
@@ -34,13 +38,13 @@ fn plain() -> Document {
             page.text(b"F0", 12.0, 20.0, 150.0, &format!("page {index}"));
         });
     }
-    Document::open(builder.finish()).expect("the builder's output opens")
+    authored("three pages of text", builder.finish())
 }
 
 const MODES: [WriteMode; 2] = [WriteMode::Incremental, WriteMode::Rewrite];
 
-/// Saves `editor` in `mode`, reopens the file, and holds it to the strict
-/// validator before handing it back.
+/// Saves `editor` in `mode` and holds the file to the validate-on-save helper
+/// before handing it back, reopened.
 #[track_caller]
 fn saved(editor: &DocumentEditor, mode: WriteMode, compress: bool) -> (Vec<u8>, Document) {
     let bytes = editor.save(&WriteOptions {
@@ -48,12 +52,7 @@ fn saved(editor: &DocumentEditor, mode: WriteMode, compress: bool) -> (Vec<u8>, 
         compress,
         ..WriteOptions::default()
     });
-    let reopened = Document::open(bytes.clone()).expect("the saved file reopens");
-    let defects = reopened.validate();
-    assert!(
-        defects.is_empty(),
-        "{mode:?}: the strict validator refused the output: {defects:?}"
-    );
+    let reopened = authored(&format!("saved, {mode:?}, compress {compress}"), &bytes);
     (bytes, reopened)
 }
 
@@ -391,7 +390,10 @@ fn an_outline_replaces_the_old_one_and_follows_a_moved_page() {
         open: false,
         children: Vec::new(),
     }]));
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored(
+        "an outline replaces the old one and follows a moved page",
+        builder.finish(),
+    );
     assert_eq!(doc.outline().len(), 1);
 
     let mut editor = doc.editor();
@@ -526,7 +528,10 @@ fn a_caller_supplied_packet_is_written_verbatim_and_uncompressed() {
     // nothing.
     let mut builder = DocumentBuilder::new();
     builder.add_page(100.0, 100.0, |_| {});
-    let bare = Document::open(builder.finish()).expect("opens");
+    let bare = authored(
+        "a caller supplied packet is written verbatim and uncompressed",
+        builder.finish(),
+    );
     let mut editor = bare.editor();
     assert_eq!(editor.set_xmp_metadata(PACKET), Some(MetadataSync::Alone));
 }

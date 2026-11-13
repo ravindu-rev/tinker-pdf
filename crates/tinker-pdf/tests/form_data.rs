@@ -44,6 +44,9 @@ use tinker_pdf::{
     WriteOptions,
 };
 
+mod written_support;
+use written_support::rewritten;
+
 fn testdata(name: &str) -> Vec<u8> {
     std::fs::read(format!(
         "{}/../../testdata/{name}",
@@ -228,7 +231,8 @@ fn a_hand_written_file_imports_into_its_form() {
             read_xfdf(&fixture("form-fields.xfdf")).expect("reads"),
         ),
     ] {
-        let document = Document::open(testdata("form-fields.pdf")).expect("opens");
+        let input = testdata("form-fields.pdf");
+        let document = Document::open(input.clone()).expect("opens");
         let mut editor = document.editor();
         let skipped = apply(&mut editor, &data).expect("every field takes its value");
         assert_eq!(
@@ -236,7 +240,11 @@ fn a_hand_written_file_imports_into_its_form() {
             1,
             "{label}: the fixture's one rectless widget"
         );
-        let reopened = Document::open(editor.save(&incremental())).expect("reopens");
+        let reopened = rewritten(
+            &format!("the form, imported from {label}"),
+            &input,
+            editor.save(&incremental()),
+        );
         let got = values(&reopened.form_fields());
         assert_eq!(
             got,
@@ -286,7 +294,11 @@ fn a_round_trip_reproduces_every_value_of_the_form_fixture() {
             let document = Document::open(original.clone()).expect("opens");
             let mut editor = document.editor();
             apply(&mut editor, &imported).expect("imports");
-            let reopened = Document::open(editor.save(&incremental())).expect("reopens");
+            let reopened = rewritten(
+                &format!("the form fixture, round-tripped through {label}"),
+                &original,
+                editor.save(&incremental()),
+            );
             assert_eq!(values(&reopened.form_fields()), expected, "{label}");
         }
     }
@@ -299,7 +311,8 @@ fn a_round_trip_reproduces_every_value_of_the_form_fixture() {
 /// `&`, `<`, `"` and a carriage return (XML 1.0 2.11).
 #[test]
 fn a_round_trip_reproduces_a_hierarchical_form() {
-    let base = Document::open(testdata("simple-text.pdf")).expect("opens");
+    let input = testdata("simple-text.pdf");
+    let base = Document::open(input.clone()).expect("opens");
     let mut editor = base.editor();
     let r = |y: f64| Rect {
         x0: 50.0,
@@ -389,7 +402,11 @@ fn a_round_trip_reproduces_a_hierarchical_form() {
     ] {
         editor.add_field(&spec).expect("created");
     }
-    let blank = Document::open(editor.save(&incremental())).expect("reopens");
+    let blank = rewritten(
+        "a hierarchical form, blank",
+        &input,
+        editor.save(&incremental()),
+    );
     let mut editor = blank.editor();
     editor
         .set_field_values(&[
@@ -420,9 +437,12 @@ fn a_round_trip_reproduces_a_hierarchical_form() {
     for (label, imported) in [("fdf", fdf), ("xfdf", xfdf)] {
         let mut editor = blank.editor();
         apply(&mut editor, &imported).expect("imports");
-        let reopened = Document::open(editor.save(&incremental())).expect("reopens");
+        let reopened = rewritten(
+            &format!("the hierarchical form, round-tripped through {label}"),
+            &input,
+            editor.save(&incremental()),
+        );
         assert_eq!(values(&reopened.form_fields()), expected, "{label}");
-        assert!(reopened.validate().is_empty(), "{label}: strict-clean");
     }
 }
 

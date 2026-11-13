@@ -15,6 +15,8 @@ use tinker_pdf::{
 
 mod render_support;
 use render_support::pixel;
+mod written_support;
+use written_support::authored;
 
 const PAGE: f64 = 60.0;
 const WHITE: (u8, u8, u8) = (255, 255, 255);
@@ -37,15 +39,6 @@ fn incremental(editor: &DocumentEditor) -> Vec<u8> {
         mode: WriteMode::Incremental,
         ..WriteOptions::default()
     })
-}
-
-/// Opens saved bytes and asserts the strict validator has nothing to say.
-#[track_caller]
-fn clean(bytes: Vec<u8>) -> Document {
-    let document = Document::open(bytes).expect("the saved document opens");
-    let defects = document.validate();
-    assert!(defects.is_empty(), "the strict validator: {defects:?}");
-    document
 }
 
 /// The red stripe, as a form over the whole page.
@@ -84,14 +77,17 @@ fn contents(document: &Document, index: u32) -> Vec<ObjRef> {
 #[test]
 fn a_stamp_over_paints_on_top_and_one_under_paints_beneath() {
     for (placement, inside) in [(StampPlacement::Over, RED), (StampPlacement::Under, BLUE)] {
-        let document = Document::open(blue_square()).expect("it opens");
+        let document = authored("a blue square", blue_square());
         let mut editor = document.editor();
         let form = stripe(&mut editor);
         assert_eq!(
             editor.stamp(0, form, placement).as_deref(),
             Some(&b"Stamp0"[..])
         );
-        let stamped = clean(incremental(&editor));
+        let stamped = authored(
+            "a stamp over paints on top and one under paints beneath",
+            incremental(&editor),
+        );
         assert_eq!(
             at(&stamped, 0, 30.0, 30.0),
             inside,
@@ -117,7 +113,7 @@ fn a_stamp_over_paints_on_top_and_one_under_paints_beneath() {
 #[test]
 fn the_original_content_streams_are_unchanged_in_the_saved_file() {
     let original = blue_square();
-    let document = Document::open(original.clone()).expect("it opens");
+    let document = authored("a blue square", original.clone());
     let before = contents(&document, 0);
     assert_eq!(before.len(), 1);
     let mut editor = document.editor();
@@ -133,7 +129,10 @@ fn the_original_content_streams_are_unchanged_in_the_saved_file() {
         "the update does not redefine the content stream: {update}"
     );
 
-    let stamped = clean(saved);
+    let stamped = authored(
+        "the original content streams are unchanged in the saved file",
+        saved,
+    );
     let after = contents(&stamped, 0);
     assert_eq!(
         after.len(),
@@ -167,7 +166,10 @@ fn two_pages_sharing_one_resources_dictionary_are_stamped_independently() {
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
-    let document = clean(normalised);
+    let document = authored(
+        "two pages sharing one resources dictionary are stamped independently",
+        normalised,
+    );
     let shared = page_resources(&document, 0);
     assert!(matches!(shared, Some(Object::Ref(_))), "the fixture shares");
     assert_eq!(shared, page_resources(&document, 1));
@@ -179,7 +181,10 @@ fn two_pages_sharing_one_resources_dictionary_are_stamped_independently() {
         Some(&b"Stamp1"[..]),
         "Stamp0 is taken"
     );
-    let once = clean(incremental(&editor));
+    let once = authored(
+        "two pages sharing one resources dictionary are stamped independently",
+        incremental(&editor),
+    );
     assert_eq!(at(&once, 0, 5.0, 30.0), RED, "page 0 is stamped");
     assert_eq!(at(&once, 1, 5.0, 30.0), WHITE, "page 1 is not");
     assert_eq!(
@@ -209,7 +214,10 @@ fn two_pages_sharing_one_resources_dictionary_are_stamped_independently() {
         Some(&b"Stamp1"[..]),
         "page 1's own copy is independent of page 0's"
     );
-    let twice = clean(incremental(&editor));
+    let twice = authored(
+        "two pages sharing one resources dictionary are stamped independently",
+        incremental(&editor),
+    );
     assert_eq!(at(&twice, 0, 5.0, 30.0), RED);
     assert_eq!(at(&twice, 0, 30.0, 50.0), BLUE, "no yellow bar on page 0");
     assert_eq!(at(&twice, 1, 30.0, 50.0), YELLOW, "page 1's bar");
@@ -264,12 +272,18 @@ fn a_page_that_leaves_its_state_changed_is_bracketed() {
     builder.add_page(PAGE, PAGE, |page| {
         page.raw(b"2 0 0 2 0 0 cm 0 0 1 rg 5 5 10 10 re f")
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored(
+        "a page that leaves its state changed is bracketed",
+        builder.finish(),
+    );
     let before = contents(&document, 0);
     let mut editor = document.editor();
     let form = stripe(&mut editor);
     assert!(editor.stamp(0, form, StampPlacement::Over).is_some());
-    let stamped = clean(incremental(&editor));
+    let stamped = authored(
+        "a page that leaves its state changed is bracketed",
+        incremental(&editor),
+    );
 
     let after = contents(&stamped, 0);
     assert_eq!(after.len(), 3, "q, the page's stream, then Q and the stamp");
@@ -308,12 +322,18 @@ fn a_change_before_an_unclosed_q_is_undone_as_well() {
     builder.add_page(PAGE, PAGE, |page| {
         page.raw(b"2 0 0 2 0 0 cm q 0 0 1 rg 5 5 10 10 re f")
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored(
+        "a change before an unclosed q is undone as well",
+        builder.finish(),
+    );
     let before = contents(&document, 0);
     let mut editor = document.editor();
     let form = stripe(&mut editor);
     assert!(editor.stamp(0, form, StampPlacement::Over).is_some());
-    let stamped = clean(incremental(&editor));
+    let stamped = authored(
+        "a change before an unclosed q is undone as well",
+        incremental(&editor),
+    );
 
     let after = contents(&stamped, 0);
     assert_eq!(
@@ -349,12 +369,18 @@ fn a_layer_the_page_leaves_open_does_not_hide_the_stamp() {
         // first layer's `/Properties` key.
         page.raw(b"/OC /OC0 BDC 0 0 1 rg 5 5 10 10 re f");
     });
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored(
+        "a layer the page leaves open does not hide the stamp",
+        builder.finish(),
+    );
     assert_eq!(at(&document, 0, 10.0, 10.0), WHITE, "the square is hidden");
     let mut editor = document.editor();
     let form = stripe(&mut editor);
     assert!(editor.stamp(0, form, StampPlacement::Over).is_some());
-    let stamped = clean(incremental(&editor));
+    let stamped = authored(
+        "a layer the page leaves open does not hide the stamp",
+        incremental(&editor),
+    );
 
     assert_eq!(last_stream(&stamped, 0), "\nEMC\nQ\n/Stamp0 Do\n");
     assert_eq!(at(&stamped, 0, 45.0, 30.0), RED, "the stamp is not hidden");
@@ -400,13 +426,19 @@ fn a_td_on_the_page_is_bracketed_and_a_td_that_sets_nothing_is_not() {
     for (page_content, parts) in [(&b"BT 0 -20 TD ET"[..], 3), (&b"BT 0 -20 Td ET"[..], 2)] {
         let mut builder = DocumentBuilder::new();
         builder.add_page(PAGE, PAGE, |page| page.raw(page_content));
-        let document = Document::open(builder.finish()).expect("it opens");
+        let document = authored(
+            "a td on the page is bracketed and a td that sets nothing is not",
+            builder.finish(),
+        );
         let mut editor = document.editor();
         let form = editor
             .import_page_as_form(source.cos(), 0, None)
             .expect("the source page");
         assert!(editor.stamp(0, form, StampPlacement::Over).is_some());
-        let stamped = Document::open(incremental(&editor)).expect("it opens");
+        let stamped = authored(
+            "a td on the page is bracketed and a td that sets nothing is not, stamped",
+            incremental(&editor),
+        );
         let what = String::from_utf8_lossy(page_content).into_owned();
         assert_eq!(contents(&stamped, 0).len(), parts, "{what}");
         assert_eq!(
@@ -446,13 +478,19 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
-    let document = clean(normalised.clone());
+    let document = authored(
+        "inherited resources are copied onto the page",
+        normalised.clone(),
+    );
     assert!(page_resources(&document, 0).is_none(), "the page inherits");
     let mut editor = document.editor();
     let form = stripe(&mut editor);
     assert!(editor.stamp(0, form, StampPlacement::Under).is_some());
     let saved = incremental(&editor);
-    let stamped = clean(saved.clone());
+    let stamped = authored(
+        "inherited resources are copied onto the page",
+        saved.clone(),
+    );
     assert_eq!(
         at(&stamped, 0, 2.0, 2.0),
         GREEN,
@@ -492,16 +530,22 @@ fn a_page_of_another_document_stamps_as_a_form() {
     letterhead.add_page(PAGE, PAGE, |page| {
         page.image(b"Logo", 45.0, 45.0, 10.0, 10.0)
     });
-    let source = Document::open(letterhead.finish()).expect("the source opens");
+    let source = authored(
+        "a page of another document stamps as a form",
+        letterhead.finish(),
+    );
 
-    let document = Document::open(blue_square()).expect("it opens");
+    let document = authored("a blue square", blue_square());
     let mut editor = document.editor();
     let form = editor
         .import_page_as_form(source.cos(), 0, None)
         .expect("the source page");
     assert!(editor.import_page_as_form(source.cos(), 1, None).is_none());
     assert!(editor.stamp(0, form, StampPlacement::Over).is_some());
-    let stamped = clean(incremental(&editor));
+    let stamped = authored(
+        "a page of another document stamps as a form",
+        incremental(&editor),
+    );
     assert_eq!(at(&stamped, 0, 50.0, 50.0), GREEN, "the letterhead's logo");
     assert_eq!(at(&stamped, 0, 30.0, 30.0), BLUE, "the page's own square");
 }
@@ -509,7 +553,7 @@ fn a_page_of_another_document_stamps_as_a_form() {
 /// What cannot be stamped is refused before anything changes.
 #[test]
 fn what_is_not_a_form_or_a_page_is_refused_and_changes_nothing() {
-    let document = Document::open(blue_square()).expect("it opens");
+    let document = authored("a blue square", blue_square());
     let content = contents(&document, 0)[0];
     let mut editor = document.editor();
     assert!(
@@ -556,7 +600,10 @@ fn add_resource_picks_a_name_the_page_does_not_use() {
         },
     ));
     builder.add_page(PAGE, PAGE, |page| assert!(page.set_ext_gstate(b"GS0")));
-    let document = Document::open(builder.finish()).expect("it opens");
+    let document = authored(
+        "add resource picks a name the page does not use",
+        builder.finish(),
+    );
     let mut editor = document.editor();
     let mut state = tinker_pdf::Dict::new();
     state.insert(editor.intern(b"ca"), Object::Real(0.25));
@@ -570,7 +617,10 @@ fn add_resource_picks_a_name_the_page_does_not_use() {
     assert!(editor
         .add_resource(3, b"ExtGState", b"GS", Object::Null)
         .is_none());
-    let saved = clean(incremental(&editor));
+    let saved = authored(
+        "add resource picks a name the page does not use",
+        incremental(&editor),
+    );
     let cos = saved.cos();
     let pages = tinker_pdf_cos::pages::collect(cos);
     let table = cos.resolve_key(

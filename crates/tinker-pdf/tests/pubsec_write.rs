@@ -33,6 +33,9 @@ use tinker_pdf::{
 };
 use tinker_pdf_crypto::bignum::{Modulus, Uint};
 
+mod written_support;
+use written_support::{rewritten, Key, Locked};
+
 const SIMPLE_TEXT: &[u8] = include_bytes!("../../../testdata/simple-text.pdf");
 const CERTIFICATE: &[u8] = include_bytes!("signature_support/visible-signer.der");
 const KEY: &[u8] = include_bytes!("signature_support/visible-signer-key.der");
@@ -192,12 +195,25 @@ fn sealed_to(certificates: &[Vec<u8>]) -> PublicKeyEncryption {
     PublicKeyEncryption::seal(certificates, PERMISSIONS, &mut Counter(0)).expect("seals")
 }
 
+/// The fixture sealed under `options`, held to the validate-on-save helper as a
+/// rewrite of it, opened by the committed key every sealing here includes.
+#[track_caller]
 fn saved(sealed: &PublicKeyEncryption, options: &WriteOptions) -> Vec<u8> {
-    Document::open(SIMPLE_TEXT.to_vec())
+    let out = Document::open(SIMPLE_TEXT.to_vec())
         .expect("the fixture opens")
         .editor()
         .save_sealed(options, sealed)
-        .expect("a sealed rewrite")
+        .expect("a sealed rewrite");
+    let holder = KeyHolder::committed();
+    rewritten(
+        "simple-text.pdf, sealed to a certificate",
+        SIMPLE_TEXT,
+        Locked {
+            bytes: out.clone(),
+            key: Key::Recipient(&holder),
+        },
+    );
+    out
 }
 
 fn text_of(document: &Document) -> String {

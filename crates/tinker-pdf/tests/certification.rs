@@ -20,6 +20,11 @@ use tinker_pdf::{
     SigningRequest, SigningTarget, Touched, WriteMode, WriteOptions,
 };
 
+// Every save here is an update of the hand-built form, held to the
+// validate-on-save helper as one, over the bytes a reader gets.
+mod written_support;
+use written_support::rewritten;
+
 struct Stub;
 
 impl Signer for Stub {
@@ -94,6 +99,7 @@ fn form_document() -> Vec<u8> {
 }
 
 /// Certifies `bytes` at `level`, optionally locking fields.
+#[track_caller]
 fn certify(bytes: Vec<u8>, level: Certification, lock: Option<FieldLock>) -> Vec<u8> {
     let signer = Stub;
     let mut request = SigningRequest::new(
@@ -105,11 +111,17 @@ fn certify(bytes: Vec<u8>, level: Certification, lock: Option<FieldLock>) -> Vec
     request.reserve = 1024;
     request.certification = Some(level);
     request.field_lock = lock;
-    Document::open(bytes)
+    let certified = Document::open(bytes.clone())
         .expect("the fixture opens")
         .editor()
         .save_signed(&incremental(), &request)
-        .expect("certifying succeeds")
+        .expect("certifying succeeds");
+    rewritten(
+        &format!("the form, certified at {level:?}"),
+        &bytes,
+        &certified,
+    );
+    certified
 }
 
 fn only_signature(document: &Document) -> tinker_pdf::Signature {
@@ -184,7 +196,11 @@ fn filling_a_field_under_level_two_is_permitted() {
     );
     let filled = editor.save(&incremental());
 
-    let document = Document::open(filled).expect("the filled document opens");
+    let document = rewritten(
+        "filling a field under level two is permitted",
+        form_document(),
+        filled,
+    );
     let signature = only_signature(&document);
     assert_eq!(
         signature.coverage,
@@ -223,7 +239,11 @@ fn editing_a_page_under_level_one_is_disallowed_and_names_the_object() {
     assert!(editor.rotate_page(0, 90), "the page rotates");
     let rotated = editor.save(&incremental());
 
-    let document = Document::open(rotated).expect("opens");
+    let document = rewritten(
+        "editing a page under level one is disallowed and names the object",
+        form_document(),
+        rotated,
+    );
     let signature = only_signature(&document);
     let report = signature.modifications(&document);
 
@@ -254,7 +274,11 @@ fn a_page_edit_is_refused_at_every_level() {
         assert!(editor.rotate_page(0, 90));
         let rotated = editor.save(&incremental());
 
-        let document = Document::open(rotated).expect("opens");
+        let document = rewritten(
+            "a page edit is refused at every level",
+            form_document(),
+            rotated,
+        );
         let report = only_signature(&document).modifications(&document);
         assert!(
             report
@@ -279,7 +303,11 @@ fn filling_a_locked_field_is_disallowed_though_the_level_permits_filling() {
     assert!(editor.fill_field("Name", "Ada Lovelace").is_ok());
     let filled = editor.save(&incremental());
 
-    let document = Document::open(filled).expect("opens");
+    let document = rewritten(
+        "filling a locked field is disallowed though the level permits filling",
+        form_document(),
+        filled,
+    );
     let report = only_signature(&document).modifications(&document);
     let locked: Vec<_> = report
         .disallowed()
@@ -308,7 +336,11 @@ fn a_lock_on_another_field_leaves_this_one_fillable() {
     assert!(editor.fill_field("Name", "Ada Lovelace").is_ok());
     let filled = editor.save(&incremental());
 
-    let document = Document::open(filled).expect("opens");
+    let document = rewritten(
+        "a lock on another field leaves this one fillable",
+        form_document(),
+        filled,
+    );
     let report = only_signature(&document).modifications(&document);
     let disallowed: Vec<_> = report.disallowed().collect();
     assert!(
@@ -337,6 +369,7 @@ fn adding_a_second_signature_under_level_two_is_permitted() {
         .editor()
         .save_signed(&incremental(), &request)
         .expect("the approval signature");
+    rewritten("the form, certified and approved", form_document(), &twice);
     assert_eq!(*signer.0.borrow(), 1, "the signer ran exactly once");
 
     let document = Document::open(twice).expect("opens");
@@ -391,7 +424,11 @@ fn emptying_the_annotation_list_is_not_caught_and_this_is_the_limit() {
     editor.put(page, tinker_pdf::Object::Dict(dict));
     let stripped = editor.save(&incremental());
 
-    let document = Document::open(stripped).expect("opens");
+    let document = rewritten(
+        "emptying the annotation list is not caught and this is the limit",
+        form_document(),
+        stripped,
+    );
     let report = only_signature(&document).modifications(&document);
     let page_change = report
         .changes
@@ -427,12 +464,17 @@ fn an_uncertified_signature_reports_changes_without_refusing_them() {
         .editor()
         .save_signed(&incremental(), &request)
         .expect("signing");
+    rewritten("the form, signed", form_document(), &signed);
 
     let mut editor = Document::open(signed).expect("reopens").editor();
     assert!(editor.rotate_page(0, 90));
     let rotated = editor.save(&incremental());
 
-    let document = Document::open(rotated).expect("opens");
+    let document = rewritten(
+        "an uncertified signature reports changes without refusing them",
+        form_document(),
+        rotated,
+    );
     let report = only_signature(&document).modifications(&document);
     assert_eq!(report.certification, None);
     assert!(!report.is_unmodified(), "the change is still reported");

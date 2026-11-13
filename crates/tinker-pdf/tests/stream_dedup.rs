@@ -29,6 +29,9 @@ use tinker_pdf::{
     WriteOptions,
 };
 
+mod written_support;
+use written_support::{authored, expecting, rewritten, Expected};
+
 fn face() -> Vec<u8> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../tinker-pdf-font/data/liberation/LiberationSerif-Regular.ttf");
@@ -44,6 +47,7 @@ fn face() -> Vec<u8> {
 /// merge that took them for each other would render the same; two images
 /// whose dictionaries agree differ only in their bytes, and a merge that did
 /// not compare those would draw one image twice.
+#[track_caller]
 fn two_fonts_one_program() -> Document {
     let program = face();
     let mut builder = DocumentBuilder::new();
@@ -66,7 +70,7 @@ fn two_fonts_one_program() -> Document {
         page.image(b"Im0", 200.0, 20.0, 40.0, 40.0);
         page.image(b"Im1", 250.0, 20.0, 40.0, 40.0);
     });
-    Document::open(builder.finish()).expect("the builder's output opens")
+    authored("two fonts of one program", builder.finish())
 }
 
 /// The image XObjects page 0 names, by resource name.
@@ -133,17 +137,6 @@ fn render(doc: &Document) -> Vec<u8> {
     bitmap.data
 }
 
-#[track_caller]
-fn validated(bytes: Vec<u8>) -> Document {
-    let doc = Document::open(bytes).expect("the rewrite reopens");
-    let defects = doc.validate();
-    assert!(
-        defects.is_empty(),
-        "the strict validator refused it: {defects:?}"
-    );
-    doc
-}
-
 #[test]
 fn two_copies_of_one_font_program_become_one_and_render_the_same() {
     let original = two_fonts_one_program();
@@ -155,10 +148,16 @@ fn two_copies_of_one_font_program_become_one_and_render_the_same() {
     );
     let pixels = render(&original);
 
-    let plain = validated(rewrite(&original, false, WriteMode::Rewrite));
+    let plain = authored(
+        "two copies of one font program become one and render the same",
+        rewrite(&original, false, WriteMode::Rewrite),
+    );
     let merged_bytes = rewrite(&original, true, WriteMode::Rewrite);
     let saved = merged_bytes.len();
-    let merged = validated(merged_bytes);
+    let merged = authored(
+        "two copies of one font program become one and render the same",
+        merged_bytes,
+    );
 
     let after = programs(&merged);
     assert_eq!(after.len(), 2, "both fonts are still there");
@@ -216,7 +215,7 @@ fn an_incremental_update_merges_nothing() {
         deduplicate_streams: true,
         ..WriteOptions::default()
     });
-    let reopened = validated(bytes);
+    let reopened = authored("an incremental update merges nothing", bytes);
     let after = programs(&reopened);
     assert_ne!(after[0].1, after[1].1);
 }
@@ -225,7 +224,7 @@ fn an_incremental_update_merges_nothing() {
 fn with_two_streams(first: (Dict, Vec<u8>), second: (Dict, Vec<u8>)) -> (Document, [ObjRef; 2]) {
     let mut builder = DocumentBuilder::new();
     builder.add_page(50.0, 50.0, |_| {});
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored("with two streams", builder.finish());
     let mut editor = doc.editor();
     let mut refs = [ObjRef::new(0, 0); 2];
     for (slot, (dict, data)) in refs.iter_mut().zip([first, second]) {
@@ -282,7 +281,11 @@ fn equal_bytes_under_different_decode_parameters_stay_apart() {
         (flate_dict(&names, Some(4)), data.clone()),
         (flate_dict(&names, Some(8)), data),
     );
-    let merged = validated(rewrite(&doc, true, WriteMode::Rewrite));
+    authored("two streams under different parameters", doc.cos().bytes());
+    let merged = authored(
+        "equal bytes under different decode parameters stay apart",
+        rewrite(&doc, true, WriteMode::Rewrite),
+    );
     let refs = probe(&merged);
     assert_eq!(refs.len(), 2);
     assert_ne!(refs[0], refs[1], "kept apart");
@@ -326,12 +329,16 @@ fn two_encodings_of_one_content_merge() {
         (flate_dict(&names, None), packed),
         (flate_dict(&names, None), stored),
     );
+    authored("two encodings of one content", doc.cos().bytes());
     assert_eq!(
         doc.cos().stream_decoded(probe(&doc)[1]).expect("decodes"),
         content,
         "the stored-block stream is a valid encoding"
     );
-    let merged = validated(rewrite(&doc, true, WriteMode::Rewrite));
+    let merged = authored(
+        "two encodings of one content merge",
+        rewrite(&doc, true, WriteMode::Rewrite),
+    );
     let refs = probe(&merged);
     assert_eq!(refs[0], refs[1], "one object");
     assert_eq!(
@@ -364,6 +371,16 @@ fn two_damaged_streams_that_decode_alike_stay_apart() {
         (flate_dict(&names, None), damaged(b"first tail")),
         (flate_dict(&names, None), damaged(b"other tail")),
     );
+    // One finding for both: the validator names a repair once, by its kind.
+    expecting(
+        "two damaged streams",
+        doc.cos().bytes(),
+        &[Expected::Defect(
+            tinker_pdf::DefectKind::RepairedWhileReading(tinker_pdf::WarningKind::Filter(
+                tinker_pdf_filters::Warning::CorruptDeflateStream,
+            )),
+        )],
+    );
     let cos = doc.cos();
     let refs = probe(&doc);
     let (a, b) = (cos.stream_decoded(refs[0]), cos.stream_decoded(refs[1]));
@@ -372,9 +389,13 @@ fn two_damaged_streams_that_decode_alike_stay_apart() {
         b.as_ref().ok(),
         "the two decode alike, which is what makes this the dangerous case"
     );
-    // Not held to the strict validator: the damage is the fixture, and a
-    // rewrite carries it faithfully.
-    let merged = Document::open(rewrite(&doc, true, WriteMode::Rewrite)).expect("reopens");
+    // The damage is the fixture, and a rewrite carries it faithfully: held to
+    // no more of it than its input.
+    let merged = rewritten(
+        "two damaged streams, rewritten",
+        doc.cos().bytes(),
+        rewrite(&doc, true, WriteMode::Rewrite),
+    );
     let refs = probe(&merged);
     assert_ne!(refs[0], refs[1], "kept apart");
 }
@@ -393,7 +414,7 @@ fn image_page(indirect: bool) -> Document {
         }
     ));
     builder.add_page(50.0, 50.0, |page| page.image(b"Im0", 0.0, 0.0, 50.0, 50.0));
-    let doc = Document::open(builder.finish()).expect("opens");
+    let doc = authored("one page drawing one image", builder.finish());
     if !indirect {
         return doc;
     }
@@ -420,7 +441,7 @@ fn image_page(indirect: bool) -> Document {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
     });
-    Document::open(saved).expect("reopens")
+    authored("one image whose space is a reference", saved)
 }
 
 /// How many image XObjects a document carries, anywhere.
@@ -453,29 +474,38 @@ fn an_imported_image_merges_unless_its_dictionary_names_a_copied_non_stream() {
         assert_eq!(image_count(&source), 1, "the premise");
         let mut builder = DocumentBuilder::new();
         builder.add_page(50.0, 50.0, |_| {});
-        let target = Document::open(builder.finish()).expect("opens");
+        let target = authored(
+            "an imported image merges unless its dictionary names a copied non stream",
+            builder.finish(),
+        );
         let mut editor = target.editor();
         for index in [1, 2] {
             editor
                 .import_page(source.cos(), 0, index)
                 .expect("the page imports");
         }
-        let plain = validated(editor.save(&WriteOptions {
-            mode: WriteMode::Rewrite,
-            garbage_collect: true,
-            ..WriteOptions::default()
-        }));
+        let plain = authored(
+            "an imported image merges unless its dictionary names a copied non stream",
+            editor.save(&WriteOptions {
+                mode: WriteMode::Rewrite,
+                garbage_collect: true,
+                ..WriteOptions::default()
+            }),
+        );
         assert_eq!(
             image_count(&plain),
             2,
             "indirect {indirect}: one per import"
         );
-        let merged = validated(editor.save(&WriteOptions {
-            mode: WriteMode::Rewrite,
-            garbage_collect: true,
-            deduplicate_streams: true,
-            ..WriteOptions::default()
-        }));
+        let merged = authored(
+            "an imported image merges unless its dictionary names a copied non stream",
+            editor.save(&WriteOptions {
+                mode: WriteMode::Rewrite,
+                garbage_collect: true,
+                deduplicate_streams: true,
+                ..WriteOptions::default()
+            }),
+        );
         assert_eq!(image_count(&merged), expected, "indirect {indirect}");
     }
 }
