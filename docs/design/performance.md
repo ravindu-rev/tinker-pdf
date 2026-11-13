@@ -941,7 +941,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in twelve groups of one file
-each, MS-09's `threads` among them: 176 operations over inputs the benches
+each, MS-09's `threads` among them: 177 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1408,6 +1408,7 @@ container's synthesised PDF is `doc.cos().bytes()`
 | `layout/render the 30-chapter book at 72 dpi` | pages · its count | `book(30)` | not measured → ≥ 300 pages/s; calibrated; the same relation | in | built |
 | `layout/open and paginate the 10-chapter book` | pages · 2 × its count | `book(10)` | the relation's other side | ×2 | built |
 | `layout/render the 10-chapter book at 72 dpi` | pages · its count | `book(10)` | the relation's other side; 33 at 300 pages/s | in | built |
+| `layout/open and paginate the 10-chapter hyphenated book` | pages · 2 × its count | `hyphenated_book(10)`: `book`'s shape in British English, its paragraphs long words set in `hyphens: auto`, under the `hyphenation` feature | not in tier P's table; floor 1, the planning baseline paginating the same book unhyphenated | untimed | built |
 | `layout/the 20-page HTML report to PDF` | pages · 3 × 20 | `html_report()`, laid out and finished | not measured → ≤ 60; calibrated | ×3 | built |
 | `layout/the 20-page Markdown document to PDF` | pages · 3 × 20 | `markdown()` | not measured → ≤ 50; calibrated | ×3 | built |
 | `layout/open each SVG fixture, render page 1` | pages · 4 × 17 | every committed `.svg`, its first page at 72 dpi | not measured; relation ≤ 1.5 × its synthesised PDF | ×4 | built |

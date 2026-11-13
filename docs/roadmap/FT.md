@@ -407,18 +407,6 @@ list, each held to first-party evidence.
 | FT-14.7 | measure | The speed row in MS-04's render group: render at 150 dpi a generated page of text drawn through a substituted face with the fit, a shear and emboldening, sized into MS-04's window, with its baseline entry. *Note:* MS-04 splits `benches/` by group; today's `render text at 150 dpi` draws no glyph (`benches/support/inputs.rs`'s own comment), which is why this page brings its face. No target is set here; one is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json` | `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree` holds the bench file and `baseline.json` to one list with the operation in it, and `cargo bench -p tinker-pdf` reports its time. | FT-14.6, MS-04 |
 | FT-14.9 | measure | Close the row on the corpora (ruling 15): a local `cargo xtask corpus-run --check` over the fetched corpora, in its three settings, holds "rendered with something reported" at or under its bars with metric matching as FT-14.6 left it; then FT-14 leaves the roadmap. *Note:* FT-14.8, the watch step that held this exit, left with the corpus workflow. | `corpus/ratchet.json`, `corpus/ratchet-fonts.json`, `docs/roadmap/FT.md` | The local run prints no regression line for "rendered with something reported", recorded here. | FT-14.6, FT-14.7 |
 
-## FT-15 — Hyphenation
-
-**Hyphenation**: a pattern hyphenator and dictionaries per language for `hyphens: auto` in EPUB, HTML and the layout API
-
-**Exit criterion.** each language's patterns held to the dictionary's own published test words; a reftest pair per language in `epub_reftest.rs`
-
-**Doc:** [design/hyphenation.md](../design/hyphenation.md) · **Depends on:** H-116 (dictionary licences)
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| FT-15.8 | measure | Hyphenated layout's speed row: an operation in MS-04's layout group that lays out and paginates a generated book whose paragraphs are set in `hyphens: auto` in a vendored language, sized into MS-04's window, built with the dictionaries' feature, with its baseline entry. *Note:* MS-04 splits `benches/` by group; the operation goes in the layout group's file with its figure recorded as MS-04 records a new operation's. No target is invented here; one is the owner's (H-77). | `crates/tinker-pdf/benches/layout.rs`, `crates/tinker-pdf/benches/baseline.json` | `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree` holds the bench file and `baseline.json` to one list with the new operation in it, and `cargo bench -p tinker-pdf` with the feature reports its time. | FT-15.6, MS-04 |
-
 ## FT-16 — A font measurement API
 
 **A font measurement API** on the facade: advance, bounding box, `has_glyph`, text length, valid code points, glyph-name tables, flags

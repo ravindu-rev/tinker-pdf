@@ -1,10 +1,9 @@
 # Hyphenation
 
 *For [ROADMAP](../ROADMAP.md) row FT-15.* `hyphens: auto` asks the layout to
-break a word where a hyphenation resource for its language says it may, and
-this build reads `none` and `manual` only: a soft hyphen (U+00AD) is a break
-that draws a hyphen, and `auto` is refused by value
-([features/epub.md](../features/epub.md)). This design adds the resource —
+break a word where a hyphenation resource for its language says it may,
+beside `manual`'s soft hyphen (U+00AD), a break that draws a hyphen
+([features/epub.md](../features/epub.md)). This design is the resource —
 Liang's patterns and exception lists, one compiled table a language — the
 content language that keys it, and the seam where its points join the line
 breaker, for EPUB, HTML and the layout API alike.

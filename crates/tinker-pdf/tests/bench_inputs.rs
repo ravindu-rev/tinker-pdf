@@ -449,3 +449,48 @@ fn the_column_face_shapes_its_paragraph_as_a_column() {
         );
     }
 }
+
+/// **The hyphenated book is a page a chapter, and breaks at its
+/// dictionary's points** (FT-15.8): `inputs::hyphenated_book` writes the same
+/// bytes every time, and at the layout group's box its ten chapters open to
+/// ten pages. A hyphen stands only at a line's end, so the text holds none of
+/// its own; in a build with the `hyphenation` feature at least one line ends
+/// in one, at an automatic point, which is what the operation times, and
+/// without it none does, the book then set as `manual`.
+#[test]
+fn the_hyphenated_book_is_a_page_a_chapter_and_breaks_at_its_points() {
+    use tinker_pdf::{Document, OpenOptions};
+
+    let bytes = inputs::hyphenated_book(10);
+    assert_eq!(bytes, inputs::hyphenated_book(10), "seeded");
+    let doc =
+        Document::open_with(bytes, &OpenOptions::at_page(432.0, 648.0)).expect("the book opens");
+    assert_eq!(doc.page_count(), 10, "a page a chapter");
+    let lines: Vec<String> = doc
+        .pages()
+        .iter()
+        .flat_map(|page| {
+            page.text()
+                .lines()
+                .iter()
+                .map(|line| line.text.trim_end().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(!lines.is_empty(), "the book draws text");
+    for line in &lines {
+        assert!(
+            !line.trim_end_matches('-').contains('-'),
+            "a hyphen inside a line, which the book's words do not hold: {line:?}"
+        );
+    }
+    let ends = lines.iter().filter(|line| line.ends_with('-')).count();
+    if cfg!(feature = "hyphenation") {
+        assert!(ends > 0, "no line ends at an automatic point: {lines:?}");
+    } else {
+        assert_eq!(
+            ends, 0,
+            "a line broke inside a word with no dictionary: {lines:?}"
+        );
+    }
+}

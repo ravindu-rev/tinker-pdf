@@ -16,7 +16,9 @@
 //! repository under [`WORK_DIR`], named by its commit, and each builds its
 //! release `tpdf` and the release bench binary of the group asked for into a
 //! target directory of its own, so a CLI operation runs its own side's
-//! `tpdf`. Each operation then runs in count mode under cachegrind
+//! `tpdf`; the bench binary with each of [`BENCH_FEATURES`] its facade's
+//! manifest declares, as every run of the set is built, so an operation a
+//! feature brings is in its group's binary on a side that has the feature. Each operation then runs in count mode under cachegrind
 //! ([`COUNTER`]) at one iteration and at two, on each side. Every process is
 //! traced, so a CLI operation's `tpdf` children count with the bench, and
 //! each writes its own log; a run's count is the sum of its logs' `I refs`,
@@ -507,9 +509,43 @@ fn lists(dir: &Path, side: &str) -> Result<Vec<Group>, String> {
         .map_err(|error| format!("the {side}'s {}: {error}", bench::BASELINE_PATH))
 }
 
+/// The features the benchmark set is built with where a side's facade
+/// manifest declares them (`docs/verification.md`, "The set is built with
+/// `--features hyphenation`"): `hyphenation`, whose dictionaries the layout
+/// group's hyphenated book needs. A side from before a feature was declared
+/// builds without it, and its lists hold no operation that needs it.
+pub const BENCH_FEATURES: &[&str] = &["hyphenation"];
+
+/// The facade's manifest, from a checkout's root.
+const FACADE_MANIFEST: &str = "crates/tinker-pdf/Cargo.toml";
+
+/// Of [`BENCH_FEATURES`], each that `manifest`, a `Cargo.toml`, declares as a
+/// key of its `[features]` table, in [`BENCH_FEATURES`]' order. A name met
+/// anywhere else — a dependency's own feature list — declares nothing.
+#[must_use]
+pub fn declared_bench_features(manifest: &str) -> Vec<&'static str> {
+    let mut declared: Vec<&str> = Vec::new();
+    let mut in_features = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_features = line == "[features]";
+        } else if in_features {
+            if let Some((key, _)) = line.split_once('=') {
+                declared.push(key.trim().trim_matches('"'));
+            }
+        }
+    }
+    BENCH_FEATURES
+        .iter()
+        .copied()
+        .filter(|feature| declared.contains(feature))
+        .collect()
+}
+
 /// The release `tpdf` and the group's release bench binary, built in the
 /// checkout at `dir` into its own target directory, so the CLI operations
-/// run the `tpdf` beside the bench: the bench binary's path.
+/// run the `tpdf` beside the bench, the bench with the [`BENCH_FEATURES`] the
+/// checkout's facade declares: the bench binary's path.
 fn build(dir: &Path, group: &str) -> Result<PathBuf, String> {
     let target = dir.join("target");
     let cargo = |args: &[&str]| {
@@ -532,7 +568,10 @@ fn build(dir: &Path, group: &str) -> Result<PathBuf, String> {
             dir.display()
         ));
     }
-    let bench = [
+    let manifest = std::fs::read_to_string(dir.join(FACADE_MANIFEST))
+        .map_err(|error| format!("{}: {error}", dir.join(FACADE_MANIFEST).display()))?;
+    let features = declared_bench_features(&manifest).join(",");
+    let mut bench = vec![
         "bench",
         "-p",
         "tinker-pdf",
@@ -541,6 +580,9 @@ fn build(dir: &Path, group: &str) -> Result<PathBuf, String> {
         "--no-run",
         "--message-format=json-render-diagnostics",
     ];
+    if !features.is_empty() {
+        bench.extend(["--features", features.as_str()]);
+    }
     let out = cargo(&bench)
         .stderr(Stdio::inherit())
         .output()
@@ -997,5 +1039,34 @@ mod tests {
         );
         assert_eq!(bench_binary(messages, "tinker_pdf"), None);
         assert_eq!(bench_binary(messages, "render"), None);
+    }
+
+    /// A side builds the set with each of [`BENCH_FEATURES`] its facade's
+    /// manifest declares under `[features]`, a quoted key as a bare one, and
+    /// without one it lacks: a name met outside the table, in a dependency's
+    /// own feature list, declares nothing. The committed manifest declares
+    /// every one of them.
+    #[test]
+    fn a_side_builds_with_the_bench_features_its_manifest_declares() {
+        let declares = concat!(
+            "[package]\nname = \"tinker-pdf\"\n\n",
+            "[features]\ndefault = [\"cmap-predefined\"]\n",
+            "hyphenation = [\"tinker-pdf-layout/hyphenation\"]\n\n",
+            "[dependencies]\nx = \"1\"\n",
+        );
+        assert_eq!(declared_bench_features(declares), ["hyphenation"]);
+        let quoted = "[features]\n\"hyphenation\" = []\n";
+        assert_eq!(declared_bench_features(quoted), ["hyphenation"]);
+        let before = concat!(
+            "[features]\ndefault = []\nbundled-fonts = [\"tinker-pdf-font/bundled-fonts\"]\n\n",
+            "[dependencies]\n",
+            "tinker-pdf-layout = { path = \"../tinker-pdf-layout\", features = [\"hyphenation\"] }\n",
+            "hyphenation = \"1\"\n",
+        );
+        assert!(declared_bench_features(before).is_empty());
+        assert!(declared_bench_features("").is_empty());
+        let committed = std::fs::read_to_string(crate::repo_root().join(FACADE_MANIFEST))
+            .expect("the facade's manifest");
+        assert_eq!(declared_bench_features(&committed), BENCH_FEATURES);
     }
 }

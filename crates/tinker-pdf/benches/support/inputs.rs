@@ -2176,6 +2176,134 @@ pub fn book(chapters: usize) -> Vec<u8> {
     ocf_zip(&entries, &directory)
 }
 
+/// The long words [`hyphenated_paragraph`] draws from: British English of
+/// twelve letters and more, ASCII and none holding a hyphen, so a line whose
+/// last word does not fit has letters enough to break inside it.
+const LONG_WORDS: [&str; 16] = [
+    "accommodation",
+    "administration",
+    "characteristic",
+    "communication",
+    "consideration",
+    "environmental",
+    "establishment",
+    "extraordinary",
+    "independently",
+    "international",
+    "investigation",
+    "neighbourhood",
+    "organisation",
+    "particularly",
+    "responsibility",
+    "understanding",
+];
+
+/// The short words [`hyphenated_paragraph`] sets between the long ones.
+const LINKING_WORDS: [&str; 8] = ["the", "of", "and", "in", "with", "for", "an", "by"];
+
+/// About 600 characters of [`LONG_WORDS`] and [`LINKING_WORDS`], a long word
+/// and a short one in turn, in sentences: one chapter's paragraph of
+/// [`hyphenated_book`], which a 432 × 648 pt page holds whole, as it holds
+/// [`paragraph`]'s. It holds no hyphen and no soft hyphen.
+fn hyphenated_paragraph(words: &mut Seeded) -> String {
+    let mut text = String::new();
+    let mut start = true;
+    while text.chars().count() < 600 {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        let long = LONG_WORDS[words.below(LONG_WORDS.len())];
+        if start {
+            let mut letters = long.chars();
+            if let Some(first) = letters.next() {
+                text.extend(first.to_uppercase());
+                text.push_str(letters.as_str());
+            }
+            start = false;
+        } else {
+            text.push_str(long);
+        }
+        text.push(' ');
+        text.push_str(LINKING_WORDS[words.below(LINKING_WORDS.len())]);
+        if words.below(6) == 0 {
+            text.push('.');
+            start = true;
+        }
+    }
+    text.push('.');
+    text
+}
+
+/// A book of `chapters` chapters in British English set in `hyphens: auto`
+/// (`docs/design/hyphenation.md`): [`book`]'s shape, each chapter one XHTML
+/// file holding a heading and one paragraph in Liberation Serif Regular
+/// embedded through `@font-face`, every chapter `xml:lang="en-GB"`, the one
+/// stylesheet setting every paragraph in `hyphens: auto`, and each paragraph
+/// [`hyphenated_paragraph`]'s long words. A build with the `hyphenation`
+/// feature breaks its lines at the vendored `en-GB` dictionary's points; one
+/// without, or a revision with no `hyphens: auto`, sets it as `manual`. Each
+/// chapter starts a page and fits on it either way, so the book is
+/// `chapters` pages long at the default box.
+pub fn hyphenated_book(chapters: usize) -> Vec<u8> {
+    let mut words = Seeded::new(chapters as u64 + 1_000);
+    let mut manifest = String::new();
+    let mut spine = String::new();
+    let mut entries = vec![
+        OcfEntry::stored("mimetype", OCF_MEDIA_TYPE),
+        OcfEntry::deflated("META-INF/container.xml", CONTAINER_XML.as_bytes()),
+    ];
+    for chapter in 1..=chapters {
+        manifest.push_str(&format!(
+            r#"<item id="c{chapter}" href="c{chapter}.xhtml" media-type="application/xhtml+xml"/>"#
+        ));
+        spine.push_str(&format!(r#"<itemref idref="c{chapter}"/>"#));
+    }
+    let package = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">"#,
+            r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+            r#"<dc:identifier id="pub-id">urn:uuid:1f0c2c1e-0000-4000-8000-0000000000b1</dc:identifier>"#,
+            r#"<dc:title>A Hyphenated Book of {chapters} Chapters</dc:title>"#,
+            r#"<dc:language>en-GB</dc:language>"#,
+            r#"</metadata><manifest>"#,
+            r#"<item id="css" href="book.css" media-type="text/css"/>"#,
+            r#"<item id="serif" href="serif.ttf" media-type="font/ttf"/>"#,
+            r#"{manifest}</manifest><spine>{spine}</spine></package>"#
+        ),
+        chapters = chapters,
+        manifest = manifest,
+        spine = spine
+    );
+    entries.push(OcfEntry::deflated("EPUB/content.opf", package.as_bytes()));
+    let stylesheet = concat!(
+        r#"@font-face { font-family: "Book Serif"; src: url(serif.ttf) format("truetype"); } "#,
+        r#"body { font-family: "Book Serif"; } p { hyphens: auto; }"#
+    );
+    entries.push(OcfEntry::deflated("EPUB/book.css", stylesheet.as_bytes()));
+    entries.push(OcfEntry::deflated("EPUB/serif.ttf", &serif()));
+    for chapter in 1..=chapters {
+        let body = hyphenated_paragraph(&mut words);
+        let xhtml = format!(
+            concat!(
+                r#"<?xml version="1.0" encoding="utf-8"?>"#,
+                r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en-GB"><head>"#,
+                r#"<title>Chapter {chapter}</title>"#,
+                r#"<link rel="stylesheet" type="text/css" href="book.css"/>"#,
+                r#"</head><body><h2>Chapter {chapter}</h2><p>{body}</p></body></html>"#
+            ),
+            chapter = chapter,
+            body = body
+        );
+        entries.push(OcfEntry::deflated(
+            &format!("EPUB/c{chapter}.xhtml"),
+            xhtml.as_bytes(),
+        ));
+    }
+    let directory: Vec<usize> = (0..entries.len()).collect();
+    ocf_zip(&entries, &directory)
+}
+
 /// How many sections [`html_report`] and [`markdown`] hold: what lays out
 /// into their 20 pages at the default box.
 const REPORT_SECTIONS: usize = 20;

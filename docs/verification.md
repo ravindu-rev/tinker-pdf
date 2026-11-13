@@ -31,7 +31,7 @@ recorded in the roadmap row it closes:
 | The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner, and `determinism.rs` again with `--features hyphenation` |
 | Native against wasm, over fuzz corpora | `wasm_parity.rs` natively, then on `wasm32-wasip1` under wasmtime granted the same documents and held to the native list ("Native against wasm") |
 | The corpora | `cargo xtask corpus-fetch`, then `cargo xtask corpus-run --check` |
-| The benches | `cargo bench -p tinker-pdf`, then `cargo xtask bench-check --machine NAME` |
+| The benches | `cargo bench -p tinker-pdf --features hyphenation`, then `cargo xtask bench-check --machine NAME` |
 | The benches on `wasm32-wasip1` | the set built plain and with `+simd128` and run under wasmtime beside a native run, each leg into its own tree ("The wasm legs") |
 | Instruction counts, on Linux | `cargo xtask bench-count --group NAME`, a group or a part of one at a time, with valgrind installed |
 | Peak memory, on Linux | `cargo test --release -p tinker-pdf --test peak_memory -- --ignored`, in both builds |
@@ -1228,6 +1228,14 @@ cargo bench -p tinker-pdf -- --baseline before
 
 and `--bench <group>` narrows either to one group's file.
 
+**The set is built with `--features hyphenation`.** One operation, the layout
+group's `open and paginate the 10-chapter hyphenated book`, needs the
+dictionaries that feature compiles, and a build without it leaves that
+operation out, which `bench-check --machine` compares nothing for. Every run
+held to the whole set — the wasm legs, the paired run, the counts — builds
+with the feature, `cargo xtask bench-count` on each side whose manifest
+declares it.
+
 Twenty-eight operations time `tpdf` itself: those tier P marks CLI — the
 render group's eight quarter-size pages to PNG on 1 and 4 jobs among them —
 and the `threads` group's four, which time the CLI's page walk,
@@ -1757,7 +1765,7 @@ local run's own commands.
 ```sh
 export TINKER_BENCH_FIXTURES="$(mktemp -d)"
 cargo build -p tpdf
-cargo test -p tinker-pdf --benches
+cargo test -p tinker-pdf --benches --features hyphenation
 git worktree add --detach ../planning 61adcde
 rm -r ../planning/crates/tinker-pdf/benches
 cp -r crates/tinker-pdf/benches ../planning/crates/tinker-pdf/benches
@@ -1774,7 +1782,11 @@ manifest. The head's `cargo test --benches` runs every operation once and
 writes every input into the directory; the planning baseline's then runs
 every operation with a side on it once, beside a debug `tpdf`, on those
 bytes, and writes none of its own. A timed run builds both with
-`--release`.
+`--release`. The head builds with `--features hyphenation`, which the
+layout group's hyphenated book needs, as every run of the set does; the
+planning baseline declares no such feature and builds without it, and its
+`cfg` takes that operation in, laying the book out as that revision does,
+with no word broken.
 
 **A pinned machine names its host.** An entry for one host held still
 carries `cpu`, that host's `/proc/cpuinfo` model name, and `held`, the
@@ -1838,18 +1850,18 @@ each tree starts empty:
 
 ```sh
 cargo build --release -p tpdf
-rm -rf target/criterion && cargo bench -p tinker-pdf
+rm -rf target/criterion && cargo bench -p tinker-pdf --features hyphenation
 grant="--dir ../..::/repo --env TINKER_BENCH_CRATE_DIR=/repo/crates/tinker-pdf"
 rm -rf target/criterion-wasm32-wasip1 && mkdir -p target/criterion-wasm32-wasip1
 CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run $grant \
     --dir ../../target/criterion-wasm32-wasip1::/criterion --env CRITERION_HOME=/criterion" \
-  cargo bench -p tinker-pdf --target wasm32-wasip1
+  cargo bench -p tinker-pdf --features hyphenation --target wasm32-wasip1
 rm -rf target/criterion-wasm32-wasip1-simd128 && mkdir -p target/criterion-wasm32-wasip1-simd128
 CARGO_TARGET_DIR=target/simd128 \
 CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS="-C target-feature=+simd128" \
 CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run $grant \
     --dir ../../target/criterion-wasm32-wasip1-simd128::/criterion --env CRITERION_HOME=/criterion" \
-  cargo bench -p tinker-pdf --target wasm32-wasip1
+  cargo bench -p tinker-pdf --features hyphenation --target wasm32-wasip1
 ```
 
 The `+simd128` leg builds into a target directory of its own, so neither

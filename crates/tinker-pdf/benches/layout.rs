@@ -5,14 +5,21 @@
 //! `support/mod.rs`'s; `baseline.json`'s `layout` list names these operations
 //! in this order. Each input is asserted before its operation is timed:
 //! every committed book paginates and renders every page, each generated book has
-//! a page a chapter, the HTML and Markdown documents have their 20 pages, and
-//! every container fixture's first page renders, from the container and from
-//! its synthesised PDF.
+//! a page a chapter, the hyphenated one ends a line at an automatic point, the
+//! HTML and Markdown documents have their 20 pages, and every container
+//! fixture's first page renders, from the container and from its synthesised
+//! PDF.
 //!
 //! Each operation is sized into the set's 20-300 ms window on the hosted
 //! runner (`docs/design/performance.md`): the generated books at ten and
 //! thirty chapters, and the shorter operations repeated inside an iteration,
 //! their unit counting every call.
+//!
+//! The hyphenated book's operation needs the `hyphenation` feature's
+//! dictionaries, so the set is built with `--features hyphenation`
+//! (`docs/verification.md`, "The benches") and a build without it leaves that
+//! operation out; the planning baseline, which has no `hyphens: auto`, lays the
+//! same book out without breaking a word in its place.
 
 mod support;
 
@@ -132,6 +139,47 @@ fn generated(chapters: usize) -> (Arc<[u8]>, Document) {
     (bytes, doc)
 }
 
+/// A generated book of `chapters` chapters set in `hyphens: auto`
+/// ([`inputs::hyphenated_book`]), asserted to have a page a chapter and,
+/// where the build has the dictionaries, to end at least one line at an
+/// automatic point — its text holds no hyphen of its own, so a line ending in
+/// one broke at a dictionary's point, and the operation times hyphenation —
+/// and the document it opens to.
+#[cfg(any(feature = "hyphenation", tinker_planning_baseline))]
+fn hyphenated(chapters: usize) -> (Arc<[u8]>, Document) {
+    let bytes: Arc<[u8]> = inputs::store()
+        .bytes(&format!("hyphenated-book-{chapters}.epub"), || {
+            inputs::hyphenated_book(chapters)
+        })
+        .into();
+    let doc = Document::open_with(Arc::clone(&bytes), &at_box()).expect("the book opens");
+    assert_eq!(
+        doc.page_count() as usize,
+        chapters,
+        "the hyphenated book has a page for each of its chapters"
+    );
+    #[cfg(not(tinker_planning_baseline))]
+    {
+        let automatic: usize = doc
+            .pages()
+            .iter()
+            .map(|page| {
+                page.text()
+                    .lines()
+                    .iter()
+                    .filter(|line| line.text.trim_end().ends_with('-'))
+                    .count()
+            })
+            .sum();
+        assert!(
+            automatic > 0,
+            "the hyphenated book ends none of its lines at an automatic point, so the \
+             operation would time no hyphenation"
+        );
+    }
+    (bytes, doc)
+}
+
 /// [`open_and_render`] `calls` times an iteration, a page a fixture a call.
 fn containers_rendered<'d>(op: &mut Op<'d>, fixtures: &'d [inputs::Fixture], calls: u64) {
     op.per(Per::Pages(calls * fixtures.len() as u64));
@@ -210,6 +258,8 @@ fn layout(c: &mut Criterion) {
 
     let thirty = LazyCell::new(|| generated(30));
     let ten = LazyCell::new(|| generated(10));
+    #[cfg(any(feature = "hyphenation", tinker_planning_baseline))]
+    let hyphenated_ten = LazyCell::new(|| hyphenated(10));
 
     // Each set of fixtures, and the PDFs the facade synthesised for it, which
     // are written from the committed fixtures themselves, so a process timing
@@ -407,6 +457,26 @@ fn layout(c: &mut Criterion) {
     });
     group.operation("render the 10-chapter book at 72 dpi", |op| {
         render(op, &ten.1, 10, 1)
+    });
+    // The 10-chapter book's shape in British English set in `hyphens: auto`
+    // (FT-15.8): each paragraph long words the vendored `en-GB` dictionary
+    // breaks at a line's end, opened and paginated twice an iteration as the
+    // 10-chapter book is. A build without the `hyphenation` feature leaves it
+    // out; the planning baseline, which has no `hyphens: auto`, paginates the
+    // same book without breaking a word in its place.
+    #[cfg(any(feature = "hyphenation", tinker_planning_baseline))]
+    group.operation("open and paginate the 10-chapter hyphenated book", |op| {
+        let (bytes, _) = &*hyphenated_ten;
+        op.per(Per::Pages(2 * 10));
+        op.iter(move || {
+            for _ in 0..2 {
+                black_box(
+                    Document::open_with(Arc::clone(bytes), &at_box())
+                        .expect("it opens")
+                        .page_count(),
+                );
+            }
+        });
     });
 
     // Markup laid out and written as a PDF.
