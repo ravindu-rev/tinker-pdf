@@ -256,6 +256,45 @@ impl Admission {
         self.budget_spent = true;
     }
 
+    /// Whether this admission, from where it stands, gives every answer
+    /// `events` records to the questions in them — each form entered, each
+    /// group and mask accepted or declined as recorded, the marked-content
+    /// scopes and the brackets between them taken as they come — worked out
+    /// on a copy, so nothing here changes: what a renderer and a recorder
+    /// that ask this admission answer `Device::answers_alike` with, short of
+    /// cancellation, which declines everything and is theirs to ask.
+    #[must_use]
+    pub fn answers_alike(&self, events: &[Event]) -> bool {
+        let mut admission = self.clone();
+        for event in events {
+            match event {
+                Event::BeginMarkedContent(scope) => admission.begin_marked_content(scope.visible),
+                Event::EndMarkedContent => admission.end_marked_content(),
+                // Every form a renderer is not cancelled out of is entered.
+                Event::BeginForm { entered, .. } => {
+                    if !*entered {
+                        return false;
+                    }
+                }
+                Event::BeginGroup { entered, .. } => {
+                    if admission.begin_group() != *entered {
+                        return false;
+                    }
+                }
+                Event::EndGroup => admission.end_group(),
+                Event::BeginSoftMask { entered, .. } => {
+                    if admission.begin_soft_mask() != *entered {
+                        return false;
+                    }
+                }
+                Event::EndSoftMask => admission.end_soft_mask(),
+                Event::GroupBudgetSpent => admission.note_budget_spent(),
+                _ => {}
+            }
+        }
+        true
+    }
+
     /// Spends one buffer from the budget, or records that there was none.
     fn spend(&mut self) -> bool {
         if self.buffers >= MAX_GROUP_BUFFERS {
@@ -611,6 +650,12 @@ impl Device for DisplayRecorder {
     /// documentation).
     fn is_cancelled(&self) -> bool {
         self.overflowed
+    }
+
+    /// The renderer's admission's answer, as the recorder answers by it; and
+    /// never once the budget is passed, when it declines everything.
+    fn answers_alike(&self, events: &[Event]) -> bool {
+        !self.overflowed && self.admission.answers_alike(events)
     }
 }
 

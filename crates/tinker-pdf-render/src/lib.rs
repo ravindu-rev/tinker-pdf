@@ -4069,6 +4069,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         self.stopping()
     }
 
+    /// The admission's answers ([`Admission::answers_alike`]), which are
+    /// every answer this renderer gives that does not depend on cancellation;
+    /// and a renderer cancelled declines everything, so it is handed no
+    /// replay.
+    fn answers_alike(&self, events: &[tinker_pdf_content::record::Event]) -> bool {
+        !self.cancel.is_cancelled() && self.admission.answers_alike(events)
+    }
+
     fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.

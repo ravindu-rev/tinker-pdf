@@ -28,7 +28,9 @@ use tinker_pdf_render::{
     Shading, TilingPattern, TwoColourSamples,
 };
 
-use crate::cache::{self, DocumentCache, Fill, FrameKey, IccKey, ImageKey, Written};
+use crate::cache::{
+    self, DocumentCache, Fill, FormKey, FrameKey, IccKey, ImageKey, KeptForm, Written,
+};
 use crate::fonts::{self, FontProvider, FontRequest};
 use crate::optional::OptionalContent;
 use crate::stats::{self, Counter, Work};
@@ -314,6 +316,11 @@ struct Caches {
     /// (MS-20). What reading it repaired is kept beside it and said again at
     /// each `gs`, as [`CachedImage`] says an image's. `None` is cached too.
     states: Mutex<HashMap<Vec<u8>, CachedState>>,
+    /// This scope's resource dictionary written exactly
+    /// ([`cache::write_exact`]), on the first question that needs it: what
+    /// the drawing of a form that brings no resources of its own is kept
+    /// under beside its invocation (`cache::FormKey`).
+    written: OnceLock<Written>,
 }
 
 /// A graphics state as [`Caches::states`] keeps it.
@@ -728,6 +735,12 @@ impl Operation {
         self.cache.as_deref()
     }
 
+    /// What the operation renders for, which binds its optional-content
+    /// states: the usage a form's kept drawing is keyed by.
+    pub(crate) fn usage(&self) -> Option<Usage> {
+        self.usage
+    }
+
     /// Whether this is [`Operation::none`].
     fn is_none(&self) -> bool {
         self.streams.is_none() && self.work.is_none() && self.cache.is_none()
@@ -803,6 +816,10 @@ pub struct PageResources {
     /// taken by [`GlyphSource::outline`] into the cache entry beside the
     /// outline so a render that meets it there can say it again.
     unresolved: Mutex<Option<String>>,
+    /// The forms being recorded in this scope for the document's cache,
+    /// innermost last, each with what the scope has been told since its
+    /// interpretation began (`FontSource::kept_form`).
+    recording: Mutex<Vec<FormCapture>>,
     /// The host's substitute faces, kept so a resource dictionary *inside*
     /// this one can be read with the same configuration.
     ///
@@ -1803,6 +1820,7 @@ impl PageResources {
             repaired_spaces: Mutex::new(Vec::new()),
             image_capture: Mutex::new(None),
             unresolved: Mutex::new(None),
+            recording: Mutex::new(Vec::new()),
             provider: self.provider.clone(),
             op,
         }
@@ -1954,6 +1972,7 @@ impl PageResources {
             repaired_spaces: Mutex::new(Vec::new()),
             image_capture: Mutex::new(None),
             unresolved: Mutex::new(None),
+            recording: Mutex::new(Vec::new()),
             provider: provider.cloned(),
             op,
         }
@@ -2964,12 +2983,7 @@ impl FontSource for PageResources {
             // A name the resource dictionary does not define. Recorded so a
             // caller can tell "this page has no text" from "this page has text
             // whose font this build could not resolve".
-            if let Ok(mut missing) = self.missing_fonts.lock() {
-                let name = String::from_utf8_lossy(&fonts::shown(font)).into_owned();
-                if missing.len() < 64 && !missing.contains(&name) {
-                    missing.push(name);
-                }
-            }
+            self.note_missing_font(String::from_utf8_lossy(&fonts::shown(font)).into_owned());
             return Vec::new();
         };
         let font = found;
@@ -3051,6 +3065,112 @@ impl FontSource for PageResources {
 
     fn form_scope(&self, name: &[u8]) -> Option<Arc<PageResources>> {
         self.form_resources(name)
+    }
+
+    /// As much as the document's budget, and at most what a retained page
+    /// may hold, where the document keeps forms' drawings; nothing without
+    /// a budget, or with one of zero, which keeps none.
+    fn form_recording_bytes(&self) -> usize {
+        self.op.cache().map_or(0, |cache| {
+            usize::try_from(cache.limits().bytes)
+                .unwrap_or(usize::MAX)
+                .min(tinker_pdf_render::MAX_DISPLAY_LIST_BYTES)
+        })
+    }
+
+    /// The drawing the document's cache keeps under `invocation` and, for a
+    /// form that brings no resources of its own, this scope's resources:
+    /// handed back with the fonts its interpretation found none for said
+    /// again. Where none is kept, the interpretation about to run is watched
+    /// for what it tells this scope, until `form_drawn` says how it went.
+    fn kept_form(
+        &self,
+        name: &[u8],
+        invocation: &tinker_pdf_content::FormInvocation,
+    ) -> Option<Arc<tinker_pdf_content::FormRecording>> {
+        // Every miss is answered by a `form_drawn` that takes its capture, so
+        // a miss that has no key still leaves one, which keeps nothing.
+        let key = self
+            .op
+            .cache()
+            .and_then(|_| self.form_key(name, invocation));
+        let found = match (self.op.cache(), &key) {
+            (Some(cache), Some(key)) => cache.form(key, self.op.work.as_deref()),
+            _ => Err(0),
+        };
+        match found {
+            Ok(kept) => {
+                for name in &kept.missing_fonts {
+                    self.note_missing_font(name.clone());
+                }
+                Some(Arc::clone(&kept.recording))
+            }
+            Err(asked) => {
+                if let Ok(mut recording) = self.recording.lock() {
+                    recording.push(FormCapture {
+                        key,
+                        asked,
+                        missing_fonts: Vec::new(),
+                        repaired: false,
+                    });
+                }
+                None
+            }
+        }
+    }
+
+    /// Counts how the form was drawn, and keeps the drawing recorded after
+    /// `kept_form` found none, where it is one to keep and its
+    /// interpretation reported no repaired colour space.
+    fn form_drawn(&self, _name: &[u8], drawn: tinker_pdf_content::FormDrawn) {
+        use tinker_pdf_content::FormDrawn;
+        let recorded = match drawn {
+            FormDrawn::Replayed => {
+                self.count(Counter::FormsReplayed);
+                return;
+            }
+            FormDrawn::Interpreted => {
+                self.count(Counter::FormsInterpreted);
+                return;
+            }
+            FormDrawn::Recorded { recording, .. } => recording,
+        };
+        self.count(Counter::FormsInterpreted);
+        let capture = self
+            .recording
+            .lock()
+            .ok()
+            .and_then(|mut recording| recording.pop());
+        let (Some(cache), Some(capture), Some(recording)) = (self.op.cache(), capture, recorded)
+        else {
+            return;
+        };
+        let Some(key) = capture.key else {
+            return;
+        };
+        if capture.repaired {
+            return;
+        }
+        let words = capture
+            .missing_fonts
+            .iter()
+            .map(String::len)
+            .fold(0usize, usize::saturating_add);
+        let bytes = recording
+            .kept_bytes()
+            .saturating_add(key.invocation.written_len())
+            .saturating_add(key.scope.as_ref().map_or(0, Written::len))
+            .saturating_add(words);
+        cache.offer_form(
+            key,
+            Arc::new(KeptForm {
+                recording: Arc::new(recording),
+                missing_fonts: capture.missing_fonts,
+            }),
+            u64::try_from(bytes).unwrap_or(u64::MAX),
+            capture.asked,
+            self.op.work.as_deref(),
+        );
     }
 
     fn form(&self, name: &[u8]) -> Option<tinker_pdf_content::Form> {
@@ -4144,6 +4264,68 @@ impl PageResources {
     }
 }
 
+/// A form being recorded in a scope for the document's cache
+/// (`FontSource::kept_form`): the key its drawing will be kept under, the
+/// request that missed it, and what the scope has been told since its
+/// interpretation began.
+struct FormCapture {
+    /// `None` for a form whose key could not be built, whose drawing is not
+    /// kept.
+    key: Option<FormKey>,
+    asked: u64,
+    /// Fonts the scope was told it has none for: said again by every render
+    /// that replays the drawing.
+    missing_fonts: Vec<String>,
+    /// Whether the scope was told of a colour space read with a repair: the
+    /// drawing is then not kept.
+    repaired: bool,
+}
+
+impl PageResources {
+    /// The key the drawing of the form `name` invoked as `invocation` is
+    /// kept under in this scope: the invocation, this scope's resources
+    /// where the form brings none of its own, so that its names resolve in
+    /// them, and the usage the operation binds its optional-content states
+    /// for. `None` for a name that selects no form here, or one the
+    /// invocation does not name.
+    fn form_key(
+        &self,
+        name: &[u8],
+        invocation: &tinker_pdf_content::FormInvocation,
+    ) -> Option<FormKey> {
+        let (dict, reference) = self.xobject(name)?;
+        if crate::structure::stream_id(reference) != invocation.stream {
+            return None;
+        }
+        // The rule `build_form_resources` reads a form's own scope by.
+        let owns = self
+            .doc
+            .resolve_key(&dict, Name::RESOURCES)
+            .as_dict()
+            .is_some();
+        Some(FormKey {
+            invocation: invocation.clone(),
+            scope: (!owns).then(|| self.written().clone()),
+            usage: self.op.usage(),
+        })
+    }
+
+    /// This scope's resource dictionary written exactly, once a scope.
+    fn written(&self) -> &Written {
+        self.caches.written.get_or_init(|| {
+            let mut out = Vec::new();
+            match self.resources.as_deref() {
+                Some(resources) => {
+                    out.push(1);
+                    cache::write_exact_dict(resources, &mut out);
+                }
+                None => out.push(0),
+            }
+            Written::of(out)
+        })
+    }
+}
+
 /// Which scope a form's contents run in, for [`PageResources::form_from`].
 #[derive(Clone, Copy)]
 enum Contents {
@@ -4493,8 +4675,16 @@ impl PageResources {
         self.note_missing_font(name);
     }
 
-    /// Adds a font to what this render could not resolve, once.
+    /// Adds a font to what this render could not resolve, once, and to what
+    /// every form being recorded here has met.
     fn note_missing_font(&self, name: String) {
+        if let Ok(mut recording) = self.recording.lock() {
+            for capture in recording.iter_mut() {
+                if capture.missing_fonts.len() < 64 && !capture.missing_fonts.contains(&name) {
+                    capture.missing_fonts.push(name.clone());
+                }
+            }
+        }
         if let Ok(mut missing) = self.missing_fonts.lock() {
             if missing.len() < 64 && !missing.contains(&name) {
                 missing.push(name);
@@ -4517,6 +4707,14 @@ impl PageResources {
     /// the space at every `sc`, and a page that sets a colour a thousand times
     /// has one space to report.
     fn note_repaired_space(&self, entry: (String, String)) {
+        // A repair a form's interpretation met is said where it met it, among
+        // what the device says beside it, which a recording cannot keep in
+        // order: the form's drawing is not kept.
+        if let Ok(mut recording) = self.recording.lock() {
+            for capture in recording.iter_mut() {
+                capture.repaired = true;
+            }
+        }
         if let Ok(mut repaired) = self.repaired_spaces.lock() {
             if repaired.len() < 64 && !repaired.contains(&entry) {
                 repaired.push(entry);

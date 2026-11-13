@@ -803,10 +803,30 @@ grid's every node filled and its largest row tables built: relative
 colorimetric's, and one for each other intent at the most any of the
 profile's sources compiles, a model's curves or the largest grid a table or a
 pipeline is read through. So an intent compiled, a grid node filled or a row
-converted later never takes the cache past its budget. `Page::render`,
-`Page::render_form`, `Page::render_annotation`, `DisplayList::render` and the
-page walk read through it; `Page::to_svg` keeps its pictures for the write
-alone.
+converted later never takes the cache past its budget. **A form's drawing**
+is kept too: the interpreter asks for a recording of each form it enters and
+offers each it makes ([content and text](content-and-text.md)), and the
+document keeps it under the interpreter's `FormInvocation`, the usage the
+render names — whose optional-content states its marked content is shown or
+hidden by — and, for a form that brings no resources of its own, the scope
+its names resolve in — the scope's resource dictionary written exactly, so
+pages whose resources are one dictionary's worth share it. A form stamped on every page, invoked under
+one state, is interpreted once while its drawing fits, and replayed after
+that by every page, display list, tile and resolution, since a recording is a
+function of the stream and the invoking state and never of the canvas (ruling
+5); past the budget it is interpreted at every invocation, as it always was.
+The renderer and the display list's recorder replay one only where their
+admission would answer as it was recorded. A replay says again the fonts its
+interpretation found none for; a drawing whose interpretation read a colour
+space with a repair is not kept, since that repair is said among what the
+renderer says, in an order a recording cannot keep. A drawing is charged its
+recording as `Event::kept_bytes` counts it, its key's bytes and the words it
+says again, and is never filled single-flight: it is made by the render that
+draws the form, as it draws it, so two renders that miss one at once each
+interpret it and the first to offer it keeps it. `Page::render`,
+`Page::render_form`, `Page::render_annotation`, `Page::display_list`'s
+recording, `DisplayList::render` and the page walk read through it;
+`Page::to_svg` keeps what it computes for the write alone.
 
 **A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
 (`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list
@@ -1028,6 +1048,9 @@ found its entry kept and each that computed it, of every kind it keeps,
 `cache_evictions`, each entry it evicted to make room for one the operation
 kept, and `cache_bytes_held`, the most bytes it held at any of the
 operation's lookups — all four zero for a document with no budget;
+`forms_interpreted` and `forms_replayed`, each form drawn by interpreting its
+content and each drawn from a kept drawing, counted only where the document's
+cache can keep one — a budget, and not one of zero;
 `page_walks`, each walk of the page tree from its root,
 `page_nodes_visited`, each node a walk or a one-page lookup reads, and
 `page_entries_copied`, each page a lookup or a read of every page copies out
@@ -1492,6 +1515,16 @@ defect to hide in.
   one's carrying a matrix, three tables and four pipelines beside a media
   white that is not D50, every intent compiled and converting a colour and a
   row, within the bound charged for them.
+  `a_form_stamped_on_a_hundred_pages_is_interpreted_once`, a stamp after each
+  page's own text and path, with resources of its own and resolving its font
+  in the pages', one interpretation and ninety-nine replays, every page
+  byte-equal to a document's with no budget; a tile at another resolution
+  replaying the page's drawing; a form whose missing font is said again on
+  the pages that replay it beside one whose repaired space keeps it from
+  being kept; display lists recording through the kept drawing; a form whose
+  marked content a print render hides kept once for each usage, each render
+  byte-equal to a document's with no budget; and no drawing kept with no
+  budget, a budget of zero or a cancelled render.
   `determinism.rs`'s `warm_and_starved_caches_render_the_fingerprints` holds
   every fingerprinted page to its fingerprint and its warnings through a warm
   cache and a starved one ([determinism](determinism.md)). The

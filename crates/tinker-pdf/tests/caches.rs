@@ -26,7 +26,7 @@
 
 use tinker_pdf::{
     Bitmap, CacheLimits, Document, OpenOptions, Page, Parallelism, PixelRegion, RenderOptions,
-    RenderWarning, Stats,
+    RenderWarning, Stats, Usage,
 };
 
 /// What the cache charges an entry beside its payload.
@@ -1062,4 +1062,294 @@ fn transforms_and_images_share_one_budget() {
         );
         same_render(&bitmap, &plain, &format!("render {render}"));
     }
+}
+
+// ---- form recordings --------------------------------------------------------
+
+/// A stamp: a red rule, a blue frame and the word "Draft" in Helvetica, the
+/// form's content `q`-bracketed and its text in a text object of its own.
+const STAMP: &str = "q 0.8 0 0 rg 5 5 90 2 re f 0 0 1 RG 2 w 10 10 80 30 re S \
+                     BT /Helv 12 Tf 20 20 Td (Draft) Tj ET Q";
+
+/// `pages` pages each drawing [`STAMP`] (object 3) after text and a path of
+/// its own, which leave the text matrix and the current point somewhere else
+/// on every page. Where `own` the stamp brings its own resources naming
+/// Helvetica (object 4); otherwise every page's resources name it, and the
+/// stamp resolves its font there.
+fn stamped_pages(pages: u32, own: bool) -> Vec<u8> {
+    let stamp = if own {
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 50] /Resources << /Font << /Helv 4 0 R >> >>"
+    } else {
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 50]"
+    };
+    let shared = [
+        stream(stamp, STAMP.as_bytes()),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+    ];
+    let resources = if own {
+        "<< /XObject << /Stamp 3 0 R >> >>"
+    } else {
+        "<< /XObject << /Stamp 3 0 R >> /Font << /Helv 4 0 R >> >>"
+    };
+    let contents: Vec<String> = (0..pages)
+        .map(|index| {
+            format!(
+                "BT /Helv 10 Tf 10 {} Td (Page {index}) Tj ET 0 0 0 rg {} {} m 60 60 l S \
+                 q 1 0 0 1 0 40 cm /Stamp Do Q",
+                80 - index % 7,
+                index % 11,
+                index % 13
+            )
+        })
+        .collect();
+    let pages: Vec<(&str, &str)> = contents
+        .iter()
+        .map(|content| (resources, content.as_str()))
+        .collect();
+    document(&shared, &pages)
+}
+
+/// A page whose form `/Fm` paints a green left half and, inside marked
+/// content of an optional-content group a print render turns off, a red
+/// right half: the group is on in every render but one naming print
+/// (8.11.4.4).
+fn usage_page() -> Vec<u8> {
+    pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] \
+          /D << /ON [5 0 R] /AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R] >>] >> >> >>"
+            .to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] \
+          /Resources << /XObject << /Fm 6 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        stream("", b"/Fm Do"),
+        b"<< /Type /OCG /Name (Layer) /Usage << /Print << /PrintState /OFF >> >> >>".to_vec(),
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 40 40] \
+             /Resources << /Properties << /MC0 5 0 R >> >>",
+            b"0 1 0 rg 0 0 20 40 re f /OC /MC0 BDC 1 0 0 rg 20 0 20 40 re f EMC",
+        ),
+    ])
+}
+
+/// **A form drawn for two usages keeps a drawing for each**: the usage a
+/// render names binds the optional-content states the form's marked content
+/// reads, so a render naming none and one naming print each interpret the
+/// form once and keep their own drawing, and each later render of either
+/// replays its own — never the other's — drawing what a document with no
+/// budget draws for that usage, byte for byte.
+#[test]
+fn a_form_drawn_for_two_usages_keeps_a_drawing_for_each() {
+    let bytes = usage_page();
+    let render = |document: &Document, usage: Option<Usage>| {
+        let bitmap = document.page(0).expect("a page").render(&RenderOptions {
+            usage,
+            ..counting(72.0)
+        });
+        let stats = bitmap.stats.expect("a counted render hands its stats back");
+        (bitmap, stats)
+    };
+    let plain = Document::open(bytes.clone()).expect("it opens");
+    let (shown, _) = render(&plain, None);
+    let (printed, _) = render(&plain, Some(Usage::Print));
+    assert!(
+        shown.data != printed.data,
+        "the fixture is what it says: print hides the red half"
+    );
+
+    let document = budgeted(bytes, 16 << 20);
+    for (round, expected) in [(0, (1, 0)), (1, (0, 1))] {
+        for (usage, alone) in [(None, &shown), (Some(Usage::Print), &printed)] {
+            let (bitmap, stats) = render(&document, usage);
+            assert_eq!(
+                (stats.forms_interpreted, stats.forms_replayed),
+                expected,
+                "round {round}, {usage:?}: {stats:?}"
+            );
+            same_render(&bitmap, alone, &format!("round {round}, {usage:?}"));
+        }
+    }
+}
+
+/// **A form stamped on a hundred pages is interpreted once**: under a stated
+/// budget the first page's render interprets the stamp and keeps its
+/// drawing, and the ninety-nine after it replay it — each page's own text and
+/// path leave the text matrix and the current point elsewhere, which the
+/// stamp, setting its own, never reads — and every page draws what it draws
+/// with no budget, where every render interprets it. So too where the stamp
+/// resolves its font in every page's resources, which are one dictionary's
+/// worth between them.
+#[test]
+fn a_form_stamped_on_a_hundred_pages_is_interpreted_once() {
+    for own in [true, false] {
+        let bytes = stamped_pages(100, own);
+        let document = budgeted(bytes.clone(), 16 << 20);
+        let plain = Document::open(bytes).expect("it opens");
+        let (mut interpreted, mut replayed) = (0, 0);
+        for index in 0..100 {
+            let (bitmap, stats) = counted(&document.page(index).expect("a page"), 72.0);
+            interpreted += stats.forms_interpreted;
+            replayed += stats.forms_replayed;
+            let (alone, alone_stats) = counted(&plain.page(index).expect("a page"), 72.0);
+            assert_eq!(
+                (alone_stats.forms_interpreted, alone_stats.forms_replayed),
+                (0, 0),
+                "with no budget neither is counted"
+            );
+            same_render(&bitmap, &alone, &format!("own {own}, page {index}"));
+        }
+        assert_eq!(
+            (interpreted, replayed),
+            (1, 99),
+            "own resources {own}: one interpretation for a hundred pages"
+        );
+    }
+}
+
+/// **A tile and the page hit the same drawing** (ruling 5): a recording is a
+/// function of the stream and the invoking state, never of the canvas, so a
+/// region of the page and a render at another resolution replay what the
+/// whole page's render recorded, and draw what they draw with no budget.
+#[test]
+fn a_tile_and_the_page_replay_one_drawing() {
+    let bytes = stamped_pages(1, true);
+    let document = budgeted(bytes.clone(), 16 << 20);
+    let plain = Document::open(bytes).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let (_, whole) = counted(&page, 72.0);
+    assert_eq!((whole.forms_interpreted, whole.forms_replayed), (1, 0));
+    let options = RenderOptions {
+        region: Some(PixelRegion::new(5, 10, 40, 30)),
+        ..counting(150.0)
+    };
+    let tile = page.render(&options);
+    let tile_stats = tile.stats.expect("asked");
+    assert_eq!(
+        (tile_stats.forms_interpreted, tile_stats.forms_replayed),
+        (0, 1)
+    );
+    let alone = plain.page(0).expect("a page").render(&options);
+    same_render(&tile, &alone, "the tile");
+}
+
+/// **A hit reports again what the form's interpretation reported**: a form
+/// with no resources of its own that selects a font its pages do not define
+/// is kept, and a page that replays it says, as one that interprets it does,
+/// that it met a font it could not read; one that reads a colour space with a
+/// repair is never kept, since the repair is said among what the renderer
+/// says, in an order a recording cannot keep — and every page draws and
+/// reports what it does with no budget.
+#[test]
+fn a_kept_form_reports_what_its_interpretation_reported() {
+    let missing = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 100]",
+        b"BT /Missing 12 Tf 10 10 Td (Gone) Tj ET 0 0 1 rg 0 0 10 10 re f",
+    );
+    let repaired = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 100]",
+        b"/Lab0 cs 50 10 10 sc 20 20 30 30 re f",
+    );
+    let resources = "<< /XObject << /Missing 3 0 R /Repaired 4 0 R >> \
+                     /ColorSpace << /Lab0 [/Lab << /WhitePoint [0.9505 1 1.089] \
+                     /Range [100 -100 100 -100] >>] >> >>";
+    let page = (resources, "/Missing Do /Repaired Do");
+    let bytes = document(&[missing, repaired], &[page, page, page]);
+    let document = budgeted(bytes.clone(), 16 << 20);
+    let plain = Document::open(bytes).expect("it opens");
+    for index in 0..3 {
+        let (bitmap, stats) = counted(&document.page(index).expect("a page"), 72.0);
+        assert_eq!(
+            (stats.forms_interpreted, stats.forms_replayed),
+            if index == 0 { (2, 0) } else { (1, 1) },
+            "page {index}: the missing font's form kept, the repaired space's not"
+        );
+        assert!(
+            bitmap.warnings.contains(&RenderWarning::UnreadableFont),
+            "page {index}: {:?}",
+            bitmap.warnings
+        );
+        assert!(
+            bitmap
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, RenderWarning::RepairedColorSpace { .. })),
+            "page {index}: {:?}",
+            bitmap.warnings
+        );
+        let alone = plain
+            .page(index)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        same_render(&bitmap, &alone, &format!("page {index}"));
+    }
+}
+
+/// **Display lists record through the kept drawing**: under a budget, ten
+/// pages' display lists are recorded through the document's cache, so each
+/// list replays as its page renders and a direct render after them replays
+/// the stamp's drawing a list's recording kept.
+#[test]
+fn display_lists_record_a_stamp_once() {
+    let bytes = stamped_pages(10, false);
+    let document = budgeted(bytes.clone(), 16 << 20);
+    let plain = Document::open(bytes).expect("it opens");
+    let mut interpreted = 0;
+    for index in 0..10 {
+        let list = document.page(index).expect("a page").display_list();
+        assert!(list.is_retained());
+        let replay = list.render(&counting(72.0));
+        interpreted += replay.stats.expect("asked").forms_interpreted;
+        let alone = plain
+            .page(index)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        same_render(&replay, &alone, &format!("page {index}'s list"));
+    }
+    assert_eq!(
+        interpreted, 0,
+        "a list's replay replays its recording and draws no form of its own"
+    );
+    let (_, direct) = counted(&document.page(3).expect("a page"), 72.0);
+    assert_eq!(
+        (direct.forms_interpreted, direct.forms_replayed),
+        (0, 1),
+        "the lists' recordings kept the stamp's drawing for the direct render too"
+    );
+}
+
+/// **With no budget, or a budget of zero, nothing is kept and nothing about
+/// forms is counted**, and a cancelled render keeps nothing it drew: the
+/// next render interprets the stamp.
+#[test]
+fn a_budget_of_zero_or_a_cancelled_render_keeps_no_drawing() {
+    let bytes = stamped_pages(3, true);
+    for budget in [None, Some(0)] {
+        let document = match budget {
+            Some(budget) => budgeted(bytes.clone(), budget),
+            None => Document::open(bytes.clone()).expect("it opens"),
+        };
+        for index in 0..3 {
+            let (_, stats) = counted(&document.page(index).expect("a page"), 72.0);
+            assert_eq!(
+                (stats.forms_interpreted, stats.forms_replayed),
+                (0, 0),
+                "budget {budget:?}, page {index}"
+            );
+        }
+    }
+
+    let document = budgeted(bytes, 16 << 20);
+    let cancel = tinker_pdf::CancelToken::new();
+    cancel.cancel();
+    let cancelled = document.page(0).expect("a page").render(&RenderOptions {
+        cancel: Some(cancel),
+        ..counting(72.0)
+    });
+    assert!(cancelled.warnings.contains(&RenderWarning::Cancelled));
+    let (_, after) = counted(&document.page(0).expect("a page"), 72.0);
+    assert_eq!(
+        (after.forms_interpreted, after.forms_replayed),
+        (1, 0),
+        "nothing the cancelled render drew was kept"
+    );
 }

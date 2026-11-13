@@ -3461,7 +3461,7 @@ a typed key:
 | a decoded image | the image's object, the reduction its decode is made at — 1 at full size, or 2, 4 or 8 for a JPEG decoded at the size it is drawn at (P-09.8), and the budget's reduced decode (*Reduced-resolution decode*) — and the default colour spaces its scope paints device spaces in (8.6.5.6), each `/ColorSpace` entry written exactly, the one thing outside the object a decode reads | its samples and its soft mask's, at the decoded size, the words of what its decode reported and its key's defaults | P-16.2, P-16.9 |
 | a JPEG's frame | the image's object and its scope's defaults, as its decodes: the width and height every draw of a JPEG with no mask reads its reduction against, learnt by its first decode | its key's defaults | P-16.2 |
 | a compiled ICC transform | today's key, the profile stream's object; P-22.7 re-keys it by the profile's bytes, intent and black-point compensation | the most it can come to hold whichever intents compile after it is kept and whatever they convert (`Transforms::bytes_bound`): the profile's model, and its `A2B*` tables and `D2B*` pipelines at the most reading each can allocate, beside relative colorimetric's transform and one for each other intent at the most any of the profile's sources compiles — three 4 096-entry curves for an RGB matrix model, or the largest grid a table or pipeline is read through with its every node filled — each with its largest row tables | P-16.4, P-22.7 |
-| a form recording | the form's object, the scope its names resolve in where it brings no resources of its own, and `tinker_pdf_content::FormInvocation`: everything the interpreter carries into a form and does not reset, written exactly — the graphics state, a waiting clip, the operands before `Do`, the depth, the streams around it, the scope's remapped device spaces. The text and line matrices, the current point and the subpath's start are not in it: a recording notes each its drawing read before setting its own and replays only where they are what they were | the recorded calls, as a display list counts its own (`Event::kept_bytes`), with its budget operations | P-16.5, P-16.6 |
+| a form recording | the form's object, the scope its names resolve in where it brings no resources of its own, the usage the render names (its optional-content states), and `tinker_pdf_content::FormInvocation`: everything the interpreter carries into a form and does not reset, written exactly — the graphics state, a waiting clip, the operands before `Do`, the depth, the streams around it, the scope's remapped device spaces. The text and line matrices, the current point and the subpath's start are not in it: a recording notes each its drawing read before setting its own and replays only where they are what they were | the recorded calls, as a display list counts its own (`Event::kept_bytes`), with its budget operations | P-16.5, P-16.6 |
 | a glyph mask | P-06.3's key: font identity, code, quantised 2x2, phase and flattening tolerance | P-06.3's charge, its pixels and 64 bytes | P-16.7 |
 | a tiling cell | P-23.2's | its pixels | P-23.2 |
 
@@ -3484,6 +3484,11 @@ thread's open fills are counted where `tinker_pdf_cos::Flights` counts its
 own (`tinker_pdf_cos::OpenFill`, `fill_open`), so the rule holds across this
 table and every `Flights` at once. A fill that unwinds or is cancelled
 publishes nothing, so a cancelled render's partial decode is never kept.
+**A form's recording is the one kind not filled so**: it is made by the
+render that draws the form, as it draws it, and a render cannot wait for
+another's drawing in place of its own, so a miss is a request numbered as
+any other, the interpretation that follows offers what it recorded, and the
+first offer for a key is the one kept.
 
 #### `CacheLimits { bytes }`, and where a caller states it
 

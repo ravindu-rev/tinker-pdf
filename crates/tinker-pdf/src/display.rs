@@ -105,7 +105,7 @@ use tinker_pdf_raster::image::{image_bounds_in, Transform};
 use tinker_pdf_render::{DisplayRecorder, Renderer};
 
 use crate::annots::{self, Recorded};
-use crate::resources::{Operation, PageResources};
+use crate::resources::PageResources;
 use crate::stats::Counter;
 use crate::{
     handed_back, Bitmap, Met, Page, Parallelism, PixelRegion, RenderOptions, RenderWarning, Usage,
@@ -179,13 +179,14 @@ impl Page {
     pub fn display_list_for(&self, usage: Option<Usage>) -> DisplayList {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         // The recording is an operation of its own, binding the usage's
-        // states; the resources it reads through are kept past it, and serve
-        // none afterwards.
+        // states and keeping what it computes in the document's cache where
+        // the document has one — a form's drawing among it; the resources it
+        // reads through are kept past it, and serve none afterwards.
         let resources = PageResources::new_in(
             &self.doc,
             &self.inner,
             self.fonts.as_ref(),
-            Operation::rendering(None, usage),
+            self.operation(None, usage),
         );
         let mut recorder = DisplayRecorder::new();
         interpret(&content, Matrix::IDENTITY, &mut recorder, &resources);

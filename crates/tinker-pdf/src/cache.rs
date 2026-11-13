@@ -13,8 +13,9 @@
 //! XObject at one reduction, in the default colour spaces its scope paints
 //! device spaces in (8.6.5.6), which are the one thing outside the object a
 //! decode reads; a JPEG's frame, which a draw's size is read against for the
-//! reduction it is decoded at; and the compiled transforms of one ICC profile
-//! stream. So **a hit is the bytes a miss computes**, and a page draws the
+//! reduction it is decoded at; the compiled transforms of one ICC profile
+//! stream; the recorded drawing of one form under everything its drawing
+//! reads. So **a hit is the bytes a miss computes**, and a page draws the
 //! same pixels whatever was drawn before it.
 //!
 //! A refusal is kept as firmly as a success, in the words the decode used, and
@@ -52,9 +53,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, ThreadId};
 
-use tinker_pdf_cos::{fill_open, limits, Counter, ObjRef, Object, OpenFill, Work};
+use tinker_pdf_cos::{fill_open, limits, Counter, Dict, ObjRef, Object, OpenFill, Work};
 
 use tinker_pdf_color::icc::Transforms;
+use tinker_pdf_content::{FormInvocation, FormRecording};
 
 use crate::resources::CachedImage;
 use crate::stats;
@@ -66,8 +68,8 @@ use crate::stats;
 /// [`crate::Document::with_cache_limits`]. **With none stated, a document
 /// keeps nothing past the render that made it**, as it always has: a render's
 /// own resources hold what they decode and go with it. With one stated, the
-/// document keeps what its renders compute — decoded images and compiled ICC
-/// transforms — across
+/// document keeps what its renders compute — decoded images, compiled ICC
+/// transforms and forms' recorded drawings — across
 /// renders, pages and clones of it, while the bytes fit, evicting the least
 /// recently requested entry first. A budget of zero is stated and keeps
 /// nothing at all: every request computes again.
@@ -130,6 +132,8 @@ struct Table {
     frames: HashMap<FrameKey, Slot<Option<(u32, u32)>>>,
     /// Compiled ICC transforms, and the profiles that would not compile.
     icc: HashMap<IccKey, Slot<Option<Arc<Transforms>>>>,
+    /// Forms' drawings, recorded.
+    forms: HashMap<FormKey, Slot<Arc<KeptForm>>>,
     /// A kind of plain values, for the tests of the machinery itself.
     #[cfg(test)]
     tests: HashMap<u32, Slot<Arc<Vec<u8>>>>,
@@ -149,6 +153,7 @@ impl Table {
             Key::Image(key) => remove_ready(&mut self.images, key),
             Key::Frame(key) => remove_ready(&mut self.frames, key),
             Key::Icc(key) => remove_ready(&mut self.icc, key),
+            Key::Form(key) => remove_ready(&mut self.forms, &**key),
             #[cfg(test)]
             Key::Test(key) => remove_ready(&mut self.tests, key),
         }
@@ -183,6 +188,7 @@ enum Key {
     Image(ImageKey),
     Frame(FrameKey),
     Icc(IccKey),
+    Form(Box<FormKey>),
     #[cfg(test)]
     Test(u32),
 }
@@ -229,6 +235,18 @@ impl Kind for IccKey {
 
     fn key(&self) -> Key {
         Key::Icc(*self)
+    }
+}
+
+impl Kind for FormKey {
+    type Value = Arc<KeptForm>;
+
+    fn slots(table: &mut Table) -> &mut HashMap<Self, Slot<Self::Value>> {
+        &mut table.forms
+    }
+
+    fn key(&self) -> Key {
+        Key::Form(Box::new(self.clone()))
     }
 }
 
@@ -312,6 +330,87 @@ impl DocumentCache {
         self.read(key, work, fill)
     }
 
+    /// The recording of a form's drawing kept under `key`, or, where none is,
+    /// the number of this request, for [`DocumentCache::offer_form`] to keep
+    /// the recording the interpretation makes under.
+    ///
+    /// **Not single-flight**: a form's recording is made by the render that
+    /// draws the form, as it draws it, so a render never waits for another
+    /// thread's; two that miss one key at once each interpret it, and the
+    /// first to offer its recording keeps it.
+    pub(crate) fn form(&self, key: &FormKey, work: Option<&Work>) -> Result<Arc<KeptForm>, u64> {
+        self.get(key, work)
+    }
+
+    /// Keeps `value` under `key` for the request numbered `asked` that missed
+    /// it, charged `bytes` beside [`ENTRY_BYTES`], where nothing is kept
+    /// under the key already.
+    pub(crate) fn offer_form(
+        &self,
+        key: FormKey,
+        value: Arc<KeptForm>,
+        bytes: u64,
+        asked: u64,
+        work: Option<&Work>,
+    ) {
+        self.offer(key, value, bytes, asked, work);
+    }
+
+    /// The value published under `key`, the request counted and the entry
+    /// marked as asked for by it; or, where there is none, the request's
+    /// number, the request counted as a miss.
+    fn get<K: Kind>(&self, key: &K, work: Option<&Work>) -> Result<K::Value, u64> {
+        let mut table = lock(&self.table);
+        let asked = table.next_request();
+        let found = match K::slots(&mut table).get_mut(key) {
+            Some(Slot::Ready {
+                value, asked: last, ..
+            }) => {
+                let previous = *last;
+                *last = asked;
+                Some((value.clone(), previous))
+            }
+            _ => None,
+        };
+        let held = table.held;
+        let found = match found {
+            Some((value, previous)) => {
+                table.order.remove(&previous);
+                table.order.insert(asked, key.key());
+                Ok(value)
+            }
+            None => Err(asked),
+        };
+        drop(table);
+        stats::count(
+            work,
+            if found.is_ok() {
+                Counter::CacheHits
+            } else {
+                Counter::CacheMisses
+            },
+        );
+        stats::cache_held(work, held);
+        found
+    }
+
+    /// Publishes `value` under `key` for the request numbered `asked`, as a
+    /// fill publishes it, where the key holds nothing yet. The key is looked
+    /// at under the lock the value is published under, so two renders that
+    /// offer one key at once keep the first value, charged once.
+    fn offer<K: Kind>(&self, key: K, value: K::Value, bytes: u64, asked: u64, work: Option<&Work>) {
+        let mut table = lock(&self.table);
+        if K::slots(&mut table).contains_key(&key) {
+            return;
+        }
+        let (evicted, held) = self.publish_in(&mut table, key, value, bytes, asked);
+        drop(table);
+        if let Some(work) = work {
+            work.add(Counter::CacheEvictions, evicted);
+        }
+        stats::cache_held(work, held);
+    }
+
     /// The value under `key` and whether it was found kept: the published
     /// value, or what `fill` answers — computed by this request when no
     /// other thread is filling the key, or when one is and this thread has a
@@ -389,11 +488,22 @@ impl DocumentCache {
     /// whole budget, releases the slot and keeps nothing. Hands back how many
     /// entries left for it and the bytes held after.
     fn publish<K: Kind>(&self, key: K, value: K::Value, bytes: u64, asked: u64) -> (u64, u64) {
+        self.publish_in(&mut lock(&self.table), key, value, bytes, asked)
+    }
+
+    /// [`DocumentCache::publish`] under a lock already held.
+    fn publish_in<K: Kind>(
+        &self,
+        table: &mut Table,
+        key: K,
+        value: K::Value,
+        bytes: u64,
+        asked: u64,
+    ) -> (u64, u64) {
         let charge = bytes.saturating_add(ENTRY_BYTES);
         let budget = self.limits.bytes;
-        let mut table = lock(&self.table);
         if charge > budget {
-            K::slots(&mut table).remove(&key);
+            K::slots(table).remove(&key);
             return (0, table.held);
         }
         let mut evicted = 0u64;
@@ -409,12 +519,12 @@ impl DocumentCache {
             // Unreachable: the index holds every published entry, so an empty
             // one leaves nothing held. Kept to the request rather than past
             // the budget all the same.
-            K::slots(&mut table).remove(&key);
+            K::slots(table).remove(&key);
             return (evicted, table.held);
         }
         table.held = table.held.saturating_add(charge);
         table.order.insert(asked, key.key());
-        K::slots(&mut table).insert(
+        K::slots(table).insert(
             key,
             Slot::Ready {
                 value,
@@ -535,6 +645,34 @@ pub(crate) struct FrameKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct IccKey(pub(crate) ObjRef);
 
+/// What a form's recorded drawing is kept under: the interpreter's
+/// [`FormInvocation`] — the form and everything of the interpretation its
+/// drawing can read — and, for a form that brings no resources of its own,
+/// the scope its names resolve in, its resource dictionary written exactly
+/// ([`Written`]), so two scopes that hold the same resources share the
+/// drawing and two that do not keep two; and the usage the render names,
+/// whose optional-content states its drawing's marked content and the forms
+/// inside it are shown or hidden by (8.11.4.4).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct FormKey {
+    /// The invocation, as the interpreter wrote it.
+    pub(crate) invocation: FormInvocation,
+    /// The invoking scope's resources, where the form resolves its names in
+    /// them; `None` for a form with resources of its own.
+    pub(crate) scope: Option<Written>,
+    /// The usage the render names (`crate::RenderOptions::usage`).
+    pub(crate) usage: Option<crate::Usage>,
+}
+
+/// A form's recorded drawing as the document keeps it: the recording, and the
+/// fonts the interpretation found no font for in the scope it was invoked in,
+/// which every render that replays it reports again, as its own
+/// interpretation would have.
+pub(crate) struct KeptForm {
+    pub(crate) recording: Arc<FormRecording>,
+    pub(crate) missing_fonts: Vec<String>,
+}
+
 /// Objects written out exactly, as a key holds them ([`write_exact`]), with
 /// a digest of the bytes standing in for them in the hash.
 ///
@@ -608,6 +746,24 @@ pub(crate) fn write_exact(object: &Object, out: &mut Vec<u8>) {
     write_exact_at(object, out, 0);
 }
 
+/// Appends `dict` to `out` as [`write_exact`] appends a dictionary.
+pub(crate) fn write_exact_dict(dict: &Dict, out: &mut Vec<u8>) {
+    write_dict_at(dict, out, 0);
+}
+
+fn write_dict_at(dict: &Dict, out: &mut Vec<u8>, depth: u32) {
+    out.push(7);
+    out.extend_from_slice(
+        &u64::try_from(dict.entries().len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for (key, value) in dict.entries() {
+        out.extend_from_slice(&key.id().to_le_bytes());
+        write_exact_at(value, out, depth + 1);
+    }
+}
+
 fn write_exact_at(object: &Object, out: &mut Vec<u8>, depth: u32) {
     // The parser nests no deeper than this, so a value written past it is
     // one no document holds; the marker keeps the walk bounded all the same.
@@ -645,17 +801,10 @@ fn write_exact_at(object: &Object, out: &mut Vec<u8>, depth: u32) {
                 write_exact_at(item, out, depth + 1);
             }
         }
-        Object::Dict(dict) => {
-            out.push(7);
-            length(out, dict.entries().len());
-            for (key, value) in dict.entries() {
-                out.extend_from_slice(&key.id().to_le_bytes());
-                write_exact_at(value, out, depth + 1);
-            }
-        }
+        Object::Dict(dict) => write_dict_at(dict, out, depth),
         Object::Stream(stream) => {
             out.push(8);
-            write_exact_at(&Object::Dict(stream.dict.clone()), out, depth + 1);
+            write_dict_at(&stream.dict, out, depth + 1);
             out.extend_from_slice(&stream.data_start.to_le_bytes());
             out.extend_from_slice(&stream.len_hint.unwrap_or(u64::MAX).to_le_bytes());
         }

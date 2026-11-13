@@ -131,6 +131,17 @@ pub struct Stats {
     pub form_scope_hits: u64,
     /// Lookups of a form XObject's resource scope that had to build it.
     pub form_scope_misses: u64,
+    /// Form XObjects drawn by interpreting their content where the
+    /// document's cache could keep a recording of the drawing — under a
+    /// budget, and not one of zero — whether or not one was kept.
+    ///
+    /// This and the next are counted by the facade's resource scopes, as the
+    /// interpreter says how it drew each form; with no budget neither
+    /// counts, since nothing is kept.
+    pub forms_interpreted: u64,
+    /// Form XObjects drawn from a recording the document's cache kept, with
+    /// none of their content interpreted.
+    pub forms_replayed: u64,
     /// Lookups of the document's cache (`docs/design/performance.md`, P-16)
     /// that found the entry kept, of any kind it keeps — or found its
     /// refusal kept, which is kept as firmly.
@@ -455,6 +466,10 @@ pub enum Counter {
     FormScopeHits,
     /// [`Stats::form_scope_misses`].
     FormScopeMisses,
+    /// [`Stats::forms_interpreted`].
+    FormsInterpreted,
+    /// [`Stats::forms_replayed`].
+    FormsReplayed,
     /// [`Stats::cache_hits`].
     CacheHits,
     /// [`Stats::cache_misses`].
@@ -546,6 +561,8 @@ impl Stats {
             self.glyph_outline_misses,
             self.form_scope_hits,
             self.form_scope_misses,
+            self.forms_interpreted,
+            self.forms_replayed,
             self.cache_hits,
             self.cache_misses,
             self.cache_evictions,
@@ -593,6 +610,8 @@ impl Stats {
             Counter::GlyphOutlineMisses => &mut self.glyph_outline_misses,
             Counter::FormScopeHits => &mut self.form_scope_hits,
             Counter::FormScopeMisses => &mut self.form_scope_misses,
+            Counter::FormsInterpreted => &mut self.forms_interpreted,
+            Counter::FormsReplayed => &mut self.forms_replayed,
             Counter::CacheHits => &mut self.cache_hits,
             Counter::CacheMisses => &mut self.cache_misses,
             Counter::CacheEvictions => &mut self.cache_evictions,
@@ -666,6 +685,10 @@ impl Add for Stats {
             form_scope_misses: self
                 .form_scope_misses
                 .saturating_add(other.form_scope_misses),
+            forms_interpreted: self
+                .forms_interpreted
+                .saturating_add(other.forms_interpreted),
+            forms_replayed: self.forms_replayed.saturating_add(other.forms_replayed),
             cache_hits: self.cache_hits.saturating_add(other.cache_hits),
             cache_misses: self.cache_misses.saturating_add(other.cache_misses),
             cache_evictions: self.cache_evictions.saturating_add(other.cache_evictions),
@@ -876,7 +899,7 @@ mod tests {
 
     /// Every counter of a step, so a test of one property covers them all;
     /// [`PLACES`] holds the two that count where a part ran.
-    const ALL: [Counter; 38] = [
+    const ALL: [Counter; 40] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::GlyphMasksRasterised,
@@ -893,6 +916,8 @@ mod tests {
         Counter::GlyphOutlineMisses,
         Counter::FormScopeHits,
         Counter::FormScopeMisses,
+        Counter::FormsInterpreted,
+        Counter::FormsReplayed,
         Counter::CacheHits,
         Counter::CacheMisses,
         Counter::CacheEvictions,
