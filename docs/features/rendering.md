@@ -963,11 +963,25 @@ composite, and a name the page has no colorant of is passed over. A page whose
 transparency group's `/CS` is a four-component subtractive space, or that has
 none, is drawn on plates; one of another space composites in it, every spot
 through its alternate (11.7.3), and its plates are that light turned into ink.
-The plan keeps at most `MAX_SPOT_PLATES` spot plates and as many as keep the
-whole page's plates inside `MAX_PLATE_BYTES` (`spots_within_bytes` of the
+The plan keeps at most `MAX_SPOT_PLATES`, 64, spot plates and as many as keep
+the whole page's plates inside `MAX_PLATE_BYTES` (`spots_within_bytes` of the
 page's pixels, whatever region is asked, so a tile keeps the page's plates);
-the spots past either, in inventory order, are drawn as composites and the
-render carries `RenderWarning::PlatesCapped { named, kept }`. A plate is not a
+the spots past either, in inventory order, are drawn as composites — so a
+`/DeviceN` naming one reverts to its alternate as a whole, the spots of it
+that kept a plate included — and the render carries
+`RenderWarning::PlatesCapped { named, kept }` once, `named` the spots that
+asked for a plate, a composite one asking for none and a disabled one
+counting, and `kept` how many of them, the first in inventory order, kept
+one. A
+page whose `/DeviceN` spaces name sixty-four spots hands back sixty-eight
+plates, each spot's holding exactly its own fill and every other plate none
+there (`sixty_four_spots_render_sixty_eight_plates`, over the render group's
+64-spot page); `a_page_past_the_plate_cap_reports_what_it_left` holds a page
+of seventy spots, with composite and disabled ones, and a page of
+`MAX_PAGE_PIXELS` whose byte bound keeps eleven of thirteen, every plate of
+each to what the page puts there. Both caps are rows of `bounds_ledger.rs`,
+and the `render_page` fuzz target's memory limits hold the plates beside its
+canvas. A plate is not a
 `Bitmap`, whose single channel reads as grey light. The format, `allow_cmyk`,
 premultiplication and forced colours say how light comes back and are not
 read, and the page is drawn on the caller's thread whatever `parallelism`

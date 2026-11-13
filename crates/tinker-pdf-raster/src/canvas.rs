@@ -89,6 +89,25 @@ pub enum PixelFormat {
 /// The most spot channels a [`PixelFormat::Plates`] canvas carries beside its
 /// four process channels: sixty-eight colour channels and an alpha, sixty-nine
 /// bytes a pixel.
+///
+/// | | Spot plates |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 64 |
+/// | A 200-page comic, each page one scan | 0 |
+/// | A dense 200-page fixed document, its colour profiles of two and of five to eight channels | 28 |
+/// | A 300-page reflowable book, its colours sRGB | 0 |
+/// | **This cap** | **64** |
+///
+/// A canvas past it is refused by name ([`TooManySpots`]), and the caller
+/// that plans a page's plates keeps the cap's worth and composites the rest
+/// through their alternates, so a page naming more still renders. The fixture
+/// figure is the cap itself for that reason: a page past it keeps the cap's
+/// plates and no more. A comic page is one image and a book's colours are
+/// sRGB, so neither names a spot; a fixed document's colour profiles of two
+/// channels and of five to eight are each a set of colorants named after
+/// their count, so a page names at most 2 + 5 + 6 + 7 + 8. Reachable: a page's
+/// spaces name as many colorants as their arrays hold, and its inventory lists
+/// 4 096 of them, each asking for a plate.
 pub const MAX_SPOT_PLATES: usize = 64;
 
 /// How many spot channels a [`PixelFormat::Plates`] canvas carries: at most

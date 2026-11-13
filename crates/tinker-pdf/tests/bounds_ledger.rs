@@ -1,5 +1,18 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, separations (RC-04).* **Two more rows, a pair over one render's
+//! plates.** `MAX_SPOT_PLATES` caps the spot plates a page's separations
+//! keep, and `MAX_PLATE_BYTES` the bytes of plates a render holds at once,
+//! which a large page reaches before the count does: past either, the spots
+//! past the cap in inventory order are drawn through their alternates and the
+//! render says so with `RenderWarning::PlatesCapped`. Both degrade rather
+//! than refuse, so each `fixtures` is the cap. The count's comic and book
+//! columns are zeros, since neither format synthesises a spot colour, and its
+//! fixed-document column is the 28 an XPS page's colour profiles can name; the
+//! byte bound's columns are those plates at each format's page at 150 dpi,
+//! `MAX_PAGE_PIXELS`'s dpi. The `render_page` fuzz target draws a page's
+//! separations, so its path holds the plates beside its canvas.
+//!
 //! *Amended, the OCR import seam (OC-01).* **One more row,
 //! `MAX_IMPORTED_WORDS`, a cap on what a recogniser's file asks a page to
 //! hold.** An hOCR, ALTO or PAGE XML file states its words, and a page of
@@ -713,6 +726,13 @@ const TABLES_TESTS: &str = include_str!("tables.rs");
 /// The review of tier 5's formats lane: HTML's two caps live with the XML
 /// reader's four, and its bounds suite fires them.
 const HTML_TESTS: &str = include_str!("../../tinker-pdf-xml/tests/html.rs");
+/// Separations: the plate cap, declared beside the plates format it sizes,
+/// and the byte bound beside the renderer that charges it (`RENDER`), both
+/// fired by the separations suite; and the facade's inventory, whose private
+/// listing bound stands in front of the plate cap.
+const RASTER_CANVAS: &str = include_str!("../../tinker-pdf-raster/src/canvas.rs");
+const SEPARATIONS: &str = include_str!("../src/separations.rs");
+const SEPARATIONS_TESTS: &str = include_str!("separations.rs");
 /// K-05's fuzz limits: the roster, the table the derivation writes, the
 /// targets whose ceilings a path stands on, the generators whose caps a
 /// structured target's path stands on, and the sources of the caps it reads
@@ -3003,7 +3023,86 @@ fn ledger() -> Vec<Bound> {
                 ICC_SPECTRAL,
             ),
         },
+        // ---- separations: the plates a page is drawn to ------------------
+        //
+        // A process's bounds again, a pair over one render's plates: how many
+        // spot plates a page keeps, and how many bytes of plates the render
+        // holds at once, which a large page reaches first. Both degrade
+        // rather than refuse — the spots past either are drawn through their
+        // alternates, and the render says so — so each fixture's figure is
+        // the cap itself, for `MAX_PAGE_PIXELS`'s reason.
+        Bound {
+            name: "MAX_SPOT_PLATES",
+            cap: tinker_pdf::MAX_SPOT_PLATES as u128,
+            published: "64",
+            // `separations.rs`'s 64-spot page keeps a plate for each of its
+            // sixty-four spots, and its page past the cap names seventy and
+            // keeps the cap's: no fixture holds more spot plates than the cap.
+            fixtures: tinker_pdf::MAX_SPOT_PLATES as u128,
+            // A comic page is synthesised as one image of a scan, and no
+            // image space the archive path writes names a colorant.
+            comic: 0,
+            // An XPS colour profile of two channels or of five to eight is
+            // synthesised as a `/DeviceN` whose colorants are named after its
+            // channel count, `6CLR.3` the third of six (`src/xps/profiles.rs`),
+            // so a fixed page names at most one set of each count:
+            // 2 + 5 + 6 + 7 + 8 spots.
+            document: 28,
+            // A book's CSS colours are sRGB, so no page of it names a colorant.
+            book: 0,
+            // A `/DeviceN` names as many colorants as its array holds, and the
+            // page's inventory lists every spot up to its own bound, each one
+            // asking for a plate.
+            reachable: listed_spots(),
+            reachable_because: "the spots a page's inventory lists, `MAX_LISTED_SPOTS` in \
+                                `src/separations.rs`, each asking for a plate",
+            declared_in: RASTER_CANVAS,
+            fires_in: (
+                "a_page_past_the_plate_cap_reports_what_it_left",
+                SEPARATIONS_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_PLATE_BYTES",
+            cap: u128::from(tinker_pdf::MAX_PLATE_BYTES),
+            published: "1 GiB",
+            // The firing test's page at `MAX_PAGE_PIXELS` keeps eleven spot
+            // plates, sixteen bytes a pixel over 2^26 pixels: the cap exactly,
+            // counted at the whole page's size whatever region is drawn.
+            fixtures: u128::from(tinker_pdf::MAX_PLATE_BYTES),
+            // Each figure at 150 dpi, the dpi `MAX_PAGE_PIXELS`'s row is at:
+            // a comic page names no spot, so its plates are the four process
+            // plates and the alpha, five bytes a pixel over 4 167 x 6 250.
+            comic: 5 * 4_167 * 6_250,
+            // The process plates, the alpha and `MAX_SPOT_PLATES`'s 28 spots,
+            // 33 bytes a pixel over US Letter's 1 275 x 1 650.
+            document: 33 * 1_275 * 1_650,
+            // Five bytes a pixel over `epub::DEFAULT_PAGE`'s 900 x 1 350.
+            book: 5 * 900 * 1_350,
+            // A page at `MAX_PAGE_PIXELS` keeping every spot plate the plate
+            // cap admits, before any group opens a buffer beside it.
+            reachable: (5 + tinker_pdf::MAX_SPOT_PLATES as u128)
+                * u128::from(tinker_pdf_render::MAX_PAGE_PIXELS),
+            reachable_because: "a page of `MAX_PAGE_PIXELS` keeping all `MAX_SPOT_PLATES` spot \
+                                plates, 69 bytes a pixel",
+            declared_in: RENDER,
+            fires_in: (
+                "a_page_past_the_plate_cap_reports_what_it_left",
+                SEPARATIONS_TESTS,
+            ),
+        },
     ]
+}
+
+/// The most spots a page's inventory lists, read from where the facade
+/// declares it: `MAX_LISTED_SPOTS` is private to `src/separations.rs`, and it
+/// is the ceiling in front of `MAX_SPOT_PLATES`.
+fn listed_spots() -> u128 {
+    SEPARATIONS
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("const MAX_LISTED_SPOTS: usize = "))
+        .and_then(|value| value.trim_end_matches(';').replace('_', "").parse().ok())
+        .expect("src/separations.rs declares the inventory's bound as a number")
 }
 
 /// What one recorded call is before its heap parts, for
@@ -3059,8 +3158,9 @@ fn segment_size() -> u128 {
 /// `MAX_NAMED_COLOURS`, its multi-process elements `MAX_MPE_ELEMENTS`, and
 /// its calculator `MAX_CALC_OPERATIONS`, `MAX_CALC_STACK`, `MAX_CALC_DEPTH`,
 /// `MAX_CALC_TEMPORARIES` and `MAX_CALC_WORK`, and its spectral connection
-/// space `MAX_SPECTRAL_STEPS`. All **seventy-seven** are here, and a bound
-/// added without a row fails this.
+/// space `MAX_SPECTRAL_STEPS`; and separations add the plate cap,
+/// `MAX_SPOT_PLATES`, and the plates' byte bound, `MAX_PLATE_BYTES`. All
+/// **seventy-nine** are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -3144,6 +3244,8 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_CALC_TEMPORARIES",
             "MAX_CALC_WORK",
             "MAX_SPECTRAL_STEPS",
+            "MAX_SPOT_PLATES",
+            "MAX_PLATE_BYTES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -3249,7 +3351,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 77, "the ledger is seventy-seven rows");
+    assert_eq!(measured, 79, "the ledger is seventy-nine rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -3281,7 +3383,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 77, "the ledger is seventy-seven rows");
+    assert_eq!(ledger().len(), 79, "the ledger is seventy-nine rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -3596,6 +3698,7 @@ fn every_bound_names_a_test_that_exists() {
         ICC_MPE,
         ICC_CALC,
         ICC_SPECTRAL,
+        SEPARATIONS_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),
@@ -4532,6 +4635,13 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                      MAX_PATTERN_DEPTH lets patterns nest",
                 ),
                 buffer(Row("MAX_SVG_BYTES"), 1, 1, "the SVG markup"),
+                buffer(
+                    Row("MAX_PLATE_BYTES"),
+                    1,
+                    1,
+                    "the page's separations: every plates buffer live at once, the page's, \
+                     each open group's and a cell's, held together to MAX_PLATE_BYTES",
+                ),
             ],
             vec![
                 (RENDER, "const MAX_GROUP_DEPTH: usize = 16;"),

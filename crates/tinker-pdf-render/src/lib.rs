@@ -7093,6 +7093,24 @@ pub const MAX_PAGE_PIXELS: u64 = 1 << 26;
 /// through their alternates; a group or a cell whose plates buffer would pass
 /// it is drawn in ink, its spots through their alternates; each says so
 /// ([`RenderWarning::PlatesCapped`]).
+///
+/// | | Bytes of plates, at 150 dpi |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 1 073 741 824 |
+/// | A 200-page comic, whose largest page is a 2000 x 3000 scan naming no spot | 130 218 750 |
+/// | A dense 200-page fixed document, US Letter naming 28 spots | 69 423 750 |
+/// | A 300-page reflowable book, at `epub::DEFAULT_PAGE`'s 432 x 648 pt naming no spot | 6 075 000 |
+/// | **This cap** | **1 GiB** |
+///
+/// The yardsticks are [`MAX_PAGE_PIXELS`]'s pages at its dpi, each plates
+/// pixel `5 + spots` bytes: a comic or a book names no spot, five bytes over
+/// 4 167 x 6 250 and 900 x 1 350 pixels, and a fixed page the 28 spots
+/// [`MAX_SPOT_PLATES`](tinker_pdf_raster::MAX_SPOT_PLATES)'s ledger finds,
+/// 33 bytes over 1 275 x 1 650. The fixture figure is the cap itself and is
+/// allowed, because this bound degrades rather than refuses: a page at
+/// `MAX_PAGE_PIXELS` keeps eleven spot plates, sixteen bytes a pixel, and
+/// spends exactly it. Reachable: such a page asking for every one of the
+/// sixty-four spot plates the cap on their count admits, 69 × 2^26 bytes.
 pub const MAX_PLATE_BYTES: u64 = 1 << 30;
 
 /// How many spot plates a page of `pixels` pixels keeps within

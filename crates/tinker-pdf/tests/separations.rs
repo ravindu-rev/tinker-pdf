@@ -7,6 +7,13 @@
 
 mod render_support;
 
+/// The separations inputs the render group times, written byte by byte: the
+/// pages this file holds to their plates where the bench draws them too.
+#[allow(dead_code, reason = "the bench reads inputs this file does not")]
+#[path = "../benches/support/plates.rs"]
+mod plates;
+
+use plates::{spot_squares, spots_page, spots_page_of, SpotSquare, SPOTS_BACKDROP, SPOTS_PAGE};
 use render_support::{spot_page, SpotPage, SpotSpaces, SPOT_TINTS};
 use tinker_pdf::{
     Document, Page, PixelRegion, PlateKind, PlateUse, RenderOptions, RenderWarning,
@@ -1935,5 +1942,379 @@ fn a_mesh_in_none_paints_nothing() {
                 );
             }
         }
+    }
+}
+
+// ---- the plate cap (RC-04.15) -----------------------------------------------
+
+/// What each plate of a spots page holds over `region` — `[x, y, width,
+/// height]` in the page's pixels at 72 dpi, every pixel whole or empty — read
+/// off the page as `plates::spots_page_of` writes it: where no square stands,
+/// the backdrop's process ink and no spot; inside a square whose space is
+/// drawn on plates, its tint on its own plate and none on any other; and
+/// inside one whose space names a spot without a plate, so that the whole
+/// colour is drawn through its alternate (8.6.6.5), its tint on the process
+/// ink its component is carried onto and none on any other plate. `plated`
+/// is every spot that keeps a plate while the page is drawn, and `handed`
+/// the plates that come back, in their order.
+fn spots_expected(
+    page: (u32, u32),
+    squares: &[SpotSquare],
+    plated: &[String],
+    handed: &[String],
+    region: [u32; 4],
+) -> Vec<Vec<u8>> {
+    let [left, top, width, height] = region;
+    // Which square each pixel of the region stands in: a square's rows run
+    // from its top edge, `y1` points up the page, downward.
+    let mut owner: Vec<Option<usize>> = vec![None; (width * height) as usize];
+    for (index, square) in squares.iter().enumerate() {
+        let [x0, y0, x1, y1] = square.rect;
+        for row in (page.1 - y1)..(page.1 - y0) {
+            for column in x0..x1 {
+                if (left..left + width).contains(&column) && (top..top + height).contains(&row) {
+                    owner[((row - top) * width + (column - left)) as usize] = Some(index);
+                }
+            }
+        }
+    }
+    let on_plates: Vec<bool> = squares
+        .iter()
+        .map(|square| {
+            squares
+                .iter()
+                .filter(|other| other.space == square.space)
+                .all(|other| plated.contains(&other.name))
+        })
+        .collect();
+    handed
+        .iter()
+        .map(|name| {
+            let process = PROCESS.iter().position(|ink| ink == name);
+            owner
+                .iter()
+                .map(|at| match (at, process) {
+                    (None, Some(ink)) => SPOTS_BACKDROP[ink],
+                    (None, None) => 0,
+                    (Some(index), process) => {
+                        let square = &squares[*index];
+                        if on_plates[*index] {
+                            if &square.name == name {
+                                square.level
+                            } else {
+                                0
+                            }
+                        } else if process == Some(square.component) {
+                            square.level
+                        } else {
+                            0
+                        }
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Each plate `separations` hands back is `expected`'s, byte for byte, the
+/// first pixel that differs named.
+#[track_caller]
+fn assert_plates(separations: &Separations, expected: &[Vec<u8>], what: &str) {
+    assert_eq!(
+        separations.plates.len(),
+        expected.len(),
+        "{what}: the plates"
+    );
+    for (plate, want) in separations.plates.iter().zip(expected) {
+        let name = String::from_utf8_lossy(&plate.name);
+        assert_eq!(plate.tints.len(), want.len(), "{what}: {name}'s size");
+        if let Some(at) = plate
+            .tints
+            .iter()
+            .zip(want)
+            .position(|(got, want)| got != want)
+        {
+            let pixel = u32::try_from(at).expect("a plate's pixels");
+            panic!(
+                "{what}: {name} at ({}, {}) holds {}, and the page puts {} there",
+                pixel % separations.width,
+                pixel / separations.width,
+                plate.tints[at],
+                want[at]
+            );
+        }
+    }
+}
+
+/// The process plates' names, then `spots`: the plates a render hands back
+/// that keeps a plate for each of `spots` and disables none of them.
+fn process_then(spots: &[String]) -> Vec<String> {
+    PROCESS
+        .iter()
+        .map(|ink| (*ink).to_string())
+        .chain(spots.iter().cloned())
+        .collect()
+}
+
+/// **Sixty-four spots render sixty-eight plates** (RC-04.15; the design's
+/// "The cap, and what it costs").
+///
+/// The render group's 64-spot page: A4, whose sixteen `/DeviceN` spaces name
+/// sixty-four distinct spots, each filling a square of its own at a tint of
+/// its own over a backdrop of process ink, drawn at 72 dpi with every pixel
+/// whole or empty. It hands back, with no warning, the four process plates
+/// and one for each of the sixty-four, in inventory order, each of its kind;
+/// inside each square its spot's plate holds exactly the square's tint and
+/// every other plate — the four process plates and the other sixty-three —
+/// holds none; and where no square stands the process plates hold the
+/// backdrop and no spot plate holds anything.
+#[test]
+fn sixty_four_spots_render_sixty_eight_plates() {
+    assert_eq!(tinker_pdf::MAX_SPOT_PLATES, 64, "the cap this page reaches");
+    let squares = spot_squares(64);
+    let spots: Vec<String> = squares.iter().map(|square| square.name.clone()).collect();
+    let mut levels: Vec<u8> = squares.iter().map(|square| square.level).collect();
+    levels.sort_unstable();
+    levels.dedup();
+    assert_eq!(levels.len(), 64, "sixty-four tints, one a spot");
+    assert!(
+        squares
+            .iter()
+            .all(|square| square.space < 16 && square.component < 4),
+        "four spots to each of sixteen spaces"
+    );
+
+    let doc = Document::open(spots_page(64)).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    assert_eq!(
+        names(&page),
+        spots,
+        "the inventory: sixty-four spots, in order"
+    );
+
+    let plates = separations(&page, &whole_pixels(), &[]);
+    assert!(plates.warnings.is_empty(), "{:?}", plates.warnings);
+    assert_eq!((plates.width, plates.height), SPOTS_PAGE);
+    let handed = process_then(&spots);
+    assert_eq!(handed.len(), 68);
+    assert_eq!(plate_names(&plates), handed, "sixty-eight plates, in order");
+    for (index, plate) in plates.plates.iter().enumerate() {
+        let kind = if index < 4 {
+            PlateKind::Process
+        } else {
+            PlateKind::Spot
+        };
+        assert_eq!(plate.kind, kind, "plate {index}'s kind");
+    }
+    let expected = spots_expected(
+        SPOTS_PAGE,
+        &squares,
+        &spots,
+        &handed,
+        [0, 0, SPOTS_PAGE.0, SPOTS_PAGE.1],
+    );
+    assert_plates(&plates, &expected, "the 64-spot page");
+}
+
+/// `count` spots of `SpotSquare::numbered` in a compact grid at the top left
+/// of a page `height` points high: six-point squares two points apart, ten to
+/// a row.
+fn compact_squares(count: usize, height: u32) -> Vec<SpotSquare> {
+    (0..count)
+        .map(|index| {
+            let column = u32::try_from(index % 10).expect("under ten");
+            let row = u32::try_from(index / 10).expect("a few rows");
+            let x0 = 2 + 8 * column;
+            let top = height - 2 - 8 * row;
+            SpotSquare::numbered(index, [x0, top - 6, x0 + 6, top])
+        })
+        .collect()
+}
+
+/// Every warning of `warnings` that says the plates were capped.
+fn capped(warnings: &[RenderWarning]) -> Vec<&RenderWarning> {
+    warnings
+        .iter()
+        .filter(|warning| matches!(warning, RenderWarning::PlatesCapped { .. }))
+        .collect()
+}
+
+/// **A page past the plate cap reports what it left** (RC-04.15; the design's
+/// "The cap, and what it costs").
+///
+/// The spots past a cap, in inventory order, are drawn as composites — so a
+/// `/DeviceN` naming one reverts to its alternate as a whole (8.6.6.5), every
+/// name of it — and the render carries `RenderWarning::PlatesCapped`, once,
+/// naming how many spots asked for a plate and how many kept one; each page's
+/// every plate is held to what the page puts there:
+///
+/// - **past `MAX_SPOT_PLATES`**: seventy spots, four to a space, so the
+///   seventeenth and eighteenth spaces hold the six past the sixty-fourth:
+///   sixty-eight plates come back, the first sixty-four spots', and the last
+///   six squares are drawn on the process plates through their spaces'
+///   alternates;
+/// - **a spot asked to be composite asks for no plate**, so the cap reaches
+///   past it: with the first space's four composite, sixty-six ask and the
+///   first sixty-four of them keep one, the fifth to the sixty-eighth;
+/// - **a disabled spot keeps its plate while the page is drawn**, so it counts
+///   toward the cap: with the first disabled, seventy ask, sixty-four keep a
+///   plate and sixty-three come back;
+/// - **past `MAX_PLATE_BYTES`, at a page the byte bound reaches first**: a page
+///   of `MAX_PAGE_PIXELS`, 8 192 points a side at 72 dpi, whose plates keep
+///   sixteen bytes a pixel — the four process plates, the alpha and eleven
+///   spots — naming thirteen, drawn as a region at its corner: the first
+///   eleven keep plates, and the third space, which names the ninth to the
+///   twelfth and so a spot past the bound, reverts as a whole, leaving the
+///   plates of the ninth to the eleventh empty;
+/// - and a light render of the same page carries no such warning, since it
+///   keeps no plates.
+#[test]
+fn a_page_past_the_plate_cap_reports_what_it_left() {
+    let cap = tinker_pdf::MAX_SPOT_PLATES;
+    let size = (84, 60);
+    let squares = compact_squares(70, size.1);
+    let spots: Vec<String> = squares.iter().map(|square| square.name.clone()).collect();
+    let doc = Document::open(spots_page_of(size, &squares)).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    assert_eq!(names(&page), spots, "the inventory lists all seventy");
+    let whole = [0, 0, size.0, size.1];
+
+    // Past the count.
+    let plates = separations(&page, &whole_pixels(), &[]);
+    assert_eq!(
+        capped(&plates.warnings),
+        [&RenderWarning::PlatesCapped {
+            named: 70,
+            kept: cap
+        }],
+        "seventy asked and sixty-four kept, said once"
+    );
+    assert_eq!(plates.warnings.len(), 1, "{:?}", plates.warnings);
+    let plated = spots[..cap].to_vec();
+    let handed = process_then(&plated);
+    assert_eq!(
+        plate_names(&plates),
+        handed,
+        "the first sixty-four keep their plates"
+    );
+    assert_plates(
+        &plates,
+        &spots_expected(size, &squares, &plated, &handed, whole),
+        "seventy spots",
+    );
+    for square in &squares[cap..] {
+        let [x0, _, _, y1] = square.rect;
+        let (x, y) = (x0 + 1, size.1 - y1 + 1);
+        assert_eq!(
+            tint_at(&plates, PROCESS[square.component], x, y),
+            square.level,
+            "{} through its alternate, onto {}",
+            square.name,
+            PROCESS[square.component]
+        );
+    }
+
+    // A spot asked to be composite asks for no plate.
+    let first_space: Vec<(&str, PlateUse)> = spots[..4]
+        .iter()
+        .map(|name| (name.as_str(), PlateUse::Composite))
+        .collect();
+    let composite = separations(&page, &whole_pixels(), &first_space);
+    assert_eq!(
+        capped(&composite.warnings),
+        [&RenderWarning::PlatesCapped {
+            named: 66,
+            kept: cap
+        }],
+        "the four composite spots ask for nothing"
+    );
+    let plated = spots[4..4 + cap].to_vec();
+    let handed = process_then(&plated);
+    assert_eq!(
+        plate_names(&composite),
+        handed,
+        "the cap reaches past the composite spots"
+    );
+    assert_plates(
+        &composite,
+        &spots_expected(size, &squares, &plated, &handed, whole),
+        "the first space composite",
+    );
+
+    // A disabled spot keeps its plate while the page is drawn.
+    let disabled = separations(&page, &whole_pixels(), &[("Spot01", PlateUse::Disabled)]);
+    assert_eq!(
+        capped(&disabled.warnings),
+        [&RenderWarning::PlatesCapped {
+            named: 70,
+            kept: cap
+        }],
+        "the disabled spot asks for its plate"
+    );
+    let plated = spots[..cap].to_vec();
+    let handed = process_then(&spots[1..cap]);
+    assert_eq!(plate_names(&disabled), handed, "sixty-three come back");
+    assert_plates(
+        &disabled,
+        &spots_expected(size, &squares, &plated, &handed, whole),
+        "the first spot disabled",
+    );
+
+    assert!(
+        capped(&page.render(&RenderOptions::default()).warnings).is_empty(),
+        "a light render keeps no plates"
+    );
+
+    // Past the bytes, at a page the byte bound reaches first.
+    let side = 8192u32;
+    let pixels = u64::from(side) * u64::from(side);
+    let kept = usize::try_from(tinker_pdf::MAX_PLATE_BYTES / pixels - 5).expect("a few");
+    assert_eq!(
+        kept, 11,
+        "sixteen bytes a pixel: the alpha, four inks and eleven spots"
+    );
+    let squares = compact_squares(13, side);
+    let spots: Vec<String> = squares.iter().map(|square| square.name.clone()).collect();
+    let doc = Document::open(spots_page_of((side, side), &squares)).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    assert_eq!(
+        page.pixel_size(&RenderOptions::default()),
+        (side, side),
+        "drawn at its size, not scaled to fit"
+    );
+    let region = [0, 0, 84, 20];
+    let render = RenderOptions {
+        region: Some(PixelRegion::new(region[0], region[1], region[2], region[3])),
+        ..whole_pixels()
+    };
+    let bytes = separations(&page, &render, &[]);
+    assert_eq!((bytes.width, bytes.height), (84, 20));
+    assert_eq!(
+        capped(&bytes.warnings),
+        [&RenderWarning::PlatesCapped { named: 13, kept }],
+        "thirteen asked and eleven kept, said once"
+    );
+    assert_eq!(bytes.warnings.len(), 1, "{:?}", bytes.warnings);
+    let plated = spots[..kept].to_vec();
+    let handed = process_then(&plated);
+    assert_eq!(
+        plate_names(&bytes),
+        handed,
+        "the first eleven keep their plates"
+    );
+    assert_plates(
+        &bytes,
+        &spots_expected((side, side), &squares, &plated, &handed, region),
+        "past the byte bound",
+    );
+    for name in ["Spot09", "Spot10", "Spot11"] {
+        assert!(
+            plate(&bytes, name)
+                .expect("a plate")
+                .tints
+                .iter()
+                .all(|tint| *tint == 0),
+            "{name} keeps a plate its square, drawn through its space's alternate, leaves empty"
+        );
     }
 }
