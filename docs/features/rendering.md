@@ -95,7 +95,13 @@ with no `/ColorSpace` over it carries its own colour, which selects no
 device space and is not remapped. A scope's defaults are read once, on its first device-space
 question, and the interpreter asks once a scope which families remap
 (`FontSource::device_defaults`), so a page naming none pays a load and a
-branch per selection and one flag check per device operator.
+branch per selection and one flag check per device operator. A space a
+resource name selects is read once a scope too, at the first `cs`, `CS`, `sc`
+or `scn` that names it, as painted and as selected together, and kept for
+every render over the scope; a render that finds it kept names again what
+reading it repaired, so a render's warnings never depend on whether it read
+the space. A function an object holds — a shading's, a tint transform, a
+graphics state's — is read once a scope as well.
 `tests/default_spaces.rs` holds every path and scope above to a twin naming
 the substitute directly, byte for byte, under CalGray and ICCBased N=1,
 CalRGB and ICCBased N=3, and ICCBased N=4, each beside the page without its
@@ -648,7 +654,14 @@ save do; `keys_looked_up`, each lookup by its bytes of a name the document's
 name table pre-interns — a key read where its `Name` constant answers without
 the table, which no reader on a counted path does, or a resource name that
 spells one, such as a font named `/Font` — counted by the resource scopes and
-by a font read through them; and
+by a font read through them; `color_spaces_parsed`, each colour space a
+resource scope reads out of `/ColorSpace` by the name its content selects it
+by, both its readings at once, the first time it is asked about the name;
+`functions_read`, each function a scope reads from an object of its own — a
+shading's, a tint transform, a stitching function's piece, a graphics
+state's — once an object, a stitching function once for each depth it is read
+at; `graphics_states_read`, each graphics state a scope reads out of
+`/ExtGState`, at the first `gs` of its name; and
 `streams_decoded`, each run of a stream's filter chain — the page's content, a
 form's at each `Do`, a tiling pattern's cell, an appearance, an image's
 samples and its soft mask's, a font's program and its CMaps, an ICC profile —
@@ -850,6 +863,15 @@ defect to hide in.
   the page, every tile of a lattice over it, two replays, the form and the
   annotation with stats on and off, byte for byte and warning for warning at
   two scales. Each runs in the default and the `bundled-fonts` builds.
+- What a scope reads once: `crates/tinker-pdf/tests/resource_work.rs`'s
+  `a_scope_parses_each_named_space_and_state_once`, a page of a thousand
+  `cs`, `scn`, `sh` and `gs` operators whose render reads each colour space
+  it names, each function object its spaces, shadings and states hold, and
+  each graphics state once — at most the distinct names and objects it uses,
+  and what a page of forty-eight of them reads; and
+  `a_space_found_kept_says_what_reading_it_said`, two replays of a display
+  list whose pattern cell selects a repaired space, the second finding it
+  kept and naming the repair as the first, which read it, does.
 - Parts: `crates/tinker-pdf/tests/render_parts.rs` holds a form — one with
   text, a fill cut by its `/BBox` and a curve, one with a `/Matrix` and a name
   that needs escaping — and an annotation drawn at its own `/Rect` and one

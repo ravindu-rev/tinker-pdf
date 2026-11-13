@@ -258,16 +258,17 @@ halftone is a typed value whose threshold array is **a handle**. No stored
 parameter is a sampled table.
 
 **A function is the parsed `tinker_pdf_color::Function`, behind an `Arc`.**
-`parse_function` (`resources.rs:2671`) reads it, handed the entry **as
-written**, as `PageResources::function` hands it (`:2643-2669`), so a type 0
-or type 4 function — a stream — reaches the reader through its reference.
+`PageResources::read_function` (`resources.rs`) reads it, handed the entry
+**as written**, as `PageResources::function` hands it, so a type 0 or type 4
+function — a stream — reaches the reader through its reference.
 `Transfer` is `Identity` (the name), `One(Arc<Function>)`, or
 `Four([Arc<Function>; 4])` for the four process colorants; `/Default`
 stores `None`. The scope keeps each function it reads by its object, so one
 function many states share, or one state set at every `gs`, is decoded and
 parsed once; a function written directly into the dictionary has no object,
-is a few numbers, and is read where it lies at each `gs`. P-02.5 extends that
-cache to the shading and tint readers rather than doubling it. The content
+is a few numbers, and is read where it lies at each `gs`. The shading and
+tint readers read through the same cache (`PageResources::kept_function`,
+`docs/design/performance.md`, P-02), rather than a second one. The content
 crate already depends on `tinker-pdf-color` (`docs/architecture.md`), so
 `GraphicsState` names `Function` with no new edge. A sampled table was not
 chosen because:

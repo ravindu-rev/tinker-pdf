@@ -209,6 +209,9 @@ already carries it.
 | `page_walks` | a walk of the page tree from its root | `collect_upto` itself, for every caller | built |
 | `page_nodes_visited` | a `/Pages` tree node a lookup or a walk read, leaves included, and the page object the linearized or hinted path reads with each ancestor the head holds (`page_alone` and `ancestors_in_the_head` in `pages.rs`) | cos's page walk | built |
 | `keys_looked_up` | a lookup by its bytes of a name the name table pre-interns (`Name::is_preinterned`): a key read where its constant answers, or a resource name that spells one (P-02) | the facade's scopes (`PageResources::name`) and the counting view (`Counting::intern`) | built |
+| `color_spaces_parsed` | a resource name's colour space a scope reads out of `/ColorSpace` and parses, both its readings at once, at the first question about the name (P-02, "Colour spaces, functions and graphics states") | the facade's scopes (`PageResources::kept_space`) | built |
+| `functions_read` | a function a scope reads from an object of its own — a shading's, a tint transform, a stitching function's piece, a graphics state's — once an object, and a stitching function once for each depth it is read at | the facade's scopes (`PageResources::kept_function`) | built |
+| `graphics_states_read` | a `gs` name's state a scope reads out of `/ExtGState`, its entry a dictionary, at the first `gs` of the name | the facade's scopes (`PageResources::read_ext_g_state`) | built |
 | `streams_decoded` | a run of a stream's filter chain, whatever it returned | cos's two filter-chain entry points and every `Resolve` view | built |
 | `most_decodes_of_one_stream` | the most runs any one stream had in the operation — a maximum, the quantity A5 holds to one | the same | built |
 | `most_decoded_stream` | the reference of the stream that had those runs, the lowest of a tie — what names a stream a page keeps decoding | the same | built |
@@ -2237,9 +2240,9 @@ step that brings it within bound.
 | `type3_glyph` | every glyph | the font's dictionary out of `/Font`, copied, with `/Font`, `/Subtype` and the font's name looked up by their bytes; for a Type 3 font, `/Encoding`, `/Differences` walked from its first item, `/CharProcs` and `/FontMatrix` | P-02.2 the keys, P-02.3 the kind and P-02.4 the record, landed |
 | `font_object`, `resource_name`, `selection` | every glyph a save's subset walk records (`subset::show`), and each outline the renderer extracts | `font_ids` scanned for the id and the name copied; `font_object` the `/Font` subdictionary copied too (`font_table`) | P-02.3, landed |
 | a scope's construction | every scope: a page's, a form's, a pattern cell's, an appearance's, the font rule's | every font its `/Font` names, read with its CMaps (`stats::fonts`), used or not; and `for_one_render` and `bind` copy the two maps it filled for every render and every counting asker | P-02.3, landed |
-| `color_space`, `selected_space` | each `cs` and `CS` that names a resource, three readings; each `sc` and `scn` in one, two | `/ColorSpace`, the entry and its parse | P-02.5 |
-| `function` | each `sh`, each shading pattern's fill | the shading's `/Function`, read and parsed | P-02.5 |
-| `ext_g_state` | each `gs` | nothing: kept by name already (`Caches::states`) | P-02.5 counts it |
+| `color_space`, `selected_space` | each `cs` and `CS` that names a resource, three readings; each `sc` and `scn` in one, two | `/ColorSpace`, the entry and its parse | P-02.5, landed |
+| `function` | each `sh`, each shading pattern's fill | the shading's `/Function`, read and parsed | P-02.5, landed |
+| `ext_g_state` | each `gs` | nothing: kept by name already (`Caches::states`) | P-02.5 counts it, landed |
 
 #### The font table
 
@@ -2323,21 +2326,32 @@ record to it.
 
 #### Colour spaces, functions and graphics states
 
-- **A colour space, by name.** `color_space` and `selected_space` keep each
-  resource name's two readings — as painted, which every conversion reads, and
-  as selected, which `resolve_ink`, `initial_color` and `color_components`
-  read: K-02.1's two answers to one selection — each with the repairs reading
-  it noted. A device space named directly is matched by its name, as now, and
+- **A colour space, by name.** `named_space` answers every question a
+  resource name asks of its space, and `Caches::spaces` keeps each name's two
+  readings — as painted, which every conversion reads, and as selected, which
+  `resolve_ink`, `initial_color` and `color_components` read: K-02.1's two
+  answers to one selection — read together at the first question about the
+  name (`PageResources::kept_space`), with the repairs reading them noted, and
+  lent to each question rather than copied. A scope whose defaults put nothing
+  in reads the entry once, the two readings being one. A name `/ColorSpace`
+  does not hold is kept too, with Table 93's abbreviation it may be, so it is
+  looked for once. A device space named directly is matched by its name and
   kept nowhere. `Caches::icc` keeps compiled profiles by stream and stays the
   one ICC cache.
-- **A function, by object.** The shading and function readers keep each
-  function an object holds in `Caches::functions`, which the graphics states'
-  functions already use, keyed as they are; a function written inline is a few
-  numbers, read where it lies.
+- **A function, by object.** `PageResources::kept_function` keeps each
+  function an object holds in `Caches::functions` — a shading's `/Function`
+  and its members, a tint transform, a stitching function's pieces and the
+  graphics states' functions alike — keyed by its object. A stitching
+  function is keyed by its object and the depth it is read at, because its
+  pieces nested past the reader's depth of eight read as nothing, so its
+  reading depends on where it stands; every other function reads alike at
+  every depth. A function written inline is a few numbers, read where it
+  lies; a shading or a space that holds a kept function copies it, a graphics
+  state shares it.
 - **A graphics state, by name.** `Caches::states` keeps each `gs` name's state
   and the repairs its reading noted, and stays as it is.
 
-Each keeps at most 4 096 names, as `Caches::states` does.
+Each keeps at most 4 096 entries, as `Caches::states` does.
 
 #### What a hit says again
 

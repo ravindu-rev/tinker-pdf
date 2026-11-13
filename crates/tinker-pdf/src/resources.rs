@@ -109,13 +109,29 @@ struct Caches {
     /// and nothing per operator — the interpreter asks once a scope too
     /// ([`FontSource::device_defaults`]).
     defaults: OnceLock<Defaults>,
-    /// The functions a graphics state names (`/TR`, `/BG`, `/UCR`, their
-    /// second spellings, and a soft mask's `/TR`), by the function's own
-    /// object packed as `num << 16 | gen`: one function many states share, or
-    /// one state set at every `gs`, is decoded and parsed once. `None` is
-    /// cached too. A function written directly into a dictionary has no
-    /// object, is a few numbers, and is read where it lies.
-    functions: Mutex<HashMap<u64, Option<Arc<Function>>>>,
+    /// The colour space each resource name selects, read out of
+    /// `/ColorSpace` on the first question about the name and kept with both
+    /// of K-02.1's readings of it, as painted and as selected, and the
+    /// repairs reading it noted, said again at each later question
+    /// (`docs/design/performance.md`, P-02, "Colour spaces, functions and
+    /// graphics states"). A device space named directly is matched by its
+    /// name and kept nowhere. A name `/ColorSpace` does not hold is kept
+    /// too, so it is looked for once.
+    spaces: RwLock<HashMap<Vec<u8>, Arc<KeptSpace>>>,
+    /// Every function this scope reads from an object of its own — a
+    /// shading's `/Function` and its members, a colour space's tint
+    /// transform, a stitching function's pieces, and the functions a
+    /// graphics state names (`/TR`, `/BG`, `/UCR`, their second spellings,
+    /// a halftone's and a soft mask's) — by its object: one function many
+    /// shadings, spaces or states share, or one shading painted at every
+    /// `sh`, is decoded and parsed once. A stitching function is kept by its
+    /// object and the depth it was read at, `Some` here, because pieces
+    /// nested past [`MAX_FUNCTION_DEPTH`] read as nothing, so its reading
+    /// depends on where it stands; every other function reads alike at every
+    /// depth, `None`. `None` is cached too. A function written directly into
+    /// a dictionary has no object, is a few numbers, and is read where it
+    /// lies.
+    functions: Mutex<FunctionCache>,
     /// The fonts this scope's names select, each read on the first question
     /// about its name and kept by the name and by the id its glyphs carry
     /// (`docs/design/performance.md`, P-02, "The font table"). Shared by
@@ -139,10 +155,40 @@ struct CachedState {
     repaired_spaces: Vec<(String, String)>,
 }
 
-/// The most names [`Caches::states`] keeps. A resource table holds what it
-/// holds, so an honest scope never reaches it; past it each `gs` reads its
-/// state again, as before the cache.
-const MAX_CACHED_STATES: usize = 1 << 12;
+/// A resource name's colour space as [`Caches::spaces`] keeps it: K-02.1's
+/// two answers to the one selection, read together on the first question
+/// about the name.
+struct KeptSpace {
+    /// As painted, each device space in it put in as the scope's default
+    /// (8.6.5.6): what every conversion reads.
+    painted: Option<ColorSpace>,
+    /// As the file selected it: what `cs` resets the colour to, its
+    /// component count and whether a colour is DeviceCMYK ink.
+    selected: Option<ColorSpace>,
+    /// The repairs reading it noted, said again at each later question, so a
+    /// render that meets it here says what the render that read it said.
+    repaired_spaces: Vec<(String, String)>,
+}
+
+/// Which of K-02.1's two answers to a selection a question reads.
+#[derive(Clone, Copy)]
+enum Answer {
+    /// The space as painted.
+    Painted,
+    /// The space as selected.
+    Selected,
+}
+
+/// The most entries [`Caches::states`], [`Caches::spaces`] and
+/// [`Caches::functions`] each keep. A resource table holds what it holds, so
+/// an honest scope never reaches it; past it each question reads its entry
+/// again, as before the caches.
+const MAX_CACHED_ENTRIES: usize = 1 << 12;
+
+/// The deepest a function is read: a stitching function's pieces (7.10.4),
+/// and a colour space's tint transform, are one deeper than what holds them,
+/// and one past this reads as nothing, so a function that holds itself ends.
+const MAX_FUNCTION_DEPTH: u32 = 8;
 
 /// One font a scope's content selects, read on the first question about the
 /// name it selects it by (`docs/design/performance.md`, P-02, "The font
@@ -279,10 +325,13 @@ impl Defaults {
     /// Whether this scope puts nothing in and refuses nothing: the scope of
     /// almost every page, which an extraction then asks nothing more.
     fn is_inert(&self) -> bool {
-        self.gray.is_none()
-            && self.rgb.is_none()
-            && self.cmyk.is_none()
-            && self.refused.iter().all(Option::is_none)
+        self.puts_nothing_in() && self.refused.iter().all(Option::is_none)
+    }
+
+    /// Whether this scope puts no default in for any device space, so that a
+    /// space as painted is the space as selected, read alike.
+    fn puts_nothing_in(&self) -> bool {
+        self.gray.is_none() && self.rgb.is_none() && self.cmyk.is_none()
     }
 }
 
@@ -332,6 +381,10 @@ impl Reading<'_> {
             .unwrap_or(device)
     }
 }
+
+/// Functions read from objects of their own ([`Caches::functions`]): by the
+/// object, and for a stitching function the depth it was read at too.
+type FunctionCache = HashMap<(ObjRef, Option<u32>), Option<Arc<Function>>>;
 
 /// Compiled ICC transforms, by the profile stream's object number and
 /// generation.
@@ -1334,36 +1387,103 @@ impl PageResources {
         Some((stream, reference))
     }
 
-    /// The colour space a resource name selects (8.6.6), as painted: a device
-    /// space this scope remaps is its default (8.6.5.6).
-    fn color_space(&self, name: &[u8]) -> Option<ColorSpace> {
-        self.named_space(name, self.painted())
-    }
-
-    /// The colour space a resource name selects, as the file selected it:
-    /// what `cs` resets the colour to (8.6.8) and whether a colour is
-    /// DeviceCMYK ink are asked of the space as selected, whatever default
-    /// the scope paints it in (`docs/design/icc.md`, "One selection, two
-    /// answers").
-    fn selected_space(&self, name: &[u8]) -> Option<ColorSpace> {
-        self.named_space(name, Reading::SELECTED)
-    }
-
-    fn named_space(&self, name: &[u8], how: Reading) -> Option<ColorSpace> {
+    /// `read` of the colour space a resource name selects (8.6.6), as
+    /// `answer` reads it, or `None` for a name that selects none. As painted,
+    /// a device space this scope remaps is its default (8.6.5.6); as
+    /// selected, the space is the file's, whatever default the scope paints
+    /// it in — what `cs` resets the colour to (8.6.8) and whether a colour is
+    /// DeviceCMYK ink are asked of it (`docs/design/icc.md`, "One selection,
+    /// two answers").
+    ///
+    /// Lent rather than returned: a name that is no device space's is read
+    /// out of `/ColorSpace` once a scope, both readings at once, and kept
+    /// ([`PageResources::kept_space`]), so the `cs`, `sc` and `scn` that name
+    /// it copy nothing.
+    fn named_space<R>(
+        &self,
+        name: &[u8],
+        answer: Answer,
+        read: impl FnOnce(&ColorSpace) -> R,
+    ) -> Option<R> {
         // The device spaces may be named directly without appearing in
         // /ColorSpace at all — 8.6.8: they "never refer to resources", so the
-        // default is what a resource dictionary is asked for.
-        match name {
+        // default is what a resource dictionary is asked for. Matched by the
+        // name and kept nowhere.
+        let device = match name {
             // A bare `/CalGray` or `/CalRGB` name carries no parameter
             // dictionary at all, so there is no white point or gamma to read
             // and the device space *is* the whole of what the file said.
-            b"DeviceGray" | b"CalGray" => return Some(how.device(ColorSpace::DeviceGray)),
-            b"DeviceRGB" | b"CalRGB" => return Some(how.device(ColorSpace::DeviceRgb)),
-            b"DeviceCMYK" => return Some(how.device(ColorSpace::DeviceCmyk)),
-            b"Pattern" => return Some(ColorSpace::Pattern { base: None }),
-            _ => {}
-        }
+            b"DeviceGray" | b"CalGray" => ColorSpace::DeviceGray,
+            b"DeviceRGB" | b"CalRGB" => ColorSpace::DeviceRgb,
+            b"DeviceCMYK" => ColorSpace::DeviceCmyk,
+            b"Pattern" => return Some(read(&ColorSpace::Pattern { base: None })),
+            _ => {
+                let kept = self.kept_space(name);
+                let space = match answer {
+                    Answer::Painted => kept.painted.as_ref(),
+                    Answer::Selected => kept.selected.as_ref(),
+                };
+                return space.map(read);
+            }
+        };
+        let space = match answer {
+            Answer::Painted => self.defaults().for_device(&device).unwrap_or(&device),
+            Answer::Selected => &device,
+        };
+        Some(read(space))
+    }
 
+    /// The colour space `name` selects through this scope's `/ColorSpace`,
+    /// read on the first question about the name and kept
+    /// ([`Caches::spaces`]); a later question notes again the repairs the
+    /// reading noted, as [`FontSource::ext_g_state`] notes a state's, so a
+    /// render's lists do not depend on whether it read the space or found it.
+    fn kept_space(&self, name: &[u8]) -> Arc<KeptSpace> {
+        if let Ok(cache) = self.caches.spaces.read() {
+            if let Some(hit) = cache.get(name) {
+                let hit = Arc::clone(hit);
+                drop(cache);
+                self.note_repaired_spaces(&hit.repaired_spaces);
+                return hit;
+            }
+        }
+        let read = Arc::new(self.read_named_space(name));
+        if let Ok(mut cache) = self.caches.spaces.write() {
+            if cache.len() < MAX_CACHED_ENTRIES {
+                cache
+                    .entry(name.to_vec())
+                    .or_insert_with(|| Arc::clone(&read));
+            }
+        }
+        read
+    }
+
+    /// Reads the colour space `name` selects, as
+    /// [`PageResources::kept_space`] keeps it: the entry `/ColorSpace` holds
+    /// for the name, as painted and as selected, counted as a colour space
+    /// parsed; or, for a name it does not hold, the device space Table 93
+    /// abbreviates by it, if it is one of those.
+    fn read_named_space(&self, name: &[u8]) -> KeptSpace {
+        // The scope's defaults first, so what they refused is said as the
+        // scope's, once, as it always was, and not kept beside a space.
+        let as_painted = self.painted();
+        let before = self.repaired_spaces().len();
+        let entry = self.resources.as_ref().and_then(|resources| {
+            let table = resources.get(Name::COLOR_SPACE)?;
+            read_resolved(&self.doc, table, |table| {
+                let entry = table.as_dict()?.get(self.name(name))?;
+                self.count(Counter::ColorSpacesParsed);
+                let selected = self.read_space(entry, 0, name, Reading::SELECTED);
+                // A scope that puts no default in paints a space as it was
+                // selected, and the two readings are one.
+                let painted = if self.defaults().puts_nothing_in() {
+                    selected.clone()
+                } else {
+                    self.read_space(entry, 0, name, as_painted)
+                };
+                Some((painted, selected))
+            })
+        });
         // `/G`, `/RGB` and `/CMYK` are Table 93's abbreviations, which an
         // inline image may use and a content stream's `cs` may not — 8.6.8
         // gives `cs` a device space's own name or a `/ColorSpace` resource,
@@ -1372,18 +1492,22 @@ impl PageResources {
         // 2026 the abbreviation won, and a page that registered its
         // `/CalGray` as `/G` was drawn in DeviceGray, gamma and white point
         // unread.
-        let entry = self.resources.as_ref().and_then(|resources| {
-            let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
-            table.as_dict()?.get(self.name(name)).cloned()
-        });
-        match entry {
-            Some(entry) => self.read_space(&entry, 0, name, how),
-            None => match name {
-                b"G" => Some(how.device(ColorSpace::DeviceGray)),
-                b"RGB" => Some(how.device(ColorSpace::DeviceRgb)),
-                b"CMYK" => Some(how.device(ColorSpace::DeviceCmyk)),
+        let (painted, selected) = entry.unwrap_or_else(|| {
+            let abbreviated = match name {
+                b"G" => Some(ColorSpace::DeviceGray),
+                b"RGB" => Some(ColorSpace::DeviceRgb),
+                b"CMYK" => Some(ColorSpace::DeviceCmyk),
                 _ => None,
-            },
+            };
+            (
+                abbreviated.clone().map(|device| as_painted.device(device)),
+                abbreviated,
+            )
+        });
+        KeptSpace {
+            painted,
+            selected,
+            repaired_spaces: self.repaired_spaces().into_iter().skip(before).collect(),
         }
     }
 
@@ -2052,15 +2176,15 @@ impl FontSource for PageResources {
                 Some(default) => default.to_rgb(components),
                 None => device.to_rgb(components),
             },
-            None => self.color_space(space)?.to_rgb(components),
+            None => self.named_space(space, Answer::Painted, |space| space.to_rgb(components))?,
         };
         Some(Rgb { r, g, b })
     }
 
     fn color_components(&self, space: &[u8]) -> Option<usize> {
         // A default has its device space's count, so the space as selected
-        // answers without the copy a default would cost.
-        Some(self.selected_space(space)?.components())
+        // answers.
+        self.named_space(space, Answer::Selected, ColorSpace::components)
     }
 
     fn resolve_ink(&self, space: &[u8], components: &[f64]) -> Option<[u8; 4]> {
@@ -2072,7 +2196,9 @@ impl FontSource for PageResources {
         // document's own ink under a `/DefaultCMYK` while its light is the
         // default's: H-135's default until the owner decides, and choosing
         // conversion instead is this one check.
-        if self.selected_space(space)? != ColorSpace::DeviceCmyk {
+        if !self.named_space(space, Answer::Selected, |space| {
+            *space == ColorSpace::DeviceCmyk
+        })? {
             return None;
         }
         let byte = |i: usize| {
@@ -2091,7 +2217,7 @@ impl FontSource for PageResources {
         // default as every other value is: `/DeviceCMYK cs` and `0 0 0 1 k`
         // paint one colour under one default, where an `ICCBased` default's
         // own initial value, all zeros, would be no ink at all.
-        Some(self.selected_space(space)?.initial())
+        self.named_space(space, Answer::Selected, ColorSpace::initial)
     }
 
     fn device_defaults(&self) -> DeviceDefaults {
@@ -2116,7 +2242,7 @@ impl FontSource for PageResources {
         let state = self.read_ext_g_state(name);
         let repaired_spaces = self.repaired_spaces().into_iter().skip(before).collect();
         if let Ok(mut cache) = self.caches.states.lock() {
-            if cache.len() < MAX_CACHED_STATES {
+            if cache.len() < MAX_CACHED_ENTRIES {
                 cache.insert(
                     name.to_vec(),
                     CachedState {
@@ -2288,24 +2414,11 @@ impl PageResources {
         Some((dashes, phase))
     }
 
-    /// A function a graphics state names, read as written by
-    /// [`PageResources::parse_function`], and through the scope's cache when
-    /// it is an object of its own.
+    /// A function a graphics state names, read as written, through the
+    /// scope's cache when it is an object of its own
+    /// ([`PageResources::kept_function`]).
     fn state_function(&self, raw: &Object) -> Option<Arc<Function>> {
-        let Some(reference) = raw.as_objref() else {
-            return self.parse_function(raw, 0).map(Arc::new);
-        };
-        let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
-        if let Ok(cache) = self.caches.functions.lock() {
-            if let Some(hit) = cache.get(&key) {
-                return hit.clone();
-            }
-        }
-        let read = self.parse_function(raw, 0).map(Arc::new);
-        if let Ok(mut cache) = self.caches.functions.lock() {
-            cache.insert(key, read.clone());
-        }
-        read
+        self.kept_function(raw, 0)
     }
 
     /// `/BG` or `/UCR` (10.3.4, 10.3.5): a function; the second spellings
@@ -2508,16 +2621,17 @@ impl PageResources {
 
     /// The graphics state `name` selects, read from where it lies: the table
     /// and the entry as `with_property_list` reads them, and the entry's keys
-    /// once each, with no copy of a table written inline.
+    /// once each, with no copy of a table written inline. Counted as a
+    /// graphics state read when the entry is a dictionary.
     fn read_ext_g_state(&self, name: &[u8]) -> Option<Arc<tinker_pdf_content::StateParameters>> {
         let resources = self.resources.as_ref()?;
         let table = resources.get(Name::EXT_G_STATE)?;
         read_resolved(&self.doc, table, |table| {
             let entry = table.as_dict()?.get(self.name(name))?;
             read_resolved(&self.doc, entry, |entry| {
-                entry
-                    .as_dict()
-                    .map(|dict| Arc::new(self.state_parameters(dict, name)))
+                let dict = entry.as_dict()?;
+                self.count(Counter::GraphicsStatesRead);
+                Some(Arc::new(self.state_parameters(dict, name)))
             })
         })
     }
@@ -3108,8 +3222,52 @@ impl PageResources {
         dict.get(key).and_then(|raw| self.parse_function(raw, 0))
     }
 
+    /// The function `object` holds, `object` the entry as written, as a
+    /// value of its own: one an object holds is copied out of the scope's
+    /// cache ([`PageResources::kept_function`]).
     fn parse_function(&self, object: &Object, depth: u32) -> Option<Function> {
-        if depth > 8 {
+        self.kept_function(object, depth).map(Arc::unwrap_or_clone)
+    }
+
+    /// The function `object` holds, `object` the entry as written and
+    /// `depth` how deep it is read: one an object holds read once a scope
+    /// for each depth it is read at, and kept ([`Caches::functions`]); one
+    /// written inline read where it lies. A type 0 or type 4 function is a
+    /// stream (7.10.2, 7.10.5), so its object is the reference it is reached
+    /// through.
+    fn kept_function(&self, object: &Object, depth: u32) -> Option<Arc<Function>> {
+        if depth > MAX_FUNCTION_DEPTH {
+            return None;
+        }
+        let Some(reference) = object.as_objref() else {
+            return self.read_function(object, depth).map(Arc::new);
+        };
+        // A function that holds no other reads alike at every depth, and is
+        // kept by its object alone; a stitching function's pieces stop where
+        // the depth does, so it is kept by its object and the depth it was
+        // read at.
+        if let Ok(cache) = self.caches.functions.lock() {
+            let hit = cache
+                .get(&(reference, None))
+                .or_else(|| cache.get(&(reference, Some(depth))));
+            if let Some(hit) = hit {
+                return hit.clone();
+            }
+        }
+        self.count(Counter::FunctionsRead);
+        let read = self.read_function(object, depth).map(Arc::new);
+        let at = matches!(read.as_deref(), Some(Function::Stitching { .. })).then_some(depth);
+        if let Ok(mut cache) = self.caches.functions.lock() {
+            if cache.len() < MAX_CACHED_ENTRIES {
+                cache.insert((reference, at), read.clone());
+            }
+        }
+        read
+    }
+
+    /// Reads the function `object` holds (7.10), its pieces one deeper.
+    fn read_function(&self, object: &Object, depth: u32) -> Option<Function> {
+        if depth > MAX_FUNCTION_DEPTH {
             return None;
         }
         let resolved = self.doc.resolve(object);

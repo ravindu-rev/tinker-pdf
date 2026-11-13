@@ -149,6 +149,31 @@ pub struct Stats {
     /// ([`crate::resolve::Counting`]) — a font read while a scope resolves
     /// it among them.
     pub keys_looked_up: u64,
+    /// Colour spaces read by resource name: one for each name a scope's
+    /// content selects a space by whose `/ColorSpace` entry the scope reads
+    /// and parses — both its readings at once, as painted and as selected —
+    /// the first time the scope is asked about the name, and kept for every
+    /// render over the scope. A device space named directly, and a name
+    /// `/ColorSpace` does not hold, are read nowhere and not counted.
+    ///
+    /// Counted by the facade's resource scopes.
+    pub color_spaces_parsed: u64,
+    /// Functions read from an object of their own — a shading's `/Function`,
+    /// a colour space's tint transform, a stitching function's pieces, a
+    /// graphics state's transfer, generation, removal and spot functions —
+    /// once for each object a scope reads one from, and kept for every render
+    /// over the scope; a stitching function once for each depth it is read
+    /// at, since its pieces are read only so deep. A function written inline
+    /// is a few numbers, read where it lies and not counted.
+    ///
+    /// Counted by the facade's resource scopes.
+    pub functions_read: u64,
+    /// Graphics states read: one for each name a scope's `gs` operators
+    /// select a state by whose `/ExtGState` entry is a dictionary, read the
+    /// first time the name is set and kept for every render over the scope.
+    ///
+    /// Counted by the facade's resource scopes.
+    pub graphics_states_read: u64,
     /// Runs of a stream's filter chain: each time an operation read a
     /// stream's bytes decoded, whatever the chain returned — a refusal, and
     /// output stopped at the decode ceiling, included. A stream read twice is
@@ -227,6 +252,12 @@ pub enum Counter {
     PageEntriesCopied,
     /// [`Stats::keys_looked_up`].
     KeysLookedUp,
+    /// [`Stats::color_spaces_parsed`].
+    ColorSpacesParsed,
+    /// [`Stats::functions_read`].
+    FunctionsRead,
+    /// [`Stats::graphics_states_read`].
+    GraphicsStatesRead,
 }
 
 impl Stats {
@@ -257,6 +288,9 @@ impl Stats {
             self.page_nodes_visited,
             self.page_entries_copied,
             self.keys_looked_up,
+            self.color_spaces_parsed,
+            self.functions_read,
+            self.graphics_states_read,
             self.streams_decoded,
         ]
         .into_iter()
@@ -284,6 +318,9 @@ impl Stats {
             Counter::PageNodesVisited => &mut self.page_nodes_visited,
             Counter::PageEntriesCopied => &mut self.page_entries_copied,
             Counter::KeysLookedUp => &mut self.keys_looked_up,
+            Counter::ColorSpacesParsed => &mut self.color_spaces_parsed,
+            Counter::FunctionsRead => &mut self.functions_read,
+            Counter::GraphicsStatesRead => &mut self.graphics_states_read,
         }
     }
 }
@@ -333,6 +370,13 @@ impl Add for Stats {
                 .page_entries_copied
                 .saturating_add(other.page_entries_copied),
             keys_looked_up: self.keys_looked_up.saturating_add(other.keys_looked_up),
+            color_spaces_parsed: self
+                .color_spaces_parsed
+                .saturating_add(other.color_spaces_parsed),
+            functions_read: self.functions_read.saturating_add(other.functions_read),
+            graphics_states_read: self
+                .graphics_states_read
+                .saturating_add(other.graphics_states_read),
             streams_decoded: self.streams_decoded.saturating_add(other.streams_decoded),
             most_decodes_of_one_stream: self
                 .most_decodes_of_one_stream
@@ -439,7 +483,7 @@ mod tests {
     use super::*;
 
     /// Every counter, so a test of one property covers them all.
-    const ALL: [Counter; 18] = [
+    const ALL: [Counter; 21] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::FontDictionariesResolved,
@@ -458,6 +502,9 @@ mod tests {
         Counter::PageNodesVisited,
         Counter::PageEntriesCopied,
         Counter::KeysLookedUp,
+        Counter::ColorSpacesParsed,
+        Counter::FunctionsRead,
+        Counter::GraphicsStatesRead,
     ];
 
     #[test]
