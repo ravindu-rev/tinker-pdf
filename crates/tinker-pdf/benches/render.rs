@@ -29,13 +29,15 @@ use support::cli::Cli;
 use support::{inputs, Group, Per};
 #[cfg(not(tinker_planning_baseline))]
 use tinker_pdf::ForcedColours;
-#[cfg(tinker_planning_baseline)]
-use tinker_pdf::PixelRegion;
-use tinker_pdf::{
-    Bitmap, Document, Page, RenderOptions, RenderWarning, SampleCodec, WriteMode, WriteOptions,
-};
 #[cfg(not(tinker_planning_baseline))]
-use tinker_pdf::{DisplayList, Parallelism};
+use tinker_pdf::{
+    write::{self, AppendOptions},
+    DisplayList, Parallelism,
+};
+use tinker_pdf::{Bitmap, Document, Page, RenderOptions, RenderWarning, SampleCodec};
+#[cfg(tinker_planning_baseline)]
+use tinker_pdf::{PixelRegion, WriteMode, WriteOptions};
+use tinker_pdf_cos::ObjRef;
 
 /// `bitmap`, the text page's 150-dpi render, resized to `width` by `height`
 /// by the bitmap toolbox's scale.
@@ -237,6 +239,67 @@ fn every_page_on(doc: &Document, dpi: f64, jobs: usize) -> usize {
         }
     });
     drawn.into_inner()
+}
+
+/// What a change of the annotated text page hands back: the update appended
+/// and the document reopened over it (`write::Appended`), which patches a
+/// page of it.
+#[cfg(not(tinker_planning_baseline))]
+type Changed = write::Appended;
+
+/// The planning baseline has no edit-and-reopen door: its arm's change is
+/// the document opened again from the incremental save.
+#[cfg(tinker_planning_baseline)]
+type Changed = Document;
+
+/// `annotated` with its square's appearance, `form`, replaced by `grey`'s,
+/// appended through the facade's edit-and-reopen door (`write::append`).
+#[cfg(not(tinker_planning_baseline))]
+fn change(annotated: &Document, form: ObjRef, grey: f64) -> Changed {
+    let mut editor = annotated.editor();
+    editor.put_stream(form, inputs::square_appearance(annotated, grey));
+    write::append(annotated, &editor, &AppendOptions::default()).expect("the update reopens")
+}
+
+/// The planning baseline's change: saved as an incremental update and the
+/// bytes opened, which reads the file whole.
+#[cfg(tinker_planning_baseline)]
+fn change(annotated: &Document, form: ObjRef, grey: f64) -> Changed {
+    let mut editor = annotated.editor();
+    editor.put_stream(form, inputs::square_appearance(annotated, grey));
+    let bytes = editor.save(&WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    });
+    Document::open(bytes).expect("the update reopens")
+}
+
+/// The document a change made.
+#[cfg(not(tinker_planning_baseline))]
+fn changed_document(changed: &Changed) -> &Document {
+    &changed.document
+}
+
+/// The document a change made: the planning baseline's change is one.
+#[cfg(tinker_planning_baseline)]
+fn changed_document(changed: &Changed) -> &Document {
+    changed
+}
+
+/// The changed page drawn again over `bitmap`, its render before the
+/// change: patched in place by the rectangle the change made
+/// (`Appended::patch`), so no other bitmap is drawn.
+#[cfg(not(tinker_planning_baseline))]
+fn redraw(changed: &Changed, bitmap: &mut Bitmap, options: &RenderOptions) -> Option<Bitmap> {
+    black_box(changed.patch(0, bitmap, options));
+    None
+}
+
+/// The planning baseline cannot patch a page: its arm draws the changed page
+/// whole, leaving the bitmap before the change as it was.
+#[cfg(tinker_planning_baseline)]
+fn redraw(changed: &Changed, _before: &mut Bitmap, options: &RenderOptions) -> Option<Bitmap> {
+    Some(changed.page(0).expect("a page").render(options))
 }
 
 fn render(c: &mut Criterion) {
@@ -545,20 +608,15 @@ fn render(c: &mut Criterion) {
 
     // ---- an annotation changed --------------------------------------------
 
+    // The square's appearance replaced and appended through the facade's
+    // edit-and-reopen door (`change`), which hands back the document reopened
+    // over the update and patches a page of it.
     let form = LazyCell::new(|| inputs::first_appearance(&annotated));
-    let changed = |grey: f64| {
-        let mut editor = annotated.editor();
-        editor.put_stream(*form, inputs::square_appearance(&annotated, grey));
-        let bytes = editor.save(&WriteOptions {
-            mode: WriteMode::Incremental,
-            ..WriteOptions::default()
-        });
-        Document::open(bytes).expect("the update reopens")
-    };
+    let changed = |grey: f64| change(&annotated, *form, grey);
     let annotated_page = LazyCell::new(|| {
         let annotated_page = annotated.page(0).expect("a page");
         let before = annotated_page.render(&RenderOptions::at_dpi(150.0));
-        let after = changed(0.2)
+        let after = changed_document(&changed(0.2))
             .page(0)
             .expect("a page")
             .render(&RenderOptions::at_dpi(150.0));
@@ -573,18 +631,42 @@ fn render(c: &mut Criterion) {
             }
         });
     });
-    // Each changed file is saved and reopened untimed, and the page drawn
-    // after the change is the one timed: one change an iteration.
+    // Each change is appended and reopened untimed, beside a copy of the
+    // bitmap `the annotated text page at 150 dpi` renders, and what is timed
+    // is the patch of that bitmap (`redraw`): the 100 x 100 pt square's
+    // rectangle rendered and written over it, one change an iteration.
+    // Untimed first: the patch takes the page, and is the page drawn whole
+    // after the change.
     group.operation("re-render a changed 100x100 pt annotation", |op| {
+        let options = RenderOptions::at_dpi(150.0);
+        let before = annotated_page.render(&options);
+        let appended = changed(0.5);
+        #[cfg(not(tinker_planning_baseline))]
+        assert_eq!(
+            appended
+                .patch(0, &mut before.clone(), &options)
+                .expect("the changed page")
+                .fallback,
+            None,
+            "the page is patched, not drawn whole"
+        );
+        let mut patched = before.clone();
+        let redrawn = redraw(&appended, &mut patched, &options).unwrap_or(patched);
+        let full = changed_document(&appended)
+            .page(0)
+            .expect("a page")
+            .render(&options);
+        assert!(
+            redrawn.data == full.data && redrawn.warnings == full.warnings,
+            "the patch is the full render after the change"
+        );
         op.per(renders(&annotated_page, 150.0, 1));
+        let changed = &changed;
         op.iter_batched(
-            || changed(0.5),
-            |doc| {
-                black_box(
-                    doc.page(0)
-                        .expect("a page")
-                        .render(&RenderOptions::at_dpi(150.0)),
-                )
+            move || (changed(0.5), before.clone()),
+            move |(changed, mut bitmap)| {
+                let drawn = redraw(&changed, &mut bitmap, &options);
+                black_box((bitmap, drawn))
             },
             BatchSize::PerIteration,
         );

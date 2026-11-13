@@ -19,8 +19,11 @@ use std::sync::Arc;
 use criterion::{criterion_group, criterion_main, Criterion};
 use support::cli::Cli;
 use support::{inputs, Group, Per};
+#[cfg(not(tinker_planning_baseline))]
+use tinker_pdf::write::AppendOptions;
 use tinker_pdf::write::{self, FontPolicy, ImagePolicy, SaveOptions};
 use tinker_pdf::{Document, WriteMode, WriteOptions};
+use tinker_pdf_cos::ObjRef;
 
 /// A rewrite, as `tpdf` writes one.
 fn rewrite() -> WriteOptions {
@@ -49,6 +52,55 @@ fn dense_bytes(pages: usize, seed: u64) -> Vec<u8> {
         seed => format!("dense-{pages}-{seed}.pdf"),
     };
     inputs::store().bytes(&name, || inputs::dense(pages, seed))
+}
+
+/// What an edit hands back: the update appended and the document reopened
+/// over it (`write::Appended`).
+#[cfg(not(tinker_planning_baseline))]
+type Edited = write::Appended;
+
+/// The planning baseline has no edit-and-reopen door: its arm's edit is the
+/// document opened again from the incremental save.
+#[cfg(tinker_planning_baseline)]
+type Edited = Document;
+
+/// `doc` with its first annotation's appearance, `form`, replaced, appended
+/// through the facade's edit-and-reopen door (`write::append`): the update
+/// section written from the document's length and last byte, and the
+/// document reopened over it reading the section alone.
+#[cfg(not(tinker_planning_baseline))]
+fn edit(doc: &Document, form: ObjRef) -> Edited {
+    let mut editor = doc.editor();
+    editor.put_stream(form, inputs::square_appearance(doc, 0.2));
+    write::append(doc, &editor, &AppendOptions::default()).expect("the update reopens")
+}
+
+/// The planning baseline's edit: saved as an incremental update and the
+/// bytes opened, which reads the file whole.
+#[cfg(tinker_planning_baseline)]
+fn edit(doc: &Document, form: ObjRef) -> Edited {
+    let mut editor = doc.editor();
+    editor.put_stream(form, inputs::square_appearance(doc, 0.2));
+    let bytes = editor.save(&WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    });
+    Document::open(bytes).expect("the update reopens")
+}
+
+/// What one edit reads, checked untimed: the update alone, and a document
+/// with the pages of the one it was made over.
+#[cfg(not(tinker_planning_baseline))]
+fn reads_the_update(edited: &Edited, pages: u32) {
+    assert_eq!(edited.full_open, None, "only the update is read");
+    assert_eq!(edited.document.page_count(), pages);
+}
+
+/// The planning baseline reads the file whole: what its edit is checked for
+/// is the pages.
+#[cfg(tinker_planning_baseline)]
+fn reads_the_update(edited: &Edited, pages: u32) {
+    assert_eq!(edited.page_count(), pages);
 }
 
 /// `doc` saved under `options`, reopened, and its page count held to the
@@ -243,45 +295,35 @@ fn write(c: &mut Criterion) {
         });
     });
 
-    // One annotation's appearance replaced, the change appended as an
-    // incremental update, and the bytes reopened: 170 times an iteration over
-    // a thousand pages, 2 700 times over ten.
-    let edit = |doc: &Document, form| {
-        let mut editor = doc.editor();
-        editor.put_stream(form, inputs::square_appearance(doc, 0.2));
-        let bytes = editor.save(&WriteOptions {
-            mode: WriteMode::Incremental,
-            ..WriteOptions::default()
-        });
-        Document::open(bytes).expect("the update reopens")
-    };
+    // One annotation's appearance replaced and appended through the facade's
+    // edit-and-reopen door (`edit`) — 170 times an iteration over a thousand
+    // pages, 2 700 times over ten. Nothing it does reads the rest of the file,
+    // which is what holds the thousand pages to twice the ten.
     group.operation("edit an annotation, save, reopen, 1000 pages", |op| {
-        let edit = &edit;
         let large = Document::open(inputs::store().bytes("small-1000-annotated.pdf", || {
             inputs::annotated(&inputs::small(1000))
         }))
         .expect("it opens");
         let large_form = inputs::first_appearance(&large);
-        assert_eq!(edit(&large, large_form).page_count(), 1000);
+        reads_the_update(&edit(&large, large_form), 1000);
         op.per(Per::Pages(170 * 1000));
         op.iter(move || {
             for _ in 0..170 {
-                black_box(edit(&large, large_form));
+                drop(black_box(edit(&large, large_form)));
             }
         });
     });
     group.operation("edit an annotation, save, reopen, 10 pages", |op| {
-        let edit = &edit;
         let short = Document::open(inputs::store().bytes("small-10-annotated.pdf", || {
             inputs::annotated(&inputs::small(10))
         }))
         .expect("it opens");
         let short_form = inputs::first_appearance(&short);
-        assert_eq!(edit(&short, short_form).page_count(), 10);
+        reads_the_update(&edit(&short, short_form), 10);
         op.per(Per::Pages(2700 * 10));
         op.iter(move || {
             for _ in 0..2700 {
-                black_box(edit(&short, short_form));
+                drop(black_box(edit(&short, short_form)));
             }
         });
     });
