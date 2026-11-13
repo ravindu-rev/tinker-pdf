@@ -8,15 +8,27 @@
 //! holds the import to them. The three whole files are the `ocr_import` fuzz
 //! target's seeds, and `the_fuzz_seeds_are_the_files_these_tests_read` holds
 //! the committed seeds to them.
+//!
+//! The text layer (milestone 2) is held to the same files, written over pages
+//! this file builds, saved, reopened and held to the strict validator: the
+//! layer extracts as the imported text in the imported order, every word's
+//! box comes back as the file's through the frame, and the page draws what it
+//! drew before.
 
 use std::path::PathBuf;
 
+mod written_support;
+
 use proptest::prelude::*;
 use tinker_pdf::ocr::{
-    import, Direction, ImportError, ImportFormat, ImportWarning, Imported, ImportedPage, Located,
-    Unit, MAX_IMPORTED_WORDS,
+    add_text_layer, import, Direction, Extent, ImportError, ImportFormat, ImportWarning, Imported,
+    ImportedPage, LayerError, LayerWarning, Layered, LineSetting, Located, Unit,
+    MAX_IMPORTED_WORDS, MAX_LAYER_CHARACTERS,
 };
-use tinker_pdf::{LineDirection, Quad, WordPage};
+use tinker_pdf::{
+    Document, DocumentBuilder, LineDirection, Quad, Rect, RenderOptions, WordBlock, WordBox,
+    WordBoxOptions, WordLine, WordPage, WordParagraph, WriteMode, WriteOptions,
+};
 
 // ---- the files --------------------------------------------------------------
 
@@ -1304,6 +1316,465 @@ fn pages_without_area_are_refused_and_absent_pages_are_none() {
         Unit::Mm10,
         "a unit is read with its white space trimmed"
     );
+}
+
+// ---- the text layer --------------------------------------------------------------
+
+/// A one-page document `width` by `height` points, its crop box `crop`, turned
+/// by `rotate`, drawing `own` lines of text in Helvetica: `(x, y, text)`.
+fn base(
+    (width, height): (f64, f64),
+    crop: Option<[f64; 4]>,
+    rotate: i64,
+    own: &[(f64, f64, &str)],
+) -> Document {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F0", b"Helvetica");
+    builder.add_page(width, height, |page| {
+        if let Some([x0, y0, x1, y1]) = crop {
+            page.set_crop_box(x0, y0, x1, y1);
+        }
+        for &(x, y, text) in own {
+            page.text(b"F0", 10.0, x, y, text);
+        }
+    });
+    let document = written_support::authored("the page", builder.finish());
+    if rotate == 0 {
+        return document;
+    }
+    let mut editor = document.editor();
+    assert!(editor.rotate_page(0, rotate), "the page turns");
+    let turned = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+    written_support::authored("the turned page", turned)
+}
+
+/// `imported` written over page one of `document`, onto `onto`, the file
+/// saved as an incremental update, and reopened through the validate-on-save
+/// helper, which holds it to the strict validator as every document this
+/// engine authors is held.
+fn layered(
+    document: &Document,
+    imported: &ImportedPage,
+    onto: Option<Rect>,
+) -> (Document, Layered) {
+    let mut editor = document.editor();
+    let report = add_text_layer(&mut editor, 0, imported, onto).expect("the layer is written");
+    let saved = editor.save(&WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    });
+    (written_support::authored("the layered page", saved), report)
+}
+
+/// Each line of a model, its words joined by single spaces.
+fn model_lines(page: &WordPage) -> Vec<String> {
+    page.blocks
+        .iter()
+        .flat_map(|b| &b.paragraphs)
+        .flat_map(|p| &p.lines)
+        .map(|l| {
+            l.words
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// Each line page one's text holds, in order.
+fn extracted_lines(document: &Document) -> Vec<String> {
+    document
+        .page(0)
+        .expect("page one")
+        .text()
+        .lines()
+        .iter()
+        .map(|line| line.text.clone())
+        .collect()
+}
+
+/// The imported pages of the three files, each its first.
+fn first_pages() -> Vec<(&'static str, ImportedPage)> {
+    [("hOCR", HOCR), ("ALTO", ALTO), ("PAGE XML", PAGE_XML)]
+        .into_iter()
+        .map(|(what, file)| (what, read(file).pages.remove(0)))
+        .collect()
+}
+
+/// The layer reads back as the file: each format's page written over a page
+/// with no text extracts as the imported lines, each its words with one space
+/// between each two, in the imported order — the hOCR file's `order` and the
+/// ALTO and PAGE XML files' reading orders included — and over a page with
+/// text of its own, that text's lines come first and the layer's after.
+#[test]
+fn the_layer_extracts_as_the_imported_text_in_the_imported_order() {
+    for (what, page) in first_pages() {
+        let expected = model_lines(&page.page);
+        assert!(!expected.is_empty(), "{what}: the file states lines");
+
+        let blank = base((612.0, 792.0), None, 0, &[]);
+        let (document, report) = layered(&blank, &page, None);
+        assert!(report.warnings.is_empty(), "{what}: {:?}", report.warnings);
+        assert!(report.form.is_some(), "{what}: a form was stamped");
+        assert_eq!(
+            extracted_lines(&document),
+            expected,
+            "{what} over a blank page"
+        );
+
+        let own = base(
+            (612.0, 792.0),
+            None,
+            0,
+            &[
+                (40.0, 30.0, "Text of the page itself"),
+                (40.0, 15.0, "and its second line"),
+            ],
+        );
+        let (document, _) = layered(&own, &page, None);
+        let mut with_own = vec![
+            "Text of the page itself".to_string(),
+            "and its second line".to_string(),
+        ];
+        with_own.extend(expected);
+        assert_eq!(
+            extracted_lines(&document),
+            with_own,
+            "{what} over a page of text"
+        );
+    }
+}
+
+/// The frame a test carries a box back through: the target rectangle on the
+/// displayed page (left, top, width and height in points, `y` up), the file's
+/// extent, and the displayed page's height.
+struct Back {
+    left: f64,
+    top: f64,
+    sx: f64,
+    sy: f64,
+    from: Extent,
+    displayed_height: f64,
+}
+
+impl Back {
+    fn new(page: &ImportedPage, onto: Option<Rect>, displayed: (f64, f64)) -> Back {
+        let (left, top, width, height) = match onto {
+            None => (0.0, displayed.1, displayed.0, displayed.1),
+            Some(r) => (r.x0, r.y1, r.x1 - r.x0, r.y1 - r.y0),
+        };
+        Back {
+            left,
+            top,
+            sx: width / page.extent.width(),
+            sy: height / page.extent.height(),
+            from: page.extent,
+            displayed_height: displayed.1,
+        }
+    }
+
+    /// A box in the render's frame at 72 dpi — points, `y` down from the
+    /// displayed page's top — as the file's.
+    fn file_box(&self, (x0, y0, x1, y1): (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+        let x = |x: f64| self.from.left + (x - self.left) / self.sx;
+        let y = |y: f64| self.from.top + (self.top - (self.displayed_height - y)) / self.sy;
+        (x(x0), y(y0), x(x1), y(y1))
+    }
+}
+
+/// Every word's box comes back as the file states it: the union of the
+/// quads of each word's characters, as `Page::word_boxes` takes it, carried
+/// back through the frame, is within a thousandth of the file's unit on every
+/// edge — on a page turned by each of the four `/Rotate`s with a crop box
+/// offset from its media box, and on a turned page placed onto a rectangle
+/// the caller names.
+#[test]
+fn every_word_s_box_equals_the_file_s() {
+    let page = read(ALTO).pages.remove(0);
+    let expected: Vec<(String, (f64, f64, f64, f64))> = page
+        .page
+        .blocks
+        .iter()
+        .flat_map(|b| &b.paragraphs)
+        .flat_map(|p| &p.lines)
+        .flat_map(|l| &l.words)
+        .map(|w| (w.text.clone(), w.quad.bounds()))
+        .collect();
+    let crop = [36.0, 48.0, 576.0, 744.0];
+    let cases: [(i64, Option<Rect>); 5] = [
+        (0, None),
+        (90, None),
+        (180, None),
+        (270, None),
+        (
+            90,
+            Some(Rect {
+                x0: 50.0,
+                y0: 60.0,
+                x1: 450.0,
+                y1: 300.0,
+            }),
+        ),
+    ];
+    for (rotate, onto) in cases {
+        let document = base((612.0, 792.0), Some(crop), rotate, &[]);
+        let (layered, report) = layered(&document, &page, onto);
+        assert_eq!(report.drawn, expected.len());
+        let shown = layered.page(0).expect("page one");
+        let back = Back::new(&page, onto, shown.size());
+        let boxes = shown.word_boxes(&WordBoxOptions::default());
+        let found: Vec<(String, (f64, f64, f64, f64))> = boxes
+            .blocks
+            .iter()
+            .flat_map(|b| &b.paragraphs)
+            .flat_map(|p| &p.lines)
+            .flat_map(|l| &l.words)
+            .map(|w| (w.text.clone(), back.file_box(w.quad.bounds())))
+            .collect();
+        assert_eq!(found.len(), expected.len(), "/Rotate {rotate} {onto:?}");
+        for ((text, at), (want, file)) in found.iter().zip(&expected) {
+            assert_eq!(text, want, "/Rotate {rotate} {onto:?}");
+            let edges = [
+                (at.0, file.0),
+                (at.1, file.1),
+                (at.2, file.2),
+                (at.3, file.3),
+            ];
+            assert!(
+                edges.iter().all(|(a, b)| (a - b).abs() < 1e-3),
+                "/Rotate {rotate} {onto:?}: {text} came back at {at:?}, the file states {file:?}"
+            );
+        }
+    }
+}
+
+/// The layer paints nothing: a page with text of its own renders to the same
+/// pixels with the layer as without it, byte for byte, and raises no warning
+/// it did not raise before.
+#[test]
+fn the_page_renders_to_the_same_pixels_as_before() {
+    for (what, page) in first_pages() {
+        let document = base(
+            (300.0, 400.0),
+            Some([10.0, 10.0, 290.0, 390.0]),
+            0,
+            &[
+                (30.0, 300.0, "Text the page draws"),
+                (30.0, 100.0, "and more of it"),
+            ],
+        );
+        let before = document
+            .page(0)
+            .expect("page one")
+            .render(&RenderOptions::default());
+        let (layered, _) = layered(&document, &page, None);
+        let after = layered
+            .page(0)
+            .expect("page one")
+            .render(&RenderOptions::default());
+        assert_eq!(
+            (after.width, after.height),
+            (before.width, before.height),
+            "{what}"
+        );
+        assert!(after.data == before.data, "{what}: the layer painted");
+        assert!(
+            after.warnings.iter().all(|w| before.warnings.contains(w)),
+            "{what}: the layer raised {:?} beyond {:?}",
+            after.warnings,
+            before.warnings
+        );
+    }
+}
+
+/// A line turned by a quarter turn, a half or three quarters is shown along
+/// that turn and extracts as one line of its words in order — the run up the
+/// page, upside down along it, and down it.
+#[test]
+fn a_turned_line_extracts_as_one_line() {
+    // Each line's words laid along its run: up the page from its foot for a
+    // quarter turn, leftwards from the right for a half, down from the top
+    // for three quarters.
+    let file = hocr_page(
+        "<span class=\"ocr_line\" title=\"bbox 100 100 160 700; textangle 90\">\
+         <span class=\"ocrx_word\" title=\"bbox 100 500 160 700\">up</span>\
+         <span class=\"ocrx_word\" title=\"bbox 100 300 160 480\">the</span>\
+         <span class=\"ocrx_word\" title=\"bbox 100 100 160 280\">page</span></span>\
+         <span class=\"ocr_line\" title=\"bbox 300 1000 900 1060; textangle 180\">\
+         <span class=\"ocrx_word\" title=\"bbox 700 1000 900 1060\">upside</span>\
+         <span class=\"ocrx_word\" title=\"bbox 300 1000 680 1060\">down</span></span>\
+         <span class=\"ocr_line\" title=\"bbox 850 100 910 700; textangle 270\">\
+         <span class=\"ocrx_word\" title=\"bbox 850 100 910 300\">down</span>\
+         <span class=\"ocrx_word\" title=\"bbox 850 320 910 500\">the</span>\
+         <span class=\"ocrx_word\" title=\"bbox 850 520 910 700\">page</span></span>",
+    );
+    let page = read(&file).pages.remove(0);
+    let turns: Vec<f64> = page.lines.iter().map(|l| l.turn).collect();
+    assert_eq!(turns, [90.0, 180.0, 270.0]);
+    let blank = base((500.0, 700.0), None, 0, &[]);
+    let (document, report) = layered(&blank, &page, None);
+    assert_eq!(report.drawn, 8);
+    assert_eq!(
+        extracted_lines(&document),
+        ["up the page", "upside down", "down the page"]
+    );
+}
+
+/// A line holding right-to-left characters is drawn in the visual order UAX
+/// #9 gives its text, each word over its own box, inside a span stating the
+/// imported text, and so extracts as imported; a line holding none carries
+/// no span.
+#[test]
+fn a_right_to_left_line_extracts_as_imported() {
+    let file = hocr_page(
+        "<span class=\"ocr_line\" title=\"bbox 100 100 900 160\" dir=\"rtl\">\
+         <span class=\"ocrx_word\" title=\"bbox 700 100 900 160\">\u{5E9}\u{5DC}\u{5D5}\u{5DD}</span>\
+         <span class=\"ocrx_word\" title=\"bbox 500 100 680 160\">\u{5E2}\u{5D5}\u{5DC}\u{5DD}</span>\
+         <span class=\"ocrx_word\" title=\"bbox 300 100 480 160\">2026</span></span>\
+         <span class=\"ocr_line\" title=\"bbox 100 300 900 360\">\
+         <span class=\"ocrx_word\" title=\"bbox 100 300 400 360\">plain</span>\
+         <span class=\"ocrx_word\" title=\"bbox 420 300 700 360\">text</span></span>",
+    );
+    let page = read(&file).pages.remove(0);
+    let blank = base((612.0, 792.0), None, 0, &[]);
+    let (document, report) = layered(&blank, &page, None);
+    assert_eq!(report.drawn, 5);
+    assert_eq!(
+        extracted_lines(&document),
+        [
+            "\u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{5E2}\u{5D5}\u{5DC}\u{5DD} 2026",
+            "plain text"
+        ]
+    );
+}
+
+/// A word whose box has no width, or no height, cannot be fitted: it is
+/// skipped and named by its line and its place in it, and the rest of the
+/// page is drawn.
+#[test]
+fn a_word_without_area_is_skipped_and_named() {
+    let file = hocr_page(
+        "<span class=\"ocr_line\" title=\"bbox 100 100 900 160\">\
+         <span class=\"ocrx_word\" title=\"bbox 100 100 300 160\">kept</span>\
+         <span class=\"ocrx_word\" title=\"bbox 320 100 320 160\">thin</span>\
+         <span class=\"ocrx_word\" title=\"bbox 340 100 500 100\">flat</span>\
+         <span class=\"ocrx_word\" title=\"bbox 520 100 700 160\">also</span></span>",
+    );
+    let page = read(&file).pages.remove(0);
+    assert!(read(&file).warnings.is_empty(), "the import keeps all four");
+    let blank = base((612.0, 792.0), None, 0, &[]);
+    let (document, report) = layered(&blank, &page, None);
+    assert_eq!(
+        report.warnings,
+        [
+            LayerWarning::WordWithoutArea { line: 0, word: 1 },
+            LayerWarning::WordWithoutArea { line: 0, word: 2 },
+        ]
+    );
+    assert_eq!(report.drawn, 2);
+    assert_eq!(extracted_lines(&document), ["kept also"]);
+}
+
+/// The refusals: a page the document does not have, a frame with no area,
+/// and more distinct characters than a layer's two-byte codes name; and a
+/// page none of whose words can be drawn adds nothing at all.
+#[test]
+fn a_layer_is_refused_by_name() {
+    let page = read(ALTO).pages.remove(0);
+    let blank = base((612.0, 792.0), None, 0, &[]);
+    let mut editor = blank.editor();
+    assert_eq!(
+        add_text_layer(&mut editor, 3, &page, None),
+        Err(LayerError::NoSuchPage { page: 3 })
+    );
+    let flat = Rect {
+        x0: 10.0,
+        y0: 10.0,
+        x1: 200.0,
+        y1: 10.0,
+    };
+    assert_eq!(
+        add_text_layer(&mut editor, 0, &page, Some(flat)),
+        Err(LayerError::NoArea)
+    );
+    assert!(!editor.is_dirty(), "a refused layer writes nothing");
+
+    // One word of every character from U+20000 on, one more than a layer
+    // names.
+    let many: String = (0..=MAX_LAYER_CHARACTERS as u32)
+        .filter_map(|n| char::from_u32(0x20000 + n))
+        .collect();
+    assert_eq!(many.chars().count(), MAX_LAYER_CHARACTERS + 1);
+    let crowded = one_word_page(&many);
+    assert_eq!(
+        add_text_layer(&mut editor, 0, &crowded, None),
+        Err(LayerError::TooManyCharacters {
+            limit: MAX_LAYER_CHARACTERS
+        })
+    );
+
+    let nothing = one_word_page("");
+    let report = add_text_layer(&mut editor, 0, &nothing, None).expect("nothing to draw");
+    assert_eq!(
+        report,
+        Layered {
+            form: None,
+            drawn: 0,
+            warnings: vec![LayerWarning::EmptyWord { line: 0, word: 0 }],
+        }
+    );
+    assert!(!editor.is_dirty(), "an empty layer writes nothing");
+}
+
+/// A model page of one word, `text`, filling a 1000 by 100 extent, built
+/// directly rather than imported, as a caller may build one.
+fn one_word_page(text: &str) -> ImportedPage {
+    let quad = |l: f64, t: f64, r: f64, b: f64| Quad {
+        ul: (l, t),
+        ur: (r, t),
+        ll: (l, b),
+        lr: (r, b),
+    };
+    ImportedPage {
+        page: WordPage {
+            index: 0,
+            width: 1000,
+            height: 100,
+            resolution: 72.0,
+            image: None,
+            blocks: vec![WordBlock {
+                quad: quad(0.0, 0.0, 1000.0, 100.0),
+                paragraphs: vec![WordParagraph {
+                    quad: quad(0.0, 0.0, 1000.0, 100.0),
+                    lines: vec![WordLine {
+                        quad: quad(0.0, 0.0, 1000.0, 100.0),
+                        direction: LineDirection::LeftToRight,
+                        words: vec![WordBox {
+                            text: text.to_string(),
+                            quad: quad(0.0, 0.0, 1000.0, 100.0),
+                            confidence: None,
+                        }],
+                    }],
+                }],
+            }],
+        },
+        extent: Extent {
+            left: 0.0,
+            top: 0.0,
+            right: 1000.0,
+            bottom: 100.0,
+        },
+        unit: Unit::Pixel,
+        resolution: None,
+        lines: vec![LineSetting {
+            turn: 0.0,
+            direction: None,
+        }],
+    }
 }
 
 // ---- the property, and the seeds ------------------------------------------------

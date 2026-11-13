@@ -1,10 +1,12 @@
 # OCR
 
-The OCR tier's facade half. What exists is the first half of its import seam
-(ROADMAP row OC-01): the words an outside recogniser wrote in hOCR, ALTO or
-PAGE XML, read into FT-24's word-box model ([word boxes](../design/word-boxes.md))
-by `tinker_pdf::ocr::import`. The design, the pipeline the tier builds around
-this seam and what adjudicates it are [design/ocr.md](../design/ocr.md).
+The OCR tier's facade half. What exists is its import seam (ROADMAP row
+OC-01): the words an outside recogniser wrote in hOCR, ALTO or PAGE XML, read
+into FT-24's word-box model ([word boxes](../design/word-boxes.md)) by
+`tinker_pdf::ocr::import`, and written over a PDF page as an invisible text
+layer by `tinker_pdf::ocr::add_text_layer`. The design, the pipeline the tier
+builds around this seam and what adjudicates it are
+[design/ocr.md](../design/ocr.md).
 
 The recogniser that wrote a file supplies bytes and decides nothing (ruling 13).
 The import reads what the file states: it corrects no word, moves no box and
@@ -106,6 +108,59 @@ file's unit — the pixel for hOCR and PAGE XML, and ALTO's `pixel`, `mm10` or
   `BASEDIRECTION` and PAGE XML's `readingDirection`, inherited from the line's
   region and page.
 
+**The text layer.** `add_text_layer(editor, page, imported, onto)` writes
+an imported page's words over page `page` of the document a
+`DocumentEditor` edits, as text in render mode 3 (9.3.6), which paints
+nothing, in a font whose glyphs are empty, which would paint nothing either.
+
+- **The frame.** The file's extent is mapped onto the page as displayed —
+  its crop box turned by `/Rotate` — scaled on each axis, or onto the
+  rectangle `onto` names, in points on the displayed page with its origin at
+  the lower-left corner and `y` up. The default guesses nothing about where a
+  page's image is.
+- **One form, stamped over the page.** The layer is one form XObject drawn
+  by `DocumentEditor::stamp` with `StampPlacement::Over`, after everything
+  the page draws and outside whatever its content leaves open, so the page's
+  own content streams stay the objects they were. The form's space is the
+  displayed page in points, so every number the layer writes is a point to
+  six decimals and carries back to well inside a thousandth of the file's
+  unit; its `/Matrix` turns that space back into the page's own, and its
+  `/BBox` is the file's page placed on it.
+- **The glyph-less font.** A Type 0 font under `/Identity-H` over a
+  CIDFontType2 whose embedded TrueType program has `.notdef` and one empty
+  glyph, each 1 000 units wide on a 1 000-unit em, in `glyf`, `head`,
+  `hhea`, `hmtx`, `loca`, `maxp` and `post` and no `cmap`; `/CIDToGIDMap`
+  sends every CID the layer draws to the empty glyph, `/DW` is 1 000, the
+  descriptor's box is `[0 -200 1000 800]` — the box text extraction gives a
+  glyph — and a `/ToUnicode` gives each CID back its character. Each distinct
+  character the layer draws is a CID, from 1 in the order it is first drawn,
+  the space among them; CID 0 is never drawn.
+- **Each word fitted to its box.** A word whose box on the page is `w` wide
+  and `h` high and whose text is `n` characters is shown one glyph a
+  character at size `h`, its baseline a fifth of `h` above the box's bottom
+  edge, under the horizontal scaling `100 · w / (n · h)`, so its glyph boxes
+  abut and their union is the word's box.
+- **A line is one text object**, its words on the first word's baseline and
+  each raised or lowered onto its own box by text rise (9.3.7), so the
+  extractor, which asks which line a glyph is on at the baseline, reads one
+  line. A space glyph follows each word but the last, as long as the gap to
+  the next word's start where that starts further along the line and a
+  hundredth of an em where it does not, so the line reads as its words with
+  one space between each two.
+- **Turns and directions.** A line is shown along the quarter turn nearest
+  its setting's turn — right, up, left or down — each word filling its box
+  across the turn and along it. A line holding a right-to-left character
+  (UAX #9's `R` or `AL`) is drawn in the visual order UAX #9 gives its text,
+  `tinker_pdf_shape::bidi::order_units` in the paragraph direction the file
+  states or else the one rules P2 and P3 find, each word's glyphs over its
+  own box, inside `/Span << /ActualText (…) >> BDC … EMC` stating the
+  imported text (14.9.4), so it reads back as imported; a line holding none
+  carries no span.
+
+`Layered` says what was drawn: the form stamped (none where no word could
+be drawn, and then nothing is added), how many words, and a `LayerWarning`
+for each word skipped.
+
 **Bounds.** A file is untrusted markup (ruling 1). `tinker-pdf-xml`'s limits
 bound the markup — its depth, its events, its names — for both readers, every
 number read is checked finite, every walk over a parsed file is bounded by
@@ -122,6 +177,9 @@ depth, and a page keeps at most `MAX_IMPORTED_WORDS` words, in reading order.
 | `Unit::per_inch` | 254 for `Mm10`, 1 200 for `Inch1200`, none for `Pixel` |
 | `Located` | the page's position in the file, the element's `id` or `ID`, the line's position on the page and the word's in its line, each in document order |
 | `MAX_IMPORTED_WORDS`, `ALTO_NAMESPACES`, `PAGE_NAMESPACE_PREFIX` | the word cap and the namespaces the format is told by |
+| `ocr::add_text_layer(&mut DocumentEditor, page, &ImportedPage, Option<Rect>) -> Result<Layered, LayerError>` | the page's words written over page `page` as an invisible text layer |
+| `Layered` | `form` (the stamped form, `Option<ObjRef>`), `drawn`, `warnings` (`LayerWarning`s) |
+| `MAX_LAYER_CHARACTERS` | the distinct characters one layer names, 65 535 |
 
 The model is FT-24's, so an imported page is written back by its writers
 ([word boxes](../design/word-boxes.md)) in the file's own frame.
@@ -146,6 +204,11 @@ every refusal is an error (ruling 10).
 | ALTO or PAGE XML that is not well-formed, hOCR past the HTML parser's caps, or a document type declaration with an internal subset in a file that holds no hOCR page | `ImportError::Markup` | refused, with the reader's own refusal |
 | A page with no extent, or one with no area | `ImportError::PageWithoutExtent` | refused, naming the page's position: no layer can place a page it cannot measure |
 | An ALTO `MeasurementUnit` other than `pixel`, `mm10` and `inch1200` | `ImportError::UnknownUnit` | refused |
+| A word whose box on the page has no width or no height, or is not finite | `LayerWarning::WordWithoutArea` | skipped, named by its line among the page's and its place in the line; the rest of the page drawn |
+| A word with no text, in a model a caller built | `LayerWarning::EmptyWord` | skipped, named the same way |
+| A page the document does not have | `LayerError::NoSuchPage` | no layer written |
+| An imported extent, a rectangle named or a crop box with no area | `LayerError::NoArea` | no layer written |
+| More distinct characters than `MAX_LAYER_CHARACTERS` | `LayerError::TooManyCharacters` | no layer written: a layer's two-byte codes name no more |
 
 ## Verified
 
@@ -169,6 +232,25 @@ every refusal is an error (ruling 10).
   `arbitrary_bytes_never_panic`, a proptest over arbitrary bytes and the three
   files mutated and cut short, holding every import that succeeds to what the
   model promises and to the same answer twice.
+- `ocr_import.rs` holds the layer to the same files, written over pages it
+  builds, saved incrementally, reopened and held to the strict validator:
+  `the_layer_extracts_as_the_imported_text_in_the_imported_order` (each
+  format's page over a page with no text, and over one with text of its own,
+  whose lines come first), `every_word_s_box_equals_the_file_s` (the union of
+  each word's character quads, through `Page::word_boxes` and back through the
+  frame, within a thousandth of the file's unit on every edge, at `/Rotate`
+  0, 90, 180 and 270 with a crop box offset from the media box, and onto a
+  rectangle a caller names), `the_page_renders_to_the_same_pixels_as_before`
+  (byte for byte, no warning the page did not raise),
+  `a_turned_line_extracts_as_one_line` (each quarter turn),
+  `a_right_to_left_line_extracts_as_imported`,
+  `a_word_without_area_is_skipped_and_named` and `a_layer_is_refused_by_name`.
+- `src/ocr/layer.rs`'s unit tests: the program a font this engine reads,
+  whose whole sums to `head`'s magic; numbers to six decimals; the nearest
+  quarter turn; a fitted word filling its box at every turn; the
+  `/ToUnicode` in blocks of a hundred, a character past the BMP as a
+  surrogate pair; the frame's inverse; and characters numbered as first
+  drawn.
 - `src/ocr/import.rs`'s unit tests: the `title` grammar, a word's text cleaned
   and its removed characters named, hOCR's `order` over sibling groups, a
   stated reading order placing each block once, and the turn's range.

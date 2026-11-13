@@ -253,9 +253,17 @@ space as the page displays it. The default guesses nothing about where a
 page's image is.
 
 **The layer is one form XObject stamped over the page.** The form
-(`DocumentEditor::add_form`) has the file's page as its `/BBox`, a `/Matrix`
-that is the frame above, with the file's downward y turned upward, and its
-own `/Resources` holding the layer's font. `DocumentEditor::stamp` with
+(`DocumentEditor::add_form`) has as its space the page as displayed, in
+points, origin at the displayed page's lower-left corner and y upward: its
+`/BBox` is the file's page placed there by the frame above, its `/Matrix`
+turns that space back into the page's own — the crop box's offset and the
+quarter turn `/Rotate` states, whose entries are exact — and its own
+`/Resources` hold the layer's font. The frame's scale is carried by the
+numbers the content writes rather than by the matrix: the writer writes a
+real to six decimals, and a scale of a few tenths written so would move the
+far edge of a page thousands of units wide by more than a thousandth of a
+unit, where a point written so moves no edge by more than that.
+`DocumentEditor::stamp` with
 `StampPlacement::Over` draws it after everything the page draws and closes
 whatever the page's content leaves open first, so the layer runs in the
 page's initial state; and the page's own content streams are not rewritten,
@@ -337,9 +345,11 @@ drawn.
 
 **What the layer refuses, and what it skips.** A word whose box has no width
 or no height cannot be fitted and is skipped,
-`LayerWarning::WordWithoutArea`, naming its line and word; a page the
-document does not have is `LayerError::NoSuchPage`. The layer never fails a
-page for one word.
+`LayerWarning::WordWithoutArea`, naming its line and word, and so is a word
+with no text, `LayerWarning::EmptyWord`; a page the document does not have is
+`LayerError::NoSuchPage`, and a frame with no area — the imported extent or
+the rectangle named — `LayerError::NoArea`. A page none of whose words can be
+drawn adds nothing. The layer never fails a page for one word.
 
 ## Milestones
 

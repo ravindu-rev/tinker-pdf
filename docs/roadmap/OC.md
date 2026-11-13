@@ -21,7 +21,6 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| OC-01.3 | build | The imported words written as an invisible text layer, render mode 3, in a glyph-less font whose advances are fitted to each word's box, with `/ToUnicode`. | `crates/tinker-pdf/src/ocr/layer.rs` (new), `crates/tinker-pdf/src/ocr/mod.rs` (new), `crates/tinker-pdf/tests/ocr_import.rs` (new), `docs/features/ocr.md` (new) | The layer extracts as the imported text in the imported order, every word's box equals the file's, and the page renders to the same pixels as before, with the tests `docs/design/ocr.md`'s second milestone names. | OC-01.2 |
 | OC-01.4 | build | Create the crate `tinker-pdf-ocr`: a workspace member with a `[workspace.dependencies]` entry and `#![forbid(unsafe_code)]`, declared in xtask's `ALLOWED` with the edges `docs/design/ocr.md` gives it, added to the libm check's `PIXEL_PATHS` since its arithmetic is pinned, and `docs/architecture.md` amended (the crate count, the graph, the per-crate map). *Note:* As FJ-01.2 creates `tinker-pdf-script`. The crate serves the tier, not this row's exit; every step that adds a file to it waits on this one. | `Cargo.toml`, `crates/tinker-pdf-ocr/Cargo.toml` (new), `crates/tinker-pdf-ocr/src/lib.rs` (new), `xtask/src/main.rs`, `docs/architecture.md` | `cargo xtask check` is green (dag, libm, versions) with the crate in it, and `cargo test -p tinker-pdf-ocr` runs. | OC-01.1 |
 
 ## OC-02 — Searchable-PDF output
