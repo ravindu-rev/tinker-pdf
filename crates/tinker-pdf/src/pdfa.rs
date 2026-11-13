@@ -706,12 +706,13 @@ pub const STAGED: &[StagedRule] = &[
                read from the header and run)",
         because: "tinker-pdf-color's icc::Profile::parse is a transform \
                   builder, not a validator. It refuses a profile it cannot \
-                  build a transform from - a v4 profile whose only route to \
-                  the connection space is an mAB tag, for one - and such a \
-                  profile conforms to ICC.1 perfectly well. Reporting every \
-                  one of them would report conforming files, so a profile \
-                  this build cannot read leaves the intent's colour space \
-                  unknown and the rules that need it do not fire",
+                  build a transform from - a printer profile larger than the \
+                  2 MiB it reads, for one, which a 33-point grid over four \
+                  inks makes - and such a profile conforms to ICC.1 perfectly \
+                  well. Reporting every one of them would report conforming \
+                  files, so a profile this build cannot read leaves the \
+                  intent's colour space unknown and the rules that need it \
+                  do not fire",
     },
     StagedRule {
         clause: "6.2.4",

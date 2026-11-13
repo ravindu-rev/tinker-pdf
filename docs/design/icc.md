@@ -62,10 +62,11 @@ open of this design — the refused profiles — is listed in the
   [rendering](../features/rendering.md), designed in
   [overprint-separations.md](overprint-separations.md)). Overprint simulation
   is [ROADMAP](../ROADMAP.md) row RC-03.
-- **Black point compensation, gamut mapping beyond intent selection,
-  iccMAX/v5 profiles, named-colour tags.** Refused by name, per ruling 2;
-  [ROADMAP](../ROADMAP.md) rows RC-02 and RC-20, the second designed in
-  [ICC engine completion](#icc-engine-completion-rc-20).
+- **Black point compensation and gamut mapping beyond intent selection.**
+  Refused by name, per ruling 2; [ROADMAP](../ROADMAP.md) row RC-02. The
+  output direction, device links, the gamut tag, named colours and version 5
+  (iccMAX) profiles are read, as
+  [ICC engine completion](#icc-engine-completion-rc-20) designs them.
 - **Profiles embedded inside image codecs.** JPX colour boxes have their own
   path in `tinker-pdf-filters`; routing them through this CMM is scheduled by
   corpus evidence (ruling 3), not assumed here.
@@ -1382,36 +1383,39 @@ reads them in a local run over the fetched corpora and raises the floor.
 
 #### Milestones
 
-1. RC-20.2: the census ratchet.
+1. RC-20.2, landed: the census ratchet.
    `a_census_that_compiles_more_is_a_gain_and_less_a_failure`.
-2. RC-20.4: the output surface; matrix/TRC and grey inverted.
+2. RC-20.4, landed: the output surface; matrix/TRC and grey inverted.
    `icc_known_answers.rs`'s
    `a_matrix_profile_takes_xyz_back_to_its_device_values`,
    `a_grey_profile_takes_luminance_back_through_its_curve` and
    `forward_then_output_is_the_identity_for_a_matrix_profile`.
-3. RC-20.5: `B2A*` in `mft1` and `mft2`, and `mft1`'s Lab read in its own
-   encoding.
+3. RC-20.5, landed: `B2A*` in `mft1` and `mft2`, and `mft1`'s Lab read in
+   its own encoding.
    `a_b2a_lut16_takes_the_connection_space_through_its_matrix_curves_and_grid`,
    `a_b2a_lut8_writes_four_channels_of_ink`,
    `the_relative_colorimetric_b2a_is_chosen_first` and
    `an_mft1_lab_table_reads_in_its_own_encoding`.
-4. RC-20.6: `mBA `, and `mAB `'s Lab read in its own encoding.
+4. RC-20.6, landed: `mBA `, and `mAB `'s Lab read in its own encoding.
    `an_mba_tag_runs_its_stages_in_icc_1s_order` and
    `a_v4_table_reads_and_writes_lab_in_its_own_encoding`.
-5. RC-20.7: device links. `a_device_link_maps_device_values_through_its_table`
-   and `a_link_names_its_output_space_in_the_connection_space_field`.
-6. RC-20.8: the gamut tag.
+5. RC-20.7, landed: device links.
+   `a_device_link_maps_device_values_through_its_table` and
+   `a_link_names_its_output_space_in_the_connection_space_field`.
+6. RC-20.8, landed: the gamut tag.
    `a_gamut_tag_answers_in_and_out_where_its_table_says`.
-7. RC-20.9: named colours. `a_named_colour_answers_its_coordinates_by_name`
-   and `a_named_colour_converts_through_its_connection_space`.
-8. RC-20.10: multi-process pipelines both ways and the version 5 header.
-   `a_curve_set_matrix_clut_pipeline_is_recomputed` and
+7. RC-20.9, landed: named colours.
+   `a_named_colour_answers_its_coordinates_by_name` and
+   `a_named_colour_converts_through_its_connection_space`.
+8. RC-20.10, landed: multi-process pipelines both ways and the version 5
+   header. `a_curve_set_matrix_clut_pipeline_is_recomputed` and
    `a_v5_profile_with_a_multi_process_transform_converts`.
-9. RC-20.11: the calculator. `the_calculator_computes_what_its_program_says`.
-10. RC-20.12: a spectral connection space.
+9. RC-20.11, landed: the calculator.
+   `the_calculator_computes_what_its_program_says`.
+10. RC-20.12, landed: a spectral connection space.
     `a_spectral_profile_integrates_against_its_own_observer`.
-11. RC-20.13: the record catches up with the parser: the crate doc, the
-    PDF/A notes and these milestones marked.
+11. RC-20.13, landed: the record catches up with the parser: the crate doc,
+    the PDF/A notes and these milestones marked.
 12. RC-20.14: fingerprints. `determinism.rs`'s
     `icc_transforms_are_stable_across_targets` and
     `a_v5_profiled_page_renders_the_same_on_every_target`.

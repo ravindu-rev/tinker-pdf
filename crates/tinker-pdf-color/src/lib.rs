@@ -6,11 +6,19 @@
 //! the surface. The caller translates `/ColorSpace` dictionaries into these
 //! plain descriptions.
 //!
-//! Colour management is reduced on purpose for this version. ICC profiles are
-//! honoured only by their component count, falling back to the alternate space
-//! the document names, and CIE-based spaces are approximated. A full profile
-//! parser is a named later capability; what it would change is the exact shade
-//! of a managed document, not whether it renders.
+//! An ICC profile converts through its own transforms, which [`icc`] reads and
+//! compiles into integer tables (`docs/design/icc.md`): ICC.1's matrix/TRC,
+//! grey and lookup-table models, the multi-process pipelines of its `D2B*`
+//! tags and of a version 5 profile (ICC.2) with the calculator element and a
+//! spectral connection space, and, the other way, [`icc::Output`] into a
+//! profile's device components, with [`icc::Link`]'s device links, the gamut
+//! tag and [`icc::NamedColours`] beside it. A profile [`icc::Profile::parse`]
+//! refuses — one past the bytes or the grid entries it reads, an element
+//! ICC.2 defines and it does not read, or a model contradicting its header
+//! with no table to convert through — names its reason as an
+//! [`icc::IccError`], and its space is [`ColorSpace::Approximated`], read as
+//! the device space of its component count (8.6.5.5). The CIE-based spaces
+//! convert by their clauses' closed forms (8.6.5.2 to 8.6.5.4).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

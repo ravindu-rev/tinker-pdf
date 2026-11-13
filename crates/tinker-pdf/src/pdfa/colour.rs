@@ -23,10 +23,11 @@
 //! need — the data colour space signature, and through it the channel
 //! count — are available and are read. What is **not** available is a profile *validator*:
 //! `Profile::parse` exists to build a colour transform and refuses a profile
-//! it cannot build one from, including v4 profiles whose only route to the
-//! connection space is an `mAB ` tag. Refusing to render is right; refusing to
-//! conform is not, and a rule that reported every such profile would report
-//! conforming files. So a destination profile this build cannot read makes the
+//! it cannot build one from, including a printer profile larger than the
+//! 2 MiB it reads (`icc::MAX_ICC_BYTES`), which a 33-point grid over four inks
+//! makes. Refusing to render is right; refusing to conform is not, and a rule
+//! that reported every such profile would report conforming files. So a
+//! destination profile this build cannot read makes the
 //! colour space of the intent **unknown** rather than wrong, the rules that
 //! depend on knowing it do not fire, and [`super::STAGED`] names the refusal.
 //!
@@ -560,9 +561,8 @@ const ICC_BASED_SPACES: &[&[u8; 4]] = &[b"RGB ", b"CMYK", b"GRAY", b"Lab "];
 ///
 /// **The header, and only the header.** `PDFA_STAGED` held this rule back
 /// because `icc::Profile::parse` is a transform builder that refuses profiles
-/// which conform perfectly well — a v4 profile whose only route to the
-/// connection space is an `mAB ` tag — so "cannot be parsed" was never "does
-/// not conform". The three things the clause names sit at fixed offsets of
+/// which conform perfectly well — a printer profile larger than the 2 MiB it
+/// reads — so "cannot be parsed" was never "does not conform". The three things the clause names sit at fixed offsets of
 /// ICC.1's 128-byte header — the version at byte 8, the device class at 12,
 /// the data colour space at 16 — and reading them needs no transform. The
 /// sentences are veraPDF's statements of rules 6.2.2-1 (part 1), 6.2.3-1

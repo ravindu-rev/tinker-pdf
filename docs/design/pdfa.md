@@ -634,8 +634,9 @@ correctly even though `WriteOptions` cannot be *asked* for one.
   from the header, and 6.2.3.3 and 6.2.3.2 both run. What is staged is named
   in `PDFA_STAGED` under 6.2.2: the profile's own conformance past its header.
   `icc::Profile::parse` is a *transform builder*, and it refuses profiles that
-  conform to ICC.1 and that it cannot render — a v4 profile whose only route
-  to the connection space is an `mAB ` tag, for one. Refusing to render is
+  conform to ICC.1 and that it cannot render — a printer profile larger than
+  the 2 MiB it reads (`icc::MAX_ICC_BYTES`), which a 33-point grid over four
+  inks makes, for one. Refusing to render is
   right; refusing to conform is not. So a destination profile this build
   cannot read leaves the output intent's colour space **unknown**, the rules
   that depend on knowing it do not fire in either direction, and a test

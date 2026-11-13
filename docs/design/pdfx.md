@@ -356,8 +356,9 @@ structural one find nothing, and the shape matches the published files*.
   and colour visitors, `Machinery`'s laziness counter, shared by opening
   items to the crate rather than forked.
 - **[design/icc.md](icc.md)** — profile parsing for the output intent's
-  destination profile; the case it stages (a v4 profile with only an `mAB `
-  route leaves the intent's space unknown) applies here unchanged.
+  destination profile; the case it stages (a profile the transform builder
+  refuses, such as a printer profile larger than the 2 MiB it reads, leaves
+  the intent's space unknown) applies here unchanged.
 - **The corpus machinery** — `corpora.lock` pins a `zip` archive with no
   upstream commit (SafeDocs), which is the shape both suites need, and
   `pdfx_census.rs` runs locally over what `cargo xtask corpus-fetch` fetches.
