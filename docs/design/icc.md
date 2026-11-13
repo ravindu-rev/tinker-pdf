@@ -1994,3 +1994,241 @@ A document's intent whose profile is refused is the `Refused` warning above;
 | The proof slows every render, proofed or not | Off by default and absent from every unproofed path: an unproofed page is byte-identical, and the seam's added question is asked only when a proof is in force |
 | A page-level intent read the other way by SD-16.6 | The choice is one function, which SD-16.6 moves if it reads 14.11.5 otherwise |
 | A hostile output intent profile | `MAX_ICC_BYTES`, the parser's refusals and the `icc_profile` and `render_page` fuzz targets, as for any profile |
+
+## A first-party sRGB profile (RC-19)
+
+*For [ROADMAP](../ROADMAP.md) row RC-19.* The engine converts every colour to
+sRGB and carries no ICC profile of its own: the CMM's destination is the
+matrix `XYZ_D50_TO_SRGB` and IEC 61966-2-1's encode function, not a profile a
+caller could embed. So the two places a document wants an RGB profile to
+name are a profile the caller states, today:
+
+- **The default RGB space.** `DeviceRGB` is drawn as sRGB, and a scope's
+  `/DefaultRGB` (8.6.5.6) is the document's own `ICCBased` or CIE space
+  ([Default colour spaces](#default-colour-spaces-8656)); a caller writing a
+  document whose RGB it wants characterised supplies the profile.
+- **PDF/A conversion's default output intent.** No conversion exists yet.
+  The writer's archival profile (`ArchivalProfile::destination_profile`,
+  [pdfa](pdfa.md)) takes the destination profile as a mandatory statement of
+  the caller's, and SD-02's conversion — "device colour converted or an
+  output intent added" — is the first user that would add one unasked, with
+  ED-06b's document conversion to sRGB, RC-05's soft proofing and RC-20's
+  output direction after it, each naming sRGB as a profile.
+
+This section specifies the profile the engine computes for all of them: its
+header, its tags and their types, the numbers it is computed from and their
+source, and the surface that hands it out. The ICC's own published profile
+files stay refused (NG-03): this profile is computed, not vendored, so
+`cargo xtask vendor` has nothing to admit and THIRDPARTY.md nothing to list.
+
+### Scope
+
+- **The bytes**: one ICC profile, version 2.4.0, class `mntr`, data space
+  `RGB `, connection space `XYZ `, written by `crates/tinker-pdf-color/build.rs`
+  into `OUT_DIR` from IEC 61966-2-1's published primaries, white point and
+  transfer function.
+- **The surface**: `tinker_pdf_color::icc::SRGB_PROFILE`, a `&'static [u8]`
+  of those bytes, projected by the facade as `tinker_pdf::SRGB_PROFILE`
+  (ruling 11), which a caller states as an archival destination profile or
+  as the stream of an `/ICCBased` `/DefaultRGB`.
+- **One byte string on every build host**, pinned by a fingerprint.
+
+### Non-goals
+
+- **Bundling the ICC's own files** (NG-03): they carry no SPDX identifier.
+  Nothing here reads, copies or ports another profile's bytes; every number
+  is computed from the published values below.
+- **A default.** `ArchivalProfile::destination_profile` stays mandatory and
+  `DeviceRGB` under a CMYK destination stays refused: the device a
+  document's colours are for remains the caller's statement
+  ([pdfa](pdfa.md)), now with a first-party profile the caller may state.
+  Nothing an unstated document renders, writes or validates changes.
+- **A version 4 profile.** `parametricCurveType`, `multiLocalizedUnicodeType`
+  and the profile ID are version 4's, and ISO 19005-1 reads ICC.1:1998-09,
+  under which `pdfa/colour.rs`'s `header_defects` admits a version below 3.0
+  only; a version 2 profile is admitted under every part.
+- **Grey and CMYK profiles.** A grey profile's curve is not a standard's
+  number, and a CMYK characterisation is a press's, which is the caller's to
+  state.
+- **Reading `chad`.** The profile carries one; the CMM does not read it
+  ([Three decisions](#three-decisions-and-why)), and needs not: the colorants
+  are already adapted.
+
+### Design
+
+The clauses below are ICC.1:2001-04's, the edition that defines profile
+version 2.4.0 (6.1.3). Every field and tag is big-endian (clause 6).
+
+#### The header (6.1, Table 9)
+
+| Bytes | Field | Value | Clause |
+| --- | --- | --- | --- |
+| 0..3 | Profile size | the length of the whole profile | 6.1.1 |
+| 4..7 | CMM type | 0: no CMM preferred | 6.1.2 |
+| 8..11 | Profile version | `02400000h`, 2.4.0 | 6.1.3, Table 10 |
+| 12..15 | Device class | `mntr`, a display device profile | 6.1.4, Table 11 |
+| 16..19 | Data colour space | `RGB ` | 6.1.5, Table 13 |
+| 20..23 | Profile connection space | `XYZ ` | 6.1.6, Table 14 |
+| 24..35 | Date and time created | a fixed `dateTimeNumber` (5.3.1) written in `build.rs`, so the bytes are a constant | Table 9 |
+| 36..39 | File signature | `acsp` | Table 9 |
+| 40..43 | Primary platform | 0: none | 6.1.7 |
+| 44..47 | Flags | 0: not embedded, usable on its own | 6.1.8, Table 16 |
+| 48..55 | Device manufacturer and model | 0: no registered signature | 6.1.9 |
+| 56..63 | Attributes | 0 | 6.1.10, Table 17 |
+| 64..67 | Rendering intent | 0, perceptual | 6.1.11, Table 18 |
+| 68..79 | PCS illuminant | D50, `0000F6D6h 00010000h 0000D32Dh` | Table 9, A.1 |
+| 80..83 | Profile creator | 0: no registered signature | 6.1.12 |
+| 84..127 | Reserved | 0 | Table 9 |
+
+A.1 sets the PCS illuminant to D50, `[X=0.9642, Y=1.0000, Z=0.8249]`. Its
+encoding is the one `tinker_pdf_color::icc::PCS_WHITE` reads back as exactly
+the PCS white, so the media white point below scales this engine's
+ICC-absolute colorimetry by exactly one.
+
+#### The tag table (6.2) and the tags
+
+The table (Table 19) lists ten tags in this order, each element's offset on a
+four-byte boundary (6.2.2) and its size the data's own, with no padding
+(6.2.3); the data follow the table in the same order, each padded with zero
+bytes to the next boundary. The three tone curves are one element that the
+three tags name, which 6.3 allows ("tags may reference the same tag data").
+
+| Tag | Clause | Type | Contents |
+| --- | --- | --- | --- |
+| `desc`, profileDescriptionTag | 6.4.32 | `textDescriptionType`, 6.5.17, Table 68 | the invariant ASCII description `sRGB IEC 61966-2-1 (tinker-pdf)` and its null; Unicode language code and count 0, ScriptCode code and count 0 and the 67-byte Macintosh description zero, as 6.5.17 asks where neither is localised |
+| `cprt`, copyrightTag | 6.4.13 | `textType`, 6.5.18, Table 70 | `Copyright tinker-pdf contributors, MIT OR Apache-2.0` and its null |
+| `wtpt`, mediaWhitePointTag | 6.4.25 | `XYZType`, 6.5.26, Table 78 | the PCS white, encoded as the header's illuminant |
+| `chad`, chromaticAdaptationTag | 6.4.11 | `s15Fixed16ArrayType`, 6.5.14, Table 63 | the adaptation matrix below, nine `s15Fixed16Number`s by rows |
+| `rXYZ`, `gXYZ`, `bXYZ`, the colorant tags | 6.4.40, 6.4.20, 6.4.4 | `XYZType` | the adapted columns below |
+| `rTRC`, `gTRC`, `bTRC`, the tone curves | 6.4.41, 6.4.21, 6.4.5 | `curveType`, 6.5.3, Table 37 | 1 024 entries of the transfer function below |
+
+These are Table 25's required tags of an RGB display profile (6.3.2.2) —
+description, the three colorants, the three curves, the media white and the
+copyright — and `chad`, which Annex E asks every profile to carry ("profile
+applications should include this tag to improve interoperability"). Every
+type is version 2's.
+
+**The media white is the PCS white.** A.3.1.1: "if the viewer completely
+adapts to the white point of the medium (as is often the case with monitors)
+this tag should be set to Xi, Yi, Zi (the PCS white point)", and the
+adaptation applied to the colorants is applied to it as well, which takes
+D65 to D50. So in this engine ICC-absolute colorimetry through the profile
+is media-relative colorimetry, bit for bit, and a CMM that reads `chad`
+recovers D65 as the display's white.
+
+#### The numbers, and where they are published
+
+IEC 61966-2-1:1999's values are taken from a free publication of the final
+standard's, W3C's CSS Color Module Level 4: section 10.2 ("The Predefined
+sRGB Color Space") for the primaries and the transfer function, and section
+2 for the white point. The standard's threshold is 0.04045 — the 1996
+proposal's 0.03928 is the draft's — which is the one the `para` fixtures in
+`icc.rs` already state, beside `encode_srgb`'s 0.003 130 8 on the linear
+side.
+
+| Quantity | Value | Source |
+| --- | --- | --- |
+| Red, green, blue chromaticities `(x, y)` | (0.640, 0.330), (0.300, 0.600), (0.150, 0.060) | CSS Color 4, 10.2 |
+| White point, D65 `(x, y)` | (0.3127, 0.3290) | CSS Color 4, 10.2 and 2 |
+| Transfer function, encoded `c` to linear | `c / 12.92` for `c ≤ 0.04045`, else `((c + 0.055) / 1.055)^2.4` | CSS Color 4, 10.2 |
+| PCS white, D50 `XYZ` | (0.9642, 1.0000, 0.8249) | ICC.1:2001-04 A.1 |
+| Bradford cone matrix, by rows | (0.8951, 0.2664, −0.1614), (−0.7502, 1.7135, 0.0367), (0.0389, −0.0685, 1.0296) | ICC.1:2001-04 E.1.2 (E.6) |
+
+**The colorant columns.** Each chromaticity `(x, y)` is the `XYZ` value
+`(x / y, 1, (1 − x − y) / y)`. With the three primaries as the columns of
+`P`, the scales `S = P⁻¹ W` make `M = P · diag(S)` the matrix that takes
+linear RGB to `XYZ` relative to D65, white to `W`. The adaptation to the
+connection space is E.1.2's linearized Bradford transform (E.7): the cone
+responses of the source white `ργβ_src = M_BFD W` and of the PCS white
+`ργβ_pcs = M_BFD W_D50`, and
+`A = M_BFD⁻¹ · diag(ρ_pcs / ρ_src, γ_pcs / γ_src, β_pcs / β_src) · M_BFD`.
+The colorants are the columns of `A · M`, each component rounded to the
+nearest `s15Fixed16Number` (5.3.3), and `A` is what `chad` holds, rounded the
+same way. Computed in exact arithmetic from the values above, they are:
+
+| Tag | `X` | `Y` | `Z` |
+| --- | --- | --- | --- |
+| `rXYZ` | `00006FA0h` (0.436 041) | `000038F5h` (0.222 485) | `00000390h` (0.013 920) |
+| `gXYZ` | `00006297h` (0.385 113) | `0000B787h` (0.716 905) | `000018D9h` (0.097 067) |
+| `bXYZ` | `0000249Fh` (0.143 046) | `00000F84h` (0.060 610) | `0000B6C3h` (0.713 913) |
+
+and `chad`, by rows, `00010C42h 000005DEh FFFFF325h`,
+`00000793h 0000FD90h FFFFFBA1h`, `FFFFFDA2h 000003DCh 0000C06Eh`
+(1.047 886, 0.022 919, −0.050 216; 0.029 582, 0.990 484, −0.017 079;
+−0.009 252, 0.015 073, 0.751 678). The columns sum to the PCS white before
+rounding, since `A` takes `W` to it exactly.
+
+**The tone curve.** Entry `i` of 1 024 is the transfer function at
+`c = i / 1023`, as a `uInt16Number` scaled so that 65 535 is 1.0 (6.5.3) and
+rounded to the nearest: entry 0 is 0, entry 1 023 is 65 535, the linear
+segment ends between entries 41 and 42, and the engine reads the curve by
+linear interpolation, as it reads every sampled curve. 1 024 entries put the
+interpolation's error under a thousandth of an 8-bit level.
+
+#### `build.rs`, and one byte string on every host
+
+`crates/tinker-pdf-color/build.rs` computes all of it at build time and
+writes `srgb.icc` into `OUT_DIR`; `icc.rs` takes it with `include_bytes!`.
+It reads no file and fetches nothing. Its arithmetic is IEEE 754's four
+operations, which every target rounds alike, and its one transcendental, the
+curve's power, is `tinker_pdf_math::pow`, taken as a build-dependency (the
+`color → math` edge already exists): so every build host writes the same
+bytes, whatever the target. `cargo xtask libm` reads `src/` only and cannot
+see a build script, so this is the rule's reach rather than its check;
+RC-19.5's fingerprint is the check. The build script panics on nothing a
+document can reach: it reads no input.
+
+#### The surface
+
+`tinker_pdf_color::icc::SRGB_PROFILE` is the bytes, and
+`tinker_pdf::SRGB_PROFILE` the same constant on the facade (ruling 11; the
+bindings project it in the row that lands each). A caller states it where a
+profile is stated today:
+
+- as the archival destination,
+  `ArchivalProfile { destination_profile: SRGB_PROFILE.to_vec(), destination_space: DeviceSpace::Rgb, .. }`,
+  which `pdfa/colour.rs` admits under every part: version below 3.0, class
+  `mntr`, space `RGB `;
+- as an `/ICCBased` stream of `/N 3` named by a scope's `/DefaultRGB`, so
+  that `DeviceRGB` under a CMYK output intent paints in a characterised space
+  (ISO 19005-2 6.2.4.3, part 1's 6.2.3.3).
+
+### Milestones
+
+1. **RC-19.1: this section.**
+2. **RC-19.2: the profile.** `build.rs`, `icc::SRGB_PROFILE`, and the
+   `icc_profile` fuzz target's seed `srgb-first-party.icc`, written by
+   `write_the_fuzz_seeds` as one that reaches `Transform`. Exit:
+   `crates/tinker-pdf-color/tests/srgb_profile.rs`'s
+   `the_colorants_are_iec_61966_2_1s_primaries_adapted_to_d50` (the columns
+   recomputed in the test from the table above, each equal to its
+   `s15Fixed16Number` within the step's rounding),
+   `the_trc_is_iec_61966_2_1s_transfer_function` (every entry recomputed),
+   `the_profile_parses_compiles_and_is_srgb` (`Model::MatrixTrc`, every grey
+   level and the three primaries back within one level) and
+   `the_header_and_tags_are_what_rc_19_1_lists`.
+3. **RC-19.3: the facade's constant.** Exit: `pdfa_writer.rs`'s
+   `the_first_party_srgb_profile_is_a_destination_every_flavour_admits` and
+   `pdfa_colour.rs`'s `a_first_party_srgb_default_rgb_excuses_device_rgb`.
+4. **RC-19.4: the record moves with it.** THIRDPARTY.md, `ArchivalProfile`'s
+   type note, [pdfa](pdfa.md), `features/pdfa.md`, `features/fonts.md`,
+   `features/rendering.md` and the CMAP-3 reason in
+   `tinker-pdf-shape/tests/text_rendering.rs` say a first-party profile is
+   computed and handed out, the ICC's files still refused. Exit:
+   `cargo doc --workspace --no-deps` with no broken intra-doc link, and the
+   `rg` of RC-19.4's row finding only sentences that name NG-03's files or
+   this profile.
+5. **RC-19.5: one byte string on every target.** Exit: `determinism.rs`'s
+   `the_first_party_srgb_profile_is_one_byte_string_on_every_target`, the
+   SHA-256 of `tinker_pdf::SRGB_PROFILE`, entered in K-07's roster.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A build host computes other bytes | Four IEEE operations and `tinker_pdf_math::pow`; RC-19.5 pins the SHA-256 on every target, and a host that differs is a determinism bug in `build.rs`, never a table edit |
+| The numbers are a draft's | The standard's, from a publication of its final values; the threshold is 0.04045, the one the tree already reads |
+| The profile is not the sRGB the engine converts to | `the_profile_parses_compiles_and_is_srgb` takes every grey level and the primaries through the engine's own CMM back to themselves |
+| A part 1 validator refuses the version | 2.4.0 is below 3.0, which `header_defects` admits under every part; RC-19.3 holds every flavour to it |
+| A reader that takes `chad` to undo the adaptation sees D65 as the display's white | That is sRGB's white, as Annex E describes the tag; this engine does not read it |
+| A licence question returns | The bytes are computed from published numbers by code in this repository; NG-03's files stay out |
