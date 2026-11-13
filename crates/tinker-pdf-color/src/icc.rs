@@ -40,7 +40,10 @@
 //! integer per colour (`docs/design/icc.md`, "The output transform"). A
 //! device link, which takes one device's values to another's, is [`Link`],
 //! and the colours an `ncl2` tag names, looked up by name, are
-//! [`NamedColours`].
+//! [`NamedColours`]. The two directions composed are a soft proof,
+//! [`Proof`]: a colour taken into a proof profile's device components at its
+//! intent and back to sRGB through the same profile, compiled once into
+//! integer tables (`docs/design/icc.md`, "Soft proofing (RC-05)").
 //!
 //! The same census found the versions: v2 2 739, v4 9, v5 2. So v2 is not a
 //! legacy case to tolerate on the way to v4 — it is the case, and the two
@@ -86,6 +89,7 @@ mod calc;
 mod mpe;
 mod named;
 mod output;
+mod proof;
 mod spectral;
 
 pub use calc::{
@@ -95,6 +99,7 @@ pub use calc::{
 pub use mpe::MAX_MPE_ELEMENTS;
 pub use named::{NamedColour, NamedColours, MAX_NAMED_COLOURS};
 pub use output::{lab_to_xyz, xyz_to_lab, DeviceColour, Link, Output, MAX_DEVICE_CHANNELS};
+pub use proof::{Proof, ProofColour, ProofDisplay, ProofError, ProofMemo};
 pub use spectral::{SpectralRefusal, ViewingConditions, MAX_SPECTRAL_STEPS};
 
 /// A rendering intent: ICC.1's four (6.1), the ones a transform is compiled
@@ -10412,5 +10417,1120 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
         assert_eq!(Profile::parse(&v4), Err(IccError::MissingTags));
         let v2 = Profile::parse(&build(b"RGB ", b"XYZ ", &matrix_tags())).expect("v2");
         assert_eq!(v2.version5, None);
+    }
+
+    // ---- soft proofing (RC-05.2) -------------------------------------------
+
+    /// The proof transform held to ICC.1's equations: three proof profiles
+    /// built here, each leg of each recomputed in `f64` — curves and matrices
+    /// in closed form, a lookup table at its grid and between its nodes by
+    /// this module's own multilinear interpolation, which pins the engine's
+    /// interpolation (`docs/design/icc.md`, "Verification") — and each sample
+    /// held to the bound the tables the proof compiles give it
+    /// (`docs/design/icc.md`, "The proof's integer form, its tables, and the
+    /// bound").
+    mod proofs {
+        use super::*;
+
+        /// The paper the proof profiles print on: a warm white, below the
+        /// PCS white, so ICC-absolute colorimetry shows it.
+        const PAPER: [f64; 3] = [0.93, 0.96, 0.79];
+
+        /// The most a D50 XYZ component of an sRGB colour is off after the
+        /// device leg's first stages, in XYZ: half a step of s15.16 for each
+        /// decode-table entry, carried through a row of `SRGB_TO_XYZ_D50`
+        /// (each row sums to at most one), half a step for each of the row's
+        /// three s15.16 entries times light of at most one, and half a step
+        /// for the sum's rounding.
+        const XYZ_ERROR: f64 = (0.5 + 1.5 + 0.5) / 65_536.0;
+
+        /// Entries a compiled tone curve and its inverse carry.
+        const ENTRIES: f64 = CURVE_ENTRIES as f64;
+
+        /// A `curv` of `points`, spaced evenly over `0..=1`.
+        fn sampled_curve(points: &[u16]) -> Vec<u8> {
+            let mut out = b"curv".to_vec();
+            out.extend_from_slice(&[0; 4]);
+            out.extend_from_slice(&(points.len() as u32).to_be_bytes());
+            for point in points {
+                out.extend_from_slice(&point.to_be_bytes());
+            }
+            out
+        }
+
+        /// An `mft2` of `inputs` to `outputs` over `grid` points an axis,
+        /// its matrix and curves the identity, each node — the first input's
+        /// axis slowest, its coordinates `i / (grid - 1)` — the values
+        /// `value` gives its coordinates, each in `0..=1` of the currency;
+        /// and the grid as stored.
+        fn lut16(
+            inputs: usize,
+            outputs: usize,
+            grid: usize,
+            value: impl Fn(&[f64]) -> Vec<f64>,
+        ) -> (Vec<u8>, Vec<u16>) {
+            let mut tag = b"mft2".to_vec();
+            tag.extend_from_slice(&[0; 4]);
+            tag.extend_from_slice(&[inputs as u8, outputs as u8, grid as u8, 0]);
+            for row in 0..3 {
+                for column in 0..3 {
+                    let entry: u32 = if row == column { 0x0001_0000 } else { 0 };
+                    tag.extend_from_slice(&entry.to_be_bytes());
+                }
+            }
+            tag.extend_from_slice(&2u16.to_be_bytes());
+            tag.extend_from_slice(&2u16.to_be_bytes());
+            for _ in 0..inputs {
+                tag.extend_from_slice(&0u16.to_be_bytes());
+                tag.extend_from_slice(&u16::MAX.to_be_bytes());
+            }
+            let mut clut = Vec::new();
+            for node in 0..grid.pow(inputs as u32) {
+                let mut coordinates = vec![0.0; inputs];
+                let mut rest = node;
+                for slot in coordinates.iter_mut().rev() {
+                    *slot = (rest % grid) as f64 / (grid - 1) as f64;
+                    rest /= grid;
+                }
+                let values = value(&coordinates);
+                for value in values.iter().take(outputs) {
+                    let stored = (value.clamp(0.0, 1.0) * 65535.0).round() as u16;
+                    clut.push(stored);
+                    tag.extend_from_slice(&stored.to_be_bytes());
+                }
+            }
+            for _ in 0..outputs {
+                tag.extend_from_slice(&0u16.to_be_bytes());
+                tag.extend_from_slice(&u16::MAX.to_be_bytes());
+            }
+            (tag, clut)
+        }
+
+        /// A grid as stored, and its shape, read by this module's own
+        /// multilinear interpolation.
+        struct Grid {
+            clut: Vec<u16>,
+            inputs: usize,
+            outputs: usize,
+            points: usize,
+        }
+
+        impl Grid {
+            /// Channel `channel` at `x`, each coordinate held to `0..=1`,
+            /// over `0..=1` of the currency: the corners of the cell `x`
+            /// falls in, each weighted by the product of its fractions.
+            fn at(&self, x: &[f64], channel: usize) -> f64 {
+                let last = (self.points - 1) as f64;
+                let mut base = vec![0usize; self.inputs];
+                let mut fraction = vec![0.0; self.inputs];
+                for axis in 0..self.inputs {
+                    let position = x[axis].clamp(0.0, 1.0) * last;
+                    let index = (position.floor() as usize).min(self.points - 2);
+                    base[axis] = index;
+                    fraction[axis] = position - index as f64;
+                }
+                let mut sum = 0.0;
+                for corner in 0..1usize << self.inputs {
+                    let mut weight = 1.0;
+                    let mut offset = 0usize;
+                    for axis in 0..self.inputs {
+                        let high = (corner >> (self.inputs - 1 - axis)) & 1 == 1;
+                        weight *= if high {
+                            fraction[axis]
+                        } else {
+                            1.0 - fraction[axis]
+                        };
+                        offset = offset * self.points + base[axis] + usize::from(high);
+                    }
+                    let node = self.clut[offset * self.outputs + channel];
+                    sum += weight * f64::from(node) / 65535.0;
+                }
+                sum
+            }
+        }
+
+        /// The RGB proof: a wide-gamut display's columns, a gamma of 2.2 for
+        /// red, sRGB's own `para` (function type 3) for green and five
+        /// samples for blue, printed on [`PAPER`].
+        fn rgb_proof() -> Vec<u8> {
+            build(
+                b"RGB ",
+                b"XYZ ",
+                &[
+                    (*b"rXYZ", xyz(0.6097, 0.3111, 0.0195)),
+                    (*b"gXYZ", xyz(0.2053, 0.6257, 0.0609)),
+                    (*b"bXYZ", xyz(0.1492, 0.0632, 0.7446)),
+                    (*b"rTRC", gamma(2.2)),
+                    (*b"gTRC", srgb_curve()),
+                    (*b"bTRC", sampled_curve(&[0, 4_000, 15_000, 34_000, 65_535])),
+                    (*b"wtpt", xyz(PAPER[0], PAPER[1], PAPER[2])),
+                ],
+            )
+        }
+
+        /// The grey proof: one gamma of 1.8 into XYZ, on [`PAPER`].
+        fn grey_proof() -> Vec<u8> {
+            build(
+                b"GRAY",
+                b"XYZ ",
+                &[
+                    (*b"kTRC", gamma(1.8)),
+                    (*b"wtpt", xyz(PAPER[0], PAPER[1], PAPER[2])),
+                ],
+            )
+        }
+
+        /// The CMYK proof's `A2B0` at inks `ink`: the light each ink leaves,
+        /// scaled by what the black leaves, as a lightness and two opponent
+        /// axes, in `mft2`'s legacy Lab encoding over `0..=1` of the
+        /// currency.
+        fn ink_lab(ink: &[f64]) -> Vec<f64> {
+            let black = 1.0 - 0.92 * ink[3];
+            let red = (1.0 - 0.85 * ink[0]) * black;
+            let green = (1.0 - 0.8 * ink[1]) * black;
+            let blue = (1.0 - 0.75 * ink[2]) * black;
+            let l = 100.0 * (0.3 * red + 0.59 * green + 0.11 * blue);
+            let a = 90.0 * (red - green);
+            let b = 70.0 * (0.5 * (red + green) - blue);
+            let legacy = 65280.0 / 65535.0;
+            vec![
+                l / 100.0 * legacy,
+                (a + 128.0) / 255.0 * legacy,
+                (b + 128.0) / 255.0 * legacy,
+            ]
+        }
+
+        /// Table `table`'s inks at the encoded Lab coordinates `p`: each ink
+        /// rising with the darkness and leaning on its own opponent axis, the
+        /// three tables a little apart so each intent answers its own.
+        fn separate(p: &[f64], table: f64) -> Vec<f64> {
+            let dark = 1.0 - p[0];
+            vec![
+                (dark * (1.1 - p[1]) * 0.9 + 0.02 * table).clamp(0.0, 1.0),
+                (dark * (0.4 + p[1]) * 0.8).clamp(0.0, 1.0),
+                (dark * (0.3 + p[2]) * 0.85).clamp(0.0, 1.0),
+                (dark * dark * 0.9 - 0.01 * table).clamp(0.0, 1.0),
+            ]
+        }
+
+        /// The CMYK proof over Lab — an `A2B0` of six points an axis, so a
+        /// node every 51st byte, and a `B2A0`, `B2A1` and `B2A2` of nine
+        /// points an axis, one each intent, printed on [`PAPER`] — and its
+        /// grids: the `A2B0`'s, then the three `B2A*`s'.
+        fn cmyk_proof() -> (Vec<u8>, Grid, [Grid; 3]) {
+            let (a2b0, forward) = lut16(4, 3, 6, ink_lab);
+            let outputs: Vec<(Vec<u8>, Vec<u16>)> = (0..3u8)
+                .map(|table| lut16(3, 4, 9, |p| separate(p, f64::from(table))))
+                .collect();
+            let bytes = build_as(
+                b"prtr",
+                b"CMYK",
+                b"Lab ",
+                &[
+                    (*b"A2B0", a2b0),
+                    (*b"B2A0", outputs[0].0.clone()),
+                    (*b"B2A1", outputs[1].0.clone()),
+                    (*b"B2A2", outputs[2].0.clone()),
+                    (*b"wtpt", xyz(PAPER[0], PAPER[1], PAPER[2])),
+                ],
+            );
+            let grid = |clut: Vec<u16>, inputs: usize, outputs: usize, points: usize| Grid {
+                clut,
+                inputs,
+                outputs,
+                points,
+            };
+            let [b2a0, b2a1, b2a2] =
+                [0usize, 1, 2].map(|table| grid(outputs[table].1.clone(), 3, 4, 9));
+            (bytes, grid(forward, 4, 3, 6), [b2a0, b2a1, b2a2])
+        }
+
+        // ---- ICC.1's equations, in `f64` ----------------------------------
+
+        /// IEC 61966-2-1's decode of an encoded value in `0..=1`.
+        fn decode(encoded: f64) -> f64 {
+            if encoded <= 0.040_45 {
+                encoded / 12.92
+            } else {
+                ((encoded + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        /// IEC 61966-2-1's encode of linear light, held to `0..=1`.
+        fn encode(linear: f64) -> f64 {
+            let v = linear.clamp(0.0, 1.0);
+            if v <= 0.003_130_8 {
+                12.92 * v
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            }
+        }
+
+        /// An sRGB colour, each channel encoded in `0..=1`, as D50 XYZ.
+        fn srgb_xyz(rgb: [f64; 3]) -> [f64; 3] {
+            let linear = rgb.map(decode);
+            crate::SRGB_TO_XYZ_D50.map(|row| row.iter().zip(linear).map(|(m, v)| m * v).sum())
+        }
+
+        /// D50 XYZ as encoded sRGB in `0..=1`.
+        fn xyz_srgb(xyz: [f64; 3]) -> [f64; 3] {
+            crate::XYZ_D50_TO_SRGB.map(|row| encode(row.iter().zip(xyz).map(|(m, v)| m * v).sum()))
+        }
+
+        /// The D50 white the Lab relation reads against.
+        fn lab_white() -> [f64; 3] {
+            crate::lab_to_xyz(100.0, 0.0, 0.0)
+        }
+
+        /// D50 XYZ as CIE L*a*b* (8.6.5.4), the cube root the platform's.
+        fn lab_of(xyz: [f64; 3]) -> [f64; 3] {
+            let white = lab_white();
+            let delta = 6.0f64 / 29.0;
+            let f = |t: f64| {
+                if t > delta * delta * delta {
+                    t.cbrt()
+                } else {
+                    t / (3.0 * delta * delta) + 4.0 / 29.0
+                }
+            };
+            let [fx, fy, fz] = [0, 1, 2].map(|c| f(xyz[c] / white[c]));
+            [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+        }
+
+        /// CIE L*a*b* as D50 XYZ.
+        fn xyz_of(lab: [f64; 3]) -> [f64; 3] {
+            let white = lab_white();
+            let delta = 6.0f64 / 29.0;
+            let finv = |t: f64| {
+                if t > delta {
+                    t * t * t
+                } else {
+                    3.0 * delta * delta * (t - 4.0 / 29.0)
+                }
+            };
+            let fy = (lab[0] + 16.0) / 116.0;
+            let f = [fy + lab[1] / 500.0, fy, fy - lab[2] / 200.0];
+            [0, 1, 2].map(|c| white[c] * finv(f[c]))
+        }
+
+        /// A tone curve at `x` in `0..=1`, by ICC.1 10.5 and 10.18.
+        fn curve_at(curve: &Curve, x: f64) -> f64 {
+            match curve {
+                Curve::Identity => x,
+                Curve::Gamma(g) => x.powf(*g),
+                Curve::Parametric { params, .. } => {
+                    let (g, a, b, c, d) = (params[0], params[1], params[2], params[3], params[4]);
+                    if x >= d {
+                        (a * x + b).max(0.0).powf(g)
+                    } else {
+                        c * x
+                    }
+                }
+                Curve::Sampled(points) => {
+                    let last = (points.len() - 1) as f64;
+                    let position = x.clamp(0.0, 1.0) * last;
+                    let index = (position.floor() as usize).min(points.len() - 2);
+                    let (low, high) = (f64::from(points[index]), f64::from(points[index + 1]));
+                    (low + (high - low) * (position - index as f64)) / 65535.0
+                }
+            }
+        }
+
+        /// The `x` a tone curve takes to light `y`, held to `0..=1`: the
+        /// lowest, where the curve is flat or jumps.
+        fn curve_inverse(curve: &Curve, y: f64) -> f64 {
+            let y = y.clamp(0.0, 1.0);
+            let x = match curve {
+                Curve::Identity => y,
+                Curve::Gamma(g) => y.powf(1.0 / g),
+                Curve::Parametric { params, .. } => {
+                    let (g, a, b, c, d) = (params[0], params[1], params[2], params[3], params[4]);
+                    let (foot, head) = (c * d, (a * d + b).max(0.0).powf(g));
+                    if y < foot {
+                        y / c
+                    } else if y <= head {
+                        d
+                    } else {
+                        (y.powf(1.0 / g) - b) / a
+                    }
+                }
+                Curve::Sampled(points) => {
+                    let values: Vec<f64> = points.iter().map(|p| f64::from(*p) / 65535.0).collect();
+                    let last = (values.len() - 1) as f64;
+                    if y <= values[0] {
+                        0.0
+                    } else {
+                        match values.windows(2).position(|pair| y <= pair[1]) {
+                            None => 1.0,
+                            Some(index) => {
+                                let (low, high) = (values[index], values[index + 1]);
+                                (index as f64 + (y - low) / (high - low)) / last
+                            }
+                        }
+                    }
+                }
+            };
+            x.clamp(0.0, 1.0)
+        }
+
+        /// What an inverted curve's table can be off by at light `y`, in
+        /// device units over `0..=1`: the span of the exact inverse over the
+        /// interval of the table's 4 096 values `y` falls in and the one
+        /// either side, which the table's entries and its interpolation
+        /// between them stay within, and one 16-bit step for its rounding.
+        fn inverse_span(curve: &Curve, y: f64) -> f64 {
+            let last = ENTRIES - 1.0;
+            let node = (y.clamp(0.0, 1.0) * last).floor().min(last - 1.0);
+            let low = (node - 1.0).max(0.0) / last;
+            let high = (node + 2.0).min(last) / last;
+            curve_inverse(curve, high) - curve_inverse(curve, low) + 1.0 / 65535.0
+        }
+
+        /// The most `f` moves, summed over its inputs, when each moves by up
+        /// to its own `error` either way: the error a stage leaves, carried
+        /// to the output through the stages after it.
+        fn carried<const N: usize>(
+            f: impl Fn([f64; N]) -> f64,
+            at: [f64; N],
+            error: [f64; N],
+        ) -> f64 {
+            let base = f(at);
+            (0..N)
+                .map(|k| {
+                    let mut up = at;
+                    up[k] += error[k];
+                    let mut down = at;
+                    down[k] -= error[k];
+                    (f(up) - base).abs().max((f(down) - base).abs())
+                })
+                .sum()
+        }
+
+        /// The matrix taking linear device values to XYZ — `columns` as its
+        /// columns — inverted by its cofactors over its determinant.
+        fn inverse_columns(columns: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+            let m = |row: usize, column: usize| columns[column][row];
+            let cofactor = |row: usize, column: usize| {
+                let (r0, r1) = ((row + 1) % 3, (row + 2) % 3);
+                let (c0, c1) = ((column + 1) % 3, (column + 2) % 3);
+                m(r0, c0) * m(r1, c1) - m(r0, c1) * m(r1, c0)
+            };
+            let determinant = (0..3).map(|c| m(0, c) * cofactor(0, c)).sum::<f64>();
+            [0, 1, 2].map(|row| [0, 1, 2].map(|column| cofactor(column, row) / determinant))
+        }
+
+        /// The media white over the PCS white, as stored, where `absolute`
+        /// (ICC.1 6.2.3), and one otherwise: what a device leg divides a
+        /// value by under absolute colorimetric, and a display leg multiplies
+        /// one by where the paper is shown.
+        fn media(profile: &Profile, absolute: bool) -> [f64; 3] {
+            if absolute {
+                let white = profile
+                    .white
+                    .expect("the proof profiles carry a media white");
+                [0, 1, 2].map(|c| white[c] / PCS_WHITE[c])
+            } else {
+                [1.0; 3]
+            }
+        }
+
+        /// sRGB colours every seventeenth byte on each channel, the corners
+        /// among them: 4 096 of them.
+        fn srgb_inputs() -> Vec<[u8; 3]> {
+            let levels: Vec<u8> = (0..16u8).map(|step| step * 17).collect();
+            let mut out = Vec::new();
+            for &r in &levels {
+                for &g in &levels {
+                    for &b in &levels {
+                        out.push([r, g, b]);
+                    }
+                }
+            }
+            out
+        }
+
+        /// **The device leg of a matrix/TRC proof**, at `rgb` under `intent`:
+        /// each channel the columns' inverse times the colour's XYZ, divided
+        /// by the media white under absolute colorimetric, through its
+        /// curve's inverse. The bound carries the XYZ's error and the
+        /// inverse matrix's s15.16 steps through the curve's inverse, and the
+        /// inverted curve's table step.
+        fn matrix_device_holds(proof: &Proof, profile: &Profile, rgb: [u8; 3], intent: Intent) {
+            let Some(Model::MatrixTrc { columns, curves }) = &profile.model else {
+                panic!("a matrix/TRC proof");
+            };
+            let scale = media(profile, intent == Intent::AbsoluteColorimetric);
+            let inverse = inverse_columns(columns);
+            let xyz = srgb_xyz(rgb.map(|byte| f64::from(byte) / 255.0));
+            let got = proof.device(rgb, intent);
+            assert_eq!(got.channels().len(), 3);
+            for (channel, curve) in curves.iter().enumerate() {
+                let light = |xyz: [f64; 3]| -> f64 {
+                    (0..3)
+                        .map(|k| inverse[channel][k] * xyz[k] / scale[k])
+                        .sum()
+                };
+                let device = |xyz: [f64; 3]| 255.0 * curve_inverse(curve, light(xyz));
+                let want = device(xyz);
+                let linear = light(xyz).clamp(0.0, 1.0);
+                // The inverse matrix's s15.16 entries, each half a step,
+                // times the XYZ, and the sum's rounding.
+                let matrix_error =
+                    (0.5 * xyz.iter().map(|v| v.abs()).sum::<f64>() + 0.5) / 65_536.0;
+                let error = carried(device, xyz, [XYZ_ERROR; 3])
+                    + carried(
+                        |[y]: [f64; 1]| 255.0 * curve_inverse(curve, y),
+                        [linear],
+                        [matrix_error],
+                    )
+                    + 255.0 * inverse_span(curve, linear);
+                let value = f64::from(got.channels()[channel]);
+                assert!(
+                    (value - want).abs() <= 0.5 + error,
+                    "{intent:?} at {rgb:?}, channel {channel}: {value}, not {want:.2} within \
+                     {:.2}",
+                    0.5 + error
+                );
+            }
+        }
+
+        /// **The device leg of a grey proof**: the colour's luminance,
+        /// divided by the media white's under absolute colorimetric, through
+        /// the curve's inverse.
+        fn grey_device_holds(proof: &Proof, profile: &Profile, rgb: [u8; 3], intent: Intent) {
+            let Some(Model::Grey { curve, .. }) = &profile.model else {
+                panic!("a grey proof");
+            };
+            let scale = media(profile, intent == Intent::AbsoluteColorimetric)[1];
+            let xyz = srgb_xyz(rgb.map(|byte| f64::from(byte) / 255.0));
+            let got = proof.device(rgb, intent);
+            assert_eq!(got.channels().len(), 1);
+            let device = |xyz: [f64; 3]| 255.0 * curve_inverse(curve, xyz[1] / scale);
+            let want = device(xyz);
+            let light = (xyz[1] / scale).clamp(0.0, 1.0);
+            let factor_error = (0.5 * xyz[1].abs() + 0.5) / 65_536.0;
+            let error = carried(device, xyz, [XYZ_ERROR; 3])
+                + carried(
+                    |[y]: [f64; 1]| 255.0 * curve_inverse(curve, y),
+                    [light],
+                    [factor_error],
+                )
+                + 255.0 * inverse_span(curve, light);
+            let value = f64::from(got.channels()[0]);
+            assert!(
+                (value - want).abs() <= 0.5 + error,
+                "{intent:?} at {rgb:?}: {value}, not {want:.2} within {:.2}",
+                0.5 + error
+            );
+        }
+
+        /// The `B2A*` table an intent's device leg reads in the CMYK proof:
+        /// perceptual `B2A0`, saturation `B2A2`, relative colorimetric
+        /// `B2A1`, and absolute colorimetric `B2A1` too, its value first
+        /// divided by the media white.
+        fn table_of(intent: Intent) -> usize {
+            match intent {
+                Intent::Perceptual => 0,
+                Intent::Saturation => 2,
+                Intent::RelativeColorimetric | Intent::AbsoluteColorimetric => 1,
+            }
+        }
+
+        /// A Lab value as a `B2A*` table of `mft2` takes it: under absolute
+        /// colorimetric through XYZ divided by the media white, then in the
+        /// legacy encoding over `0..=1` of the currency, each held there.
+        fn encoded_for(lab: [f64; 3], scale: [f64; 3]) -> [f64; 3] {
+            let lab = if scale == [1.0; 3] {
+                lab
+            } else {
+                let xyz = xyz_of(lab);
+                lab_of([0, 1, 2].map(|c| xyz[c] / scale[c]))
+            };
+            let reach = 65535.0 / 65280.0;
+            [
+                lab[0] / 100.0 / reach,
+                (lab[1] + 128.0) / 255.0 / reach,
+                (lab[2] + 128.0) / 255.0 / reach,
+            ]
+            .map(|v| v.clamp(0.0, 1.0))
+        }
+
+        /// What the device leg's sampled cube root can be off by at the ratio
+        /// `t` to the white's component `white`, over the root's own scale:
+        /// its point spacing squared over eight times the root's curvature
+        /// at the near end of the interval `t` falls in — the line below the
+        /// break has none — the white's reciprocal's s15.16 step carried
+        /// through the root's slope, and a step of the 32-bit fraction for
+        /// each rounding.
+        fn root_error(t: f64, white: f64) -> f64 {
+            let delta = 6.0f64 / 29.0;
+            let break_at = delta * delta * delta;
+            let spacing = 1.0 / 4096.0;
+            let reciprocal = t.abs() * white / (2.0 * 65_536.0);
+            let rounding = 3.0 / 4_294_967_296.0;
+            if t <= break_at {
+                reciprocal / (3.0 * delta * delta) + rounding
+            } else {
+                let near = ((t / spacing).floor() * spacing).max(break_at);
+                let curvature = 2.0 / 9.0 * near.powf(-5.0 / 3.0);
+                let slope = 1.0 / (3.0 * near.powf(2.0 / 3.0));
+                spacing * spacing / 8.0 * curvature + reciprocal * slope + rounding
+            }
+        }
+
+        /// **The device leg of a lookup-table proof**, at an sRGB colour
+        /// (`Ok`) or at a Lab value handed over as it stands (`Err`): the
+        /// colour's Lab through the intent's `B2A*` table, read by this
+        /// module's multilinear interpolation at its own nodes. The bound
+        /// carries the XYZ's error through the root, the sampled root's own
+        /// and the Lab's s15.16 step through the table, the table's input
+        /// curve's rounding and its eighth-bit fractions of a cell through
+        /// its grid, and its sum's truncation and output curve's rounding.
+        fn lut_device_holds(
+            proof: &Proof,
+            profile: &Profile,
+            outputs: &[Grid; 3],
+            from: Result<[u8; 3], [f64; 3]>,
+            intent: Intent,
+        ) {
+            let scale = media(profile, intent == Intent::AbsoluteColorimetric);
+            let grid = &outputs[table_of(intent)];
+            let (got, lab, xyz) = match from {
+                Ok(rgb) => {
+                    let xyz = srgb_xyz(rgb.map(|byte| f64::from(byte) / 255.0));
+                    (proof.device(rgb, intent), lab_of(xyz), Some(xyz))
+                }
+                Err(lab) => (proof.device_from_connection(lab, true, intent), lab, None),
+            };
+            assert_eq!(got.channels().len(), 4);
+            let white = lab_white();
+            let step = 0.5 / 65_536.0;
+            let lab_error = match xyz {
+                Some(xyz) => {
+                    let [ex, ey, ez] = [0, 1, 2].map(|c| root_error(xyz[c] / white[c], white[c]));
+                    [
+                        116.0 * ey + step,
+                        500.0 * (ex + ey) + step,
+                        200.0 * (ey + ez) + step,
+                    ]
+                }
+                None => [step; 3],
+            };
+            let cell = 1.0 / (grid.points - 1) as f64;
+            let coordinate_error = 0.5 / 65535.0 + 0.5 / 256.0 * cell;
+            for channel in 0..4 {
+                let from_lab = |lab: [f64; 3]| 255.0 * grid.at(&encoded_for(lab, scale), channel);
+                let from_coordinates = |p: [f64; 3]| 255.0 * grid.at(&p, channel);
+                let want = from_lab(lab);
+                let mut error = carried(from_lab, lab, lab_error)
+                    + carried(
+                        from_coordinates,
+                        encoded_for(lab, scale),
+                        [coordinate_error; 3],
+                    )
+                    + 255.0 * 1.5 / 65535.0;
+                if let Some(xyz) = xyz {
+                    error += carried(|xyz| from_lab(lab_of(xyz)), xyz, [XYZ_ERROR; 3]);
+                }
+                let value = f64::from(got.channels()[channel]);
+                assert!(
+                    (value - want).abs() <= 0.5 + error,
+                    "{intent:?} from {from:?}, ink {channel}: {value}, not {want:.2} within \
+                     {:.2}",
+                    0.5 + error
+                );
+            }
+        }
+
+        /// **The display leg of a matrix/TRC proof** at the device bytes
+        /// `rgb`: each byte through its curve, the columns, the media white
+        /// where the paper is shown, `XYZ_D50_TO_SRGB` and the encode. The
+        /// bound carries the curves' and the folded matrix's s15.16 steps and
+        /// the sum's rounding, and the encode table's index, through the
+        /// encode.
+        fn matrix_display_holds(proof: &Proof, profile: &Profile, rgb: [u8; 3], paper: bool) {
+            let Some(Model::MatrixTrc { columns, curves }) = &profile.model else {
+                panic!("a matrix/TRC proof");
+            };
+            let scale = media(profile, paper);
+            let linear = [0, 1, 2].map(|c| curve_at(&curves[c], f64::from(rgb[c]) / 255.0));
+            let folded = [0, 1, 2].map(|row| {
+                [0, 1, 2].map(|channel| {
+                    (0..3)
+                        .map(|axis| {
+                            crate::XYZ_D50_TO_SRGB[row][axis] * scale[axis] * columns[channel][axis]
+                        })
+                        .sum::<f64>()
+                })
+            });
+            let got = proof.display(&rgb);
+            let got = [got.0, got.1, got.2];
+            for row in 0..3 {
+                let light: f64 = (0..3).map(|c| folded[row][c] * linear[c]).sum();
+                let want = 255.0 * encode(light);
+                let light_error = (0.5 * linear.iter().sum::<f64>()
+                    + 0.5 * folded[row].iter().map(|m| m.abs()).sum::<f64>()
+                    + 0.5)
+                    / 65_536.0
+                    + 0.5 / 16_384.0;
+                let error = carried(|[v]: [f64; 1]| 255.0 * encode(v), [light], [light_error]);
+                let value = f64::from(got[row]);
+                assert!(
+                    (value - want).abs() <= 0.5 + error,
+                    "paper {paper}, {rgb:?}, channel {row}: {value}, not {want:.2} within {:.2}",
+                    0.5 + error
+                );
+            }
+        }
+
+        /// **The display leg of a grey proof**: the byte through the curve,
+        /// on the PCS white, the media white where the paper is shown, as
+        /// sRGB — the table the proof holds is the function at every byte,
+        /// so each is its rounding.
+        fn grey_display_holds(proof: &Proof, profile: &Profile, grey: u8, paper: bool) {
+            let Some(Model::Grey { curve, .. }) = &profile.model else {
+                panic!("a grey proof");
+            };
+            let scale = media(profile, paper);
+            let value = curve_at(curve, f64::from(grey) / 255.0);
+            let want = xyz_srgb([0, 1, 2].map(|c| PCS_WHITE[c] * value * scale[c]));
+            let (r, g, b) = proof.display(&[grey]);
+            for (got, want) in [r, g, b].into_iter().zip(want) {
+                assert!(
+                    (f64::from(got) - 255.0 * want).abs() <= 0.5 + 1e-6,
+                    "paper {paper}, grey {grey}: {got}, not {:.3}",
+                    255.0 * want
+                );
+            }
+        }
+
+        /// **The display leg of a lookup-table proof** at the device bytes
+        /// `ink`: the `A2B0` grid at them by this module's interpolation, its
+        /// Lab decoded from the legacy encoding, to XYZ, the media white
+        /// where the paper is shown, and to sRGB. The bound carries the
+        /// grid's 16-bit fractions of a cell and its four interpolation
+        /// steps' and its output curve's roundings, the Lab's s15.16 step, and the linear light's
+        /// fixed point and the encode table's index, through the stages after
+        /// each.
+        fn lut_display_holds(
+            proof: &Proof,
+            profile: &Profile,
+            forward: &Grid,
+            ink: [u8; 4],
+            paper: bool,
+        ) {
+            let scale = media(profile, paper);
+            let reach = 65535.0 / 65280.0;
+            let decode_lab = |e: [f64; 3]| {
+                [
+                    e[0] * reach * 100.0,
+                    e[1] * reach * 255.0 - 128.0,
+                    e[2] * reach * 255.0 - 128.0,
+                ]
+            };
+            let to_light = |lab: [f64; 3]| -> [f64; 3] {
+                let xyz = xyz_of(lab);
+                crate::XYZ_D50_TO_SRGB
+                    .map(|row| (0..3).map(|c| row[c] * xyz[c] * scale[c]).sum::<f64>())
+            };
+            let coordinates = ink.map(|byte| f64::from(byte) / 255.0);
+            let encoded = [0, 1, 2].map(|channel| forward.at(&coordinates, channel));
+            let lab = decode_lab(encoded);
+            let light = to_light(lab);
+            let cell = 1.0 / (forward.points - 1) as f64;
+            let fraction_error = [0.5 / 65_536.0 * cell; 4];
+            let encoded_error = [0, 1, 2].map(|channel| {
+                carried(
+                    |p: [f64; 4]| forward.at(&p, channel),
+                    coordinates,
+                    fraction_error,
+                ) + 3.0 / 65535.0
+            });
+            let got = proof.display(&ink);
+            let got = [got.0, got.1, got.2];
+            for row in 0..3 {
+                let want = 255.0 * encode(light[row]);
+                let error = carried(
+                    |e| 255.0 * encode(to_light(decode_lab(e))[row]),
+                    encoded,
+                    encoded_error,
+                ) + carried(
+                    |l| 255.0 * encode(to_light(l)[row]),
+                    lab,
+                    [0.5 / 65_536.0; 3],
+                ) + carried(
+                    |[v]: [f64; 1]| 255.0 * encode(v),
+                    [light[row]],
+                    [64.0 / 4_294_967_296.0 + 0.5 / 16_384.0],
+                );
+                let value = f64::from(got[row]);
+                assert!(
+                    (value - want).abs() <= 0.5 + error,
+                    "paper {paper}, {ink:?}, channel {row}: {value}, not {want:.2} within {:.2}",
+                    0.5 + error
+                );
+            }
+        }
+
+        /// **A proof transform is its legs composed** (RC-05.2). For a
+        /// matrix/TRC RGB, a grey and a lookup-table CMYK proof profile, each
+        /// printed on a paper other than the PCS white, under each intent and
+        /// with the paper shown and not: the device leg of sRGB colours
+        /// across the cube — and for the CMYK proof, of Lab values at its
+        /// `B2A*` grids' nodes and halfway between them — is ICC.1's output
+        /// direction recomputed here; the display leg at every byte of the
+        /// grey proof, every fifteenth of the RGB proof's channels, and the
+        /// CMYK proof's `A2B0` nodes — every 51st byte — and halfway between
+        /// them, is its input direction recomputed here; each within the
+        /// bound its tables give that sample. The proof of an sRGB colour is
+        /// the display leg of its device leg's bytes, byte for byte.
+        #[test]
+        fn a_proof_transform_is_its_legs_composed() {
+            let srgb = srgb_inputs();
+
+            let rgb_bytes = rgb_proof();
+            let rgb_profile = Profile::parse(&rgb_bytes).expect("the RGB proof parses");
+            let grey_bytes = grey_proof();
+            let grey_profile = Profile::parse(&grey_bytes).expect("the grey proof parses");
+            let (cmyk_bytes, forward, outputs) = cmyk_proof();
+            let cmyk_profile = Profile::parse(&cmyk_bytes).expect("the CMYK proof parses");
+
+            for display in [ProofDisplay::Relative, ProofDisplay::Paper] {
+                let paper = display == ProofDisplay::Paper;
+                let rgb = Proof::new(&rgb_bytes, display).expect("the RGB proof compiles");
+                let grey = Proof::new(&grey_bytes, display).expect("the grey proof compiles");
+                let cmyk = Proof::new(&cmyk_bytes, display).expect("the CMYK proof compiles");
+                assert_eq!(
+                    (rgb.channels(), grey.channels(), cmyk.channels()),
+                    (3, 1, 4)
+                );
+                assert_eq!(rgb.display_intent(), display);
+                assert_eq!(&cmyk.space(), b"CMYK");
+
+                for intent in Intent::ALL {
+                    for &colour in &srgb {
+                        matrix_device_holds(&rgb, &rgb_profile, colour, intent);
+                        grey_device_holds(&grey, &grey_profile, colour, intent);
+                        lut_device_holds(&cmyk, &cmyk_profile, &outputs, Ok(colour), intent);
+                        for proof in [&rgb, &grey, &cmyk] {
+                            assert_eq!(
+                                proof.apply(colour, intent),
+                                proof.display(proof.device(colour, intent).channels()),
+                                "{intent:?} at {colour:?}: the proof is its legs composed"
+                            );
+                        }
+                    }
+                    // Lab at the `B2A*` grids' nodes and halfway between
+                    // them, a coordinate `k / 16` of the legacy currency each.
+                    let reach = 65535.0 / 65280.0;
+                    for l in 0..=16u32 {
+                        for a in (0..=16u32).step_by(2) {
+                            for b in (0..=16u32).step_by(4) {
+                                let [pl, pa, pb] = [l, a, b].map(|k| f64::from(k) / 16.0);
+                                let lab = [
+                                    pl * reach * 100.0,
+                                    pa * reach * 255.0 - 128.0,
+                                    pb * reach * 255.0 - 128.0,
+                                ];
+                                lut_device_holds(&cmyk, &cmyk_profile, &outputs, Err(lab), intent);
+                            }
+                        }
+                    }
+                }
+
+                for grey_byte in 0..=u8::MAX {
+                    grey_display_holds(&grey, &grey_profile, grey_byte, paper);
+                }
+                let levels: Vec<u8> = (0..=17u8).map(|step| step * 15).collect();
+                for &r in &levels {
+                    for &g in &levels {
+                        for &b in &levels {
+                            matrix_display_holds(&rgb, &rgb_profile, [r, g, b], paper);
+                        }
+                    }
+                }
+                // The `A2B0` grid's nodes, every 51st byte, and halfway
+                // between them.
+                let inks: Vec<u8> = (0..=10u16).map(|step| (step * 51 / 2) as u8).collect();
+                for &c in &inks {
+                    for &m in &inks {
+                        for &y in inks.iter().step_by(2) {
+                            for &k in inks.iter().step_by(2) {
+                                lut_display_holds(
+                                    &cmyk,
+                                    &cmyk_profile,
+                                    &forward,
+                                    [c, m, y, k],
+                                    paper,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// **Each intent's device leg is its own table's, and an intent that
+        /// converts through another's shares its transform.** The CMYK
+        /// proof's perceptual, relative and saturation device legs are three
+        /// tables, so a colour lands three ways; absolute colorimetric's
+        /// divides by the paper first. The RGB proof's model serves every
+        /// intent but absolute colorimetric with one transform, which the
+        /// proof compiles once.
+        #[test]
+        fn each_intent_reaches_the_device_through_its_own_table() {
+            let (cmyk_bytes, _, _) = cmyk_proof();
+            let cmyk = Proof::new(&cmyk_bytes, ProofDisplay::Relative).expect("compiles");
+            let colour = [40, 120, 200];
+            let inks: Vec<Vec<u8>> = Intent::ALL
+                .iter()
+                .map(|&intent| cmyk.device(colour, intent).channels().to_vec())
+                .collect();
+            assert_ne!(inks[0], inks[1], "perceptual is B2A0 and relative B2A1");
+            assert_ne!(inks[2], inks[1], "saturation is B2A2");
+            assert_ne!(
+                inks[3], inks[1],
+                "absolute colorimetric divides by the paper"
+            );
+
+            let rgb = Proof::new(&rgb_proof(), ProofDisplay::Relative).expect("compiles");
+            for intent in Intent::ALL {
+                let _ = rgb.device(colour, intent);
+            }
+            let [perceptual, relative, saturation, absolute] =
+                [0, 1, 2, 3].map(|slot| rgb.outputs[slot].get().map(Arc::as_ptr));
+            assert_eq!(perceptual, relative, "the model's one transform");
+            assert_eq!(saturation, relative, "the model's one transform");
+            assert_ne!(
+                absolute, relative,
+                "absolute colorimetric is scaled by the paper"
+            );
+        }
+
+        /// **The paper shows only where it is asked for.** The display leg of
+        /// each proof's paper — no ink on the CMYK proof, full scale on the
+        /// grey and RGB ones — is white under relative colorimetric and
+        /// [`PAPER`]'s warm white, short of white in its blue, when the paper
+        /// is shown.
+        #[test]
+        fn the_paper_shows_only_where_it_is_asked_for() {
+            let (cmyk_bytes, _, _) = cmyk_proof();
+            for (bytes, paper) in [
+                (rgb_proof(), vec![255u8, 255, 255]),
+                (grey_proof(), vec![255]),
+                (cmyk_bytes, vec![0, 0, 0, 0]),
+            ] {
+                let relative = Proof::new(&bytes, ProofDisplay::Relative).expect("compiles");
+                let shown = Proof::new(&bytes, ProofDisplay::Paper).expect("compiles");
+                let white = relative.display(&paper);
+                let tinted = shown.display(&paper);
+                assert!(
+                    white.0 >= 254 && white.1 >= 254 && white.2 >= 254,
+                    "{white:?} is white"
+                );
+                assert!(tinted.2 < tinted.0, "{tinted:?} is the paper's warm white");
+                assert_ne!(relative, shown, "the display intent is the proof's");
+            }
+        }
+
+        /// **A memo changes no byte.** Every display leg through a memo — the
+        /// CMYK proof at a spread of inks, twice over so the second pass is
+        /// answered from the memo, and one memo handed between two proofs —
+        /// is the display leg without one, and the RGB and grey proofs, which
+        /// convert in a few operations, answer through a memo as without.
+        #[test]
+        fn a_memo_changes_no_byte() {
+            let (cmyk_bytes, _, _) = cmyk_proof();
+            let cmyk = Proof::new(&cmyk_bytes, ProofDisplay::Relative).expect("compiles");
+            let mut memo = ProofMemo::default();
+            for _ in 0..2 {
+                for c in (0..=255u8).step_by(51) {
+                    for m in (0..=255u8).step_by(51) {
+                        for y in (0..=255u8).step_by(17) {
+                            for k in (0..=255u8).step_by(85) {
+                                let ink = [c, m, y, k];
+                                assert_eq!(cmyk.display_with(&ink, &mut memo), cmyk.display(&ink));
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(format!("{memo:?}").contains("held"), "{memo:?}");
+            // One memo handed between two proofs of one profile, which show
+            // the paper differently: each answers its own colour, the memo
+            // forgetting the other's.
+            let shown = Proof::new(&cmyk_bytes, ProofDisplay::Paper).expect("compiles");
+            for ink in [[0u8, 0, 0, 0], [51, 102, 153, 0], [255, 0, 0, 51]] {
+                for proof in [&cmyk, &shown, &cmyk] {
+                    assert_eq!(proof.display_with(&ink, &mut memo), proof.display(&ink));
+                }
+            }
+            assert_ne!(
+                cmyk.display(&[0, 0, 0, 0]),
+                shown.display(&[0, 0, 0, 0]),
+                "the two show the paper differently"
+            );
+            for bytes in [rgb_proof(), grey_proof()] {
+                let proof = Proof::new(&bytes, ProofDisplay::Paper).expect("compiles");
+                for value in [0u8, 17, 128, 255] {
+                    let device = [value, 255 - value, value / 2];
+                    assert_eq!(
+                        proof.display_with(&device, &mut memo),
+                        proof.display(&device)
+                    );
+                }
+            }
+        }
+
+        /// **Each refusal is reached, by name** (`docs/design/icc.md`,
+        /// "Refused by name"): bytes that are no profile; a device link, an
+        /// abstract and a named-colour profile, by class; a three-ink `CMY `
+        /// printer profile, by data space; an input profile carrying only an
+        /// `A2B0`, with nothing out of the connection space; and a profile
+        /// converting only through a `D2B1` beside its `B2A0`, with nothing
+        /// from its device to the display.
+        #[test]
+        fn each_proof_refusal_is_reached() {
+            assert_eq!(
+                Proof::new(b"not a profile", ProofDisplay::Relative).err(),
+                Some(ProofError::Profile(IccError::TooShort))
+            );
+            let link = build_as(
+                b"link",
+                b"RGB ",
+                b"CMYK",
+                &[(
+                    *b"A2B0",
+                    graded_mft2(3, 4, |node, channel| (node * 4000 + channel * 900) as u16),
+                )],
+            );
+            assert_eq!(
+                Proof::new(&link, ProofDisplay::Relative).err(),
+                Some(ProofError::Class(*b"link"))
+            );
+            let abstract_profile = build_as(
+                b"abst",
+                b"Lab ",
+                b"Lab ",
+                &[(
+                    *b"A2B0",
+                    graded_mft2(3, 3, |node, channel| (node * 7000 + channel * 300) as u16),
+                )],
+            );
+            assert_eq!(
+                Proof::new(&abstract_profile, ProofDisplay::Relative).err(),
+                Some(ProofError::Class(*b"abst"))
+            );
+            let named = build_as(
+                b"nmcl",
+                b"CMYK",
+                b"Lab ",
+                &[(
+                    *b"ncl2",
+                    ncl2_tag(
+                        "",
+                        "",
+                        4,
+                        &[("Ink", [0x8000, 0x8000, 0x8000], &[0, 0, 0, 0xFFFF])],
+                    ),
+                )],
+            );
+            assert_eq!(
+                Proof::new(&named, ProofDisplay::Relative).err(),
+                Some(ProofError::Class(*b"nmcl"))
+            );
+            let three_inks = build_as(
+                b"prtr",
+                b"CMY ",
+                b"Lab ",
+                &[
+                    (
+                        *b"A2B0",
+                        graded_mft2(3, 3, |node, channel| {
+                            (0xFF00 - node * 0x1000 + channel * 16) as u16
+                        }),
+                    ),
+                    (
+                        *b"B2A0",
+                        graded_mft2(3, 3, |node, channel| (node * 5000 + channel * 700) as u16),
+                    ),
+                ],
+            );
+            assert_eq!(
+                Proof::new(&three_inks, ProofDisplay::Relative).err(),
+                Some(ProofError::DataSpace(*b"CMY "))
+            );
+            let input_only = build_as(
+                b"scnr",
+                b"RGB ",
+                b"Lab ",
+                &[(
+                    *b"A2B0",
+                    graded_mft2(3, 3, |node, channel| {
+                        (0x4000 + node * 0x1000 + channel * 32) as u16
+                    }),
+                )],
+            );
+            assert_eq!(
+                Proof::new(&input_only, ProofDisplay::Relative).err(),
+                Some(ProofError::NoOutputDirection)
+            );
+            let elements_only = build(
+                b"RGB ",
+                b"XYZ ",
+                &[
+                    (*b"D2B1", Chain { t: 0.0 }.tag()),
+                    (
+                        *b"B2A0",
+                        graded_mft2(3, 3, |node, channel| (node * 6000 + channel * 500) as u16),
+                    ),
+                ],
+            );
+            assert!(Profile::parse(&elements_only).is_ok(), "the D2B1 serves it");
+            assert_eq!(
+                Proof::new(&elements_only, ProofDisplay::Relative).err(),
+                Some(ProofError::NoInputDirection)
+            );
+        }
+
+        /// **Any input answers a colour on the device and one on the
+        /// display**: connection-space values past either end, infinities and
+        /// NaN, as Lab and as XYZ, through each proof; device bytes of every
+        /// value in every channel, and slices too short and too long; never a
+        /// panic, and always the device's count of components.
+        #[test]
+        fn any_input_answers_a_proofed_colour() {
+            let (cmyk_bytes, _, _) = cmyk_proof();
+            for bytes in [rgb_proof(), grey_proof(), cmyk_bytes] {
+                for display in [ProofDisplay::Relative, ProofDisplay::Paper] {
+                    let proof = Proof::new(&bytes, display).expect("compiles");
+                    for intent in Intent::ALL {
+                        for pcs in [
+                            [0.0; 3],
+                            [100.0, 0.0, 0.0],
+                            [0.9642, 1.0, 0.8249],
+                            [-5.0, 300.0, -300.0],
+                            [1e300, -1e300, 2.0],
+                            [f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
+                        ] {
+                            for lab in [false, true] {
+                                let colour = proof.device_from_connection(pcs, lab, intent);
+                                assert_eq!(colour.channels().len(), proof.channels());
+                            }
+                        }
+                    }
+                    let mut memo = ProofMemo::default();
+                    for value in 0..=u8::MAX {
+                        let device = [value; 4];
+                        let _ = proof.display(&device);
+                        let _ = proof.display_with(&device, &mut memo);
+                    }
+                    for slice in [&[][..], &[7][..], &[1, 2, 3, 4, 5, 6][..]] {
+                        let _ = proof.display(slice);
+                        let _ = proof.display_with(slice, &mut memo);
+                    }
+                }
+            }
+        }
     }
 }

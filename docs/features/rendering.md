@@ -252,6 +252,35 @@ coordinate count is held to fifteen and the colour count to 65 536
 (`icc::MAX_NAMED_COLOURS`) before any entry is read, and their entries to
 the tag's own bytes. No render converts through a named colour.
 
+**A soft proof** is `tinker_pdf_color::icc::Proof::new(bytes, display)`
+([design/icc.md](../design/icc.md), "Soft proofing (RC-05)"): a profile of a
+grey, RGB or CMYK device compiled once into the colour as that device
+reproduces it, shown on the display. Its device leg, `Proof::device`, takes
+an sRGB colour — IEC 61966-2-1's decode a 256-entry table in s15.16, then
+`SRGB_TO_XYZ_D50` in s15.16, then for a profile whose connection space is
+Lab 8.6.5.4's cube root sampled at every 1/4 096 of the ratio to the white
+and read linearly in 32 fractional bits — or, as
+`Proof::device_from_connection`, a colour's own connection-space value,
+through the profile's transform out of the connection space at the colour's
+intent, each intent's compiled the first time a colour asks for it and an
+intent compiling to another's sharing it, to the device's components
+rounded to bytes. Its display leg, `Proof::display`, takes those bytes back
+to sRGB through the profile's input direction, an `A2B*` table or its model,
+relative colorimetric so the paper shows as white, or ICC-absolute where
+`ProofDisplay::Paper` shows the paper: a grey proof's as a table of the 256
+bytes each evaluated exactly, a matrix/TRC proof's through its curves at the
+256 bytes and its columns times XYZ-to-sRGB in s15.16, a lookup-table
+proof's through the table in integers — its grid multilinear with 16-bit
+fractions at its own nodes, its curves interpolated in 16 bits, a Lab
+connection space taken to XYZ with the cube in 32 fractional bits — then
+IEC 61966-2-1's encode sampled at 16 385 points, its index rounded;
+`Proof::display_with` remembers a lookup-table proof's colours in a
+`ProofMemo` of 4 096 slots keyed by the device's bytes, which changes no
+byte. `Proof::apply` is the two composed. A profile that cannot proof is a
+`ProofError`: refused by `Profile::parse`; a device link, an abstract or a
+named-colour profile; a data space other than grey, RGB and CMYK; nothing
+out of the connection space; nothing from the device back to the display.
+
 **`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.2,
 8.6.5.3): the components go through `/Gamma`, `/Matrix` takes them into XYZ
 relative to `/WhitePoint`, and the white point is adapted to D50 before the

@@ -41,7 +41,13 @@
 //! spaces' is a typed refusal (`docs/design/icc.md`, "Device links").
 //! Named colours — an `ncl2` tag, whose colour count and device coordinate
 //! count are file fields checked before an entry is walked — are looked up
-//! and converted to sRGB, every one of them.
+//! and converted to sRGB, every one of them. And the bytes are compiled as a
+//! soft proof, its paper shown and not: its display leg's tables built from
+//! the profile's input direction, then sRGB colours taken through its
+//! device leg at every intent and back, connection-space values past either
+//! end handed to its device leg, and every byte value in every channel
+//! handed to its display leg, through a memo and without
+//! (`docs/design/icc.md`, "Soft proofing (RC-05)").
 //!
 //! # What this target checks, and what it does not
 //!
@@ -62,9 +68,18 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_color::icc::{Intent, Link, Output, Profile, Transform, Transforms};
+use tinker_pdf_color::icc::{
+    Intent, Link, Output, Profile, Proof, ProofDisplay, ProofMemo, Transform, Transforms,
+};
 
 fuzz_target!(|data: &[u8]| {
+    // A soft proof of the bytes, where they make one, either way of showing
+    // its paper: a refusal is a typed `ProofError`, never a panic.
+    for display in [ProofDisplay::Relative, ProofDisplay::Paper] {
+        if let Ok(proof) = Proof::new(data, display) {
+            proof_all(&proof);
+        }
+    }
     let Ok(profile) = Profile::parse(data) else {
         return;
     };
@@ -119,6 +134,40 @@ fn connection_all(profile: &Profile, intent: Intent) {
     ];
     for components in sets {
         let _ = profile.connection_value(intent, components);
+    }
+}
+
+/// A proof must answer for any colour: sRGB colours at the cube's corners
+/// and between them through every intent's device leg and back;
+/// connection-space values in range, past either end and not numbers, as
+/// Lab and as XYZ; and every byte value in every channel, and slices too
+/// short and too long, through its display leg with a memo and without.
+fn proof_all(proof: &Proof) {
+    for intent in Intent::ALL {
+        for rgb in [[0, 0, 0], [255, 255, 255], [255, 0, 0], [12, 200, 97]] {
+            let _ = proof.apply(rgb, intent);
+        }
+        for pcs in [
+            [0.0, 0.0, 0.0],
+            [100.0, 0.0, 0.0],
+            [0.9642, 1.0, 0.8249],
+            [-1.0, 300.0, -300.0],
+            [f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
+        ] {
+            for lab in [false, true] {
+                let _ = proof.device_from_connection(pcs, lab, intent);
+            }
+        }
+    }
+    let mut memo = ProofMemo::default();
+    for byte in 0..=u8::MAX {
+        let device = [byte, !byte, byte, !byte];
+        let _ = proof.display(&device);
+        let _ = proof.display_with(&device, &mut memo);
+    }
+    for device in [&[][..], &[7][..], &[1, 2, 3, 4, 5, 6][..]] {
+        let _ = proof.display(device);
+        let _ = proof.display_with(device, &mut memo);
     }
 }
 

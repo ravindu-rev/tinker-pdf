@@ -12,7 +12,9 @@
 //! tags and of a version 5 profile (ICC.2) with the calculator element and a
 //! spectral connection space, and, the other way, [`icc::Output`] into a
 //! profile's device components, with [`icc::Link`]'s device links, the gamut
-//! tag and [`icc::NamedColours`] beside it. A profile [`icc::Profile::parse`]
+//! tag and [`icc::NamedColours`] beside it; the two directions composed are a
+//! soft proof, [`icc::Proof`], a colour taken into a proof profile's device
+//! and back to sRGB. A profile [`icc::Profile::parse`]
 //! refuses — one past the bytes or the grid entries it reads, an element
 //! ICC.2 defines and it does not read, or a model contradicting its header
 //! with no table to convert through — names its reason as an

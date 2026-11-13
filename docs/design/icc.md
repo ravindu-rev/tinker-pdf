@@ -2081,13 +2081,14 @@ each stage is a table or a fixed-point product built when it is compiled:
 | --- | --- | --- | --- |
 | sRGB light in (DeviceRGB, the grey and CMYK readings, light at a boundary) | IEC 61966-2-1's decode, s15.16 | 256 per channel | the domain is a byte: the table is the function at every input |
 | to the connection space | `SRGB_TO_XYZ_D50`, or the source profile's `A2B*` as RC-01 compiles it per intent | — | the source's own form |
+| XYZ to Lab, for a proof profile whose connection space is Lab | 8.6.5.4's cube root in 32 fractional bits, read linearly between its samples above `(6/29)³`, the line below it | 8 193, every 1/4 096 of the ratio to the white from 0 to 2 | the root is the one transcendental the leg would otherwise take per colour |
 | the output direction | RC-20's `icc::Output` at the colour's intent: the inverted matrix in s15.16 and inverted curves, or a `B2A*` table | RC-20.1's | RC-20's own tables, not resampled |
 | device components | rounded to bytes | — | the canvas holds bytes |
 | `V`, a grey proof | the profile's grey to sRGB | 256 | the domain is a byte: exact |
 | `V`, an RGB matrix/TRC proof | per channel the curve to linear s15.16, the profile's columns times XYZ-to-sRGB in s15.16 as `Transform::compile` builds it | 256 per channel | the domain is a byte |
 | `V`, a lookup-table proof | the profile's `A2B*` in integers: input curves, the grid multilinear with 16-bit fractions at the profile's own nodes, output curves interpolated in 16 bits, a Lab connection space through XYZ with the cube in fixed point | the profile's own grid | resampling a grid adds an interpolation error on top of the one its author chose |
 | `V`'s sRGB encode | IEC 61966-2-1's encode, the index rounded | 2^14 + 1 | `12.92 × 255 / (2 × 16 384)` is 0.10 of a level: under an eighth at the steepest point of the curve |
-| `V` for three and four channels | a memo of 4 096 slots keyed by the pixel's bytes | — | it holds what the evaluation returns, so it changes no byte; the `/DeviceN` image path's table is the precedent |
+| `V` for a lookup-table proof of three and four channels | a memo of 4 096 slots keyed by the pixel's bytes, `icc::ProofMemo`, which the caller keeps for a page | — | it holds what the evaluation returns, so it changes no byte; the `/DeviceN` image path's table is the precedent |
 
 The encode table is the proof's own: the screen path's `encode_srgb`
 (4 096 entries, its index truncated, worth up to 0.8 of a level near black)
@@ -2139,7 +2140,10 @@ A document's intent whose profile is refused is the `Refused` warning above;
 
 ### Milestones
 
-1. **RC-05.2, the proof compiled** in `tinker-pdf-color`. Exit: `icc.rs`'s
+1. **RC-05.2, landed: the proof compiled** in `tinker-pdf-color`,
+   `icc::Proof` — `Proof::device` and `Proof::device_from_connection` the
+   device leg, `Proof::display` and `Proof::display_with` the display leg,
+   `Proof::apply` the two composed. Exit: `icc.rs`'s
    `a_proof_transform_is_its_legs_composed` — a matrix/TRC RGB, a grey and a
    LUT CMYK proof profile built in the test, each intent, at the tables'
    nodes and between them, within the derived bound; each `ProofError`
