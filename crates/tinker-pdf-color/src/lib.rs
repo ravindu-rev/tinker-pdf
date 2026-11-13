@@ -288,6 +288,23 @@ impl ColorSpace {
             },
         }
     }
+
+    /// [`ColorSpace::to_rgb`] for a caller converting once a pixel, the same
+    /// colour: a `/Separation` or `/DeviceN` space evaluates its tint
+    /// transform into `scratch`, which the caller keeps, rather than into a
+    /// buffer of its own.
+    #[must_use]
+    pub fn to_rgb_with(&self, components: &[f64], scratch: &mut Vec<f64>) -> (u8, u8, u8) {
+        match self {
+            ColorSpace::Separation {
+                alternate, tint, ..
+            } => {
+                tint.eval_into(components, scratch);
+                alternate.to_rgb(scratch)
+            }
+            other => other.to_rgb(components),
+        }
+    }
 }
 
 fn byte(value: f64) -> u8 {
@@ -611,6 +628,44 @@ mod tests {
         };
         assert_eq!(space.to_rgb(&[0.0]), (255, 255, 255), "no ink is white");
         assert_eq!(space.to_rgb(&[1.0]), (0, 0, 0), "full ink is black");
+    }
+
+    /// `to_rgb_with` is `to_rgb` whatever its scratch held: a two-ink
+    /// `/DeviceN` into CMYK, the tint transform an array of four, converted
+    /// over and over through one buffer, and a space with no transform beside
+    /// it.
+    #[test]
+    fn converting_through_a_kept_buffer_is_converting() {
+        let ink = |c0: f64, c1: f64| Function::Exponential {
+            domain: (0.0, 1.0),
+            c0: vec![c0],
+            c1: vec![c1],
+            n: 2.2,
+        };
+        let space = ColorSpace::Separation {
+            components: 2,
+            alternate: Box::new(ColorSpace::DeviceCmyk),
+            tint: Box::new(Function::Array(vec![
+                ink(0.0, 0.9),
+                ink(0.1, 0.4),
+                ink(0.0, 0.0),
+                ink(0.2, 0.7),
+            ])),
+        };
+        let mut scratch = vec![0.5; 9];
+        for step in 0..=20 {
+            let a = f64::from(step) / 20.0;
+            let components = [a, 1.0 - a];
+            assert_eq!(
+                space.to_rgb_with(&components, &mut scratch),
+                space.to_rgb(&components),
+                "{components:?}"
+            );
+            assert_eq!(
+                ColorSpace::DeviceRgb.to_rgb_with(&[a, 0.5, 1.0 - a], &mut scratch),
+                ColorSpace::DeviceRgb.to_rgb(&[a, 0.5, 1.0 - a])
+            );
+        }
     }
 
     #[test]

@@ -136,10 +136,16 @@ first input varying fastest, across up to eight inputs and at the nearest
 sample past that, where 2^m corners a lookup stops being a cost worth paying
 (`a_two_input_sampled_function_shades_across_both_inputs`). A type 1
 shading's `/Matrix` is not read. An evaluation enumerates only the axes the
-point is strictly inside, reads a byte-aligned sample in a few instructions,
-allocates nothing per call and reads no more than 8 192 samples whatever
-`/Range` asks for — past that, the nearest sample, as past eight inputs
-(`one_evaluation_reads_no_more_than_its_budget`). An image in any space other
+point is strictly inside, reads a byte-aligned sample in a few instructions
+and reads no more than 8 192 samples whatever `/Range` asks for — past that,
+the nearest sample, as past eight inputs
+(`one_evaluation_reads_no_more_than_its_budget`). `Function::eval_into`
+evaluates into a buffer the caller keeps, the outputs `Function::eval`
+returns to the bit, and allocates nothing once the buffer has grown: a
+table's sums are taken in it, and a calculator's operand stack runs in it
+above what an array's earlier members wrote, out of the program's reach, with
+eight waiting `{ … }` procedures held in place
+(`eval_into_starts_afresh_and_a_type_4_member_keeps_to_its_own_stack`). An image in any space other
 than the device spaces converts each colour once, remembered by its samples
 in a table of 4 096 slots that never answers one colour for another
 (`an_images_repeated_colour_is_converted_once`,
@@ -159,7 +165,14 @@ integers (ruling 4, no float termination test on a pixel path); and the whole
 mesh renders through a single coverage buffer from one non-zero fill, so
 shared edges do not seam against the backdrop. Bounds: 262 144 vertices,
 16 384 patches, 131 072 triangles total, 32 subdivisions per edge. `sh`
-fills the current clip (8.7.4.2).
+fills the current clip (8.7.4.2). Each sweep — `sh`, a shading pattern's fill
+and a mesh's colour pass — keeps one `ShadingScratch` for all its pixels: the
+function evaluates into it, and a `/Separation` or `/DeviceN` space's tint
+transform converts through it (`ColorSpace::to_rgb_with`), so painting a
+shading allocates nothing per pixel (`tests/shading_work.rs`, with MS-01's
+counting allocator). A row's inverse-map products `c·y` and `d·y` are taken
+once a row and each pixel maps to the bits `Matrix::apply` gives it
+(`a_row_map_is_the_matrix_s_map_to_the_bit`).
 
 **Patterns** (8.7.3). Tiling patterns paint in both paint types, anchored to
 the *parent content stream's default space* as 8.7.3.1 requires — not the

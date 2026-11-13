@@ -37,6 +37,8 @@
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::Matrix;
 
+use crate::shading::ShadingScratch;
+
 /// The most vertices one packed stream may yield.
 ///
 /// A vertex stream is attacker-sized: `/BitsPerCoordinate 1` with one
@@ -141,11 +143,14 @@ impl Mesh {
     /// would move the midpoint of every non-linear space, and of every
     /// non-linear `/Function`, which is a difference no test of the endpoints
     /// can see.
+    ///
+    /// `scratch` is the colour pass's, the same one for every pixel, so the
+    /// pass allocates nothing per pixel.
     #[must_use]
-    pub fn color(&self, inputs: &[f64]) -> (u8, u8, u8) {
+    pub fn color(&self, inputs: &[f64], scratch: &mut ShadingScratch) -> (u8, u8, u8) {
         match &self.function {
-            Some(function) => self.space.to_rgb(&function.eval(inputs)),
-            None => self.space.to_rgb(inputs),
+            Some(function) => scratch.color(&self.space, function, inputs),
+            None => scratch.convert(&self.space, inputs),
         }
     }
 
@@ -1264,5 +1269,69 @@ mod tests {
             .len();
         assert!(small < large, "{small} is not finer than {large}");
         assert_eq!(small, 2, "a patch a pixel across is one cell");
+    }
+
+    /// **The colour pass's one scratch converts what a fresh one would.** A
+    /// mesh carrying a `/Function` into a two-ink space, whose tint transform
+    /// writes the scratch too, and one carrying CMYK components outright, take
+    /// turns on one scratch over a run of interpolated inputs.
+    #[test]
+    fn a_kept_scratch_converts_what_a_fresh_one_does() {
+        let mesh = |space: ColorSpace, function: Option<Function>, components: usize| Mesh {
+            kind: 4,
+            space,
+            function,
+            components,
+            positions: Vec::new(),
+            values: Vec::new(),
+            triangles: Vec::new(),
+            patches: Vec::new(),
+        };
+        let inks = ColorSpace::Separation {
+            components: 2,
+            alternate: Box::new(ColorSpace::DeviceRgb),
+            tint: Box::new(Function::PostScript {
+                domain: vec![(0.0, 1.0); 2],
+                range: vec![(0.0, 1.0); 3],
+                program: tinker_pdf_color::function::parse_postscript(
+                    b"{ 2 copy add 0.5 mul 3 1 roll }",
+                ),
+            }),
+        };
+        let carried = mesh(
+            inks,
+            Some(Function::Array(vec![
+                Function::Exponential {
+                    domain: (0.0, 1.0),
+                    c0: vec![0.0],
+                    c1: vec![1.0],
+                    n: 2.2,
+                },
+                Function::Exponential {
+                    domain: (0.0, 1.0),
+                    c0: vec![1.0],
+                    c1: vec![0.25],
+                    n: 1.0,
+                },
+            ])),
+            1,
+        );
+        let components = mesh(ColorSpace::DeviceCmyk, None, 4);
+
+        let mut kept = ShadingScratch::default();
+        for step in 0..=64 {
+            let t = f64::from(step) / 64.0;
+            assert_eq!(
+                carried.color(&[t], &mut kept),
+                carried.color(&[t], &mut ShadingScratch::default()),
+                "t = {t}"
+            );
+            let cmyk = [t, 1.0 - t, t * t, 0.1];
+            assert_eq!(
+                components.color(&cmyk, &mut kept),
+                components.color(&cmyk, &mut ShadingScratch::default()),
+                "{cmyk:?}"
+            );
+        }
     }
 }

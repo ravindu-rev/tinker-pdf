@@ -6,10 +6,41 @@
 //! triangles and patches — and cannot answer that question at a point, so they
 //! carry a [`Mesh`] and are painted by the mesh rasteriser instead. That is why
 //! `color_at` returns `None` for them rather than growing a branch that guesses.
+//!
+//! A shading is evaluated once a pixel, so what an evaluation writes — the
+//! function's outputs, and a `/Separation` or `/DeviceN` space's tint — goes
+//! into a [`ShadingScratch`] the sweep keeps from one pixel to the next, and
+//! painting a shading allocates nothing per pixel.
 
 use tinker_pdf_color::{ColorSpace, Function};
 
 use crate::mesh::Mesh;
+
+/// What evaluating a shading writes, kept by a sweep from one pixel to the
+/// next: a function's outputs and a colour space's tint transform's.
+#[derive(Clone, Debug, Default)]
+pub struct ShadingScratch {
+    outputs: Vec<f64>,
+    converted: Vec<f64>,
+}
+
+impl ShadingScratch {
+    /// `function` at `inputs`, converted from `space`.
+    pub(crate) fn color(
+        &mut self,
+        space: &ColorSpace,
+        function: &Function,
+        inputs: &[f64],
+    ) -> (u8, u8, u8) {
+        function.eval_into(inputs, &mut self.outputs);
+        space.to_rgb_with(&self.outputs, &mut self.converted)
+    }
+
+    /// `components` of `space`, converted, with no function between.
+    pub(crate) fn convert(&mut self, space: &ColorSpace, components: &[f64]) -> (u8, u8, u8) {
+        space.to_rgb_with(components, &mut self.converted)
+    }
+}
 
 /// A shading, reduced to what painting needs.
 #[derive(Clone, Debug)]
@@ -61,13 +92,13 @@ impl Shading {
     }
 
     /// The colour at a point in shading space, or `None` where the shading
-    /// paints nothing.
+    /// paints nothing. `scratch` is the sweep's, the same one for every pixel.
     ///
     /// Always `None` for a mesh: a mesh is not a function of position, and
     /// answering "what colour is here" would mean locating the containing
     /// triangle per pixel, which is the search the rasteriser exists to avoid.
     #[must_use]
-    pub fn color_at(&self, x: f64, y: f64) -> Option<(u8, u8, u8)> {
+    pub fn color_at(&self, x: f64, y: f64, scratch: &mut ShadingScratch) -> Option<(u8, u8, u8)> {
         if !x.is_finite() || !y.is_finite() {
             return None;
         }
@@ -83,7 +114,7 @@ impl Shading {
                 if x < x0.min(x1) || x > x0.max(x1) || y < y0.min(y1) || y > y0.max(y1) {
                     return None;
                 }
-                Some(space.to_rgb(&function.eval(&[x, y])))
+                Some(scratch.color(space, function, &[x, y]))
             }
 
             Shading::Axial {
@@ -101,7 +132,7 @@ impl Shading {
                 // The parameter is the projection onto the axis.
                 let t = ((x - ax) * dx + (y - ay) * dy) / denominator;
                 let t = clamp_extend(t, *extend)?;
-                Some(space.to_rgb(&function.eval(&[t])))
+                Some(scratch.color(space, function, &[t]))
             }
 
             Shading::Radial {
@@ -111,7 +142,7 @@ impl Shading {
                 extend,
             } => {
                 let t = radial_parameter(*coords, x, y, *extend)?;
-                Some(space.to_rgb(&function.eval(&[t])))
+                Some(scratch.color(space, function, &[t]))
             }
         }
     }
@@ -188,6 +219,11 @@ fn radial_parameter(coords: [f64; 6], x: f64, y: f64, extend: (bool, bool)) -> O
 mod tests {
     use super::*;
 
+    /// The colour at a point, from a scratch of its own.
+    fn at(shading: &Shading, x: f64, y: f64) -> Option<(u8, u8, u8)> {
+        shading.color_at(x, y, &mut ShadingScratch::default())
+    }
+
     fn ramp() -> Function {
         // Black at zero, white at one.
         Function::Exponential {
@@ -210,13 +246,9 @@ mod tests {
     #[test]
     fn an_axial_gradient_runs_along_its_axis() {
         let shading = axial((true, true));
-        assert_eq!(shading.color_at(0.0, 0.0), Some((0, 0, 0)), "the start");
-        assert_eq!(
-            shading.color_at(10.0, 0.0),
-            Some((255, 255, 255)),
-            "the end"
-        );
-        let middle = shading.color_at(5.0, 0.0).expect("a colour");
+        assert_eq!(at(&shading, 0.0, 0.0), Some((0, 0, 0)), "the start");
+        assert_eq!(at(&shading, 10.0, 0.0), Some((255, 255, 255)), "the end");
+        let middle = at(&shading, 5.0, 0.0).expect("a colour");
         assert!(
             (125..=130).contains(&middle.0),
             "halfway is mid grey, got {middle:?}"
@@ -227,22 +259,19 @@ mod tests {
     fn the_axis_is_a_projection_not_a_distance() {
         // A point off the axis takes the colour of its projection onto it.
         let shading = axial((true, true));
-        assert_eq!(shading.color_at(5.0, 100.0), shading.color_at(5.0, 0.0));
+        assert_eq!(at(&shading, 5.0, 100.0), at(&shading, 5.0, 0.0));
     }
 
     #[test]
     fn extend_decides_what_happens_past_the_ends() {
         let extended = axial((true, true));
-        assert_eq!(extended.color_at(-50.0, 0.0), Some((0, 0, 0)));
-        assert_eq!(extended.color_at(50.0, 0.0), Some((255, 255, 255)));
+        assert_eq!(at(&extended, -50.0, 0.0), Some((0, 0, 0)));
+        assert_eq!(at(&extended, 50.0, 0.0), Some((255, 255, 255)));
 
         let bounded = axial((false, false));
-        assert_eq!(bounded.color_at(-50.0, 0.0), None, "nothing before");
-        assert_eq!(bounded.color_at(50.0, 0.0), None, "nothing after");
-        assert!(
-            bounded.color_at(5.0, 0.0).is_some(),
-            "but inside is painted"
-        );
+        assert_eq!(at(&bounded, -50.0, 0.0), None, "nothing before");
+        assert_eq!(at(&bounded, 50.0, 0.0), None, "nothing after");
+        assert!(at(&bounded, 5.0, 0.0).is_some(), "but inside is painted");
     }
 
     #[test]
@@ -253,7 +282,7 @@ mod tests {
             coords: [3.0, 3.0, 3.0, 3.0],
             extend: (true, true),
         };
-        assert_eq!(shading.color_at(3.0, 3.0), None);
+        assert_eq!(at(&shading, 3.0, 3.0), None);
     }
 
     #[test]
@@ -266,13 +295,9 @@ mod tests {
             extend: (true, true),
         };
 
-        assert_eq!(shading.color_at(0.0, 0.0), Some((0, 0, 0)), "the centre");
-        assert_eq!(
-            shading.color_at(10.0, 0.0),
-            Some((255, 255, 255)),
-            "the rim"
-        );
-        let middle = shading.color_at(5.0, 0.0).expect("a colour");
+        assert_eq!(at(&shading, 0.0, 0.0), Some((0, 0, 0)), "the centre");
+        assert_eq!(at(&shading, 10.0, 0.0), Some((255, 255, 255)), "the rim");
+        let middle = at(&shading, 5.0, 0.0).expect("a colour");
         assert!(
             (125..=130).contains(&middle.0),
             "halfway out is mid grey, got {middle:?}"
@@ -287,15 +312,15 @@ mod tests {
             coords: [0.0, 0.0, 0.0, 0.0, 0.0, 10.0],
             extend: (false, false),
         };
-        assert!(shading.color_at(5.0, 0.0).is_some(), "inside");
-        assert_eq!(shading.color_at(50.0, 0.0), None, "well outside");
+        assert!(at(&shading, 5.0, 0.0).is_some(), "inside");
+        assert_eq!(at(&shading, 50.0, 0.0), None, "well outside");
     }
 
     #[test]
     fn nonsense_coordinates_are_refused_rather_than_painted() {
         let shading = axial((true, true));
-        assert_eq!(shading.color_at(f64::NAN, 0.0), None);
-        assert_eq!(shading.color_at(0.0, f64::INFINITY), None);
+        assert_eq!(at(&shading, f64::NAN, 0.0), None);
+        assert_eq!(at(&shading, 0.0, f64::INFINITY), None);
 
         // A radial family with no real solution anywhere.
         let impossible = Shading::Radial {
@@ -304,6 +329,105 @@ mod tests {
             coords: [0.0, 0.0, 5.0, 0.0, 0.0, 5.0],
             extend: (false, false),
         };
-        let _ = impossible.color_at(100.0, 100.0);
+        let _ = at(&impossible, 100.0, 100.0);
+    }
+
+    /// **A sweep's one scratch paints what a fresh one would at every
+    /// pixel.** Nothing an evaluation leaves in the scratch may reach the
+    /// next: not a longer function's outputs before a shorter one's, not a
+    /// tint transform's, not a type 4 program's stack. Each shading is swept
+    /// over a grid through one scratch, against a fresh scratch per point,
+    /// and the shadings take turns on the one scratch so their outputs
+    /// differ in length from one point to the next.
+    #[test]
+    fn a_kept_scratch_paints_what_a_fresh_one_does() {
+        let gamma = |c0: Vec<f64>, c1: Vec<f64>, n: f64| Function::Exponential {
+            domain: (0.0, 1.0),
+            c0,
+            c1,
+            n,
+        };
+        let spot = ColorSpace::Separation {
+            components: 1,
+            alternate: Box::new(ColorSpace::DeviceCmyk),
+            tint: Box::new(gamma(vec![0.0; 4], vec![0.1, 0.7, 0.2, 0.05], 1.8)),
+        };
+        let two_inks = ColorSpace::Separation {
+            components: 2,
+            alternate: Box::new(ColorSpace::DeviceRgb),
+            tint: Box::new(Function::PostScript {
+                domain: vec![(0.0, 1.0); 2],
+                range: vec![(0.0, 1.0); 3],
+                program: tinker_pdf_color::function::parse_postscript(
+                    b"{ 2 copy add 0.5 mul 3 1 roll }",
+                ),
+            }),
+        };
+        let shadings = [
+            Shading::Axial {
+                space: ColorSpace::DeviceRgb,
+                function: gamma(vec![0.0, 0.1, 0.6], vec![1.0, 0.9, 0.2], 1.0),
+                coords: [0.0, 0.0, 40.0, 25.0],
+                extend: (true, false),
+            },
+            Shading::Radial {
+                space: ColorSpace::DeviceRgb,
+                function: Function::Stitching {
+                    domain: (0.0, 1.0),
+                    functions: vec![
+                        gamma(vec![1.0, 1.0, 1.0], vec![0.9, 0.2, 0.1], 2.2),
+                        gamma(vec![0.9, 0.2, 0.1], vec![0.0, 0.0, 0.3], 0.5),
+                    ],
+                    bounds: vec![0.4],
+                    encode: vec![(0.0, 1.0), (0.0, 1.0)],
+                },
+                coords: [20.0, 20.0, 2.0, 24.0, 18.0, 30.0],
+                extend: (false, true),
+            },
+            Shading::Axial {
+                space: spot,
+                function: ramp(),
+                coords: [40.0, 0.0, 0.0, 40.0],
+                extend: (true, true),
+            },
+            Shading::FunctionBased {
+                space: two_inks,
+                function: Function::PostScript {
+                    domain: vec![(0.0, 40.0); 2],
+                    range: vec![(0.0, 1.0); 2],
+                    program: tinker_pdf_color::function::parse_postscript(
+                        b"{ 40 div exch 40 div 2 copy gt { exch } if }",
+                    ),
+                },
+                domain: [0.0, 40.0, 0.0, 40.0],
+            },
+            Shading::Axial {
+                space: ColorSpace::DeviceGray,
+                function: Function::Sampled {
+                    domain: vec![(0.0, 1.0)],
+                    range: vec![(0.0, 1.0)],
+                    size: vec![5],
+                    bits: 8,
+                    encode: vec![],
+                    decode: vec![],
+                    samples: vec![0, 60, 130, 200, 255],
+                },
+                coords: [0.0, 40.0, 40.0, 0.0],
+                extend: (true, true),
+            },
+        ];
+        let mut kept = ShadingScratch::default();
+        for row in 0..40 {
+            for column in 0..40 {
+                let (x, y) = (f64::from(column) + 0.5, f64::from(row) + 0.5);
+                for (which, shading) in shadings.iter().enumerate() {
+                    assert_eq!(
+                        shading.color_at(x, y, &mut kept),
+                        at(shading, x, y),
+                        "shading {which} at ({x}, {y})"
+                    );
+                }
+            }
+        }
     }
 }

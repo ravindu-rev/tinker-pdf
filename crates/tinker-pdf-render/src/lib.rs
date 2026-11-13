@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
-pub use shading::Shading;
+pub use shading::{Shading, ShadingScratch};
 use tinker_pdf_content::{
     Device, Glyph, GraphicsState, ImageRef, LineCap as ContentCap, LineJoin as ContentJoin, Matrix,
     PathSegment,
@@ -1742,20 +1742,23 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let (ox, oy) = self.canvas.origin();
         let (x_start, y_start, x_end, y_end) =
             area.overlap_at((ox, oy), self.canvas.width, self.canvas.height);
+        let mut scratch = ShadingScratch::default();
         for row in y_start..y_end {
             if self.stopping() {
                 return true;
             }
+            // The device pixel, in the page's frame: the one number a tile
+            // and the page under it both sample at (ruling 5).
+            let py = oy.saturating_add(row as i32);
+            let map = RowMap::new(&inverse, f64::from(py) + 0.5);
             for col in x_start..x_end {
-                // The device pixel, in the page's frame: the one number a
-                // tile and the page under it both sample at (ruling 5).
-                let (px, py) = (ox.saturating_add(col as i32), oy.saturating_add(row as i32));
+                let px = ox.saturating_add(col as i32);
                 let coverage = area.at(px, py);
                 if coverage == 0 {
                     continue;
                 }
-                let (x, y) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
-                let Some((r, g, b)) = shading.color_at(x, y) else {
+                let (x, y) = map.at(f64::from(px) + 0.5);
+                let Some((r, g, b)) = shading.color_at(x, y, &mut scratch) else {
                     continue;
                 };
                 let weight = alpha * f64::from(coverage) / 255.0;
@@ -1825,8 +1828,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // vertices instead would interpolate in device space and move the
         // midpoint of every non-linear colour space and every non-linear
         // `/Function`.
+        //
+        // One shading scratch for the whole colour pass, taken out of its
+        // cell for each pixel and put back, so the pass allocates nothing per
+        // pixel.
+        let shading = core::cell::Cell::new(ShadingScratch::default());
         let convert = |inputs: &[f64]| {
-            let (r, g, b) = mesh.color(inputs);
+            let mut taken = shading.take();
+            let (r, g, b) = mesh.color(inputs, &mut taken);
+            shading.set(taken);
             Color { r, g, b, a: 0xFF }
         };
         let draw = MeshDraw {
@@ -3242,21 +3252,24 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 .unwrap_or_else(|| Mask::uniform(ox, oy, width, height, 255));
             self.knockout_restore(&restore);
         }
+        let mut scratch = ShadingScratch::default();
         for row in y_start..y_end {
             if self.stopping() {
                 return;
             }
+            // The device pixel, in the page's frame: see
+            // `fill_with_shading`.
+            let py = oy.saturating_add(row as i32);
+            let map = RowMap::new(&inverse, f64::from(py) + 0.5);
             for col in x_start..x_end {
-                // The device pixel, in the page's frame: see
-                // `fill_with_shading`.
-                let (px, py) = (ox.saturating_add(col as i32), oy.saturating_add(row as i32));
+                let px = ox.saturating_add(col as i32);
                 let clip = area.as_ref().map_or(255, |mask| mask.at(px, py));
                 if clip == 0 {
                     continue;
                 }
 
-                let (x, y) = inverse.apply(f64::from(px) + 0.5, f64::from(py) + 0.5);
-                let Some((r, g, b)) = shading.color_at(x, y) else {
+                let (x, y) = map.at(f64::from(px) + 0.5);
+                let Some((r, g, b)) = shading.color_at(x, y, &mut scratch) else {
                     continue;
                 };
                 let effective = alpha * f64::from(clip) / 255.0;
@@ -3397,6 +3410,41 @@ fn transform(m: &Matrix) -> Transform {
         d: m.d,
         e: m.e,
         f: m.f,
+    }
+}
+
+/// A device row's inverse map, its row-invariant products taken once.
+///
+/// [`RowMap::at`] is `Matrix::apply` at `(x, y)` operation for operation —
+/// `a·x + c·y + e` and `b·x + d·y + f`, added left to right, with `c·y` and
+/// `d·y` the values this holds — so a pixel maps to the same bits whether its
+/// row's products were taken once or at every column (ruling 4).
+#[derive(Clone, Copy, Debug)]
+struct RowMap {
+    a: f64,
+    b: f64,
+    e: f64,
+    f: f64,
+    cy: f64,
+    dy: f64,
+}
+
+impl RowMap {
+    /// The map of the row at device `y`.
+    fn new(m: &Matrix, y: f64) -> RowMap {
+        RowMap {
+            a: m.a,
+            b: m.b,
+            e: m.e,
+            f: m.f,
+            cy: m.c * y,
+            dy: m.d * y,
+        }
+    }
+
+    /// The point device `x` of this row maps to.
+    fn at(&self, x: f64) -> (f64, f64) {
+        (self.a * x + self.cy + self.e, self.b * x + self.dy + self.f)
     }
 }
 
@@ -3908,6 +3956,58 @@ mod tests {
                 PixelFormat::CmykA8 | PixelFormat::LabA8 => PixelFormat::Rgba8,
             };
             assert_eq!(page_format(format), expected, "{format:?}");
+        }
+    }
+
+    /// **A row's map is the matrix's map to the bit.** The shading sweeps take
+    /// `c·y` and `d·y` once a row; every pixel must still map to the bits
+    /// `Matrix::apply` gives it, or hoisting them would move pixels. Matrices
+    /// whose products round, a rotation and a shear among them, at
+    /// pixel-centre coordinates far enough out for the sums to round too.
+    #[test]
+    fn a_row_map_is_the_matrix_s_map_to_the_bit() {
+        let matrices = [
+            Matrix {
+                a: 0.3,
+                b: 0.7,
+                c: -1.1,
+                d: 0.9,
+                e: 13.37,
+                f: -2.71,
+            },
+            Matrix {
+                a: 1.0 / 3.0,
+                b: 0.0,
+                c: 0.0,
+                d: -1.0 / 3.0,
+                e: 0.1,
+                f: 280.6,
+            },
+            Matrix {
+                a: 0.866_025_403_784_438_6,
+                b: 0.5,
+                c: -0.5,
+                d: 0.866_025_403_784_438_6,
+                e: -123.456,
+                f: 789.012,
+            },
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        for m in &matrices {
+            for _ in 0..2_000 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let x = (seed % 9_000) as f64 + 0.5;
+                let y = ((seed >> 20) % 9_000) as f64 + 0.5;
+                let (ax, ay) = m.apply(x, y);
+                let (rx, ry) = RowMap::new(m, y).at(x);
+                assert_eq!(
+                    (ax.to_bits(), ay.to_bits()),
+                    (rx.to_bits(), ry.to_bits()),
+                    "({x}, {y}) under {m:?}"
+                );
+            }
         }
     }
 

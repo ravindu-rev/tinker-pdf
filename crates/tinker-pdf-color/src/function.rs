@@ -100,28 +100,50 @@ impl Function {
     /// than stopping a page, which is what a viewer must do with one.
     #[must_use]
     pub fn eval(&self, inputs: &[f64]) -> Vec<f64> {
+        let mut out = Vec::new();
+        self.eval_into(inputs, &mut out);
+        out
+    }
+
+    /// [`Function::eval`] into a buffer the caller keeps: `out` is cleared and
+    /// then holds the outputs, the same values to the bit.
+    ///
+    /// For a caller that evaluates once a pixel. Nothing here allocates once
+    /// `out` has grown as far as an evaluation takes it — a type 4 program's
+    /// operand stack runs in `out` too — except a type 4 program that has more
+    /// than eight `{ … }` procedures waiting for an `if` or `ifelse` at once in
+    /// one body, whose ninth and later are kept on the heap.
+    pub fn eval_into(&self, inputs: &[f64], out: &mut Vec<f64>) {
+        out.clear();
+        self.append(inputs, out);
+    }
+
+    /// Appends the outputs to `out`, leaving what it already held alone.
+    fn append(&self, inputs: &[f64], out: &mut Vec<f64>) {
         match self {
-            Function::Identity => inputs.to_vec(),
+            Function::Identity => out.extend_from_slice(inputs),
 
             // Each member contributes its own outputs, in order. Members are
             // one-output functions by the spec's own requirement, but a
             // member that yields several is concatenated rather than
             // truncated: dropping values would be the same silent loss this
             // variant exists to prevent.
-            Function::Array(functions) => functions.iter().flat_map(|f| f.eval(inputs)).collect(),
+            Function::Array(functions) => {
+                for function in functions {
+                    function.append(inputs, out);
+                }
+            }
 
             Function::Exponential { domain, c0, c1, n } => {
                 let x = clamp(inputs.first().copied().unwrap_or(0.0), *domain);
                 let factor = if *n == 1.0 { x } else { math::pow(x, *n) };
                 let factor = if factor.is_finite() { factor } else { 0.0 };
                 let len = c0.len().max(c1.len());
-                (0..len)
-                    .map(|i| {
-                        let a = c0.get(i).copied().unwrap_or(0.0);
-                        let b = c1.get(i).copied().unwrap_or(1.0);
-                        a + factor * (b - a)
-                    })
-                    .collect()
+                out.extend((0..len).map(|i| {
+                    let a = c0.get(i).copied().unwrap_or(0.0);
+                    let b = c1.get(i).copied().unwrap_or(1.0);
+                    a + factor * (b - a)
+                }));
             }
 
             Function::Stitching {
@@ -145,8 +167,8 @@ impl Function {
                 let mapped = interpolate(x, low, high, e0, e1);
 
                 match functions.get(index) {
-                    Some(f) => f.eval(&[mapped]),
-                    None => vec![0.0],
+                    Some(f) => f.append(&[mapped], out),
+                    None => out.push(0.0),
                 }
             }
 
@@ -158,31 +180,41 @@ impl Function {
                 encode,
                 decode,
                 samples,
-            } => sampled(domain, range, size, *bits, encode, decode, samples, inputs),
+            } => sampled(
+                domain, range, size, *bits, encode, decode, samples, inputs, out,
+            ),
 
             Function::PostScript {
                 domain,
                 range,
                 program,
             } => {
-                let clamped: Vec<f64> = inputs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| clamp(*v, domain.get(i).copied().unwrap_or((0.0, 1.0))))
-                    .collect();
+                // The operand stack is `out` above what it already held,
+                // starting as the clamped inputs.
+                let floor = out.len();
+                out.extend(
+                    inputs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| clamp(*v, domain.get(i).copied().unwrap_or((0.0, 1.0)))),
+                );
+                run_ps(program, &mut Stack { values: out, floor }, 0);
 
-                let mut stack = clamped;
-                run_ps(program, &mut stack, 0);
-
-                // The outputs are the last `range.len()` values on the stack.
+                // The outputs are the last `range.len()` values on the stack,
+                // moved down to where it began. Each is read before anything
+                // is written at or past its slot, because the slot it moves to
+                // is never after the one it came from.
                 let n = range.len();
-                let start = stack.len().saturating_sub(n);
-                (0..n)
-                    .map(|i| {
-                        let value = stack.get(start + i).copied().unwrap_or(0.0);
-                        clamp(value, range.get(i).copied().unwrap_or((0.0, 1.0)))
-                    })
-                    .collect()
+                let first = floor + out.len().saturating_sub(floor).saturating_sub(n);
+                for i in 0..n {
+                    let value = out.get(first + i).copied().unwrap_or(0.0);
+                    let value = clamp(value, range.get(i).copied().unwrap_or((0.0, 1.0)));
+                    match out.get_mut(floor + i) {
+                        Some(slot) => *slot = value,
+                        None => out.push(value),
+                    }
+                }
+                out.truncate(floor + n);
             }
         }
     }
@@ -237,6 +269,8 @@ const MULTILINEAR_READS: usize = 8192;
 /// nearest-sample read, and it was not one: a two-colorant `/DeviceN` tint
 /// transform painted every tint of the second colorant as none of it. The
 /// one-input path is the same arithmetic it always was.
+///
+/// The outputs are appended to `out`.
 #[allow(clippy::too_many_arguments)]
 fn sampled(
     domain: &[(f64, f64)],
@@ -247,7 +281,8 @@ fn sampled(
     decode: &[(f64, f64)],
     samples: &[u8],
     inputs: &[f64],
-) -> Vec<f64> {
+    out: &mut Vec<f64>,
+) {
     let outputs = range.len().max(1);
     let max = ((1u64 << bits.min(32)) - 1) as f64;
 
@@ -264,7 +299,8 @@ fn sampled(
     };
 
     if size.len() > 1 {
-        return sampled_across(domain, range, size, max, encode, decode, &read, inputs);
+        sampled_across(domain, range, size, max, encode, decode, &read, inputs, out);
+        return;
     }
 
     let first_domain = domain.first().copied().unwrap_or((0.0, 1.0));
@@ -282,21 +318,19 @@ fn sampled(
     let high = low.saturating_add(1).min(first_size - 1);
     let fraction = position - position.floor();
 
-    (0..outputs)
-        .map(|component| {
-            let a = read(low, component);
-            let b = read(high, component);
-            let raw = a + (b - a) * fraction;
+    out.extend((0..outputs).map(|component| {
+        let a = read(low, component);
+        let b = read(high, component);
+        let raw = a + (b - a) * fraction;
 
-            let (d0, d1) = decode
-                .get(component)
-                .copied()
-                .or_else(|| range.get(component).copied())
-                .unwrap_or((0.0, 1.0));
-            let value = interpolate(raw, 0.0, max, d0, d1);
-            clamp(value, range.get(component).copied().unwrap_or((0.0, 1.0)))
-        })
-        .collect()
+        let (d0, d1) = decode
+            .get(component)
+            .copied()
+            .or_else(|| range.get(component).copied())
+            .unwrap_or((0.0, 1.0));
+        let value = interpolate(raw, 0.0, max, d0, d1);
+        clamp(value, range.get(component).copied().unwrap_or((0.0, 1.0)))
+    }));
 }
 
 /// One sample of a 7.10.2 table: the `sample`th value of `bits` bits, packed
@@ -375,7 +409,8 @@ fn sampled_across(
     decode: &[(f64, f64)],
     read: &dyn Fn(usize, usize) -> f64,
     inputs: &[f64],
-) -> Vec<f64> {
+    out: &mut Vec<f64>,
+) {
     let outputs = range.len().max(1);
     // The cell's low corner as one index into the table, the nearest sample
     // as another, and for each axis the point is strictly inside, the step to
@@ -418,7 +453,13 @@ fn sampled_across(
         && live <= MULTILINEAR_INPUTS
         && (1usize << live).saturating_mul(outputs) <= MULTILINEAR_READS;
 
-    let mut raw = vec![0.0f64; outputs];
+    // The raw sums are taken in `out` itself, past what it already held, and
+    // decoded where they lie.
+    let start = out.len();
+    out.resize(start.saturating_add(outputs), 0.0);
+    let Some(raw) = out.get_mut(start..) else {
+        return;
+    };
     if !multilinear {
         for (component, slot) in raw.iter_mut().enumerate() {
             *slot = read(closest, component);
@@ -448,27 +489,125 @@ fn sampled_across(
         }
     }
 
-    raw.iter()
-        .enumerate()
-        .map(|(component, raw)| {
-            let (d0, d1) = decode
-                .get(component)
-                .copied()
-                .or_else(|| range.get(component).copied())
-                .unwrap_or((0.0, 1.0));
-            let value = interpolate(*raw, 0.0, max, d0, d1);
-            clamp(value, range.get(component).copied().unwrap_or((0.0, 1.0)))
-        })
-        .collect()
+    for (component, slot) in raw.iter_mut().enumerate() {
+        let (d0, d1) = decode
+            .get(component)
+            .copied()
+            .or_else(|| range.get(component).copied())
+            .unwrap_or((0.0, 1.0));
+        let value = interpolate(*slot, 0.0, max, d0, d1);
+        *slot = clamp(value, range.get(component).copied().unwrap_or((0.0, 1.0)));
+    }
+}
+
+/// A type 4 program's operand stack: the values of a buffer from `floor` up.
+///
+/// The buffer is the one [`Function::eval_into`] was handed, so the stack
+/// costs no allocation of its own, and what an array's earlier members put
+/// below `floor` is out of the program's reach: a pop at the floor answers
+/// nothing, as a pop from an empty stack does.
+struct Stack<'a> {
+    values: &'a mut Vec<f64>,
+    floor: usize,
+}
+
+impl Stack<'_> {
+    fn len(&self) -> usize {
+        self.values.len().saturating_sub(self.floor)
+    }
+
+    fn push(&mut self, value: f64) {
+        self.values.push(value);
+    }
+
+    fn pop(&mut self) -> Option<f64> {
+        if self.values.len() > self.floor {
+            self.values.pop()
+        } else {
+            None
+        }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.values.truncate(self.floor.saturating_add(len));
+    }
+
+    /// The value `index` places above the floor.
+    fn get(&self, index: usize) -> Option<f64> {
+        self.values.get(self.floor.checked_add(index)?).copied()
+    }
+
+    /// Where the top `n` values begin in the buffer, `n` held to the stack's
+    /// length, so never below the floor.
+    fn top(&self, n: usize) -> usize {
+        self.values.len().saturating_sub(n.min(self.len()))
+    }
+
+    /// The top `n` values, or as many as there are.
+    fn top_mut(&mut self, n: usize) -> &mut [f64] {
+        let from = self.top(n);
+        self.values.get_mut(from..).unwrap_or_default()
+    }
+
+    /// Pushes a copy of the top `n` values, or of as many as there are.
+    fn copy_top(&mut self, n: usize) {
+        // `top` is at most the buffer's length, so the range is in bounds.
+        let from = self.top(n);
+        self.values.extend_from_within(from..);
+    }
+}
+
+/// How many `{ … }` procedures one body of a type 4 program holds in place
+/// before [`Blocks`] keeps the rest on the heap.
+const INLINE_BLOCKS: usize = 8;
+
+/// The procedures a body of a type 4 program has pushed and no `if` or
+/// `ifelse` has yet taken, the newest on top: the first [`INLINE_BLOCKS`] in
+/// place and any beyond them on the heap, so that an evaluation of an
+/// ordinary program allocates nothing.
+struct Blocks<'p> {
+    inline: [&'p [PsOp]; INLINE_BLOCKS],
+    len: usize,
+    spill: Vec<&'p [PsOp]>,
+}
+
+impl<'p> Blocks<'p> {
+    fn new() -> Self {
+        Blocks {
+            inline: [&[]; INLINE_BLOCKS],
+            len: 0,
+            spill: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, body: &'p [PsOp]) {
+        match self.inline.get_mut(self.len) {
+            Some(slot) => {
+                *slot = body;
+                self.len += 1;
+            }
+            None => self.spill.push(body),
+        }
+    }
+
+    /// The newest procedure: the spill is pushed to only while the places are
+    /// full, so whatever it holds is newer than all of them.
+    fn pop(&mut self) -> Option<&'p [PsOp]> {
+        if let Some(body) = self.spill.pop() {
+            return Some(body);
+        }
+        self.len = self.len.checked_sub(1)?;
+        self.inline.get(self.len).copied()
+    }
 }
 
 /// Runs a type 4 program.
-fn run_ps(program: &[PsOp], stack: &mut Vec<f64>, depth: u32) {
+fn run_ps(program: &[PsOp], stack: &mut Stack<'_>, depth: u32) {
     if depth > 32 {
         return;
     }
 
-    let mut blocks: Vec<&Vec<PsOp>> = Vec::new();
+    let mut blocks = Blocks::new();
 
     for item in program {
         // The stack is bounded: 7.10.5 caps it at 100 and a hostile program
@@ -587,16 +726,14 @@ fn run_ps(program: &[PsOp], stack: &mut Vec<f64>, depth: u32) {
                     }
                     "copy" => {
                         let n = pop().clamp(0.0, 32.0) as usize;
-                        let start = stack.len().saturating_sub(n);
-                        let slice: Vec<f64> = stack.get(start..).unwrap_or_default().to_vec();
-                        stack.extend(slice);
+                        stack.copy_top(n);
                     }
                     "index" => {
                         let n = pop().max(0.0) as usize;
                         let value = stack
                             .len()
-                            .checked_sub(n + 1)
-                            .and_then(|i| stack.get(i).copied())
+                            .checked_sub(n.saturating_add(1))
+                            .and_then(|i| stack.get(i))
                             .unwrap_or(0.0);
                         stack.push(value);
                     }
@@ -604,10 +741,8 @@ fn run_ps(program: &[PsOp], stack: &mut Vec<f64>, depth: u32) {
                         let j = pop() as i64;
                         let n = pop().clamp(0.0, 64.0) as usize;
                         if n > 0 && n <= stack.len() {
-                            let at = stack.len() - n;
-                            let slice = &mut stack[at..];
                             let shift = j.rem_euclid(n as i64) as usize;
-                            slice.rotate_right(shift);
+                            stack.top_mut(n).rotate_right(shift);
                         }
                     }
                     "eq" => bool_op(stack, |a, b| a == b),
@@ -672,13 +807,13 @@ fn run_ps(program: &[PsOp], stack: &mut Vec<f64>, depth: u32) {
     }
 }
 
-fn bool_op(stack: &mut Vec<f64>, f: impl Fn(f64, f64) -> bool) {
+fn bool_op(stack: &mut Stack<'_>, f: impl Fn(f64, f64) -> bool) {
     let b = stack.pop().unwrap_or(0.0);
     let a = stack.pop().unwrap_or(0.0);
     stack.push(if f(a, b) { 1.0 } else { 0.0 });
 }
 
-fn int_op(stack: &mut Vec<f64>, f: impl Fn(i64, i64) -> i64) {
+fn int_op(stack: &mut Stack<'_>, f: impl Fn(i64, i64) -> i64) {
     let b = stack.pop().unwrap_or(0.0) as i64;
     let a = stack.pop().unwrap_or(0.0) as i64;
     stack.push(f(a, b) as f64);
@@ -916,7 +1051,18 @@ mod tests {
         };
         let domain = vec![(0.0, 1.0); size.len()];
         let range = vec![(0.0, 1.0); outputs];
-        let values = sampled_across(&domain, &range, size, 255.0, &[], &[], &read, inputs);
+        let mut values = Vec::new();
+        sampled_across(
+            &domain,
+            &range,
+            size,
+            255.0,
+            &[],
+            &[],
+            &read,
+            inputs,
+            &mut values,
+        );
         (count.get(), values)
     }
 
@@ -1001,6 +1147,124 @@ mod tests {
         assert_eq!(f(b"{ neg }", 7.0), vec![-7.0]);
         // Division by zero yields zero rather than an infinity.
         assert_eq!(f(b"{ 0 div }", 5.0), vec![0.0]);
+    }
+
+    /// `copy`, `index` and `roll` as 7.10.5 takes them from PostScript: `copy`
+    /// duplicates the top `n`, `index` reads the `n`th below the top, and
+    /// `j roll` turns the top `n` by `j`, a positive `j` towards the top.
+    /// Where the stack is too shallow for the operand, `copy` copies what is
+    /// there and `index` reads zero.
+    #[test]
+    fn postscript_copy_index_and_roll_move_the_stack_as_postscript_does() {
+        let f = |src: &[u8], outputs: usize| {
+            Function::PostScript {
+                domain: vec![(0.0, 100.0)],
+                range: vec![(-100.0, 100.0); outputs],
+                program: parse_postscript(src),
+            }
+            .eval(&[5.0])
+        };
+        assert_eq!(f(b"{ 1 2 3 copy }", 6), vec![5.0, 1.0, 2.0, 5.0, 1.0, 2.0]);
+        assert_eq!(f(b"{ 9 copy }", 2), vec![5.0, 5.0], "as many as there are");
+        assert_eq!(f(b"{ 1 2 2 index }", 4), vec![5.0, 1.0, 2.0, 5.0]);
+        assert_eq!(
+            f(b"{ 1 9 index }", 3),
+            vec![5.0, 1.0, 0.0],
+            "below the bottom"
+        );
+        assert_eq!(f(b"{ 1e300 index }", 2), vec![5.0, 0.0], "far below it");
+        assert_eq!(f(b"{ 1 2 3 3 1 roll }", 4), vec![5.0, 3.0, 1.0, 2.0]);
+        assert_eq!(f(b"{ 1 2 3 3 -1 roll }", 4), vec![5.0, 2.0, 3.0, 1.0]);
+    }
+
+    /// [`Function::eval_into`] leaves nothing of what its buffer held, and an
+    /// array's type 4 member runs on a stack of its own even though that
+    /// stack shares the buffer with the members before it: the program below
+    /// pops past its own input, and a pop there answers zero rather than the
+    /// first member's output.
+    #[test]
+    fn eval_into_starts_afresh_and_a_type_4_member_keeps_to_its_own_stack() {
+        let mut out = vec![9.0; 7];
+        let ramp = Function::Exponential {
+            domain: (0.0, 1.0),
+            c0: vec![0.0],
+            c1: vec![1.0],
+            n: 1.0,
+        };
+        ramp.eval_into(&[0.25], &mut out);
+        assert_eq!(out, vec![0.25]);
+
+        let array = Function::Array(vec![
+            ramp.clone(),
+            Function::PostScript {
+                domain: vec![(0.0, 1.0)],
+                range: vec![(0.0, 1.0)],
+                program: parse_postscript(b"{ pop 0.5 add }"),
+            },
+            ramp,
+        ]);
+        array.eval_into(&[0.25], &mut out);
+        assert_eq!(out, vec![0.25, 0.5, 0.25]);
+        assert_eq!(array.eval(&[0.25]), out);
+
+        // The 100-entry ceiling is the member's own, above the floor.
+        let deep = Function::Array(vec![
+            Function::Identity,
+            Function::PostScript {
+                domain: vec![(0.0, 1.0)],
+                range: vec![(0.0, 1.0); 2],
+                program: parse_postscript(" 1".repeat(150).as_bytes()),
+            },
+        ]);
+        deep.eval_into(&[0.75], &mut out);
+        assert_eq!(out, vec![0.75, 1.0, 1.0]);
+    }
+
+    /// Procedures waiting for `if` and `ifelse` are taken newest first, the
+    /// ninth and later from the heap and the first eight from their places,
+    /// in whatever order the two are pushed and taken.
+    #[test]
+    fn waiting_procedures_are_taken_newest_first_in_place_or_not() {
+        let bodies: Vec<Vec<PsOp>> = (0..12).map(|i| vec![PsOp::Number(f64::from(i))]).collect();
+        let mut blocks = Blocks::new();
+        let mut model: Vec<&[PsOp]> = Vec::new();
+        let mut taken = Vec::new();
+        let mut expected = Vec::new();
+        // Push ten, take three, push two, take everything.
+        for body in &bodies[..10] {
+            blocks.push(body);
+            model.push(body);
+        }
+        for _ in 0..3 {
+            taken.push(blocks.pop());
+            expected.push(model.pop());
+        }
+        for body in &bodies[10..] {
+            blocks.push(body);
+            model.push(body);
+        }
+        while let Some(body) = model.pop() {
+            taken.push(blocks.pop());
+            expected.push(Some(body));
+        }
+        taken.push(blocks.pop());
+        expected.push(None);
+        assert_eq!(taken, expected);
+
+        // And through a program: ten procedures, each `if` running the newest.
+        let mut source = String::from("{");
+        for i in 1..=10 {
+            source.push_str(&format!(" {{ {i} }}"));
+        }
+        source.push_str(&" true if".repeat(10));
+        source.push('}');
+        let f = Function::PostScript {
+            domain: vec![(0.0, 1.0)],
+            range: vec![(0.0, 10.0); 10],
+            program: parse_postscript(source.as_bytes()),
+        };
+        let wanted: Vec<f64> = (1..=10).rev().map(f64::from).collect();
+        assert_eq!(f.eval(&[0.0]), wanted);
     }
 
     #[test]
