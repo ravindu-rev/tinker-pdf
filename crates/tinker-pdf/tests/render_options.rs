@@ -1953,6 +1953,86 @@ fn a_display_list_draws_forced_colours_as_the_page_does() {
     }
 }
 
+/// The pinned renders of [`forced_colour_output_is_pinned`], each its name
+/// and its committed hash.
+///
+/// A value is a run's output: one left empty is recorded from the first
+/// target's run, which prints the lines to paste, and held on every target
+/// after it — Linux, Windows and `wasm32-wasip1`, in the default and
+/// `bundled-fonts` builds, the page embedding its own face — and one two
+/// targets disagree on is a determinism bug, never an edit of this table.
+const FORCED_COLOUR_OUTPUT: [(&str, &str); 4] = [
+    ("forced page, black on white, at 1x", ""),
+    ("forced page, black on white, fill-to-stroke, at 1x", ""),
+    ("forced page, yellow on navy, at 1.7x", ""),
+    ("forced page, yellow on navy, fill-to-stroke, at 1.7x", ""),
+];
+
+/// **The forced-colour fingerprint** (RC-09.6): the forced page — text,
+/// translucent and blended paint, a dashed stroke, a turned image, a knockout
+/// ink group and a soft mask — drawn in forced colours with and without
+/// fill-to-stroke, black on white at 1x and yellow on navy at 1.7x, where
+/// every edge lands on another phase of the pixel grid, each hashed as
+/// `determinism.rs` hashes a page to its committed value
+/// ([`FORCED_COLOUR_OUTPUT`]). Each render's coverage, the black-on-white
+/// grey of the same page, is floored by ink first, about half of what it
+/// paints or less; every row is checked before any fails, and a failure
+/// prints every line that moved.
+#[test]
+fn forced_colour_output_is_pinned() {
+    let navy = ForcedColours {
+        background: Color::rgb(10, 20, 90),
+        foreground: Color::rgb(255, 230, 0),
+        fill_to_stroke: false,
+    };
+    let cases = [
+        (1.0, ForcedColours::default(), 2_500),
+        (1.0, forced(true), 700),
+        (1.7, navy, 7_000),
+        (
+            1.7,
+            ForcedColours {
+                fill_to_stroke: true,
+                ..navy
+            },
+            1_500,
+        ),
+    ];
+    let mut moved = Vec::new();
+    for ((scale, colours, least), (name, want)) in cases.iter().zip(FORCED_COLOUR_OUTPUT) {
+        let coverage = render(
+            forced_page(false),
+            &forced_options(*scale, PixelFormat::Gray8, forced(colours.fill_to_stroke)),
+        );
+        let drawn = coverage.data.iter().filter(|&&v| v != 255).count();
+        assert!(
+            drawn >= *least,
+            "{name}: its coverage painted {drawn} pixels, fewer than {least}: it is \
+             measuring less than it claims. Warnings: {:?}",
+            coverage.warnings
+        );
+        let bitmap = render(
+            forced_page(false),
+            &forced_options(*scale, PixelFormat::Rgb8, *colours),
+        );
+        let actual = fingerprint(&bitmap);
+        if actual != want {
+            moved.push(format!("    (\"{name}\", \"{actual}\"),"));
+        }
+    }
+    assert!(
+        moved.is_empty(),
+        "{} of the {} pinned forced-colour renders moved.\n\n\
+         If two targets disagree, this is a determinism bug: find the arithmetic that \
+         is not target-stable and do not update the values.\n\
+         If the table was committed empty, or this is a deliberate rendering change \
+         said in its commit, paste:\n\n{}",
+        moved.len(),
+        FORCED_COLOUR_OUTPUT.len(),
+        moved.join("\n")
+    );
+}
+
 // ---- levels and rules (RC-11.5) ---------------------------------------------
 
 /// **`antialias` keeps its meaning** (RC-11.5): off, both levels read as 0

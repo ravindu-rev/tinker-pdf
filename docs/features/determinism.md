@@ -115,8 +115,8 @@ becoming a baseline.
 
 **The options that change what a page's bytes are** — ink instead of light,
 hard edges, coverage levels, the hard-edge rules and the thinnest line, a page
-with nothing under it, premultiplied alpha — are pinned beside these rather
-than among them, in
+with nothing under it, premultiplied alpha, forced colours — are pinned beside
+these rather than among them, in
 `crates/tinker-pdf/tests/render_options.rs`: this file's `Fixture` renders
 with the default options and nothing else, and its table is the one place a
 determinism bug shows, so a row meaning "this page, but differently" does not
@@ -128,7 +128,25 @@ rule, with anti-aliasing off under the centre and any-part rules and at
 explicit thinnest lines, at 1x and 1.7x, to a table of its own
 (`LEVELS_RULES_AND_WIDTHS`), every row checked and every moved line printed
 before it fails; a value is recorded from the first target's run and held on
-every target after it. The local `wasm32-wasip1` run takes that file as well.
+every target after it. `forced_colour_output_is_pinned` holds the forced
+page — text, translucent and blended paint, a dashed stroke, a turned image, a
+knockout ink group and a soft mask — in forced colours with and without
+fill-to-stroke, black on white at 1x and in two hues at 1.7x, to
+`FORCED_COLOUR_OUTPUT` the same way, each render's black-on-white coverage
+floored by ink first; the page embeds its face, so one table serves both
+builds. The local `wasm32-wasip1` run takes that file as well.
+
+**The bitmap toolbox's output** is pinned the same way, over a committed
+render rather than a page: `crates/tinker-pdf/tests/bitmap_toolbox.rs`'s
+`the_toolbox_is_stable_across_targets` lays the shading golden out in RGBA
+with an alpha plane, and in ink and Lab, and hashes each operation's output
+as a render is hashed — gamma at four exponents, the two inversions, the
+tint, grayscale, the three reductions' answers, scales down and up, a
+subsample, and conversions into and out of ink and Lab — to its own table
+(`TOOLBOX_FINGERPRINTS`), each map checked to change its input. Gamma's
+table, built through `tinker_pdf_math::pow`, and Lab's arithmetic, through
+`tinker-pdf-color`, are where a platform transcendental would show first, and
+a hash two targets disagree on is a determinism bug there as everywhere.
 
 **A page drawn in bands is the page.**
 `banded_rendering_reproduces_every_fingerprint` renders every page of the
@@ -254,7 +272,8 @@ every fingerprinted page and the same pages drawn through a warm and a
 starved document cache, and under a warm and a starved budget stated at open;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, hard-edged
-output and levels, rules and widths; the shaper's two fingerprints; and the guard suite's
+and forced-colour output and levels, rules and widths; `bitmap_toolbox.rs`'s
+toolbox outputs; the shaper's two fingerprints; and the guard suite's
 roster of guards and the work counts it pins (`guards.rs`), which CI's tests
 run in each build they test and the local `wasm32-wasip1` run under wasmtime,
 beside `guard_allocations.rs`; and the requests page one costs over a streamed

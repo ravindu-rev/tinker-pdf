@@ -2178,7 +2178,9 @@ under it, so the copy holds every canvas the walk closes onto.
   holds the copies, packed and padded, and an ink bitmap premultiplied and
   straightened in place; `light_through_ink_and_back_is_exact` and
   `to_png_writes_what_conversion_gives` hold the round trip through ink and
-  the PNG writer's conversions to the toolbox's.
+  the PNG writer's conversions to the toolbox's;
+  `the_toolbox_is_stable_across_targets` pins every operation's output over
+  one golden on every target ([determinism](determinism.md)).
   `tinker-pdf-raster`'s `toolbox` tests hold gamma's table to its formula at
   other exponents, the toolbox's decoding and encoding of each format to the
   canvas's own, every conversion of a row of every byte pattern to
@@ -2202,7 +2204,8 @@ under it, so the copy holds every canvas the walk closes onto.
   three scales, anti-aliased and not; `a_type3_glyph_stays_filled_under_fill_to_stroke`,
   `forced_colours_apply_no_transfer_function`, the opacity and premultiplied
   cases and a display list's forced render are
-  held beside them. `render_regions.rs`'s
+  held beside them, and `forced_colour_output_is_pinned` pins the forced page
+  with and without fill-to-stroke on every target. `render_regions.rs`'s
   `a_forced_colour_tile_is_the_page_under_it` tiles every fixture and the
   annotated page in forced colours, directly and from a display list. The
   render crate's `forced_colour_tests` drive the device calls: each paint

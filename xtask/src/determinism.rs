@@ -119,6 +119,17 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/render_options.rs",
         test: "levels_rules_and_widths_are_pinned",
     },
+    // The forced-colour page with and without fill-to-stroke (RC-09.6).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/render_options.rs",
+        test: "forced_colour_output_is_pinned",
+    },
+    // The bitmap toolbox's every operation over one golden: the maps, the
+    // reductions, scale, subsample and conversion (RC-09.6).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/bitmap_toolbox.rs",
+        test: "the_toolbox_is_stable_across_targets",
+    },
     // MS-01's guard suite: its roster of guards, and the work counts it pins
     // for every target.
     Fingerprint {

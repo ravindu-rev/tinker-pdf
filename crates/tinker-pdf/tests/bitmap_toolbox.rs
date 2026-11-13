@@ -1367,3 +1367,182 @@ fn to_png_writes_what_conversion_gives() {
         );
     }
 }
+
+// ---- the fingerprints -------------------------------------------------------------
+
+/// The golden the toolbox's fingerprints are taken over: the shading
+/// family's, whose two smooth ramps reach most of the 256 levels of every
+/// channel, so gamma's table and Lab's arithmetic are read at nearly every
+/// entry.
+fn fingerprinted_golden() -> Bitmap {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/shading.ppm");
+    let bytes = std::fs::read(&path).expect("the shading golden is committed");
+    golden_support::ppm_bitmap(&bytes).expect("a raster golden")
+}
+
+/// The hash `determinism.rs` takes of a render: SHA-256 over the width and
+/// height, big-endian, and then the bytes.
+fn fingerprint(bitmap: &Bitmap) -> String {
+    let mut input = Vec::with_capacity(bitmap.data.len() + 8);
+    input.extend_from_slice(&bitmap.width.to_be_bytes());
+    input.extend_from_slice(&bitmap.height.to_be_bytes());
+    input.extend_from_slice(&bitmap.data);
+    hex(&input)
+}
+
+/// SHA-256 of `bytes`, in hex.
+fn hex(bytes: &[u8]) -> String {
+    tinker_pdf_crypto::sha2::sha256(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The pinned outputs of [`the_toolbox_is_stable_across_targets`], each its
+/// name and its committed hash, in the order [`toolbox_outputs`] makes them.
+///
+/// A value is a run's output: one left empty is recorded from the first
+/// target's run, which prints the lines to paste, and held on every target
+/// after it — Linux, Windows and `wasm32-wasip1` — and one two targets
+/// disagree on is a determinism bug, never an edit of this table. Gamma's
+/// table, built through `tinker_pdf_math::pow`, and Lab's conversions, through
+/// `tinker-pdf-color`, are where a platform's transcendental would show first.
+const TOOLBOX_FINGERPRINTS: [(&str, &str); 19] = [
+    ("gamma 2.2", ""),
+    ("gamma 1/2.2, premultiplied", ""),
+    ("gamma 1.8, ink", ""),
+    ("gamma 2.4, Lab", ""),
+    ("invert", ""),
+    ("invert by luminance", ""),
+    ("invert by luminance, ink", ""),
+    ("tint", ""),
+    ("grayscale", ""),
+    ("grayscale, ink", ""),
+    ("the colour count, unicolour and monochrome tests", ""),
+    ("scaled to two thirds", ""),
+    ("scaled to one and a half, premultiplied", ""),
+    ("scaled to a third, ink", ""),
+    ("subsampled by 3 by 2", ""),
+    ("converted to Lab", ""),
+    ("converted from Lab", ""),
+    ("converted to ink, premultiplied", ""),
+    ("converted from ink to grey and alpha", ""),
+];
+
+/// Each toolbox operation over [`fingerprinted_golden`], by the name
+/// [`TOOLBOX_FINGERPRINTS`] pins it under, hashed: the golden laid out in
+/// `Rgba8` with the alpha plane, and in ink and Lab where a row says so —
+/// every map, the three reductions' answers, scales down and up, a
+/// subsample, and conversions into and out of the two formats whose
+/// arithmetic is not the bytes'. Each map is checked to change the bitmap,
+/// so that no row pins its input.
+fn toolbox_outputs(golden: &Bitmap) -> Vec<(&'static str, String)> {
+    let rgba = variant(golden, PixelFormat::Rgba8, false);
+    let premultiplied = variant(golden, PixelFormat::Rgba8, true);
+    let ink = variant(golden, PixelFormat::CmykA8, false);
+    let lab = variant(golden, PixelFormat::LabA8, false);
+    let mapped = |name: &'static str, source: &Bitmap, map: &dyn Fn(&mut Bitmap)| {
+        let mut out = source.clone();
+        map(&mut out);
+        assert_ne!(out.data, source.data, "{name}: the map changed nothing");
+        (name, fingerprint(&out))
+    };
+    let made = |name: &'static str, out: Option<Bitmap>| {
+        let out = out.unwrap_or_else(|| panic!("{name}: a picture"));
+        (name, fingerprint(&out))
+    };
+    let (w, h) = (golden.width, golden.height);
+    let answers: String = [&rgba, &premultiplied, &ink, &lab]
+        .iter()
+        .map(|bitmap| {
+            format!(
+                "{:?} {:?} {:?} {:?} {:?};",
+                bitmap.format,
+                bitmap.colour_count(usize::MAX),
+                bitmap.colour_count(100),
+                bitmap.is_unicolour(),
+                bitmap.is_monochrome()
+            )
+        })
+        .collect();
+    vec![
+        mapped("gamma 2.2", &rgba, &|b| b.gamma(2.2)),
+        mapped("gamma 1/2.2, premultiplied", &premultiplied, &|b| {
+            b.gamma(1.0 / 2.2);
+        }),
+        mapped("gamma 1.8, ink", &ink, &|b| b.gamma(1.8)),
+        mapped("gamma 2.4, Lab", &lab, &|b| b.gamma(2.4)),
+        mapped("invert", &rgba, &|b| b.invert()),
+        mapped("invert by luminance", &rgba, &|b| b.invert_luminance()),
+        mapped("invert by luminance, ink", &ink, &|b| b.invert_luminance()),
+        mapped("tint", &rgba, &|b| b.tint(DARK, LIGHT)),
+        mapped("grayscale", &rgba, &|b| b.grayscale()),
+        mapped("grayscale, ink", &ink, &|b| b.grayscale()),
+        (
+            "the colour count, unicolour and monochrome tests",
+            hex(answers.as_bytes()),
+        ),
+        made("scaled to two thirds", rgba.scaled(w * 2 / 3, h * 2 / 3)),
+        made(
+            "scaled to one and a half, premultiplied",
+            premultiplied.scaled(w * 3 / 2, h * 3 / 2),
+        ),
+        made("scaled to a third, ink", ink.scaled(w / 3, h / 3)),
+        made("subsampled by 3 by 2", rgba.subsampled(3, 2)),
+        made(
+            "converted to Lab",
+            rgba.converted(PixelFormat::LabA8, false),
+        ),
+        made(
+            "converted from Lab",
+            lab.converted(PixelFormat::Rgba8, false),
+        ),
+        made(
+            "converted to ink, premultiplied",
+            rgba.converted(PixelFormat::CmykA8, true),
+        ),
+        made(
+            "converted from ink to grey and alpha",
+            ink.converted(PixelFormat::GrayA8, false),
+        ),
+    ]
+}
+
+/// **The toolbox is stable across targets** (RC-09.6): each operation's
+/// output over one golden ([`toolbox_outputs`]) hashed as `determinism.rs`
+/// hashes a render, to its committed value ([`TOOLBOX_FINGERPRINTS`]). Every
+/// row is checked before any fails, and a failure prints every line that
+/// moved; the golden is read, never rewritten (H-133). In the determinism
+/// roster (`xtask/src/determinism.rs`), so `cargo xtask determinism` holds it
+/// to running.
+#[test]
+fn the_toolbox_is_stable_across_targets() {
+    let outputs = toolbox_outputs(&fingerprinted_golden());
+    assert_eq!(
+        outputs.len(),
+        TOOLBOX_FINGERPRINTS.len(),
+        "every operation has a pinned value, or the test passes by not looking"
+    );
+    let mut moved = Vec::new();
+    for ((name, actual), (pinned, want)) in outputs.iter().zip(TOOLBOX_FINGERPRINTS) {
+        assert_eq!(*name, pinned, "the table is in the outputs' order");
+        if actual != want {
+            moved.push(format!("    (\"{name}\", \"{actual}\"),"));
+        }
+    }
+    assert!(
+        moved.is_empty(),
+        "{} of the {} pinned toolbox outputs moved.\n\n\
+         If two targets disagree, this is a determinism bug: find the arithmetic that \
+         is not target-stable and do not update the values.\n\
+         If the table was committed empty, or this is a deliberate change said in its \
+         commit, paste:\n\n{}",
+        moved.len(),
+        TOOLBOX_FINGERPRINTS.len(),
+        moved.join("\n")
+    );
+    println!(
+        "bitmap-toolbox fingerprints: RAN, {} outputs held to their pins",
+        outputs.len()
+    );
+}
