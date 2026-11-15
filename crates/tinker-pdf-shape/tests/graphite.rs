@@ -597,7 +597,8 @@ fn name(face: &Sfnt<'_>, id: u16) -> Option<String> {
 #[test]
 fn the_fixture_faces_are_the_ones_vendored() {
     // (bytes, family, version, length, GSUB, GPOS)
-    let faces: [(&[u8], &str, &str, usize, bool, bool); 3] = [
+    type Vendored = (&'static [u8], &'static str, &'static str, usize, bool, bool);
+    let faces: [Vendored; 3] = [
         (
             DAI_BANNA,
             "Dai Banna SIL",
@@ -997,10 +998,11 @@ fn an_offset_past_the_glat_answers_none() {
     let mut cut = gloc.clone();
     set(&mut cut, 4, read(&gloc, 4) - 1);
 
+    let last = u16::try_from(maps.len() - 1).expect("small");
     // (what, the index, the glyphs it breaks, the glyphs whose data it moves
     // and so whose answers say nothing)
-    let last = u16::try_from(maps.len() - 1).expect("small");
-    let cases: [(&str, Vec<u8>, Vec<u16>, Vec<u16>); 4] = [
+    type Case = (&'static str, Vec<u8>, Vec<u16>, Vec<u16>);
+    let cases: [Case; 4] = [
         ("an end past the Glat", past, vec![last], vec![]),
         ("an end before the start", backwards, vec![2], vec![3]),
         ("a start inside the header", header, vec![0, 1], vec![]),
@@ -1346,9 +1348,12 @@ fn feat_table(features: &[(u32, u16, &[i16])]) -> Vec<u8> {
     out
 }
 
+/// One setting a `Sill` language asks: a feature's id and its value.
+type Setting = (u32, i16);
+
 /// A `Sill` of `languages`, each its code and its settings, and the GTF's
 /// one entry more.
-fn sill_table(languages: &[([u8; 4], &[(u32, i16)])]) -> Vec<u8> {
+fn sill_table(languages: &[([u8; 4], &[Setting])]) -> Vec<u8> {
     let count = u16::try_from(languages.len()).expect("a few");
     let mut out = 0x0001_0000u32.to_be_bytes().to_vec();
     out.extend(u16s(&[count, 0, 0, 0]));
@@ -1786,10 +1791,13 @@ fn the_sill_examples_hold() {
         (id(b"shkr"), 0x8000, &[0, 1]),
         (id(b"hehA"), 0x8000, &[0, 1, 2]),
     ]);
-    let sindhi: &[(u32, i16)] = &[(id(b"meem"), 1), (id(b"edig"), 1), (id(b"shkr"), 1)];
-    let kurdish: &[(u32, i16)] = &[(id(b"hehA"), 1)];
-    let urdu: &[(u32, i16)] = &[(id(b"hehA"), 2), (id(b"edig"), 2), (id(b"shkr"), 1)];
-    let groups: [(&[&[u8; 4]], &[(u32, i16)], [i16; 4]); 3] = [
+    let sindhi: &[Setting] = &[(id(b"meem"), 1), (id(b"edig"), 1), (id(b"shkr"), 1)];
+    let kurdish: &[Setting] = &[(id(b"hehA"), 1)];
+    let urdu: &[Setting] = &[(id(b"hehA"), 2), (id(b"edig"), 2), (id(b"shkr"), 1)];
+    // A group's codes, the settings they share, and the four features'
+    // values a code asks.
+    type Group<'a> = (&'a [&'a [u8; 4]], &'a [Setting], [i16; 4]);
+    let groups: [Group<'_>; 3] = [
         (&[b"snd\0", b"sd\0\0"], sindhi, [1, 1, 1, 0]),
         (
             &[b"bdh\0", b"ckb\0", b"kmr\0", b"kur\0", b"sdh\0"],
@@ -1798,7 +1806,7 @@ fn the_sill_examples_hold() {
         ),
         (&[b"urd\0", b"ur\0\0"], urdu, [0, 2, 1, 2]),
     ];
-    let mut entries: Vec<([u8; 4], &[(u32, i16)])> = Vec::new();
+    let mut entries: Vec<([u8; 4], &[Setting])> = Vec::new();
     for (codes, settings, _) in &groups {
         for code in *codes {
             entries.push((**code, *settings));
@@ -2374,7 +2382,7 @@ fn a_class_map_answers_both_kinds_of_class() {
     linear[6] = upper.clone();
     for (major, wide) in [(2u32, false), (3, false), (4, true), (5, true)] {
         let spec = DescriptionSpec {
-            class_map: class_map(&linear, &[lower.clone()], wide),
+            class_map: class_map(&linear, std::slice::from_ref(&lower), wide),
             order: [0, 0, 0, 255],
             ..DescriptionSpec::default()
         };
@@ -4581,7 +4589,7 @@ fn an_insertion_past_the_glyph_ceiling_is_refused_and_named() {
     });
     // A run's own ceiling leaves room for a run's worth of insertions.
     with_stream(&face, &THREE, |slots| {
-        let code: Vec<u8> = std::iter::repeat(0x1F).take(64).chain([0x31]).collect();
+        let code: Vec<u8> = std::iter::repeat_n(0x1F, 64).chain([0x31]).collect();
         assert!(act_in(slots, 3, &code, 0, &Limits::for_glyphs(3)).is_ok());
         assert_eq!(slots.len(), 67);
     });
@@ -4919,7 +4927,7 @@ fn compile(rules: &[RuleSpec], glyphs: u16, max_rule_loop: u8, max_backup: u8) -
             .map(|state| {
                 rows[state]
                     .iter()
-                    .map(|next| next.as_ref().map_or(0, |next| id(next)))
+                    .map(|next| next.as_ref().map_or(0, id))
                     .collect()
             })
             .collect(),
@@ -5241,7 +5249,6 @@ fn substitution_passes_reproduce_the_specifications_examples() {
             slots: vec![vec![], vec![1]],
             constraint: single(0, 0),
             action: mark(2, 0xFE),
-            ..RuleSpec::default()
         },
         // gA > @ {Alt = 2} / ^ ANY _ {Alt == 0} gA {Alt == 1};
         RuleSpec {
@@ -5249,7 +5256,6 @@ fn substitution_passes_reproduce_the_specifications_examples() {
             slots: vec![vec![], vec![1], vec![1]],
             constraint: both(0, 1),
             action: mark(2, 0xFE),
-            ..RuleSpec::default()
         },
         // gA > @ {Alt = 1} / ^ ANY _ {Alt == 0} gA {Alt == 2};
         RuleSpec {
@@ -5257,7 +5263,6 @@ fn substitution_passes_reproduce_the_specifications_examples() {
             slots: vec![vec![], vec![1], vec![1]],
             constraint: both(0, 2),
             action: mark(1, 0xFE),
-            ..RuleSpec::default()
         },
         // gA > @ {Alt = 2} / ^ _ {Alt == 0} gA {Alt == 1};
         RuleSpec {
@@ -6416,14 +6421,13 @@ fn shift_rule(glyph: u16, x: i16, y: i16) -> RuleSpec {
     )
 }
 
+/// [`fixed`]'s answer: the run placed, what was refused, and each slot's fix
+/// and advance after its passes.
+type FixedRun = (Vec<ShapedGlyph>, Vec<Refusal>, Vec<(i32, i32)>, Vec<i32>);
+
 /// What the face makes of `glyphs`: the run placed, what was refused, and
 /// each slot's fix and advance after its passes.
-fn fixed(
-    bytes: &[u8],
-    glyphs: &[u16],
-    right_to_left: bool,
-    limits: &Limits,
-) -> (Vec<ShapedGlyph>, Vec<Refusal>, Vec<(i32, i32)>, Vec<i32>) {
+fn fixed(bytes: &[u8], glyphs: &[u16], right_to_left: bool, limits: &Limits) -> FixedRun {
     let sfnt = Sfnt::parse(bytes).expect("the face parses");
     let tables = Tables::parse(&sfnt, limits).expect("a description");
     let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");

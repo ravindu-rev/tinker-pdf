@@ -2942,9 +2942,12 @@ mod tests {
         assert!(!is_variation_selector('a'));
     }
 
+    /// One table of a test face: its tag and its bytes.
+    type Table<'a> = (&'a [u8; 4], &'a [u8]);
+
     /// A table directory of `tables` and nothing else, which is all
     /// `Sfnt::parse` and `Layout::parse` read.
-    fn directory(tables: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    fn directory(tables: &[Table<'_>]) -> Vec<u8> {
         let count = u16::try_from(tables.len()).expect("a small directory");
         let mut out = 0x0001_0000u32.to_be_bytes().to_vec();
         out.extend(count.to_be_bytes());
@@ -2976,7 +2979,7 @@ mod tests {
         let unreadable: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0, 0, 0];
         let gdef: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let silf_tag = Some(Tag::new(b"Silf"));
-        let cases: Vec<(Vec<(&[u8; 4], &[u8])>, Option<Tag>)> = vec![
+        let cases: Vec<(Vec<Table<'_>>, Option<Tag>)> = vec![
             (vec![(b"Silf", silf)], silf_tag),
             (vec![(b"GDEF", gdef), (b"Silf", silf)], silf_tag),
             (vec![(b"GSUB", unreadable), (b"Silf", silf)], silf_tag),
@@ -3022,7 +3025,7 @@ mod tests {
         let kerx_old: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0];
         // (tables, a morx read, a kerx read, a feat read); a face reading
         // neither takes no AAT tables.
-        let cases: Vec<(Vec<(&[u8; 4], &[u8])>, bool, bool, bool)> = vec![
+        let cases: Vec<(Vec<Table<'_>>, bool, bool, bool)> = vec![
             (vec![(b"morx", morx)], true, false, false),
             (vec![(b"morx", three)], true, false, false),
             (vec![(b"feat", feat), (b"morx", morx)], true, false, true),
@@ -3125,7 +3128,7 @@ mod tests {
         let named_morx = Some(Tag::new(b"morx"));
         let named_mort = Some(Tag::new(b"mort"));
         let named_kerx = Some(Tag::new(b"kerx"));
-        let cases: Vec<(Vec<(&[u8; 4], &[u8])>, [Option<Tag>; 2])> = vec![
+        let cases: Vec<(Vec<Table<'_>>, [Option<Tag>; 2])> = vec![
             (vec![(b"morx", old)], [named_morx, None]),
             (vec![(b"morx", &morx[..5])], [named_morx, None]),
             (vec![(b"GDEF", gdef), (b"morx", old)], [named_morx, None]),
@@ -3193,7 +3196,7 @@ mod tests {
         let morx: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0];
         let mort: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0];
         let gdef: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let tables: [(&[u8; 4], &[u8]); 4] = [
+        let tables: [Table<'_>; 4] = [
             (b"Silf", silf),
             (b"morx", morx),
             (b"mort", mort),
@@ -3201,7 +3204,7 @@ mod tests {
         ];
         // Every subset of the four tables, by bitmask.
         for mask in 0u8..16 {
-            let chosen: Vec<(&[u8; 4], &[u8])> = tables
+            let chosen: Vec<Table<'_>> = tables
                 .iter()
                 .enumerate()
                 .filter(|(at, _)| mask & (1 << at) != 0)

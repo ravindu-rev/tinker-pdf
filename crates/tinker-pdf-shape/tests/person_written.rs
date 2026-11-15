@@ -165,6 +165,9 @@ fn statement(line: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// One statement of a case file: its line number, its keyword and its value.
+type Statement<'a> = (usize, &'a str, &'a str);
+
 /// Reads one case file: every refusal it earns, or the delivery.
 ///
 /// A file is refused whole, every problem in it listed, because a delivery
@@ -173,7 +176,7 @@ fn statement(line: &str) -> (&str, Option<&str>) {
 fn read(text: &str) -> Result<Delivery, Vec<String>> {
     let mut refusals: Vec<String> = Vec::new();
     let mut header: BTreeMap<&str, String> = BTreeMap::new();
-    let mut cases: Vec<(usize, Vec<(usize, &str, &str)>)> = Vec::new();
+    let mut cases: Vec<(usize, Vec<Statement<'_>>)> = Vec::new();
 
     for (index, line) in text.split('\n').enumerate() {
         let number = index + 1;
@@ -713,8 +716,11 @@ fn drawn(case: &Case, face: &Sfnt<'_>, em: Option<u32>) -> (Vec<Drawn>, (i64, i6
     (out, (units(pen_x), units(pen_y)))
 }
 
+/// A place in font units, `x` then `y`.
+type Point = (i64, i64);
+
 /// Where a case's own numbers draw each glyph, and where they leave the pen.
-fn stated(written: &[Written]) -> (Vec<(i64, i64)>, Option<(i64, i64)>) {
+fn stated(written: &[Written]) -> (Vec<Point>, Option<Point>) {
     let mut places = Vec::new();
     let (mut pen_x, mut pen_y) = (0i64, 0i64);
     let mut end = Some((0, 0));

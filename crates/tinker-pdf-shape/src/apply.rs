@@ -2156,7 +2156,7 @@ mod tests {
         );
         let single = assemble(u16s(&[1, 0, 4, 50]), &[2], &[coverage(&[1, 2])]);
         lookup_list(&[
-            lookup(1, &[single.clone()]),
+            lookup(1, std::slice::from_ref(&single)),
             lookup(2, &[pair1, pair2]),
             lookup(3, &[cursive]),
             lookup(4, &[mark_to_base]),

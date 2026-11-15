@@ -679,9 +679,13 @@ mod tests {
         glyphs.into_iter().map(|(_, glyph)| glyph).collect()
     }
 
+    /// One thing a substituting subtable turns into another: the glyphs it
+    /// reads and the glyphs it writes.
+    type Edge = (Vec<u16>, Vec<u16>);
+
     /// What a substituting subtable turns into what: `(input, output)` pairs,
     /// the input a ligature's whole component list.
-    fn edges(kind: u16, data: Bytes<'_>) -> Vec<(Vec<u16>, Vec<u16>)> {
+    fn edges(kind: u16, data: Bytes<'_>) -> Vec<Edge> {
         let mut out = Vec::new();
         let Some(coverage) = data.offset16(2).map(Coverage::new) else {
             return out;
@@ -826,7 +830,7 @@ mod tests {
     /// makes directly, and the lookups its rules name.
     struct Catalogue {
         kinds: BTreeMap<u16, u16>,
-        edges: BTreeMap<u16, Vec<(Vec<u16>, Vec<u16>)>>,
+        edges: BTreeMap<u16, Vec<Edge>>,
         calls: BTreeMap<u16, Vec<u16>>,
     }
 

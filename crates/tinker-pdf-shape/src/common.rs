@@ -994,7 +994,7 @@ mod tests {
             GlyphSet::union(&[empty.clone(), empty]),
             GlyphSet::default()
         );
-        assert_eq!(GlyphSet::union(&[c.clone()]), c);
+        assert_eq!(GlyphSet::union(std::slice::from_ref(&c)), c);
     }
 
     /// `Coverage::ranges` lists every glyph the search can find, whatever

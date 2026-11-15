@@ -571,7 +571,9 @@ fn every_run_over_a_morx_face_takes_the_chain_its_caller_asks_for() {
         tag: Tag::new(b"mark"),
     };
     let (f, i, x, alpha, beta) = (1u16, 2u16, 3u16, 5u16, 6u16);
-    let cases: Vec<(Shaper<'_>, Vec<u16>, Vec<u16>, Vec<Warning>)> = vec![
+    // A shaper, the glyphs it gives "fix" and "βα", and what each run names.
+    type Case<'a> = (Shaper<'a>, Vec<u16>, Vec<u16>, Vec<Warning>);
+    let cases: Vec<Case<'_>> = vec![
         (
             Shaper::new(&sfnt),
             vec![FI, SWASH_X],
@@ -2380,7 +2382,7 @@ fn a_chain_or_subtable_the_table_cannot_hold_is_named() {
         );
     }
     // A chain count past the chains the table holds.
-    let mut claims = morx_table(2, &[good.clone()]);
+    let mut claims = morx_table(2, std::slice::from_ref(&good));
     claims[4..8].copy_from_slice(&3u32.to_be_bytes());
     assert_eq!(
         chained(&claims, &[10], ltr, &defaults),
@@ -4096,12 +4098,13 @@ fn twenty_nine(extra_marked: u16, extra_current: u16) -> Vec<u8> {
     )
 }
 
+/// One glyph an insertion subtable leaves: the glyph, its cluster and how it
+/// was inserted, where it was.
+type Inserted = (u16, u32, Option<Insertion>);
+
 /// The glyphs, clusters and insertion kinds one subtable leaves of `glyphs`
 /// over a left-to-right run, and what it refused.
-fn inserted_through(
-    subtable: Vec<u8>,
-    glyphs: &[u16],
-) -> (Vec<(u16, u32, Option<Insertion>)>, Vec<Warning>) {
+fn inserted_through(subtable: Vec<u8>, glyphs: &[u16]) -> (Vec<Inserted>, Vec<Warning>) {
     let table = morx_table(2, &[chain(1, &[], &[subtable])]);
     let morx = Morx::parse(&table).expect("a readable morx");
     let mut buffer = run_of(glyphs, Direction::LeftToRight);
