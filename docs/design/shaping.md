@@ -1886,7 +1886,13 @@ success and column counts, the ranges that give each glyph a column, the
 rule lists of the success states, the shortest and longest pre-context and
 the start state for each, a sort key and a pre-context a rule, the collision
 threshold, the pass constraint's length, each rule's constraint and action
-offsets, and the transitions. A pass of no columns has no machine and runs
+offsets, and the transitions. A rule with no constraint stores the offset 0,
+which the GTF leaves unsaid and the compiled faces settle: each opens
+`ruleConstraints` with a byte no rule's code starts at, so a rule's
+constraint runs from its offset to the next rule's that is not 0, the last
+of the offsets ending the block, and a rule stored 0 has an empty one. Every
+rule has an action, and an action runs from its offset to the next rule's.
+A pass of no columns has no machine and runs
 only its collision fixing. Before 2 a pass has no `fsmOffset`, pass
 constraint offset, collision threshold, constraint length or the reserved
 byte, as the notes say. A pass whose counts disagree — more success or

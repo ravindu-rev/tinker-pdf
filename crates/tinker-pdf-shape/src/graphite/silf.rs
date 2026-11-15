@@ -1063,9 +1063,37 @@ impl<'a> Pass<'a> {
     }
 
     /// Rule `rule`'s constraint code; empty where it has none.
+    ///
+    /// A rule with no constraint stores the offset 0: the compiled faces
+    /// open `ruleConstraints` with a byte no rule's code starts at, so a
+    /// rule's code runs from its offset to the next rule's that is not 0,
+    /// the last of the `numRules + 1` offsets ending the block. A code whose
+    /// end comes before its start is malformed and answers `None`.
     #[must_use]
     pub fn constraint(&self, rule: u16) -> Option<&'a [u8]> {
-        self.code(self.constraint_offsets_at, self.rule_constraints_at, rule)
+        if rule >= self.rules {
+            return None;
+        }
+        let offsets = self.constraint_offsets_at;
+        let start = usize::from(self.data.u16_at(offsets, usize::from(rule))?);
+        if start == 0 {
+            return Some(&[]);
+        }
+        let last = usize::from(self.rules);
+        let mut end = 0;
+        for next in usize::from(rule) + 1..=last {
+            end = usize::from(self.data.u16_at(offsets, next)?);
+            if end != 0 {
+                break;
+            }
+        }
+        if start > end {
+            return None;
+        }
+        let base = self.rule_constraints_at;
+        self.data
+            .as_slice()
+            .get(base.checked_add(start)?..base.checked_add(end)?)
     }
 
     /// Rule `rule`'s action code.

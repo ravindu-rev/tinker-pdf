@@ -657,8 +657,11 @@ fn the_vendored_faces_take_the_path_the_precedence_gives() {
     }
     let shaped = glyphs(&runs);
     let e = dai_banna.glyph_for_char('e').expect("Dai Banna SIL maps e");
+    // A code a `cmap` does not map answers glyph 0, `.notdef`.
     assert_eq!(
-        dai_banna.glyph_for_char('\u{301}'),
+        dai_banna
+            .glyph_for_char('\u{301}')
+            .filter(|&glyph| glyph != 0),
         None,
         "U+0301 is not in its cmap"
     );
@@ -1966,16 +1969,24 @@ fn pass_bytes(spec: &PassSpec, major: u32, base: usize) -> Vec<u8> {
                 .to_be_bytes(),
         );
     }
-    let mut constraints: Vec<u8> = Vec::new();
-    let mut constraint_offsets = vec![0u16];
+    // As the compiled faces store them: `ruleConstraints` opens with a byte
+    // no rule's code starts at, a rule with no constraint stores 0, and the
+    // last offset ends the block.
+    let mut constraints: Vec<u8> = vec![0];
+    let mut constraint_offsets: Vec<u16> = Vec::new();
     let mut actions: Vec<u8> = Vec::new();
     let mut action_offsets = vec![0u16];
     for (_, _, constraint, action) in &spec.rules {
-        constraints.extend(constraint);
-        constraint_offsets.push(u16::try_from(constraints.len()).expect("short"));
+        if constraint.is_empty() {
+            constraint_offsets.push(0);
+        } else {
+            constraint_offsets.push(u16::try_from(constraints.len()).expect("short"));
+            constraints.extend(constraint);
+        }
         actions.extend(action);
         action_offsets.push(u16::try_from(actions.len()).expect("short"));
     }
+    constraint_offsets.push(u16::try_from(constraints.len()).expect("short"));
     fixed.extend(u16s(&constraint_offsets));
     fixed.extend(u16s(&action_offsets));
     for row in &spec.transitions {
@@ -2806,6 +2817,69 @@ fn a_silf_reads_at_every_version_it_covers() {
     assert_eq!(glyph_of(b"cyrl"), Some(1));
 }
 
+/// A rule with no constraint stores the offset 0, as the compiled faces
+/// store it, and a constrained rule before it keeps its code: the code runs
+/// to the next rule's offset that is not 0. An end before its start is
+/// malformed and answers nothing.
+#[test]
+fn a_rule_stored_zero_has_no_constraint_and_ends_none_before_it() {
+    let pass = PassSpec {
+        ranges: vec![(1, 1, 0)],
+        columns: 1,
+        rows: 2,
+        transitional: 1,
+        success: 1,
+        rule_lists: vec![vec![0, 1, 2]],
+        start_states: vec![0],
+        rules: vec![
+            (3, 0, vec![0x01, 0x30], vec![0x1B, 0x31]),
+            (2, 0, vec![], vec![0x1B, 0x31]),
+            (1, 0, vec![0x32], vec![0x1B, 0x31]),
+        ],
+        transitions: vec![vec![1]],
+        ..PassSpec::default()
+    };
+    let spec = DescriptionSpec {
+        class_map: class_map(&[vec![1]], &[], true),
+        passes: vec![pass],
+        order: [0, 1, 1, 255],
+        ..DescriptionSpec::default()
+    };
+    let mut silf = silf_table(5, &[spec]);
+    let read = |silf: &[u8]| -> Vec<Option<Vec<u8>>> {
+        let table = graphite::Silf::parse(silf).expect("the Silf reads");
+        let description = table.description(0).expect("its description");
+        let pass = description.pass(0, &Limits::DEFAULT).expect("its pass");
+        (0..4)
+            .map(|rule| pass.constraint(rule).map(<[u8]>::to_vec))
+            .collect()
+    };
+    assert_eq!(
+        read(&silf),
+        vec![
+            Some(vec![0x01, 0x30]),
+            Some(Vec::new()),
+            Some(vec![0x32]),
+            None
+        ],
+        "the first rule's code ends at the third's offset, past the 0 between"
+    );
+
+    // The offsets as written, `[1, 0, 3, 4]` after the pad byte, and the
+    // actions' after them; the first rule's moved past the third's.
+    let written = u16s(&[1, 0, 3, 4, 0, 2, 4, 6]);
+    let at = silf
+        .windows(written.len())
+        .position(|window| window == written.as_slice())
+        .expect("the offsets are where the builder put them");
+    silf[at..at + 2].copy_from_slice(&5u16.to_be_bytes());
+    assert_eq!(
+        read(&silf),
+        vec![None, Some(Vec::new()), Some(vec![0x32]), None],
+        "an end before its start"
+    );
+}
+
 /// The vendored faces' `Silf`s read as their authors compiled them, and the
 /// machine finds in them the rules their text calls for: Dai Banna SIL's
 /// composition of `e` and U+0301, through its pseudo-glyph map, to the rule
@@ -2839,7 +2913,11 @@ fn the_vendored_faces_silf_reads() {
     assert_eq!(description.pseudo_count(), 8);
     let acute = description.pseudo(0x301).expect("U+0301 is a pseudo-glyph");
     assert_eq!(acute, 413);
-    assert_eq!(face.glyph_for_char('\u{301}'), None);
+    assert_eq!(
+        face.glyph_for_char('\u{301}').filter(|&glyph| glyph != 0),
+        None,
+        "U+0301 is not in its cmap: it answers glyph 0, .notdef"
+    );
     let classes = description.classes();
     assert_eq!((classes.len(), classes.linear_count()), (116, 116));
 
