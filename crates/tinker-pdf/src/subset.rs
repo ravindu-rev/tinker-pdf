@@ -1142,7 +1142,12 @@ fn note_scope(usage: &mut Usage, doc: &CosDocument, scope: &PageResources) {
 
 /// A Type 3 font's procedure streams with the glyph name each is under, in
 /// `/CharProcs` order; empty for any other font, or a Type 3 font with no
-/// procedure that is a reference.
+/// procedure that is a reference to a stream.
+///
+/// 9.6.4 Table 110 makes every `/CharProcs` value a content stream. A
+/// reference to anything else — a damaged file's entry that names its
+/// catalog — is no glyph procedure: nothing draws through it, and emptying it
+/// would write a procedure over an object that is not one.
 ///
 /// Through any [`Resolve`] — the view during the walk, the editor in the
 /// rewrite — so that both read one dictionary the same way.
@@ -1160,7 +1165,11 @@ fn type3_procedures(doc: &impl Resolve, font: &Dict) -> Vec<(ObjRef, Name)> {
         .map(|procs| {
             procs
                 .iter()
-                .filter_map(|(name, value)| Some((value.as_objref()?, *name)))
+                .filter_map(|(name, value)| {
+                    let stream = value.as_objref()?;
+                    matches!(doc.resolve(value).as_ref(), Object::Stream(_))
+                        .then_some((stream, *name))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -4309,6 +4318,33 @@ mod type3_fonts {
             before.data,
             "the page renders as it did"
         );
+    }
+
+    /// A `/CharProcs` entry that names something other than a stream is no
+    /// glyph procedure (9.6.4 Table 110): here `/T3`'s `b` names object 1, the
+    /// catalog, as a damaged file's entry can. Nothing draws through it and
+    /// nothing is written over it, so the save's catalog is the document's,
+    /// its page still there, and the font's one procedure is kept for the `A`
+    /// it shows.
+    #[test]
+    fn a_char_procs_entry_that_names_no_stream_is_no_procedure() {
+        let bytes = String::from_utf8(document("[65 /a /b]", "BT /T3 20 Tf 10 10 Td (A) Tj ET"))
+            .expect("the fixture is text")
+            .replace("/a 5 0 R /b 6 0 R", "/a 5 0 R /b 1 0 R")
+            .into_bytes();
+        let (after, report) = subset(bytes);
+
+        let doc = open(after);
+        let catalog = doc.catalog().expect("the catalog is still one");
+        assert_eq!(catalog.get_ref(Name::PAGES), Some(ObjRef::new(2, 0)));
+        assert_eq!(tinker_pdf_cos::pages::count(&doc), 1);
+        assert_eq!(procedure(&doc, 5), A, "a: shown through /T3");
+        let fonts: Vec<(u32, usize, usize)> = report
+            .type3
+            .iter()
+            .map(|t| (t.font.num, t.kept, t.emptied))
+            .collect();
+        assert_eq!(fonts, vec![(4, 1, 0), (10, 1, 1)], "b is none of /T3's");
     }
 
     /// `/Differences [65 /a 65 /b]` gives code 65 two names. This engine

@@ -630,6 +630,10 @@ besides, which is what a redaction leaves in one when it removes a glyph's
 use rather than rewriting the procedure every use shares. So the same pass
 empties every procedure nothing the document shows still runs, writing
 `0 0 d0` over the stream in place and leaving the font dictionary as it was.
+A procedure is a stream (9.6.4 Table 110): a `/CharProcs` entry that names
+anything else — a damaged file's entry naming its catalog — is none, and
+nothing is written over it
+(`a_char_procs_entry_that_names_no_stream_is_no_procedure`).
 Which procedures run is learned where the interpreter asks for one, since a
 Type 3 glyph is run rather than shown and no device hears of it — and,
 for a code whose procedure this engine could not run (no `/FontMatrix`, a
