@@ -21,6 +21,12 @@
 //!   the unit that includes it, so a generator a test takes from a bench's
 //!   support module is that test's.
 //!
+//! A `#[path]` is followed as rustc follows it: to whatever file of the
+//! repository it names, outside `crates/` and `tools/` too, and only through
+//! directories that exist, each `..` leaving one, as on Linux and macOS. A
+//! path through one that does not exist fails, since Windows alone folds the
+//! `..` out of it by text.
+//!
 //! A `#[cfg(test)]` item that is not a module is not a unit, nothing under
 //! `xtask/`, `fuzz/`, `bindings/`, `benches/` or `examples/` is a unit of its
 //! own, and no comment is read.
@@ -216,11 +222,7 @@ pub const WRITERS: &[Writer] = &[
 
 /// `cargo xtask written`, over the tree at `root`.
 pub fn check(root: &Path) -> Result<(), Vec<String>> {
-    let mut problems = Vec::new();
-    let mut files = BTreeMap::new();
-    for tree in ["crates", "tools"] {
-        collect(root, &root.join(tree), &mut files, &mut problems);
-    }
+    let (files, mut problems) = gather(root);
     problems.extend(judge(&files, PENDING));
     if problems.is_empty() {
         Ok(())
@@ -228,6 +230,41 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
         problems.sort();
         Err(problems)
     }
+}
+
+/// The files the check reads, by their paths from `root` with forward
+/// slashes: every `.rs` file under `crates/` and `tools/`, and every file
+/// outside them that one of those includes by `#[path]`, and what that
+/// includes in turn, since rustc follows a `#[path]` wherever it leads — a
+/// font test takes a fuzz target's file from `fuzz/src/`. Beside them, the
+/// files under the two trees that could not be read.
+fn gather(root: &Path) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut problems = Vec::new();
+    let mut files = BTreeMap::new();
+    for tree in ["crates", "tools"] {
+        collect(root, &root.join(tree), &mut files, &mut problems);
+    }
+    let mut queue: Vec<String> = files.keys().cloned().collect();
+    while let Some(file) = queue.pop() {
+        let source = Source::new(&files[&file]);
+        for decl in &source.declarations {
+            let Some(target) = decl.path.as_deref() else {
+                continue;
+            };
+            let base = base_directory(&file, &source, decl.start, true);
+            let named = normalise(&format!("{base}{target}"));
+            if files.contains_key(&named) {
+                continue;
+            }
+            // One that cannot be read stays out, and a unit that includes it
+            // says so: the judgement, not this, decides where a path leads.
+            if let Ok(text) = std::fs::read_to_string(root.join(&named)) {
+                files.insert(named.clone(), text);
+                queue.push(named);
+            }
+        }
+    }
+    (files, problems)
 }
 
 /// Every `.rs` file under `dir`, by its path from `root` with forward slashes.
@@ -368,12 +405,12 @@ fn units<'a>(
                 continue;
             }
             match module_file(path, source, decl, sources) {
-                Some(file) => {
+                Ok(file) => {
                     module_files.insert(file);
                 }
-                None => problems.push(format!(
-                    "{path}: declares the test module `{}`, whose file could not be found, \
-                     so it cannot be checked",
+                Err(why) => problems.push(format!(
+                    "{path}: declares the test module `{}`, whose file {why}, so it cannot be \
+                     checked",
                     decl.name
                 )),
             }
@@ -437,10 +474,21 @@ fn fold<'a>(
             };
             let segment = &segments[index];
             let base = base_directory(segment.file, segment.source, decl.start, true);
-            found.push((segment.file, normalise(&format!("{base}{target}"))));
+            let resolved = resolve(&format!("{base}{target}"), |dir| is_directory(dir, sources));
+            found.push((segment.file, target, resolved));
         }
         index += 1;
-        for (file, resolved) in found {
+        for (file, target, resolved) in found {
+            let resolved = match resolved {
+                Ok(resolved) => resolved,
+                Err(missing) => {
+                    problems.push(format!(
+                        "{file}: includes `{target}` by `#[path]` through `{missing}/`, which \
+                         does not exist, so it cannot be checked: {FOLDED}"
+                    ));
+                    continue;
+                }
+            };
             let is_unit = in_tests(&resolved) || module_files.contains(resolved.as_str());
             if HELPER.contains(&resolved.as_str()) || is_unit || !seen.insert(resolved.clone()) {
                 continue;
@@ -523,16 +571,21 @@ fn base_directory(file: &str, source: &Source, at: usize, has_path: bool) -> Str
 }
 
 /// The file an out-of-line module declaration names: its `#[path]`, or else
-/// `name.rs` or `name/mod.rs` where the declaring file's modules resolve.
+/// `name.rs` or `name/mod.rs` where the declaring file's modules resolve; or
+/// why there is none, to follow "whose file".
 fn module_file<'a>(
     file: &str,
     source: &Source,
     decl: &Declaration,
     sources: &'a BTreeMap<&'a str, Source>,
-) -> Option<&'a str> {
+) -> Result<&'a str, String> {
     let base = base_directory(file, source, decl.start, decl.path.is_some());
     let candidates = match &decl.path {
-        Some(path) => vec![normalise(&format!("{base}{path}"))],
+        Some(path) => vec![
+            resolve(&format!("{base}{path}"), |dir| is_directory(dir, sources)).map_err(
+                |missing| format!("is named through `{missing}/`, which does not exist ({FOLDED})"),
+            )?,
+        ],
         None => vec![
             format!("{base}{}.rs", decl.name),
             format!("{base}{}/mod.rs", decl.name),
@@ -542,6 +595,39 @@ fn module_file<'a>(
         .iter()
         .find_map(|candidate| sources.get_key_value(candidate.as_str()))
         .map(|(path, _)| *path)
+        .ok_or_else(|| "could not be found".to_string())
+}
+
+/// Why a `#[path]` through a directory that does not exist is a fault, not a
+/// way of spelling a path.
+const FOLDED: &str = "Windows folds the `..` out of such a path by text and builds it, and \
+                      Linux and macOS refuse it";
+
+/// Where `path` leads as rustc follows it on Linux and macOS, `a/b/../c` as
+/// `a/c` when `a/b` is a directory; or the first directory it leaves by a
+/// `..` that is not one. `exists` says which are.
+fn resolve(path: &str, exists: impl Fn(&str) -> bool) -> Result<String, String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                let dir = parts.join("/");
+                if !dir.is_empty() && !exists(&dir) {
+                    return Err(dir);
+                }
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+/// Whether `dir` is a directory of the tree: a file of it lies under `dir`.
+fn is_directory(dir: &str, sources: &BTreeMap<&str, Source>) -> bool {
+    let prefix = format!("{dir}/");
+    sources.keys().any(|path| path.starts_with(&prefix))
 }
 
 fn stem(file: &str) -> &str {
@@ -1319,9 +1405,13 @@ mod tests {
             (
                 "crates/x/src/write.rs",
                 "#[cfg(test)]\nmod tests {\n    \
-                 #[path = \"../../../tests/written_support/mod.rs\"]\n    \
+                 #[path = \"written_support.rs\"]\n    \
                  mod written_support;\n    \
                  fn t(b: DocumentBuilder) { written_support::authored(\"x\", b.finish()); }\n}\n",
+            ),
+            (
+                "crates/x/src/write/tests/written_support.rs",
+                "pub fn authored(_: &str, _: Vec<u8>) {}\n",
             ),
         ]);
         let problems = judge(&files, &[]);
@@ -1337,6 +1427,75 @@ mod tests {
         // The file it includes is not a unit of its own, and is pending under
         // the unit that reads it.
         assert!(judge(&files, &["crates/x/tests/counts.rs"]).is_empty());
+    }
+
+    /// A `#[path]` leads only through directories that exist, as rustc follows
+    /// it on Linux and macOS: one whose `..` leaves a directory that does not,
+    /// which builds only where Windows folds the `..` out by text, fails —
+    /// from an inline test module's include and from a test module's own
+    /// declaration alike — and the same paths resolve once the directories
+    /// they leave are there.
+    #[test]
+    fn a_path_through_a_directory_that_does_not_exist_fails() {
+        let files = tree(&[
+            (
+                "crates/x/src/write.rs",
+                "#[cfg(test)]\nmod tests {\n    \
+                 #[path = \"../../../tests/written_support/mod.rs\"]\n    \
+                 mod written_support;\n    \
+                 fn t(b: DocumentBuilder) { written_support::authored(\"x\", b.finish()); }\n}\n",
+            ),
+            (
+                "crates/x/tests/written_support/mod.rs",
+                "pub fn authored(_: &str, _: Vec<u8>) {}\n",
+            ),
+            (
+                "crates/x/src/lib.rs",
+                "mod inner {\n    #[cfg(test)]\n    #[path = \"../edit_tests.rs\"]\n    mod tests;\n}\n",
+            ),
+            ("crates/x/src/edit_tests.rs", "fn t() {}\n"),
+        ]);
+        let problems = judge(&files, &[]);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems.iter().any(|problem| problem.starts_with(
+                "crates/x/src/write.rs: includes `../../../tests/written_support/mod.rs` by \
+                 `#[path]` through `crates/x/src/write/tests/`, which does not exist"
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|problem| problem.starts_with(
+                "crates/x/src/lib.rs: declares the test module `tests`, whose file is named \
+                 through `crates/x/src/inner/`, which does not exist"
+            )),
+            "{problems:?}"
+        );
+
+        let mut present = files.clone();
+        for dir in ["crates/x/src/write/tests", "crates/x/src/inner"] {
+            present.insert(format!("{dir}/kept.rs"), String::new());
+        }
+        let problems = judge(&present, &[]);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    /// A `#[path]` out of `crates/` and `tools/` is followed to its file, which
+    /// the check reads from disk: the font crate's fuzz-seed test takes the
+    /// hinting target's own file from `fuzz/src/`, and holds it as part of
+    /// itself rather than as a file that could not be read.
+    #[test]
+    fn a_path_out_of_the_two_trees_is_followed_to_its_file() {
+        let (files, unreadable) = gather(&crate::repo_root());
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        assert!(files.contains_key("fuzz/src/hinting.rs"));
+        let problems = judge(&files, PENDING);
+        assert!(
+            !problems
+                .iter()
+                .any(|problem| problem.contains("tinker-pdf-font/tests/fuzz_seeds.rs")),
+            "{problems:?}"
+        );
     }
 
     /// A crate root that declares a reading for its `src` test modules, by a

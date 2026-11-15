@@ -340,6 +340,14 @@ checks its count in `USAGE` names (`xtask/src/main.rs:50`).
   the unit that includes it, so a generator a test takes from
   `crates/tinker-pdf/benches/support/inputs.rs` is that test's.
 
+A `#[path]` is followed as rustc follows it: to whatever file of the
+repository it names, outside `crates/` and `tools/` too — the font crate's
+fuzz-seed test takes the hinting target's file from `fuzz/src/` — and only
+through directories that exist, each `..` leaving one, as on Linux and macOS.
+A path whose `..` leaves a directory that does not exist fails the check:
+Windows folds the `..` out of it by text and builds it, and Linux and macOS
+refuse it.
+
 A `#[cfg(test)]` item that is not a module — a counter, a helper function —
 is not a unit, nothing under `xtask/`, `fuzz/`, `bindings/`, `benches/` or
 `examples/` is a unit of its own, and no doc comment is read.
