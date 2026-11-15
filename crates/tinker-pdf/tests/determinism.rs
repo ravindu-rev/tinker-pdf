@@ -2916,7 +2916,7 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // what says this is a rendering change and not a determinism bug.
     (
         "text",
-        "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
+        "be52a29bdb29eee9a3c184683fd7d0f3ef8570127dd0f799f5b8eef1e8e1265c",
     ),
     // Moved September 2026, deliberately, and not because two targets
     // disagreed. The fixture's red triangle is `20 20 m 60 75 l 100 25 l
@@ -2936,17 +2936,17 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     ),
     (
         "shading",
-        "813a28f7b119418e76ae52f96f69047b5dec5100a26375294e9de41ed9cc90b5",
+        "c68813d867ee97002822f8316d91443976f316833e11c064642b52de2465f709",
     ),
     (
         "blend",
-        "759840c7df7bad4fc49a2d94f763e8b5eca6d9edb64f3af1cdfcd635b2512258",
+        "356213a08456233be801103e9cd41dc94cb4e06074ad2a7b8fe2b0c4f6dda0e4",
     ),
     // Added August 2026 with gap 07; no existing fixture reached
     // `fill_with_pattern` at all.
     (
         "pattern",
-        "e02ff91587f4a82c2273f7980e42d953878eead57026dd863de757241217cd5c",
+        "985c60553486db273446e8650c95242ab6d7ecc8c9d5cb1585a4b661190f33b6",
     ),
     // Added August 2026 with gap 06. No existing fixture has an
     // `/OCProperties`, so none of them would move if 8.11 stopped working.
@@ -2983,7 +2983,7 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // ExtGState soft mask reach no other fixture here at all.
     (
         "transparency",
-        "c120574918fcfadb0b33f3f9faa4f0c10a10cc760cd9e9830bedf31463e3f059",
+        "7679c48713abc8f05eb276e3d161dfdda94494443da821d3f424230eb0b80714",
     ),
     // Added August 2026 with gap 09. The `pattern` fixture above is a
     // shading pattern, evaluated per pixel; nothing here reached a
@@ -3011,7 +3011,7 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // a rounding difference.
     (
         "mesh",
-        "7faa166696c1283b6fb7556185d6e2f2a73bc49365a19bcf6797ad60e47c8c27",
+        "7cd8040633751a4434af769fef4a8b66b8ab452a02e6b4e5a88c6cef2f00a016",
     ),
     // Added August 2026 with gap 18a. Nothing above decodes a JPEG 2000
     // stream, so the whole of T.800 -- the container, tier-2's packets,
@@ -3050,7 +3050,7 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // wrote, as well as the renderer every other row here covers.
     (
         "xps",
-        "5dd016599f8b550f523f7faa189b0d2c9edfcaf35860ac286caec4d71da56b11",
+        "3a5663d510c1d4a3e67ce6d2a1bb40c0f2b8b881507db75a75afc71d1450c908",
     ),
     // Added August 2026 with gap 31 milestone 13, and **the first entry
     // here whose page number is not a property of the file**: this is page
@@ -3065,7 +3065,7 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // what it wrote, as well as the renderer every other row here covers.
     (
         "epub",
-        "a0cc8fd3b519745300b0b3eba14cfc5c2fb516b6af9c692801b8031f5585fbd6",
+        "2c1529c716041766c264c05ca487ef245c4d4b28bb9381871ce623f1b5cf10c6",
     ),
     // Enrolled with the analytic tier's own pages (milestone 2). Their
     // right answer is an equation `render_analytic.rs` evaluates per pixel;
@@ -3093,14 +3093,14 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // table. No other entry moved when it was added.
     (
         "default_spaces",
-        "cfe787612cba9228dd2a089986d409a34f599f2000ea708f96b6278036967374",
+        "e05826b6d7c742938db2774628fba7a3fb70f872ecdc6af7c5815c251ceebe41",
     ),
     // The `text` page with its font selected by graphics states (8.4.5's
     // `/Font`): the same face, lines and pixels, so the `text` page's
     // fingerprint.
     (
         "gs_text",
-        "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
+        "be52a29bdb29eee9a3c184683fd7d0f3ef8570127dd0f799f5b8eef1e8e1265c",
     ),
     // The pen: no other page here dashes a stroke or draws a miter, a bevel or
     // a square cap, so this is the one that pins them.
@@ -3120,14 +3120,14 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // ICC conversion through every model of profile the engine reads: a CMYK
     // image through a four-channel `mft2` into Lab, beside the same samples as
     // `/DeviceCMYK`, an RGB image and a fill through one matrix/TRC profile
-    // and a grey-profile image. Its value is the pipeline's that converted
-    // every colour per pixel, taken at the commit that added the page, so that
-    // reading the lookup table through a grid (P-22.4) shows as a move of the
-    // CMYK picture's pixels and of nothing else; `default_spaces`, whose
-    // `/DefaultCMYK` is an `mft2` table too, is the other page it may move.
+    // and a grey-profile image. The CMYK picture is the one conversion here
+    // that reads a lookup table through its integer grid (P-22.4), so the grid
+    // reaches this value through that picture's pixels alone, each within the
+    // grid's bound of the direct pipeline; `default_spaces`, whose
+    // `/DefaultCMYK` is an `mft2` table too, is the other page it reaches.
     (
         "icc",
-        "79955adcd06da0f4bca98631d0cc9675cd4abc8ee9e0775b07baf9b2fc7e02b6",
+        "2317d632acc04051cee11aa82f92217e3b573edac16c3c5de56c6e11ab886537",
     ),
     // The reduced JPEG decodes: every scale a draw asks for — a half, a
     // quarter and an eighth — over a baseline and a progressive 4:2:0 frame
@@ -3502,7 +3502,7 @@ fn svg_output_is_stable_across_targets() {
         ),
         (
             "pattern",
-            "5494551e8a1e1dca71ab8ff7e94cd9e5c5ec260221ec8cddd8c8c6dae841e8fc",
+            "f1ac2548406b22eedae0ecdbddc7c0dce0fab380e3f8addf6fa645f6f312e777",
         ),
         (
             "optional",
@@ -3526,7 +3526,7 @@ fn svg_output_is_stable_across_targets() {
         ),
         (
             "mesh",
-            "ac3f390525f659fd802f3b6f7002752f727fefc2cd5bb9cc5294a79316de1654",
+            "77f538a2abf5ae9952ab1b2946819d7eea0713ed36c1fc196b73fc504bea8f82",
         ),
         (
             "jpx",
@@ -3542,7 +3542,7 @@ fn svg_output_is_stable_across_targets() {
         ),
         (
             "epub",
-            "ef3c3ae7ddc44f2d8a22b0b0589efde0d1d09894217ae9afeb6cbea3705f9a30",
+            "1da99f221f55c8814cd4f6130484c3bab2df9dd6cd0a6b81216e3174c99166ec",
         ),
         (
             "analytic_axial",
@@ -3562,7 +3562,7 @@ fn svg_output_is_stable_across_targets() {
         ),
         (
             "default_spaces",
-            "25633d01d2416d190d121513c742c7e4ba02034096fbe9146639bd7473b93ee3",
+            "ce43ce7885601b0a3a30fdf8073f2ca93ae07a3ba8a49146997b1e5f4c789f9f",
         ),
         (
             "strokes",
@@ -3574,7 +3574,7 @@ fn svg_output_is_stable_across_targets() {
         ),
         (
             "icc",
-            "47dc9a18e2982067ce364561978ba459b6958afc99f342f55991b8e084974077",
+            "b0fbaa803f81602b77b9d6b6a98039e831fcd6491859ab2e34295726019af97e",
         ),
         (
             "jpeg_minified",

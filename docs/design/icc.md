@@ -1808,12 +1808,12 @@ every byte value through each transform it compiles.
 `determinism.rs`'s `icc` page (P-22.3) draws an 8-bit CMYK image through a
 four-channel `mft2` profile over a Lab connection space, an RGB image and a
 fill through a matrix/TRC profile, a grey-profile image and a DeviceCMYK
-image beside them, each profile built in the test, and is recorded from
-today's per-pixel pipeline. The CMYK image is its only gridded conversion, so
-P-22.4 moves the page by that image's pixels or not at all, and the rest of
-the page is the control: a move outside the image is a defect, not the grid.
+image beside them, each profile built in the test. The CMYK image is its only
+gridded conversion, so the grid reaches the page through that image's pixels
+alone, each within the bound above of the direct pipeline, and the rest of the
+page is the control: a move outside the image is a defect, not the grid.
 `default_spaces`, whose `/DefaultCMYK` is an `mft2` profile into XYZ, is the
-other pin P-22.4 may move, and H-76 reviews the two moves together.
+other fingerprint the grid reaches.
 
 ### Milestones
 
