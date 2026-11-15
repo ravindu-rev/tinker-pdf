@@ -143,11 +143,13 @@ fn soft_light(cb: u32, cs: u32) -> u32 {
     // acquire any by accident.
     let d = |x: u32| -> u32 {
         if x <= 63 {
-            // ((16x − 12)x + 4)x, with x in 0..=1 scaled to 0..=255.
-            let x1 = x;
-            let a = (16 * x1).saturating_sub(12 * 255);
-            let b = mul(a, x1) + 4 * 255;
-            mul(b, x1)
+            // ((16x − 12)x + 4)x, with x in 0..=1 scaled to 0..=255: over
+            // 255³, (16x² − 12·255·x + 4·255²)·x. `16x − 12` is negative for
+            // every x here, so it cannot stand alone in unsigned arithmetic —
+            // held at zero it made D(x) 4x — but the quadratic it sits in has
+            // a negative discriminant and is positive for every x.
+            let quadratic = 16 * x * x + 4 * 255 * 255 - 12 * 255 * x;
+            (quadratic * x + 255 * 255 / 2) / (255 * 255)
         } else {
             isqrt(x * 255)
         }
@@ -336,6 +338,30 @@ mod tests {
             128,
             "a mid source leaves the backdrop alone"
         );
+    }
+
+    /// SoftLight's `D(x)` up to a quarter is 11.3.5.2's polynomial,
+    /// `((16x − 12)x + 4)x`, whose first factor is negative there: under a
+    /// source above a half, every dark backdrop blends to within a level of
+    /// `cb + (2cs − 1)(D(cb) − cb)` worked out exactly, the factor's sign kept
+    /// as the formula writes it.
+    #[test]
+    fn soft_light_follows_the_polynomial_on_a_dark_backdrop() {
+        let whole = 255 * 255 * 255i64;
+        for cb in 0..=63i64 {
+            // D(cb / 255) · 255³, as written.
+            let d = ((16 * cb - 12 * 255) * cb + 4 * 255 * 255) * cb;
+            for cs in 128..=255i64 {
+                // B · 255 · 255³ = cb · 255³ + (2cs − 255)(D · 255³ − cb · 255²).
+                let scaled = cb * whole + (2 * cs - 255) * (d - cb * 255 * 255);
+                let expected = (scaled + whole / 2) / whole;
+                let got = i64::from(BlendMode::SoftLight.apply(cb as u32, cs as u32));
+                assert!(
+                    (got - expected).abs() <= 1,
+                    "backdrop {cb}, source {cs}: {got}, not {expected}"
+                );
+            }
+        }
     }
 
     #[test]
