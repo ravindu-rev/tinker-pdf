@@ -174,7 +174,7 @@ mod tests {
         for ((search, phases), (fractions, ms)) in
             SEARCHES.iter().zip(fractions.iter().zip([36.0, 77.0]))
         {
-            now.insert(group.id(search), ms * 1e6 * calls(*search));
+            now.insert(group.id(search), ms * 1e6 * calls(search));
             for (phase, fraction) in phases.iter().zip(fractions.iter()) {
                 now.insert(group.id(phase), fraction * ms * 1e6 * calls(phase));
             }

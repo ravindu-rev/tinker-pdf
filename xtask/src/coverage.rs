@@ -1553,10 +1553,13 @@ pub fn ledger(text: &str) -> Ledger {
     out
 }
 
+/// One table row: its line number and its cells.
+type TableRow = (usize, Vec<String>);
+
 /// Each `## ` section's table rows, header and rule aside, with each row's
 /// line number and cells.
-fn tables(text: &str) -> Vec<(String, Vec<(usize, Vec<String>)>)> {
-    let mut out: Vec<(String, Vec<(usize, Vec<String>)>)> = Vec::new();
+fn tables(text: &str) -> Vec<(String, Vec<TableRow>)> {
+    let mut out: Vec<(String, Vec<TableRow>)> = Vec::new();
     let mut header_seen = false;
     for (index, line) in text.lines().enumerate() {
         if let Some(title) = line.strip_prefix("## ") {
