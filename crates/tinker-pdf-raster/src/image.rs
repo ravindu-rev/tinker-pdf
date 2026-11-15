@@ -5191,16 +5191,11 @@ mod tests {
         (tints, alpha)
     }
 
-    /// Tint `channel` of every sample, as a grey image's three equal bytes,
-    /// or, `inverted`, as the grey of no ink at 255.
-    fn one_component(tints: &[u8], channels: usize, channel: usize, inverted: bool) -> Vec<u8> {
+    /// Tint `channel` of every sample, as a grey image's three equal bytes.
+    fn one_component(tints: &[u8], channels: usize, channel: usize) -> Vec<u8> {
         tints
             .chunks_exact(channels)
-            .flat_map(|sample| {
-                let tint = sample[channel];
-                let grey = if inverted { 255 - tint } else { tint };
-                [grey; 3]
-            })
+            .flat_map(|sample| [sample[channel]; 3])
             .collect()
     }
 
@@ -5243,11 +5238,15 @@ mod tests {
     /// An image of six tints a sample and a coverage, at 1:1, 2:1 and 3.7:1
     /// down, 4x up with and without `/Interpolate`, turned, and past 128:1
     /// where the pyramid reduces it: drawn onto plates, every plate is,
-    /// byte for byte, the draw of that tint alone as a grey image of light —
-    /// over nothing, the grey itself, and over paper, the complement of the
-    /// grey of no ink drawn over white — and the alpha is that draw's alpha.
-    /// So the policy, the plan, the pyramid and the weights are the light
-    /// sampler's, tint by tint.
+    /// byte for byte, the draw of that tint alone as a grey image — over
+    /// nothing, onto a transparent canvas, and over paper, onto an opaque
+    /// black one, which holds 0 at full alpha as paper holds no ink — and the
+    /// alpha is that draw's alpha. So the policy, the plan, the pyramid, the
+    /// weights and the composite are the light sampler's, tint by tint.
+    ///
+    /// The tint itself is the grey, never its complement: the sampler rounds
+    /// each weighted mean half up, so the mean of `255 − t` is not `255`
+    /// less the mean of `t` where the mean of `t` lies on a half.
     #[test]
     fn each_plate_of_an_image_samples_as_its_one_component_image() {
         let channels = 4 + PLATE_SPOTS;
@@ -5318,9 +5317,16 @@ mod tests {
                     &mut pyramid,
                     &mut FillScratch::new(),
                 );
+                // Paper is no ink at full alpha: on the light canvas, 0 at
+                // full alpha, which composites the tint as paper does.
+                let under = if paper {
+                    Color::BLACK
+                } else {
+                    Color::TRANSPARENT
+                };
                 for channel in 0..channels {
-                    let grey = one_component(&tints, channels, channel, paper);
-                    let mut light = Canvas::new(48, 40, PixelFormat::Rgba8, background);
+                    let grey = one_component(&tints, channels, channel);
+                    let mut light = Canvas::new(48, 40, PixelFormat::Rgba8, under);
                     let mut one = ImageDraw::new(
                         ImageSource {
                             width,
@@ -5340,12 +5346,7 @@ mod tests {
                         &mut FillScratch::new(),
                     );
                     let plate = plates.channel(channel).expect("a plate");
-                    let red = light.channel(0).expect("red");
-                    let expected: Vec<u8> = if paper {
-                        red.iter().map(|grey| 255 - grey).collect()
-                    } else {
-                        red
-                    };
+                    let expected = light.channel(0).expect("red");
                     assert_eq!(
                         plate,
                         expected,
