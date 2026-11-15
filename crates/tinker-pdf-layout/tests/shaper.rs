@@ -662,7 +662,9 @@ fn a_justified_line_offers_its_slack_to_the_shaper_first() {
         &justified_tree(&justified_parts(TextJustify::InterCharacter)),
         &provider,
     );
-    assert_eq!(laid.text(), "aaaa aaaa b#bb bbbb cccc cccc cccc");
+    // The collapsible space the first line ends at is removed
+    // (`css-text-3` §4.1.3), so the two lines' text meets there.
+    assert_eq!(laid.text(), "aaaa aaaa b#bb bbbbcccc cccc cccc");
     assert_eq!(
         *provider.offers.borrow(),
         vec![("b#bb bbbb".to_string(), 15.0)],
