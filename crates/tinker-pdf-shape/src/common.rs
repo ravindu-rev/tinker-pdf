@@ -728,7 +728,7 @@ impl GlyphSet {
             .windows(2)
             .all(|pair| matches!(pair, [one, two] if one.1 < two.0));
         if !ascending {
-            ranges.sort_unstable();
+            crate::sort::ascending(ranges);
             let mut merged: Vec<(u16, u16)> = Vec::with_capacity(ranges.len());
             for &(first, last) in ranges.iter() {
                 match merged.last_mut() {

@@ -141,7 +141,7 @@ fn ranked_face_defects(defects: &[(String, FaceDefect)]) -> Vec<(String, FaceDef
             None => out.push((family.clone(), defect.clone(), 1)),
         }
     }
-    out.sort_by(|a, b| {
+    crate::sort::by(&mut out, |a, b| {
         b.2.cmp(&a.2)
             .then_with(|| a.0.cmp(&b.0))
             .then_with(|| a.1.describe().cmp(&b.1.describe()))
@@ -1834,7 +1834,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
                 None => ranked.push((*defect, 1)),
             }
         }
-        ranked.sort_by_key(|(_, images)| std::cmp::Reverse(*images));
+        crate::sort::by_key(&mut ranked, |(_, images)| std::cmp::Reverse(*images));
         for (defect, images) in ranked {
             warnings.push(ArchiveWarning::ImageNotDrawn {
                 item: chapter.name.clone(),
@@ -2375,7 +2375,9 @@ fn register_backgrounds<R: read::Resources + ?Sized>(
                 }
             }
         }
-        failed.sort_by_key(|(_, elements)| std::cmp::Reverse(elements.len()));
+        crate::sort::by_key(&mut failed, |(_, elements)| {
+            std::cmp::Reverse(elements.len())
+        });
         for (defect, elements) in failed {
             warnings.push(ArchiveWarning::BackgroundImageNotDrawn {
                 item: chapter.name.clone(),

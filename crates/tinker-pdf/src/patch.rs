@@ -211,7 +211,7 @@ fn entries_drawn(doc: &CosDocument, dict: &Dict) -> Vec<(Vec<u8>, Vec<u8>)> {
             (name.unwrap_or_default(), written_object(doc, Some(value)))
         })
         .collect();
-    entries.sort();
+    crate::sort::ascending(&mut entries);
     entries
 }
 

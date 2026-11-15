@@ -10553,7 +10553,7 @@ fn merge_tree(
         }
     }
     order_kids(&mut arena);
-    roots.sort_by_key(|kid| kid.order(&arena));
+    crate::sort::by_key(&mut roots, |kid| kid.order(&arena));
 
     // The first element in the arena's order carrying each caller's key,
     // which is the one a caller naming each element once means.
@@ -10717,7 +10717,7 @@ fn default_page(arena: &[Merged], at: usize) -> Option<usize> {
 fn order_kids(arena: &mut [Merged]) {
     for at in 0..arena.len() {
         let mut kids = std::mem::take(&mut arena[at].kids);
-        kids.sort_by_key(|kid| kid.order(arena));
+        crate::sort::by_key(&mut kids, |kid| kid.order(arena));
         arena[at].kids = kids;
     }
 }

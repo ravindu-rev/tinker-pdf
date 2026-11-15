@@ -109,7 +109,7 @@ impl Item {
 #[must_use]
 pub fn ordered(orders: &[i32]) -> Vec<usize> {
     let mut out: Vec<usize> = (0..orders.len()).collect();
-    out.sort_by_key(|at| orders[*at]);
+    crate::sort::by_key(&mut out, |at| orders[*at]);
     out
 }
 

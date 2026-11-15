@@ -1778,11 +1778,11 @@ fn rewrite(
     // Object order, as every field promises. The jobs are already in it — a
     // `BTreeMap` keyed by the program — but the directly-written fonts above
     // were appended before the loop ran.
-    report.untouched.sort_by_key(|u| u.program.num);
-    report.subsetted.sort_by_key(|s| s.program.num);
-    report.type3.sort_by_key(|t| t.font.num);
-    report.type3_untouched.sort_by_key(|u| u.program.num);
-    report.unconverted.sort_by_key(|u| u.program.num);
+    crate::sort::by_key(&mut report.untouched, |u| u.program.num);
+    crate::sort::by_key(&mut report.subsetted, |s| s.program.num);
+    crate::sort::by_key(&mut report.type3, |t| t.font.num);
+    crate::sort::by_key(&mut report.type3_untouched, |u| u.program.num);
+    crate::sort::by_key(&mut report.unconverted, |u| u.program.num);
     report
 }
 

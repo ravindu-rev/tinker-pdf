@@ -118,6 +118,7 @@ pub mod hyphenate;
 pub mod limits;
 pub mod metrics;
 mod position;
+mod sort;
 pub mod style;
 pub use style::{BackgroundLayer, Outline};
 pub mod table;
@@ -876,7 +877,7 @@ impl Layout {
             .flat_map(|page| page.runs.iter())
             .filter(|run| !run.generated)
             .collect();
-        runs.sort_by_key(|run| run.order);
+        crate::sort::by_key(&mut runs, |run| run.order);
         let mut out = String::new();
         for run in runs {
             out.push_str(&run.text);

@@ -270,7 +270,7 @@ pub fn subset_type1(program: &[u8], glyphs: &BTreeSet<u16>) -> Result<Type1Subse
         replacement.extend_from_slice(&stub);
         edits.push((entry.length..entry.data.end, replacement));
     }
-    edits.sort_by_key(|(range, _)| range.start);
+    crate::sort::by_key(&mut edits, |(range, _)| range.start);
 
     let mut plain: Vec<u8> = Vec::with_capacity(close_end + 1);
     let mut at = 0usize;
@@ -364,7 +364,7 @@ fn text_between(
         .chain(charstrings)
         .map(|entry| (entry.start, entry.data.clone()))
         .collect();
-    spans.sort_by_key(|(start, _)| *start);
+    crate::sort::by_key(&mut spans, |(start, _)| *start);
     let mut text = Vec::with_capacity(spans.len() + 1);
     let mut at = 0usize;
     for (start, data) in spans {

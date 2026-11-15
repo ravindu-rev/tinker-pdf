@@ -29,6 +29,7 @@ pub mod outline;
 mod predefined;
 pub mod sbix;
 pub mod sfnt;
+mod sort;
 pub mod subset;
 pub mod svg_table;
 pub mod symbolic;

@@ -885,7 +885,7 @@ fn tables_of(observed: &Observed, frame: (f64, f64, f64, f64), aligned: bool) ->
         ));
     }
     // Top to bottom, then left to right, as a page is read.
-    tables.sort_by(|a, b| {
+    crate::sort::by(&mut tables, |a, b| {
         let (ab, bb) = (a.bounds.bounds(), b.bounds.bounds());
         bb.3.total_cmp(&ab.3).then(ab.0.total_cmp(&bb.0))
     });
@@ -952,8 +952,8 @@ impl Centres {
                 *cy = y;
             }
         }
-        by_x.sort_by(|a, b| a.0.total_cmp(&b.0));
-        by_y.sort_by(|a, b| a.0.total_cmp(&b.0));
+        crate::sort::by(&mut by_x, |a, b| a.0.total_cmp(&b.0));
+        crate::sort::by(&mut by_y, |a, b| a.0.total_cmp(&b.0));
         Centres {
             by_x,
             by_y,
@@ -1023,7 +1023,7 @@ fn median_size(chars: &[&TextChar]) -> Option<f64> {
         .map(|c| c.size)
         .filter(|s| s.is_finite() && *s > 0.0)
         .collect();
-    sizes.sort_by(f64::total_cmp);
+    crate::sort::by(&mut sizes, f64::total_cmp);
     sizes.get(sizes.len() / 2).copied()
 }
 
@@ -1054,7 +1054,7 @@ fn lattice_lines(rules: &[TableRule], em: f64) -> Vec<Line> {
             .iter()
             .filter(|r| r.horizontal == horizontal)
             .collect();
-        axis.sort_by(|a, b| a.at.total_cmp(&b.at));
+        crate::sort::by(&mut axis, |a, b| a.at.total_cmp(&b.at));
         let mut start = 0usize;
         while start < axis.len() {
             let Some(first) = axis.get(start).map(|r| r.at) else {
@@ -1084,7 +1084,7 @@ fn lattice_lines(rules: &[TableRule], em: f64) -> Vec<Line> {
             }
             let mut pieces: Vec<(f64, f64, f64)> =
                 cluster.iter().map(|r| (r.from, r.to, r.width)).collect();
-            pieces.sort_by(|a, b| a.0.total_cmp(&b.0));
+            crate::sort::by(&mut pieces, |a, b| a.0.total_cmp(&b.0));
             let mut current: Option<(f64, f64, f64)> = None;
             let flush = |piece: (f64, f64, f64), out: &mut Vec<Line>| {
                 if piece.1 - piece.0 >= RULE_MIN_EMS * em {
@@ -1157,7 +1157,7 @@ fn components(lines: &[Line], em: f64) -> Vec<Lattice> {
     let mut verticals: Vec<usize> = (0..lines.len())
         .filter(|i| lines.get(*i).is_some_and(|l| !l.horizontal))
         .collect();
-    verticals.sort_by(|a, b| {
+    crate::sort::by(&mut verticals, |a, b| {
         let at = |i: &usize| lines.get(*i).map_or(0.0, |l| l.at);
         at(a).total_cmp(&at(b))
     });
@@ -1199,9 +1199,9 @@ fn components(lines: &[Line], em: f64) -> Vec<Lattice> {
             .filter(|l| !l.horizontal)
             .map(|l| l.at)
             .collect();
-        ys.sort_by(|a, b| b.total_cmp(a));
+        crate::sort::by(&mut ys, |a, b| b.total_cmp(a));
         ys.dedup();
-        xs.sort_by(f64::total_cmp);
+        crate::sort::by(&mut xs, f64::total_cmp);
         xs.dedup();
         if ys.len() < 2 || xs.len() < 2 || (ys.len() - 1) * (xs.len() - 1) < 2 {
             continue;
@@ -1209,8 +1209,8 @@ fn components(lines: &[Line], em: f64) -> Vec<Lattice> {
         let by_place = |a: &Line, b: &Line| a.at.total_cmp(&b.at).then(a.from.total_cmp(&b.from));
         let mut horizontals: Vec<Line> = group.iter().filter(|l| l.horizontal).copied().collect();
         let mut verticals: Vec<Line> = group.iter().filter(|l| !l.horizontal).copied().collect();
-        horizontals.sort_by(by_place);
-        verticals.sort_by(by_place);
+        crate::sort::by(&mut horizontals, by_place);
+        crate::sort::by(&mut verticals, by_place);
         out.push(Lattice {
             ys,
             xs,
@@ -1398,14 +1398,14 @@ impl Lattice {
                 placed.extend(members.iter().map(|s| (s / columns, s % columns, 1, 1)));
             }
         }
-        placed.sort_unstable();
+        crate::sort::ascending(&mut placed);
         // Read in the table's direction.
         let mirrored = |column: usize, span: usize| columns - column - span;
         if right_to_left {
             for cell in &mut placed {
                 cell.1 = mirrored(cell.1, cell.3);
             }
-            placed.sort_unstable();
+            crate::sort::ascending(&mut placed);
         }
 
         let mut permutation = Vec::new();
@@ -1505,7 +1505,7 @@ fn order_cell(chars: &mut [usize], line_of: &[LineOf]) {
             .get(*at)
             .map_or((usize::MAX, 0.0), |l| (l.at, l.top))
     };
-    chars.sort_by(|a, b| {
+    crate::sort::by(chars, |a, b| {
         let ((la, ta), (lb, tb)) = (key(a), key(b));
         tb.total_cmp(&ta).then(la.cmp(&lb)).then(a.cmp(b))
     });
@@ -1571,7 +1571,7 @@ fn fragments(page: &TextPage, flat: &[&TextChar], em: f64, ruled: &[bool]) -> Ve
             })
             .filter(|(at, _)| !ruled.get(*at).copied().unwrap_or(false))
             .collect();
-        placed.sort_by(|a, b| a.1 .0.total_cmp(&b.1 .0));
+        crate::sort::by(&mut placed, |a, b| a.1 .0.total_cmp(&b.1 .0));
         let mut current: Option<Fragment> = None;
         for (at, (x0, y0, x1, y1)) in placed {
             // A space is part of the gap it stands in, not ink that closes
@@ -1626,7 +1626,7 @@ fn infer_aligned(
 ) -> Vec<InferredTable> {
     // Rows: fragments by baseline, top first.
     let mut fragments = fragments;
-    fragments.sort_by(|a, b| {
+    crate::sort::by(&mut fragments, |a, b| {
         b.baseline
             .total_cmp(&a.baseline)
             .then(a.x0.total_cmp(&b.x0))
@@ -1697,7 +1697,7 @@ fn aligned_table(
         .enumerate()
         .flat_map(|(r, row)| row.iter().map(move |f| (edge(f), r)))
         .collect();
-    edges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    crate::sort::by(&mut edges, |a, b| a.0.total_cmp(&b.0));
     // Clusters of edges within the tolerance of their first, kept when
     // enough distinct rows share them.
     let mut starts: Vec<f64> = Vec::new();
@@ -1716,7 +1716,7 @@ fn aligned_table(
             .iter()
             .map(|e| e.1)
             .collect();
-        rows.sort_unstable();
+        crate::sort::ascending(&mut rows);
         rows.dedup();
         if rows.len() >= ALIGNED_REPEATS {
             starts.push(first);
@@ -1768,7 +1768,7 @@ fn aligned_table(
     // Prose set in columns is not a table.
     let mut wide = 0usize;
     for w in &mut widths {
-        w.sort_by(f64::total_cmp);
+        crate::sort::by(w, f64::total_cmp);
         if w.get(w.len() / 2)
             .is_some_and(|m| *m >= crate::reading_order::COLUMN_MIN_WIDTH_EMS * em)
         {
@@ -1793,7 +1793,7 @@ fn aligned_table(
     let high = bands.iter().map(|b| b.1).fold(f64::NEG_INFINITY, f64::max);
     // Column extents in page terms: from a column's start to the next's.
     let mut bounds_x: Vec<f64> = starts.clone();
-    bounds_x.sort_by(f64::total_cmp);
+    crate::sort::by(&mut bounds_x, f64::total_cmp);
     let mut permutation = Vec::new();
     let mut cells = Vec::with_capacity(rows * columns);
     for r in 0..rows {

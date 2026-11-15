@@ -2040,7 +2040,7 @@ fn gradient_stops(space: &ColorSpace, function: &Function) -> Option<Vec<Stop>> 
     let mut points = vec![0.0, 1.0];
     breakpoints(function, &mut points);
     points.retain(|t| t.is_finite() && (0.0..=1.0).contains(t));
-    points.sort_by(f64::total_cmp);
+    crate::sort::by(&mut points, f64::total_cmp);
     points.dedup();
     // Linear between breakpoints, so inside `[0, 1]` everywhere exactly when
     // it is at every breakpoint and on each side of one.

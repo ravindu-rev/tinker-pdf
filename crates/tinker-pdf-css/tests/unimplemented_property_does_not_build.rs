@@ -170,20 +170,28 @@ impl Source {
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(src.join("tests")).expect("the scratch directory");
 
-        // Everything but the three files the injection touches is copied
-        // verbatim, so the proof builds this crate and not a sketch of it.
-        for file in [
-            "counter.rs",
-            "font_face.rs",
-            "limits.rs",
-            "media.rs",
-            "parser.rs",
-            "selector.rs",
-            "supports.rs",
-            "tokenizer.rs",
-        ] {
-            std::fs::write(src.join(file), read(&root.join("src").join(file))).expect("write");
+        // Everything but the files the injection touches, and the root that
+        // declares them, is copied verbatim, so the proof builds this crate
+        // and not a sketch of it. Enumerated rather than listed, as
+        // `tinker-pdf-layout`'s `uncascaded_field_does_not_build.rs` copies
+        // this crate: a list stops building the crate the day it gains a
+        // module, and a proof that breaks when the crate grows proves nothing
+        // until somebody notices.
+        let written = ["lib.rs", "property.rs", "cascade.rs", "longhand.rs"];
+        let mut copied = Vec::new();
+        for entry in std::fs::read_dir(root.join("src")).expect("the crate's source directory") {
+            let entry = entry.expect("a directory entry");
+            let file = entry.file_name().to_string_lossy().into_owned();
+            if !file.ends_with(".rs") || written.contains(&file.as_str()) {
+                continue;
+            }
+            std::fs::write(src.join(&file), read(&entry.path())).expect("write");
+            copied.push(file);
         }
+        assert!(
+            copied.iter().any(|file| file == "parser.rs"),
+            "the crate's modules were copied: {copied:?}"
+        );
         std::fs::write(src.join("lib.rs"), &self.lib).expect("write");
         std::fs::write(src.join("property.rs"), &self.property).expect("write");
         std::fs::write(src.join("cascade.rs"), &self.cascade).expect("write");

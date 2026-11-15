@@ -295,7 +295,7 @@ pub fn number_tree_in<R: Resolve + ?Sized>(doc: &R, root: ObjRef) -> Vec<(i64, O
         .collect();
     // 7.9.7: the keys ascend. Sorting here means a producer that emits them
     // out of order still gets correct lookups.
-    entries.sort_by_key(|(n, _)| *n);
+    crate::sort::by_key(&mut entries, |(n, _)| *n);
     entries
 }
 
@@ -485,7 +485,7 @@ pub fn write_name_tree(
         return Err(TreeWriteError::TooManyEntries(entries.len()));
     }
     let mut entries = entries;
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    crate::sort::by(&mut entries, |a, b| a.0.cmp(&b.0));
     if let Some(key) = entries.windows(2).find_map(|pair| match pair {
         [a, b] if a.0 == b.0 => Some(a.0.clone()),
         _ => None,
@@ -516,7 +516,7 @@ pub fn write_number_tree(
         return Err(TreeWriteError::TooManyEntries(entries.len()));
     }
     let mut entries = entries;
-    entries.sort_by_key(|entry| entry.0);
+    crate::sort::by_key(&mut entries, |entry| entry.0);
     if let Some(key) = entries.windows(2).find_map(|pair| match pair {
         [a, b] if a.0 == b.0 => Some(a.0),
         _ => None,

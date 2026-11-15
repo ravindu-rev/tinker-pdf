@@ -1009,7 +1009,7 @@ impl Codestream<'_> {
             // A.7.5: "concatenated, in the order of increasing Zppt". A
             // repeated index is refused in `tile_part`, so the order is total
             // and the stable sort has nothing left to decide.
-            segments.sort_by_key(|(z, _)| *z);
+            crate::sort::by_key(&mut segments, |(z, _)| *z);
             for (_, ippt) in segments {
                 out.bytes.extend_from_slice(ippt);
                 out.boundaries.push(out.bytes.len());
@@ -1386,7 +1386,7 @@ fn join_ppm(mut segments: Vec<(u8, &[u8])>, parts: usize) -> Result<Option<Ppm>,
     if segments.is_empty() {
         return Ok(None);
     }
-    segments.sort_by_key(|(z, _)| *z);
+    crate::sort::by_key(&mut segments, |(z, _)| *z);
     let mut joined = Vec::new();
     for (_, ippm) in &segments {
         joined.extend_from_slice(ippm);

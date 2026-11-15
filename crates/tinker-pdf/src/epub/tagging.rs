@@ -655,7 +655,7 @@ pub(crate) fn figure_orders(dom: &Dom, pages: &[LayoutPage]) -> Figures {
         .flat_map(|page| page.runs.iter())
         .filter(|run| !run.generated && run.anchor.is_some())
         .collect();
-    runs.sort_by_key(|run| run.order);
+    crate::sort::by_key(&mut runs, |run| run.order);
 
     let mut out = BTreeMap::new();
     for fragment in pages.iter().flat_map(|page| page.replaced.iter()) {
@@ -711,7 +711,7 @@ pub(crate) fn figure_orders(dom: &Dom, pages: &[LayoutPage]) -> Figures {
         .iter()
         .map(|(anchor, order)| (*order, *anchor))
         .collect();
-    by_order.sort_unstable();
+    crate::sort::ascending(&mut by_order);
     Figures {
         by_anchor: out,
         by_order,

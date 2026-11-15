@@ -930,7 +930,7 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
-    values.sort_by(f64::total_cmp);
+    crate::sort::by(&mut values, f64::total_cmp);
     values.get(values.len() / 2).copied()
 }
 
@@ -1210,7 +1210,7 @@ fn infer(
                 ))
             })
             .collect();
-        found.sort_by(|a, b| {
+        crate::sort::by(&mut found, |a, b| {
             let (x, y) = (a.1.bounds.0, b.1.bounds.0);
             if rtl_page {
                 y.total_cmp(&x)
@@ -1284,7 +1284,7 @@ fn in_stream_place(drafts: Vec<Draft>, mut placed: Vec<(Role, Piece)>) -> Vec<Dr
     if placed.is_empty() {
         return drafts;
     }
-    placed.sort_by_key(|(_, piece)| piece.first());
+    crate::sort::by_key(&mut placed, |(_, piece)| piece.first());
     // Each piece of the drafts in order is a slot; each character, its slot.
     let mut by_stream: Vec<(usize, usize)> = Vec::new();
     let mut slots = 0usize;
@@ -1294,7 +1294,7 @@ fn in_stream_place(drafts: Vec<Draft>, mut placed: Vec<(Role, Piece)>) -> Vec<Dr
             slots += 1;
         }
     }
-    by_stream.sort_unstable();
+    crate::sort::ascending(&mut by_stream);
     let mut after: BTreeMap<Option<usize>, Vec<(Role, Piece)>> = BTreeMap::new();
     for (role, piece) in placed {
         let first = piece.first();
@@ -1381,7 +1381,7 @@ fn order_body(placed: Vec<(Option<usize>, Piece)>, columns: usize, em: f64) -> V
 
     // A piece's section is how many spanners stand above it.
     let mut mids: Vec<f64> = spanners.iter().map(|unit| unit_middle(unit)).collect();
-    mids.sort_by(f64::total_cmp);
+    crate::sort::by(&mut mids, f64::total_cmp);
     let section_of = |piece: &Piece| -> usize {
         let mid = piece.middle();
         mids.len() - mids.partition_point(|m| *m <= mid)
@@ -1465,7 +1465,7 @@ fn units(pieces: Vec<Piece>, tolerance: f64) -> Vec<Vec<Piece>> {
         .map(|g| unit_middle(g))
         .collect();
     if !mids.is_empty() {
-        mids.sort_by(f64::total_cmp);
+        crate::sort::by(&mut mids, f64::total_cmp);
         let between = |above: f64, below: f64| {
             let from = mids.partition_point(|m| *m <= below);
             mids.get(from).is_some_and(|m| *m < above)
@@ -1521,7 +1521,7 @@ fn sort_units(units: Vec<Vec<Piece>>, tolerance: f64) -> Vec<Vec<Piece>> {
     let first = |g: &Vec<Piece>| g.iter().map(Piece::first).min().unwrap_or(usize::MAX);
     let mut keyed: Vec<(f64, usize, Vec<Piece>)> =
         units.into_iter().map(|g| (top(&g), first(&g), g)).collect();
-    keyed.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    crate::sort::by(&mut keyed, |a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
     cluster_rows(&mut keyed, tolerance, |k| k.0, |k| k.1);
     keyed.into_iter().map(|(_, _, g)| g).collect()
 }
@@ -1610,7 +1610,9 @@ fn rules_table(rule: &TableRule, frame: (f64, f64, f64, f64), em: f64) -> bool {
 /// Orders pieces down the page: by top, descending, with pieces whose tops
 /// are within `tolerance` of the row's first kept in stream order.
 fn order_rows(pieces: &mut [Piece], tolerance: f64) {
-    pieces.sort_by(|a, b| b.top().total_cmp(&a.top()).then(a.first().cmp(&b.first())));
+    crate::sort::by(pieces, |a, b| {
+        b.top().total_cmp(&a.top()).then(a.first().cmp(&b.first()))
+    });
     cluster_rows(pieces, tolerance, Piece::top, Piece::first);
 }
 
@@ -1636,7 +1638,7 @@ fn cluster_rows<T>(
             end += 1;
         }
         if let Some(run) = items.get_mut(start..end) {
-            run.sort_by_key(|item| first(item));
+            crate::sort::by_key(run, |item| first(item));
         }
         start = end;
     }
@@ -1770,7 +1772,7 @@ fn baseline(piece: &Piece, flat: &[&TextChar]) -> f64 {
         .map(|c| c.origin.1)
         .filter(|y| y.is_finite())
         .collect();
-    ys.sort_by(f64::total_cmp);
+    crate::sort::by(&mut ys, f64::total_cmp);
     ys.get(ys.len() / 2).copied().unwrap_or(piece.bounds.1)
 }
 
@@ -1949,7 +1951,7 @@ fn footnotes(
     if taken.is_empty() {
         return (drafts, Vec::new());
     }
-    taken.sort_unstable();
+    crate::sort::ascending(&mut taken);
     // The notes, cut at every piece that opens with a raised marker.
     let mut body = Vec::with_capacity(drafts.len());
     let mut notes: Vec<(Option<String>, Draft)> = Vec::new();
@@ -1996,7 +1998,7 @@ fn footnotes(
             (key, at, draft)
         })
         .collect();
-    keyed.sort_by_key(|(key, at, _)| (*key, *at));
+    crate::sort::by_key(&mut keyed, |(key, at, _)| (*key, *at));
     (body, keyed.into_iter().map(|(_, _, d)| d).collect())
 }
 
@@ -2257,8 +2259,8 @@ fn within_reach<K: Ord + Copy>(
     }
     queries.retain(|(_, m, x, _)| m.is_finite() && x.is_finite());
     points.retain(|(_, m, x)| m.is_finite() && x.is_finite());
-    queries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    points.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    crate::sort::by(&mut queries, |a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    crate::sort::by(&mut points, |a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
     let mut rest: &[(K, f64, f64, usize)] = &queries;
     while let Some(first) = rest.first() {
         let key = first.0;
@@ -2479,7 +2481,7 @@ fn find_columns(
                 (x0, x1)
             })
             .collect();
-        boxes.sort_by(|a, b| a.0.total_cmp(&b.0));
+        crate::sort::by(&mut boxes, |a, b| a.0.total_cmp(&b.0));
         let (_, y0, _, y1) = line.bounds;
         let mut current: Option<(f64, f64)> = None;
         for (x0, x1) in boxes {
@@ -2512,7 +2514,7 @@ fn find_columns(
     }
 
     let mut edges: Vec<f64> = fragments.iter().flat_map(|f| [f.0, f.1]).collect();
-    edges.sort_by(f64::total_cmp);
+    crate::sort::by(&mut edges, f64::total_cmp);
     edges.dedup();
     if edges.len() < 2 {
         return Columns::default();
@@ -2660,7 +2662,7 @@ struct Extents {
 impl Extents {
     fn new(fragments: &[(f64, f64, f64, f64)], min: f64) -> Extents {
         let mut by_end: Vec<(f64, f64)> = fragments.iter().map(|f| (f.1, f.0)).collect();
-        by_end.sort_by(|a, b| a.0.total_cmp(&b.0));
+        crate::sort::by(&mut by_end, |a, b| a.0.total_cmp(&b.0));
         let mut least = f64::INFINITY;
         let least_start = by_end
             .iter()
@@ -2670,7 +2672,7 @@ impl Extents {
             })
             .collect();
         let mut by_start: Vec<(f64, f64)> = fragments.iter().map(|f| (f.0, f.1)).collect();
-        by_start.sort_by(|a, b| a.0.total_cmp(&b.0));
+        crate::sort::by(&mut by_start, |a, b| a.0.total_cmp(&b.0));
         let mut greatest = f64::NEG_INFINITY;
         let mut greatest_end: Vec<f64> = by_start
             .iter()

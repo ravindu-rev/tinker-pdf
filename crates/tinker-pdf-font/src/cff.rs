@@ -993,7 +993,7 @@ fn invert_charset(charset: &[u16]) -> Vec<(u16, u16)> {
         .enumerate()
         .filter_map(|(gid, sid)| Some((*sid, u16::try_from(gid).ok()?)))
         .collect();
-    out.sort_unstable();
+    crate::sort::ascending(&mut out);
     out.dedup_by_key(|(sid, _)| *sid);
     out
 }

@@ -2720,7 +2720,9 @@ fn settle(
     // page happened to invoke its forms in is one two equivalent files can
     // disagree about.
     let mut rest: Vec<usize> = (0..count).filter(|&f| !exact(&old_way, f)).collect();
-    rest.sort_by_key(|&f| walk.forms.get(f).map_or(0, |e| e.reference.num));
+    crate::sort::by_key(&mut rest, |&f| {
+        walk.forms.get(f).map_or(0, |e| e.reference.num)
+    });
     for form in rest {
         union(editor, walk, form, areas, report, &mut elsewhere);
     }
@@ -3696,7 +3698,7 @@ fn with_names(
     }
 
     // Back to front, so each range still means what it meant.
-    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    crate::sort::by_key(&mut edits, |(range, _)| std::cmp::Reverse(range.start));
     let mut out = data.to_vec();
     for (range, name) in edits {
         // Every range is one `rewrite` recorded around a name it wrote, so

@@ -490,7 +490,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
 /// first stamp and has to stay in front of it, and two runs of one line share
 /// nothing but their order in the line.
 fn order(page: &mut Page) {
-    page.runs.sort_by_key(|run| run.order);
+    crate::sort::by_key(&mut page.runs, |run| run.order);
 }
 
 /// Whether any of these records still has something left to draw.

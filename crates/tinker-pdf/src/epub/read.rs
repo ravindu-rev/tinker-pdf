@@ -109,7 +109,7 @@ impl Census {
     #[must_use]
     pub fn ranked(&self) -> Vec<(&'static str, usize)> {
         let mut out = self.unsupported.clone();
-        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        crate::sort::by(&mut out, |a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
         out
     }
 

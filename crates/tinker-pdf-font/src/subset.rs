@@ -424,7 +424,7 @@ fn subset_opentype_cff(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>) -> Option<Vec<u8
         };
         tables.push((tag, data));
     }
-    tables.sort_by_key(|(tag, _)| *tag);
+    crate::sort::by_key(&mut tables, |(tag, _)| *tag);
     Some(assemble(sfnt.version(), &tables))
 }
 
@@ -520,7 +520,7 @@ fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>, reshape: &Reshape) -
         };
         tables.push((tag, data));
     }
-    tables.sort_by_key(|(tag, _)| *tag);
+    crate::sort::by_key(&mut tables, |(tag, _)| *tag);
 
     Some(assemble(sfnt.version(), &tables))
 }

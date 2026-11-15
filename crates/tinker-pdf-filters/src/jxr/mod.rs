@@ -476,7 +476,7 @@ fn decode_with(bytes: &[u8], limits: &Limits, steps: &mut u64) -> Result<JxrImag
     let data = colour::format_output(&planes, &headers, format, alpha_ref)?;
     *steps = steps.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
 
-    warnings.sort();
+    crate::sort::ascending(&mut warnings);
     warnings.dedup();
     Ok(JxrImage {
         width: headers.image.width,

@@ -456,7 +456,7 @@ impl CMap {
                 }
             }
         }
-        candidates.sort_unstable();
+        crate::sort::ascending(&mut candidates);
         candidates.dedup();
         let mut want = [0u8; 4];
         let want: &str = c.encode_utf8(&mut want);
@@ -589,7 +589,7 @@ impl CMap {
             candidates.push(cid);
         }
 
-        candidates.sort_unstable();
+        crate::sort::ascending(&mut candidates);
         candidates.dedup();
         candidates
             .into_iter()

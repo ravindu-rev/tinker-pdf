@@ -127,6 +127,7 @@ pub mod media;
 pub mod parser;
 pub mod property;
 pub mod selector;
+mod sort;
 pub mod supports;
 pub mod tokenizer;
 

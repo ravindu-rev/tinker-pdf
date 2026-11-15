@@ -1422,7 +1422,7 @@ pub(crate) struct Listing {
 /// so may two headers in a tar.
 fn reading_order(entries: &[Listing]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..entries.len()).collect();
-    order.sort_by(|&x, &y| {
+    crate::sort::by(&mut order, |&x, &y| {
         // Both indices come from the range above, so neither `get` can miss;
         // the fallbacks keep the comparison total rather than panicking.
         let (a, b) = (entries.get(x), entries.get(y));

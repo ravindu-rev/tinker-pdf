@@ -966,7 +966,7 @@ fn cuts(runs: &[(u32, u32)], view: PixelRegion, count: usize) -> Vec<u32> {
         .filter(|(top, bottom)| bottom.saturating_sub(*top) >= 2)
         .map(|&(top, bottom)| (top + 1, bottom - 1))
         .collect();
-    blocked.sort_unstable();
+    crate::sort::ascending(&mut blocked);
     let mut merged: Vec<(u32, u32)> = Vec::with_capacity(blocked.len());
     for (from, to) in blocked {
         match merged.last_mut() {
@@ -1093,9 +1093,9 @@ fn merged(
             }
         }
     }
-    calls.sort_by_key(|call| call.0);
+    crate::sort::by_key(&mut calls, |call| call.0);
     // `Renderer::finish`'s order; a sort that keeps the order of the rest.
-    ending.sort_by_key(|warning| match warning {
+    crate::sort::by_key(&mut ending, |warning| match warning {
         RenderWarning::UnreadableFont => 0,
         RenderWarning::GroupBudgetSpent { .. } => 1,
         RenderWarning::RecursiveContent => 2,
@@ -1159,7 +1159,7 @@ fn listed<T: Clone + PartialEq>(
             keep_least(&mut least, stamp, entry.clone());
         }
     }
-    least.sort_by_key(|entry| entry.0);
+    crate::sort::by_key(&mut least, |entry| entry.0);
     least.truncate(64);
     least.into_iter().map(|(_, entry)| entry).collect()
 }

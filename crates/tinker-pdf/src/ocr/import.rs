@@ -754,7 +754,7 @@ fn by_stated_order<T>(items: Vec<(Option<usize>, Option<i64>, T)>) -> Vec<T> {
             continue;
         }
         let mut sorted = members.clone();
-        sorted.sort_by_key(|&m| (orders.get(m).copied().flatten(), m));
+        crate::sort::by_key(&mut sorted, |&m| (orders.get(m).copied().flatten(), m));
         for (&slot, &member) in members.iter().zip(sorted.iter()) {
             if let Some(place) = placement.get_mut(slot) {
                 *place = member;
@@ -1002,7 +1002,9 @@ impl Naming<'_> {
 /// order among themselves: by the first block each names, those naming none
 /// last as listed.
 fn in_document_order(mut members: Vec<Vec<usize>>) -> Vec<usize> {
-    members.sort_by_key(|blocks| blocks.first().copied().unwrap_or(usize::MAX));
+    crate::sort::by_key(&mut members, |blocks| {
+        blocks.first().copied().unwrap_or(usize::MAX)
+    });
     members.into_iter().flatten().collect()
 }
 
@@ -1463,7 +1465,7 @@ fn read_page_xml(
             })
             .collect();
         if lines.iter().all(|(index, _)| index.is_some()) {
-            lines.sort_by_key(|&(index, l)| (index, l));
+            crate::sort::by_key(&mut lines, |&(index, l)| (index, l));
         }
         let lines = lines
             .into_iter()
@@ -1528,7 +1530,7 @@ fn page_group(tree: &XmlTree, group: usize, naming: &mut Naming<'_>, depth: usiz
         .collect();
     let ordered = tree.local(group).starts_with("OrderedGroup");
     if ordered {
-        members.sort_by_key(|&(index, m)| (index.is_none(), index, m));
+        crate::sort::by_key(&mut members, |&(index, m)| (index.is_none(), index, m));
     }
     let mut lists = Vec::with_capacity(members.len());
     for (_, member) in members {

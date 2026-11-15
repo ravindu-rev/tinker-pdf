@@ -251,7 +251,7 @@ fn confine(after: &CosDocument, before: &CosDocument, object: ObjRef, kind: Touc
     let old = entries(before, old);
 
     let mut keys: Vec<&Vec<u8>> = new.keys().chain(old.keys()).collect();
-    keys.sort_unstable();
+    crate::sort::ascending(&mut keys);
     keys.dedup();
     for key in keys {
         if allowed.contains(&key.as_slice()) {

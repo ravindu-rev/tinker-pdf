@@ -1737,7 +1737,7 @@ fn brackets(
             }
         }
     }
-    pairs.sort_unstable();
+    crate::sort::ascending(&mut pairs);
 
     let e = level.strong();
     let o = if e == BidiClass::L {

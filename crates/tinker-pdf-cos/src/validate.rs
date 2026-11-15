@@ -3358,7 +3358,7 @@ impl Validator<'_> {
 
         let mut boundaries: Vec<u64> = offsets.values().copied().collect();
         boundaries.extend(sections.iter().map(|section| section.at));
-        boundaries.sort_unstable();
+        crate::sort::ascending(&mut boundaries);
 
         offsets
             .iter()

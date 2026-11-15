@@ -72,6 +72,7 @@ mod predictors;
 mod qm;
 mod raster;
 mod runlength;
+mod sort;
 mod tiff;
 mod webp;
 mod xxhash;

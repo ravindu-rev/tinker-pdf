@@ -1494,7 +1494,7 @@ impl Walk<'_, '_> {
         }
         // A stable sort: stops of one offset keep the font's order, which
         // decides which of them stands below the offset and which at it.
-        stops.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+        crate::sort::by(&mut stops, |a, b| a.offset.total_cmp(&b.offset));
         Some(Line {
             extend: line.extend,
             stops,

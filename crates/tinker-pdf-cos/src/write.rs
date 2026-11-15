@@ -1417,7 +1417,7 @@ pub(crate) fn update_section_reserving(
                 gen: standing.gen,
             }))
             .collect();
-        rows.sort_by_key(|row| row.num);
+        crate::sort::by_key(&mut rows, |row| row.num);
         rows.dedup_by_key(|row| row.num);
         write_classic_rows(&mut out, &rows);
     }

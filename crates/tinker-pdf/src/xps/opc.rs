@@ -1211,7 +1211,7 @@ fn assemble(
         .map(|(entry, _)| entry.name.to_ascii_lowercase())
         .collect();
     for (folded, mut group) in groups {
-        group.sort_by_key(|(number, _, _)| *number);
+        crate::sort::by_key(&mut group, |(number, _, _)| *number);
         let count = group.len();
         let numbered = group
             .iter()

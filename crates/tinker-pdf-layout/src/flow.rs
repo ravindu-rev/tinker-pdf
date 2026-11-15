@@ -1029,14 +1029,16 @@ pub(crate) fn build<M: Metrics>(
     let mut warnings: Vec<(Warning, usize)> = builder.warnings.into_iter().collect();
     // Deterministic order, ruling 4: a `HashMap`'s iteration order is not, and
     // a warning list that changed between runs would change a report.
-    warnings.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+    crate::sort::by(&mut warnings, |a, b| {
+        format!("{:?}", a.0).cmp(&format!("{:?}", b.0))
+    });
     let mut flow = builder.flow;
     // §9.9.1's painting order, and a **stable** sort: two positioned boxes in
     // one layer are painted in the order the document generated them, which is
     // the order this vector already holds. `z-index` decides the layer and
     // nothing else decides anything.
-    flow.positioned.sort_by_key(|record| record.z);
-    flow.fixed.sort_by_key(|record| record.z);
+    crate::sort::by_key(&mut flow.positioned, |record| record.z);
+    crate::sort::by_key(&mut flow.fixed, |record| record.z);
     flow.warnings = warnings;
     Ok(flow)
 }
@@ -3064,7 +3066,7 @@ impl<M: Metrics> Builder<'_, M> {
         // Document order over the slots, which is *not* the order they were
         // placed in: `Grid::place` walks the row groups in visual order.
         let mut document: Vec<usize> = (0..grid.slots.len()).collect();
-        document.sort_by_key(|at| {
+        crate::sort::by_key(&mut document, |at| {
             let slot = &grid.slots[*at];
             (slot.group, slot.row, slot.cell)
         });
@@ -4251,7 +4253,7 @@ impl<M: Metrics> Builder<'_, M> {
         avoid: bool,
     ) {
         let mut order: Vec<usize> = (0..ranges.len()).collect();
-        order.sort_by(|a, b| line_top[*a].total_cmp(&line_top[*b]));
+        crate::sort::by(&mut order, |a, b| line_top[*a].total_cmp(&line_top[*b]));
         self.commit_margin();
         let separator = MarginBreak {
             forced: false,
@@ -4750,7 +4752,7 @@ impl<M: Metrics> Builder<'_, M> {
                 at,
                 mandatory: false,
             }));
-            opportunities.sort_by_key(|opportunity| opportunity.at);
+            crate::sort::by_key(&mut opportunities, |opportunity| opportunity.at);
         }
 
         let indent = match container.text_indent {
@@ -6144,7 +6146,7 @@ fn fold_tails(
         }
     }
     // Stable, so two tails after one item stay in the order they were given.
-    tails.sort_by_key(|(at, _)| *at);
+    crate::sort::by_key(&mut tails, |(at, _)| *at);
     let old = std::mem::take(items);
     let mut moved = Vec::with_capacity(old.len());
     let mut tails = tails.into_iter().peekable();

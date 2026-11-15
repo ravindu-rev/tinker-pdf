@@ -344,7 +344,7 @@ impl<'f> FamilyPlan<'f> {
                 )
             })
             .collect();
-        ranked.sort_unstable();
+        crate::sort::ascending(&mut ranked);
         let embedded = ranked.into_iter().map(|(_, _, index)| index).collect();
         #[cfg(test)]
         tally(&BASE_FONT_CALLS);
@@ -1505,7 +1505,9 @@ impl<'a> Fonts<'a> {
                 continue;
             }
             // In the order drawn, which is the order written.
-            line.sort_by_key(|run| order.get(&run_key(run)).copied().unwrap_or(usize::MAX));
+            crate::sort::by_key(&mut line, |run| {
+                order.get(&run_key(run)).copied().unwrap_or(usize::MAX)
+            });
             // Each run's place in the page's list, which its plans are kept
             // by ([`Fonts::plans`]).
             let Some(places) = line
@@ -1587,7 +1589,7 @@ impl<'a> Fonts<'a> {
         // Each stated line's runs and what is drawn between them, one span
         // where two lines' runs interleave, each stating what its runs draw,
         // as typed: the characters the page's fonts give back something for.
-        spans.sort_unstable();
+        crate::sort::ascending(&mut spans);
         let mut merged: Vec<(usize, usize)> = Vec::new();
         for (first, last) in spans {
             match merged.last_mut() {
@@ -3489,7 +3491,7 @@ impl Effects {
             .chain(self.shadow_alphas.iter().map(|(steps, _, _)| *steps))
             .filter(|steps| f64::from(*steps) < ALPHA_STEPS)
             .collect();
-        wanted.sort_unstable();
+        crate::sort::ascending(&mut wanted);
         wanted.dedup();
         let mut refused = Refused::default();
         // A set and not a list: a refused alpha is every element of an
@@ -3599,7 +3601,7 @@ impl OnPage<'_> {
             .chain(chain.iter().map(|element| (*element, true)))
             .collect();
         // `false` before `true`: an element's own transform before its clip.
-        order.sort_unstable();
+        crate::sort::ascending(&mut order);
         for (element, clips) in order {
             if clips {
                 self.clip_to(page, element);
@@ -4780,7 +4782,9 @@ fn page_lines<'r>(
     along: &dyn Fn(&TextRun) -> f64,
 ) -> Vec<Vec<&'r TextRun>> {
     let mut order: Vec<&TextRun> = painted.to_vec();
-    order.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+    crate::sort::by(&mut order, |a, b| {
+        a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x))
+    });
     // Rows of one baseline, then each row by `x`. A run is on the row of the
     // run above it within half an em, as `TextDevice` asks each glyph of the
     // one before it: under a `line-height` of half an em or less every line
@@ -4801,7 +4805,7 @@ fn page_lines<'r>(
     }
     let mut lines: Vec<Vec<&TextRun>> = Vec::new();
     for mut row in rows {
-        row.sort_by(|a, b| a.x.total_cmp(&b.x));
+        crate::sort::by(&mut row, |a, b| a.x.total_cmp(&b.x));
         let mut line: Vec<&TextRun> = Vec::new();
         let mut end = f64::NEG_INFINITY;
         let mut size = 0.0f64;
@@ -4877,7 +4881,7 @@ impl Overprint {
     /// order the reading lists them in.
     fn count(self) -> usize {
         let Overprint(mut boxes) = self;
-        boxes.sort_by(|a, b| {
+        crate::sort::by(&mut boxes, |a, b| {
             a.0.cmp(&b.0)
                 .then(a.1.total_cmp(&b.1))
                 .then(a.2.total_cmp(&b.2))
@@ -5843,7 +5847,7 @@ fn set_objects(page: &mut LayoutPage, atomics: &Atomics) {
     if objects.is_empty() {
         return;
     }
-    objects.sort_by_key(|object| object.order);
+    crate::sort::by_key(&mut objects, |object| object.order);
     #[cfg(test)]
     OBJECTS_SET.with(|set| set.set(set.get().saturating_add(objects.len())));
     let stand = |mut object: TextRun| {
@@ -6629,7 +6633,7 @@ fn drawn_units(
     for (lo, hi, count) in stands.into_values() {
         if hi + 1 - lo == count {
             if let Some(whole) = order.get_mut(lo..=hi) {
-                whole.sort_unstable();
+                crate::sort::ascending(whole);
             }
         }
     }

@@ -241,7 +241,7 @@ pub fn type1_to_cff(program: &[u8]) -> Result<Type1Cff, Type1CffRefusal> {
     // lowest code each answers to, which the encoding's tables need, then
     // every other glyph in program order.
     let mut encoded: Vec<usize> = (0..count).filter(|g| primary[*g].is_some()).collect();
-    encoded.sort_by_key(|g| primary[*g]);
+    crate::sort::by_key(&mut encoded, |g| primary[*g]);
     let mut order: Vec<Option<usize>> = vec![notdef];
     order.extend(encoded.iter().map(|g| Some(*g)));
     order.extend(
@@ -1277,7 +1277,7 @@ fn declare(
 /// The stems of `set` in declaration order — horizontal before vertical,
 /// each by edge and then width — once each.
 fn normalise(mut set: Vec<Stem>) -> Vec<Stem> {
-    set.sort_by(|a, b| {
+    crate::sort::by(&mut set, |a, b| {
         b.horizontal
             .cmp(&a.horizontal)
             .then(a.edge.total_cmp(&b.edge))

@@ -1046,7 +1046,9 @@ impl<'a> Pass<'a> {
             }
         }
         found.retain(|candidate| usize::from(candidate.pre_context) <= position);
-        found.sort_by(|a, b| b.sort_key.cmp(&a.sort_key).then(a.rule.cmp(&b.rule)));
+        crate::sort::by(&mut found, |a, b| {
+            b.sort_key.cmp(&a.sort_key).then(a.rule.cmp(&b.rule))
+        });
         matched.candidates = found;
         matched
     }

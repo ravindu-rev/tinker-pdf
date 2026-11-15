@@ -312,9 +312,9 @@ pub(crate) fn plan(header: Option<&Jp2Header>, components: &[Component]) -> Resu
     // is what a file without `cdef` leaves, or a partial set) means the
     // declared order is the only order there is.
     let mut seen: Vec<u16> = colour.iter().map(|(a, _)| *a).collect();
-    seen.sort_unstable();
+    crate::sort::ascending(&mut seen);
     if seen == (1..=colour.len() as u16).collect::<Vec<_>>() {
-        colour.sort_by_key(|(a, _)| *a);
+        crate::sort::by_key(&mut colour, |(a, _)| *a);
     }
     let colour: Vec<Channel> = colour.into_iter().map(|(_, c)| c).collect();
     if colour.is_empty() {

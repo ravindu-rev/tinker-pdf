@@ -817,7 +817,7 @@ impl Plan {
             .collect();
         front_offsets.push((self.parameters_object, part1 as u64));
         front_offsets.push((self.hint_object, hint_at as u64));
-        front_offsets.sort_unstable();
+        crate::sort::ascending(&mut front_offsets);
         self.write_first_xref(&mut out, &front_offsets, main_xref_at as u64, names);
         debug_assert_eq!(out.len(), part4_at, "part 4 begins where it was placed");
 
@@ -925,7 +925,7 @@ impl Plan {
             .iter()
             .filter_map(|p| offsets.get(&p.number).map(|at| (p.number, *at)))
             .collect();
-        entries.sort_unstable();
+        crate::sort::ascending(&mut entries);
 
         let mut out = Vec::new();
         out.extend_from_slice(b"xref\n");

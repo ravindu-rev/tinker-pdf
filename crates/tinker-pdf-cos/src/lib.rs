@@ -90,6 +90,7 @@ pub mod xref;
 // than surface for callers.
 mod objstm;
 mod repair;
+mod sort;
 mod store;
 mod streams;
 

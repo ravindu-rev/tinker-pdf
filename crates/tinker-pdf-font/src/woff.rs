@@ -318,7 +318,7 @@ fn assemble(flavor: u32, mut tables: Vec<Table>, max_output: usize) -> Result<Ve
 
     // Place the data in the container's physical order, recording where each
     // table landed so the directory can point at it.
-    tables.sort_by_key(|t| t.order);
+    crate::sort::by_key(&mut tables, |t| t.order);
     let mut placed: Vec<(u32, u32, u32, u32)> = Vec::with_capacity(count);
     for table in &tables {
         let offset = u32::try_from(out.len())
@@ -338,7 +338,7 @@ fn assemble(flavor: u32, mut tables: Vec<Table>, max_output: usize) -> Result<Ve
     }
 
     // The directory goes in ascending tag order, whatever order the data is in.
-    placed.sort_by_key(|&(tag, _, _, _)| tag);
+    crate::sort::by_key(&mut placed, |&(tag, _, _, _)| tag);
     for (i, (tag, sum, offset, length)) in placed.iter().enumerate() {
         let at = 12 + i * 16;
         out[at..at + 4].copy_from_slice(&tag.to_be_bytes());
@@ -928,7 +928,7 @@ fn assemble_collection(
     mut tables: Vec<Table>,
     max_output: usize,
 ) -> Result<Vec<u8>, WoffError> {
-    tables.sort_by_key(|t| t.order);
+    crate::sort::by_key(&mut tables, |t| t.order);
     let fonts = &collection.fonts;
 
     // §4.2 permits converting a version 2.0 TTC header to version 1, which is
@@ -1012,7 +1012,7 @@ fn assemble_collection(
                 .ok_or(WoffError::Malformed("a table that was never placed"))?;
             rows.push((table.tag, sum, offset, length));
         }
-        rows.sort_by_key(|&(tag, _, _, _)| tag);
+        crate::sort::by_key(&mut rows, |&(tag, _, _, _)| tag);
         for (tag, sum, offset, length) in rows {
             out.extend_from_slice(&tag.to_be_bytes());
             out.extend_from_slice(&sum.to_be_bytes());

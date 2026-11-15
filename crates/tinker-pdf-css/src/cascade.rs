@@ -2062,7 +2062,7 @@ impl<'a> Matcher<'a> {
         if matched.is_empty() {
             return Ok(None);
         }
-        matched.sort_by_key(|(key, _, _)| *key);
+        crate::sort::by_key(&mut matched, |(key, _, _)| *key);
 
         // The gaps are counted **before** the early return below, and that
         // ordering is the whole of it. `Matcher::winners` walks the same rules
@@ -2258,7 +2258,7 @@ impl<'a> Matcher<'a> {
         // A stable sort, so two declarations with an identical key keep the
         // order they were pushed in — which for two declarations of the same
         // property inside one rule is the order the author wrote them.
-        matched.sort_by_key(|(key, _, _)| *key);
+        crate::sort::by_key(&mut matched, |(key, _, _)| *key);
 
         let mut winners: Vec<(Longhand, usize)> = Vec::new();
         for (index, (_, _, declared)) in matched.iter().enumerate() {

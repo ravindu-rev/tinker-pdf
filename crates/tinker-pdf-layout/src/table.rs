@@ -299,7 +299,7 @@ impl<'a> TableBox<'a> {
     pub fn visual_groups(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.groups.len()).collect();
         // A stable sort by kind, so two bodies keep their document order.
-        order.sort_by_key(|at| self.groups[*at].kind);
+        crate::sort::by_key(&mut order, |at| self.groups[*at].kind);
         order
     }
 

@@ -84,7 +84,7 @@ pub(crate) fn tree(slots: &Slots<'_>, max_depth: usize) -> Tree {
         }
     }
     let mut order: Vec<usize> = (0..count).collect();
-    order.sort_by_key(|at| depth[*at]);
+    crate::sort::by_key(&mut order, |at| depth[*at]);
     Tree {
         parents,
         order,

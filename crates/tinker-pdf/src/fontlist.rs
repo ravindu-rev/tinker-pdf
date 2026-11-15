@@ -475,7 +475,7 @@ impl ScopeVisitor for Fonts {
                 }
                 if !existing.resource_names.contains(&label) {
                     existing.resource_names.push(label);
-                    existing.resource_names.sort();
+                    crate::sort::ascending(&mut existing.resource_names);
                 }
                 break;
             }

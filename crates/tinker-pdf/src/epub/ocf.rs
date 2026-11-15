@@ -956,7 +956,7 @@ impl<'a> Ocf<'a> {
             .iter()
             .map(|e| e.name.as_str())
             .collect();
-        names.sort_unstable();
+        crate::sort::ascending(&mut names);
         // One warning per *repeated name*, so a container holding one file
         // three times says one thing about it and not two.
         if names.windows(2).any(|pair| pair[0] == pair[1]) {

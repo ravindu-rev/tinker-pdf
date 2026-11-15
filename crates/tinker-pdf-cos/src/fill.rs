@@ -626,7 +626,7 @@ fn wrap_for_shaping(map: &[(char, u16, u16)]) -> Vec<u8> {
         hmtx.extend_from_slice(&0u16.to_be_bytes());
     }
     let mut sorted: Vec<(u32, u16)> = map.iter().map(|(c, g, _)| (u32::from(*c), *g)).collect();
-    sorted.sort_unstable();
+    crate::sort::ascending(&mut sorted);
     let groups = u32::try_from(sorted.len()).unwrap_or(0);
     let mut sub = Vec::new();
     sub.extend_from_slice(&12u16.to_be_bytes());

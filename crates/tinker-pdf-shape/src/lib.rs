@@ -99,6 +99,7 @@ pub mod jstf;
 pub mod limits;
 pub mod read;
 pub mod shape;
+mod sort;
 #[cfg(test)]
 mod trace;
 pub mod unicode;
@@ -588,7 +589,7 @@ impl<'a> LayoutTable<'a> {
                 }
             }
         }
-        lookups.sort_unstable();
+        crate::sort::ascending(&mut lookups);
         let mut merged: Vec<(u16, u32)> = Vec::new();
         for (lookup, mask) in lookups {
             match merged.last_mut() {

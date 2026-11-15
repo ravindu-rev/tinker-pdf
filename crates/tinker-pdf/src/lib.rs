@@ -63,6 +63,7 @@ mod resources;
 mod separations;
 pub mod shaping;
 pub mod signature;
+mod sort;
 pub mod standalone;
 mod stats;
 pub mod structure;

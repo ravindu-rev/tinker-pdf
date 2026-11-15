@@ -926,7 +926,7 @@ fn stops_of(node: &Node, resolve: Resolve<'_>) -> Result<Vec<Stop>, BrushError> 
     // A stable sort, so two stops at one offset keep the order the file wrote
     // them in — which is what decides which side of a hard stop each colour
     // lands on.
-    out.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+    crate::sort::by(&mut out, |a, b| a.offset.total_cmp(&b.offset));
     Ok(out)
 }
 

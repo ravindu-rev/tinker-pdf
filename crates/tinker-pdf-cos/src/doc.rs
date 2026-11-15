@@ -1272,7 +1272,7 @@ impl CosDocument {
                     .map(|at| (at, index)),
             );
         }
-        probes.sort_unstable();
+        crate::sort::ascending(&mut probes);
         let mut passed = vec![false; nums.len()];
         self.headers_through_windows(&probes, |index, header| {
             if let (Some(header), Some(&num), Some(pass)) =

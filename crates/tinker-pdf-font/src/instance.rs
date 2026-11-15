@@ -492,7 +492,7 @@ pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, Insta
         out.push((tag_value(TAG_VORG), varied.unwrap_or_else(|| vorg.to_vec())));
     }
 
-    out.sort_by_key(|(tag, _)| *tag);
+    crate::sort::by_key(&mut out, |(tag, _)| *tag);
     Ok(assemble(sfnt.version(), &out))
 }
 

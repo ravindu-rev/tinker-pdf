@@ -1286,7 +1286,7 @@ fn drawn_units(chars: &[TextChar]) -> Units {
     }
 
     // Step 2: visual order, by where each base starts. `sort_by` is stable.
-    clusters.sort_by(|a, b| {
+    crate::sort::by(&mut clusters, |a, b| {
         let start = |cluster: &Vec<usize>| cluster.first().map_or(0.0, |at| extents[*at].0);
         start(a).total_cmp(&start(b))
     });
@@ -1386,7 +1386,7 @@ fn logical_line_reading(
             {
                 Some(span) => {
                     let mut at = cluster.clone();
-                    at.sort_unstable();
+                    crate::sort::ascending(&mut at);
                     let here = at.iter().filter_map(|k| chars.get(*k)).collect();
                     let glyphs = stated.glyphs(span, here, Some(reading.direction));
                     out.extend(stated_chars(stated.text(span), &glyphs, Some(span)));

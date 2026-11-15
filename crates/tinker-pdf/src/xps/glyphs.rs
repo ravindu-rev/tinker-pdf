@@ -524,7 +524,7 @@ fn visual_order(out: &[Placed], units: &[u16]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..out.len()).collect();
     // Stable, which is what keeps a cluster's glyphs in the order the file
     // wrote them: every glyph of one cluster carries the same rank.
-    order.sort_by_key(|&at| {
+    crate::sort::by_key(&mut order, |&at| {
         let character = unit_to_char
             .get(out[at].unit)
             .copied()
