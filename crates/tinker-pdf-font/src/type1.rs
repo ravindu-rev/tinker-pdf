@@ -2041,7 +2041,12 @@ mod tests {
         cs.push(6); // hlineto
         num(500, &mut cs);
         cs.push(7); // vlineto
-        num(-500, &mut cs);
+
+        // -500 in chapter 6.2's five-byte form, which any 32-bit integer may
+        // take, rather than the two bytes `num` writes: the committed seed
+        // `fuzz/corpus/type1/square.pfb` is this program as written so.
+        cs.push(255);
+        cs.extend_from_slice(&(-500i32).to_be_bytes());
         cs.push(6); // hlineto
         cs.push(9); // closepath
         cs.push(14); // endchar
