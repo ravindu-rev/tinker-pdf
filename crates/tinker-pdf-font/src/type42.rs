@@ -471,11 +471,21 @@ fn number(word: &[u8]) -> Option<Token<'static>> {
 }
 
 /// Every token of a program, or the refusal the first malformed one earns.
+///
+/// A binary string is one token: section 4.2's `n RD ~binary~bytes~` is
+/// `RD`'s `string currentfile exch readstring pop`, which takes the integer
+/// before it as its count and leaves the string, so the count is not a token
+/// of its own.
 fn tokens(data: &[u8]) -> Result<Vec<Token<'_>>, Type42Refusal> {
     let mut scanner = Scanner::new(data);
     let mut out = Vec::new();
     while let Some(token) = scanner.scan() {
-        out.push(token?);
+        let token = token?;
+        if matches!(token, Token::Binary(_)) {
+            // The scanner reads a binary string only right after an integer.
+            out.pop();
+        }
+        out.push(token);
     }
     Ok(out)
 }
