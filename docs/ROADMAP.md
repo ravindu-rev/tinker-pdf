@@ -262,6 +262,12 @@ AN-06.3, AN-06.4, AN-06.5, AN-07.1, AN-07.2, AN-07.3, AN-07.4, AN-09.1,
 AN-09.2, AN-09.3, AN-10a.1, AN-10a.2, AN-10b.1, AN-10b.2, AN-10b.3,
 AN-10b.4.
 
+1001–1028: SU-12.25, SU-12.26, SU-12.27, SU-12.28, SU-12.29, SU-12.30,
+SU-12.31, SU-12.32, SU-12.33, SU-12.34, SU-12.4, SU-12.11, SU-12.35,
+SU-12.36, SU-12.37, SU-12.38, SU-12.39, SU-12.40, SU-12.22, SU-12.41,
+SU-12.42, SU-12.43, SU-12.44, SU-12.10, SU-12.45, SU-12.46, SU-12.47,
+SU-12.48.
+
 **The end phase.** First the full test and gate run on every target, each
 failure traced to the step that wrote it and each moved pin reviewed by the
 owner; K-03.8c lands from that run, its exact defect lists read off it. Then

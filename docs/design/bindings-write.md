@@ -256,8 +256,11 @@ own.
 
 - **Laziness across the boundary.** An iterator crosses collected; nothing on
   a surface holds a document's internals open between calls.
-- **Counted work** (`Stats`): the refusal table's row stands until a step owes
-  it.
+- **Counted work** (`Stats`), and the other shapes these rules do not cover
+  (values a host builds, handles whose methods change them, closures, sources
+  and items naming types the facade does not export): SU-12.25 states their
+  rules and SU-12.26 sorts the converters' parts, for the steps of SU-12 that
+  owe them.
 - **Warnings and progress during an operation**: SU-21's callbacks (ruling
   20). A value's own warnings cross with it, as below.
 - **Typed exceptions per status**: SU-14.1's, over the statuses these rules

@@ -67,8 +67,9 @@ MS-02's paired run, MS-04's benchmark set and MS-07's corpus time ratchet.
   returns it as a value in its own vocabulary, as `Jbig2SymbolExtent::work`
   already does (`crates/tinker-pdf-filters/src/jbig2.rs:149-158`), and the
   facade adds it to the operation's tally.
-- **The C ABI and the bindings.** MS-01 projects none of its doors; each is a
-  'not projected' row in `docs/features/bindings.md` (ruling 11).
+- **The C ABI and the bindings.** MS-01 projects none of its doors; each is
+  owed in `docs/features/bindings.md` to the step of SU-12 that projects it
+  (ruling 11).
 - **The `cfg(test)` step counters** some crates' unit tests read. They stay
   until a row that reads one
   moves it onto the tally — K-05 for the HTML tree builder, whose crate is a
