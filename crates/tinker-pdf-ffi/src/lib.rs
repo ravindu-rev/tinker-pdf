@@ -4987,7 +4987,7 @@ endobj
             .expect("the first signature");
         rewritten(
             "simple-text.pdf, signed once",
-            &fixture("simple-text.pdf"),
+            fixture("simple-text.pdf"),
             &once,
         );
 
@@ -6025,7 +6025,7 @@ endobj
         unsafe { tpdf_editor_free(editor) };
         rewritten(
             "the form fixture, filled and saved through the C ABI",
-            &fixture("form-fields.pdf"),
+            fixture("form-fields.pdf"),
             &bytes,
         );
         (bytes, messages)
@@ -6051,7 +6051,7 @@ endobj
         });
         rewritten(
             "the form fixture, filled and saved through the facade",
-            &fixture("form-fields.pdf"),
+            fixture("form-fields.pdf"),
             &bytes,
         );
         (bytes, messages)
@@ -6456,7 +6456,7 @@ endobj
         unsafe { tpdf_editor_free(editor) };
         rewritten(
             "simple-text.pdf, rewritten through the C ABI with its defaults",
-            &fixture("simple-text.pdf"),
+            fixture("simple-text.pdf"),
             &through_abi,
         );
 
@@ -6464,7 +6464,7 @@ endobj
         let through_facade = document.editor().save(&WriteOptions::default());
         rewritten(
             "simple-text.pdf, rewritten through the facade with its defaults",
-            &fixture("simple-text.pdf"),
+            fixture("simple-text.pdf"),
             &through_facade,
         );
         assert_eq!(through_abi, through_facade);
@@ -6520,7 +6520,7 @@ endobj
         unsafe { tpdf_editor_free(editor) };
         rewritten(
             "simple-text.pdf, encrypted through the C ABI",
-            &fixture("simple-text.pdf"),
+            fixture("simple-text.pdf"),
             Locked {
                 bytes: through_abi.clone(),
                 key: Key::Password("open-sesame"),
@@ -6581,7 +6581,7 @@ endobj
         unsafe { tpdf_editor_free(editor) };
         rewritten(
             "simple-text.pdf, encrypted with no owner password",
-            &fixture("simple-text.pdf"),
+            fixture("simple-text.pdf"),
             Locked {
                 bytes: bytes.clone(),
                 key: Key::Password("open-sesame"),
