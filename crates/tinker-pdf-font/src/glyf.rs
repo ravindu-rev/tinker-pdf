@@ -494,7 +494,9 @@ const MAX_POINTS: usize = 1 << 16;
 /// Integer arithmetic throughout, so a caller under a no-float contract can
 /// ask. `None` for a face with no `glyf`, `loca` or `head`, a glyph past the
 /// end of `loca` or whose data runs past `glyf`, a glyph whose data ends
-/// before its points or its records do, a composite nested deeper than eight
+/// before its header, its instructions, its points or its records do (a
+/// glyph of no contours too, and a composite whose last record says more
+/// follow), a composite nested deeper than eight
 /// levels, drawing more than 256 glyphs in all or holding more than 64
 /// records — [`outline`]'s bounds — and a glyph of more than 65 536 points.
 /// Where `outline` draws what it can of such a glyph, this answers nothing:
@@ -521,6 +523,15 @@ fn glyph_points(sfnt: &Sfnt, glyph: u16, depth: u32, budget: &mut u32) -> Option
     let data = glyf.get(start..end)?;
     let contours = i16_at(data, 0)?;
     if let Ok(contours) = usize::try_from(contours) {
+        // A glyph of no contours stores no point, but its header, its
+        // instruction length and its instructions all the same: data that
+        // ends before them is cut short, as data ending before a point is.
+        // Where there are contours, the flags read after them say as much.
+        let length_at = 10 + contours * 2;
+        let instructions = usize::from(be16(data, length_at)?);
+        if data.len() < length_at + 2 + instructions {
+            return None;
+        }
         let parsed = parse_simple(data, contours, &mut 0)?;
         return Some(
             parsed
@@ -1981,11 +1992,12 @@ mod tests {
         assert_eq!(points(&sfnt, 1).map(|p| p.len()), Some(65_536));
         assert_eq!(points(&sfnt, 2), None);
 
-        // A record list ending where a record says more follow, and one cut
-        // in the middle of a record's 2×2.
+        // Two whole records, the second the last; cut after the first, a
+        // record list ending where a record says more follow, and at 30, in
+        // the middle of the second's 2×2.
         let two = composite_glyph(&[
             component(0x0023, 0, 200, 0, &[]),
-            component(0x00A3, 0, 0, -300, &TURN),
+            component(0x0083, 0, 0, -300, &TURN),
         ]);
         let data = font_with_glyphs(&[&triangle(), &two]);
         let sfnt = Sfnt::parse(&data).expect("a font");
