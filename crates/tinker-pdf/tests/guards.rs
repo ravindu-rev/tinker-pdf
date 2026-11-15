@@ -974,13 +974,13 @@ fn pinned_page() -> Vec<u8> {
 /// the streams decoded, each once, and the bytes they inflate to; and the
 /// nodes of a one-page tree. A cache's hits and misses, the font dictionaries
 /// read and the outlines filled are how today's code does the work, and the P
-/// rows exist to move them. A pin a fix has to move is a finding the owner
-/// rules on, as a moved fingerprint is.
+/// rows exist to move them. A pin a fix has to move is decided as a moved
+/// fingerprint is, by whether the fix is correct (ruling 24).
 #[test]
 fn the_tally_counts_the_same_on_every_target() {
     // What the pins are made of: the content, the face and the samples.
     assert_eq!(PINNED_CONTENT.len(), 71);
-    assert_eq!(render_support::curvy_font().len(), 892);
+    assert_eq!(render_support::curvy_font().len(), 1282);
     assert_eq!(SAMPLES.len(), 12);
     let document = Document::open(pinned_page()).expect("the pinned page opens");
     let page = document.page(0).expect("its page");
@@ -999,7 +999,7 @@ fn the_tally_counts_the_same_on_every_target() {
             render.most_decodes_of_one_stream,
             render.bytes_decoded,
         ),
-        (8, 3, 1, 975),
+        (8, 3, 1, 1365),
         "a render: \"Guarded!\", and the content, the face and the samples once each"
     );
 
