@@ -308,9 +308,10 @@ type Coded = Option<(Vec<u8>, u32, u32)>;
 
 /// `spec`'s codestream with every code-block carrying the coefficients
 /// `value` names: each block coded by tier-1's test encoder to the bottom
-/// plane, its packet headers written for one layer in the order the decoder
-/// reads them, and a block whose coefficients are all zero left out of its
-/// packet.
+/// plane in the code-block style its component's header names
+/// ([`tier1_style`]), its packet headers written for one layer in the order
+/// the decoder reads them, and a block whose coefficients are all zero left
+/// out of its packet.
 ///
 /// The geometry and the packet order are the decoder's own
 /// (`tier2::layout_for_test`), so this writes what the decoder will look
@@ -328,7 +329,11 @@ pub(crate) fn coded(spec: &Spec, value: &dyn Fn(At) -> i32) -> Vec<u8> {
     let mut parts: Vec<(u16, Vec<u8>)> = Vec::new();
     for t in 0..spec.tile_count() {
         let (tile, order) = layout_for_test(&stream, t).expect("the writer's tile lays out");
-        let blocks = code_tile(&tile, value, mb);
+        let index = u16::try_from(t).expect("a tile index");
+        let styles: Vec<_> = (0..tile.components.len())
+            .map(|c| tier1_style(stream.style_for(index, c)))
+            .collect();
+        let blocks = code_tile(&tile, &styles, value, mb);
         let mut trees = tag_trees(&tile, &blocks);
         let mut data = Vec::new();
         for (layer, r, c, p) in order {
@@ -336,20 +341,46 @@ pub(crate) fn coded(spec: &Spec, value: &dyn Fn(At) -> i32) -> Vec<u8> {
             let (r, c, p) = (usize::from(r), usize::from(c), p as usize);
             write_packet(&tile, &blocks, &mut trees, (c, r, p), &mut data);
         }
-        parts.push((u16::try_from(t).expect("a tile index"), data));
+        parts.push((index, data));
     }
     let tiles: Vec<(u16, &[u8])> = parts.iter().map(|(t, data)| (*t, &data[..])).collect();
     spec.codestream(&tiles)
 }
 
-/// Every code-block of `tile` coded, by `[component][resolution][band]
-/// [precinct][block]`.
+/// The tier-1 style a component's code-block style byte (Table A.19) codes
+/// its blocks in, as the decoder reads it: D.5's segmentation symbols, the
+/// context reset of bit 1 and the vertically causal contexts of bit 3, which
+/// change what each pass codes and leave each block one codeword segment.
+/// Bypass (D.6), termination on each pass and predictable termination (D.4)
+/// change how a block's bytes are cut and ended, which the writer does not
+/// write, so a style that sets any of them is refused rather than written as
+/// though it had not.
+fn tier1_style(coding: &crate::jpx::codestream::CodingStyle) -> crate::jpx::tier1::CodingStyle {
+    use crate::jpx::codestream::cb_style;
+
+    assert_eq!(
+        coding.cb_style & (cb_style::BYPASS | cb_style::TERMALL | cb_style::PREDICTABLE),
+        0,
+        "the writer codes a block as one MQ codeword segment"
+    );
+    crate::jpx::tier1::CodingStyle {
+        segmentation_symbols: coding.segmentation_symbols(),
+        reset_contexts: coding.reset_contexts(),
+        vertically_causal: coding.vertically_causal(),
+        bypass: false,
+        terminate_all: false,
+    }
+}
+
+/// Every code-block of `tile` coded, component `c`'s in `styles[c]`, by
+/// `[component][resolution][band][precinct][block]`.
 fn code_tile(
     tile: &crate::jpx::tier2::Tile,
+    styles: &[crate::jpx::tier1::CodingStyle],
     value: &dyn Fn(At) -> i32,
     mb: u32,
 ) -> Vec<Vec<Vec<Vec<Vec<Coded>>>>> {
-    use crate::jpx::tier1::{encoder::encode_code_block, CodingStyle};
+    use crate::jpx::tier1::encoder::encode_code_block;
 
     let mut out = Vec::new();
     for (c, component) in tile.components.iter().enumerate() {
@@ -384,7 +415,7 @@ fn code_tile(
                                 h,
                                 planes,
                                 band.orientation,
-                                CodingStyle::default(),
+                                styles[c],
                             );
                             (bytes, passes, mb - planes)
                         }));
