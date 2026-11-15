@@ -1175,9 +1175,14 @@ struct Forced {
 
 /// The clip and the soft mask, with their page-frame rectangles, as `q` saves
 /// them (8.5.4, 11.6.5).
+///
+/// The masks are shared with the state in force, not copied: a `q` costs no
+/// pixels, and the `Q` that ends it puts back the very masks it held, at
+/// their addresses, which is what lets an image run opened under them go on
+/// across it (`ImageRun::masks`).
 struct Held {
-    clip: Option<Mask>,
-    soft: Option<Mask>,
+    clip: Option<Arc<Mask>>,
+    soft: Option<Arc<Mask>>,
     clip_bounds: Option<Bounds>,
     soft_bounds: Option<Bounds>,
 }
@@ -1195,14 +1200,14 @@ struct GroupFrame {
     /// `/BM` at the `Do`, likewise.
     blend: RasterBlend,
     /// The clip in force at the `Do`, in device pixels.
-    clip: Option<Mask>,
+    clip: Option<Arc<Mask>>,
     /// The soft mask in force at the `Do`, in device pixels.
     ///
     /// 11.6.6 resets it to None inside the group, so it masks the group's
     /// *result* rather than each element -- which is the whole drop-shadow
     /// idiom: a mask applied element by element shows the seams the group
     /// exists to remove.
-    soft: Option<Mask>,
+    soft: Option<Arc<Mask>>,
     /// The page-frame rectangles of the two masks above, and of the parent's
     /// canvas. See [`Bounds`].
     clip_bounds: Option<Bounds>,
@@ -1264,8 +1269,8 @@ struct MaskFrame {
     transfer: Option<[u8; 256]>,
     /// The clip and soft mask to put back afterwards, with their page-frame
     /// rectangles and the parent canvas's.
-    clip: Option<Mask>,
-    soft: Option<Mask>,
+    clip: Option<Arc<Mask>>,
+    soft: Option<Arc<Mask>>,
     clip_bounds: Option<Bounds>,
     soft_bounds: Option<Bounds>,
     frame: Bounds,
@@ -1337,14 +1342,18 @@ struct ImageRun {
     blend: RasterBlend,
     /// The clip and soft mask in force when the run was opened.
     ///
-    /// A run survives `q`, and a `Q` or a form's end with no clip or soft
-    /// mask in force on either side of it, because none of those draws
-    /// anything. A run is composited under the masks in force when it
-    /// reaches the canvas, so whatever puts *different* masks in force
-    /// composites it first: a clip, a soft mask or a group as it changes
-    /// them, a `Q` or a form's end as it restores others
-    /// (`Renderer::restore_held`) — a run composited under the wrong ones
-    /// would paint through the clip its draws were made under.
+    /// A run survives `q`, and a `Q` or a form's end that puts back the clip
+    /// and the soft mask in force, because none of those draws anything. A
+    /// `q` shares the masks in force rather than copying them (`Held`), so
+    /// the `Q` after it puts back the very masks, at their addresses, and a
+    /// run under a clip or a soft mask survives the pair as one under neither
+    /// does: a copy put back would read as another clip and end the run at
+    /// every image a page brackets in `q`/`Q`. A run is composited under the
+    /// masks in force when it reaches the canvas, so whatever puts
+    /// *different* masks in force composites it first: a clip, a soft mask or
+    /// a group as it changes them, a `Q` or a form's end as it restores
+    /// others (`Renderer::restore_held`) — a run composited under the wrong
+    /// ones would paint through the clip its draws were made under.
     /// Each mask is identified by its rectangle, the address of its coverage
     /// and the value it reads outside itself, which is cheap and cannot
     /// collide while the mask is alive.
@@ -1610,7 +1619,7 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// [`Renderer::run_reach`].
     unseen: Option<Bounds>,
     cut: Option<Bounds>,
-    clip: Option<Mask>,
+    clip: Option<Arc<Mask>>,
     /// The clip's rectangle on a render of the whole page. See [`Bounds`].
     clip_bounds: Option<Bounds>,
     /// The soft mask's rectangle on a render of the whole page.
@@ -1738,7 +1747,7 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// and the graphics state is PDF-level (ruling 8). It follows the clip
     /// stack's precedent exactly: `save_state` pushes it and `restore_state`
     /// pops it, so an `/SMask` set inside `q ... Q` does not survive the `Q`.
-    soft: Option<Mask>,
+    soft: Option<Arc<Mask>>,
     /// Soft-mask groups being rendered, innermost last.
     mask_frames: Vec<MaskFrame>,
     /// How many tiling-pattern cells this renderer is drawing inside
@@ -2270,13 +2279,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// soft mask in force then ([`Renderer::composite_run`]), and its draws
     /// were made under the ones in force now, which the restore takes away —
     /// a clipped image drawn inside `q` and `Q` would otherwise be composited
-    /// unclipped. A restore that leaves no mask in force where none was keeps
-    /// the run, so abutting images drawn each in a `q` and `Q` of its own
-    /// stay one.
+    /// unclipped. A restore that puts back the masks in force keeps the run:
+    /// a `q` shares them (`Held`), so every `q ... Q` that sets none puts
+    /// them back at their addresses, and abutting images drawn each in a `q`
+    /// and `Q` of its own stay one run, under a clip or a soft mask as under
+    /// neither.
     fn restore_held(&mut self, held: Held) {
         let restored = (
-            held.clip.as_ref().map(mask_id),
-            held.soft.as_ref().map(mask_id),
+            held.clip.as_deref().map(mask_id),
+            held.soft.as_deref().map(mask_id),
         );
         if self.run.is_some() && restored != self.mask_ids() {
             self.flush_run();
@@ -2809,8 +2820,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// How the clip and the soft mask in force can be told apart cheaply.
     fn mask_ids(&self) -> (Option<MaskId>, Option<MaskId>) {
         (
-            self.clip.as_ref().map(mask_id),
-            self.soft.as_ref().map(mask_id),
+            self.clip.as_deref().map(mask_id),
+            self.soft.as_deref().map(mask_id),
         )
     }
 
@@ -2913,8 +2924,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let combined = self.combined_mask();
         let clip = combined
             .as_ref()
-            .or(self.clip.as_ref())
-            .or(self.soft.as_ref());
+            .or(self.clip.as_deref())
+            .or(self.soft.as_deref());
         let marked = put_marks(&mut self.canvas, run.marks);
         run.fragments.composite_region_inked(
             &mut self.canvas,
@@ -3313,8 +3324,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             let combined = self.combined_mask();
             let clip = combined
                 .as_ref()
-                .or(self.clip.as_ref())
-                .or(self.soft.as_ref());
+                .or(self.clip.as_deref())
+                .or(self.soft.as_deref());
             run.fragments.composite_region_inked(
                 &mut canvas,
                 run.covered,
@@ -3357,7 +3368,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     frame.at,
                     frame.alpha,
                     frame.blend,
-                    frame.soft.as_ref(),
+                    frame.soft.as_deref(),
                     None,
                 );
                 if let Some(previous) = held {
@@ -3571,7 +3582,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         alpha: f64,
         blend: tinker_pdf_content::BlendMode,
     ) {
-        let (x0, y0, width, height) = paint_region(bounds, self.clip.as_ref(), None, self.device());
+        let (x0, y0, width, height) =
+            paint_region(bounds, self.clip.as_deref(), None, self.device());
         let framed = region_within(bounds, &[self.clip_bounds], self.frame);
         let format = Self::alpha_format(self.canvas.format);
         let (format, plate_bytes) = match self.plates_within_bound(format, framed.area()) {
@@ -3699,7 +3711,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             frame.at,
             frame.alpha,
             frame.blend,
-            soft.as_ref(),
+            soft.as_deref(),
             Some(&stop),
         );
         self.release_removal(held);
@@ -3859,7 +3871,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             .counts
             .soft_mask_bound_pixels
             .saturating_add(pixels_of(&buffer));
-        self.soft = Some(mask);
+        self.soft = Some(Arc::new(mask));
         // A mask reading a value outside its box confines no paint, so on the
         // whole page its rectangle is the whole frame (`Bounds::limit_of`).
         self.soft_bounds = Some(if frame.outside == 0 {
@@ -4839,8 +4851,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     fn coverage(&mut self, shape: Shape<'_>, stop: Option<&dyn Fn() -> bool>) -> Mask {
         let (x0, y0, width, height) = paint_region(
             self.bounds_of(shape),
-            self.clip.as_ref(),
-            self.soft.as_ref(),
+            self.clip.as_deref(),
+            self.soft.as_deref(),
             self.device(),
         );
         #[cfg(test)]
@@ -5041,7 +5053,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// it (ruling 5), and the clip multiplies into a mask already hardened
     /// when anti-aliasing is off, as it does on the path route.
     fn placed_glyph(&self, local: &Mask, origin: [i32; 2], soft: bool) -> Mask {
-        let soft = if soft { self.soft.as_ref() } else { None };
+        let soft = if soft { self.soft.as_deref() } else { None };
         let left = i64::from(origin[0]) + i64::from(local.x0);
         let top = i64::from(origin[1]) + i64::from(local.y0);
         let placed = Bounds {
@@ -5051,7 +5063,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             bottom: top + i64::from(local.height),
         };
         let mut region = placed.meet(Bounds::of_rect(self.device()));
-        for limit in [self.clip.as_ref(), soft]
+        for limit in [self.clip.as_deref(), soft]
             .into_iter()
             .flatten()
             .filter_map(Bounds::limit_of)
@@ -5221,7 +5233,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     interpolate: image.interpolate,
                     alpha: 1.0,
                     blend: RasterBlend::Normal,
-                    clip: self.clip.as_ref(),
+                    clip: self.clip.as_deref(),
                     tint: image.stencil.then_some(Color::WHITE),
                     ink: None,
                     plates: None,
@@ -5370,8 +5382,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let combined = self.combined_mask();
         let clip = combined
             .as_ref()
-            .or(self.clip.as_ref())
-            .or(self.soft.as_ref());
+            .or(self.clip.as_deref())
+            .or(self.soft.as_deref());
         let draw = ImageDraw {
             image: ImageSource {
                 width: image.width,
@@ -6552,7 +6564,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // shrinks as it nests instead of carrying a page apiece.
         let stop = self.stop_predicate();
         let (clip, bounds) = self.clip_coverage(&built, rule, Some(&stop));
-        self.clip = Some(clip);
+        self.clip = Some(Arc::new(clip));
         self.clip_bounds = Some(bounds);
         tally(&mut self.counts.drawn_clips);
     }
@@ -6605,7 +6617,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         self.showing = self.showing.saturating_add(1);
         let (clip, bounds) = self.clip_coverage(&path, FillRule::NonZero, Some(&stop));
         self.showing = self.showing.saturating_sub(1);
-        self.clip = Some(clip);
+        self.clip = Some(Arc::new(clip));
         self.clip_bounds = Some(bounds);
         tally(&mut self.counts.drawn_clips);
     }
@@ -6786,7 +6798,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // against a per-pixel sweep over the same rectangle is nothing.
         let area: Option<Mask> = match (&self.clip, &self.soft) {
             (Some(clip), Some(soft)) => Some(clip.intersect(soft)),
-            (Some(mask), None) | (None, Some(mask)) => Some(mask.clone()),
+            (Some(mask), None) | (None, Some(mask)) => Some(Mask::clone(mask)),
             (None, None) => None,
         };
 
@@ -6808,7 +6820,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 mesh,
                 to_device,
                 area.as_ref(),
-                shape_area.as_ref(),
+                shape_area.as_deref(),
                 limit,
                 alpha,
                 mode,
@@ -6842,7 +6854,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             Overprint::fill(state),
             plates.as_ref().map(SpaceTints::marks),
         );
-        self.record_shading(&shading, &inverse, shape_area.as_ref(), set.entry);
+        self.record_shading(&shading, &inverse, shape_area.as_deref(), set.entry);
         let (ox, oy, width, height) = self.device();
         let (x_start, y_start, x_end, y_end) =
             area.as_ref().map_or((0, 0, width, height), |mask| {
@@ -9632,7 +9644,8 @@ mod tests {
     /// soft mask whose group painted nothing, which reads black's luminosity
     /// and so hides everything, inside `q` and `Q`, it paints nothing. A `Q`
     /// that puts no other mask in force keeps the run: two abutting images
-    /// drawn each in a `q` and `Q` of its own are one run still.
+    /// drawn each in a `q` and `Q` of its own are one run still, under no clip
+    /// and under one.
     #[test]
     fn a_run_is_composited_under_the_masks_its_draws_were_made_under() {
         use tinker_pdf_content::{Event, Form, MaskGroup};
@@ -9743,6 +9756,27 @@ mod tests {
             (run.covered.0, run.covered.2),
             (10, 30),
             "both images in the one run"
+        );
+
+        // And under one clip, which each `q` shares with the state it saves
+        // and each `Q` puts back as it was (`Held`): one run still. A copy
+        // put back would read as another clip and end the run at the second
+        // image (RC-21's group, soft mask and appearance pages).
+        let clipped = replayed(&[
+            Event::SaveState,
+            clip(),
+            Event::SaveState,
+            image_draw(10.0),
+            Event::RestoreState,
+            Event::SaveState,
+            image_draw(20.0),
+            Event::RestoreState,
+        ]);
+        let run = clipped.run.as_ref().expect("the run held under the clip");
+        assert_eq!(
+            (run.covered.0, run.covered.2),
+            (10, 30),
+            "both images in the one run under the clip"
         );
     }
 
@@ -11378,7 +11412,7 @@ mod tests {
             );
             assert_eq!(
                 r.clip_bounds,
-                r.clip.as_ref().map(Bounds::of_mask),
+                r.clip.as_deref().map(Bounds::of_mask),
                 "{step}: the clip's rectangle"
             );
             assert_eq!(r.clip.as_ref().map_or(0, |clip| clip.outside), 0, "{step}");

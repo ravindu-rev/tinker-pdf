@@ -630,15 +630,17 @@ their average, which is what a render at twice the scale box-filters down to.
 Fragments are *added*, so a run holds only draws that do not overlap: a picture
 laid over another ends the run and composites, and so does any change of alpha,
 blend mode, clip or soft mask, and any other drawing operation. A run survives
-`q`, and a `Q` or a form boundary with no clip or soft mask in force on
-either side of it, because none of those paints — which matters, since real
-content brackets every image in `q`/`Q` and a run that ended there would
-never hold two of anything. A `Q` or a form's end that restores other masks
-composites the run first, under the masks its draws were made under, so a
-clipped image drawn in its own `q`/`Q` reaches the canvas clipped. Past
-`MAX_IMAGE_RUN_PIXELS`, a quarter of `MAX_PAGE_PIXELS`, images composite one
-at a time and abutting ones conflate; that is bounded memory rather than a
-page that will not render.
+`q`, and a `Q` or a form boundary that puts back the clip and the soft mask in
+force, because none of those paints — which matters, since real content
+brackets every image in `q`/`Q` and a run that ended there would never hold two
+of anything. It survives them under a clip or a soft mask too, a form's `/BBox`
+and a group's among them: a `q` shares the masks in force with the state it
+saves rather than copying them, so its `Q` puts back the very masks the run was
+opened under. A `Q` or a form's end that restores other masks composites the
+run first, under the masks its draws were made under, so a clipped image drawn
+in its own `q`/`Q` reaches the canvas clipped. Past `MAX_IMAGE_RUN_PIXELS`, a
+quarter of `MAX_PAGE_PIXELS`, images composite one at a time and abutting ones
+conflate; that is bounded memory rather than a page that will not render.
 A knockout group composites image by image too, because 11.4.5 gives every
 element its own shape.
 

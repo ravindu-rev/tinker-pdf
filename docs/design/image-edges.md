@@ -98,10 +98,13 @@ What ends a run: anything that paints, any change of alpha, blend mode, clip or
 soft mask, a knockout group (11.4.5 gives each element its own shape), the page
 itself, and a draw that would land on coverage the run already holds — adding
 an overlap would show both pictures at once. What does *not* end a run is `q`,
-or a `Q` or a form boundary with no clip or soft mask in force on either side
-of it, none of which paints. That distinction is the whole difference between
-the feature working and not: real content brackets every image in `q`/`Q`,
-and flushing there would leave no run holding two of anything. A `Q` or a
+or a `Q` or a form boundary that puts back the clip and the soft mask in
+force, none of which paints; a `q` shares those masks with the state it saves
+rather than copying them, so the `Q` of a `q ... Q` that sets none puts back
+the very masks, under a clip or a soft mask as under neither. That distinction
+is the whole difference between the feature working and not: real content
+brackets every image in `q`/`Q`, and flushing there would leave no run
+holding two of anything. A `Q` or a
 form's end that restores other masks composites the run before it restores
 them: a run reaches the canvas under the masks in force when it is
 composited, and its draws were made under the ones the restore takes away, so
