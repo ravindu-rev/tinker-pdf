@@ -1408,25 +1408,82 @@ fn hex(bytes: &[u8]) -> String {
 /// table, built through `tinker_pdf_math::pow`, and Lab's conversions, through
 /// `tinker-pdf-color`, are where a platform's transcendental would show first.
 const TOOLBOX_FINGERPRINTS: [(&str, &str); 19] = [
-    ("gamma 2.2", ""),
-    ("gamma 1/2.2, premultiplied", ""),
-    ("gamma 1.8, ink", ""),
-    ("gamma 2.4, Lab", ""),
-    ("invert", ""),
-    ("invert by luminance", ""),
-    ("invert by luminance, ink", ""),
-    ("tint", ""),
-    ("grayscale", ""),
-    ("grayscale, ink", ""),
-    ("the colour count, unicolour and monochrome tests", ""),
-    ("scaled to two thirds", ""),
-    ("scaled to one and a half, premultiplied", ""),
-    ("scaled to a third, ink", ""),
-    ("subsampled by 3 by 2", ""),
-    ("converted to Lab", ""),
-    ("converted from Lab", ""),
-    ("converted to ink, premultiplied", ""),
-    ("converted from ink to grey and alpha", ""),
+    (
+        "gamma 2.2",
+        "e8ec9374d9ded7964d4ffee85602b1be279c3d5561105963090bd6386cf01dcc",
+    ),
+    (
+        "gamma 1/2.2, premultiplied",
+        "a7124f1270d9afa824c0a86634eb2ba8eaebd923bd600a046840b3e728f92fb9",
+    ),
+    (
+        "gamma 1.8, ink",
+        "74bad0dbc8ecca76b9dffe87b0e06f7f2a278abd2ed942012d3d568090aa1cb7",
+    ),
+    (
+        "gamma 2.4, Lab",
+        "a448a2b9ab61305a7376528b0f15a3807b520064d0871e78843fcab2f4a7681d",
+    ),
+    (
+        "invert",
+        "825ad2ba02fa17b683de7ddd0baa2895cb050c82586ae9fd246282b999aa0ed9",
+    ),
+    (
+        "invert by luminance",
+        "aaf97ef7fe7e7483fe984945b9482966f156fe5a2a9a22653a230d389a5c6dea",
+    ),
+    (
+        "invert by luminance, ink",
+        "f3cbb8c125e50db628060ebfdd6725c269918e0161fa30e49ed8582ec8dbba33",
+    ),
+    (
+        "tint",
+        "8a77784cb2e5d89303ed7b405fae6ef5b804ad2a84fed229d75bf1d141334b7a",
+    ),
+    (
+        "grayscale",
+        "3f8b1d56f41cf14b0d8b7b795dff9adb22ddf89dff728fd4ebf73fb296bcb3b4",
+    ),
+    (
+        "grayscale, ink",
+        "efedccf1ab3946b46d1f0434253df0aba076ba45cd0a6a3f4d27e39c352b7123",
+    ),
+    (
+        "the colour count, unicolour and monochrome tests",
+        "a9b8f55557554fd973fa8cb444b1885dbabd6551d0397b7f8bfa70b458d881e1",
+    ),
+    (
+        "scaled to two thirds",
+        "3972d47b1175194d905100a9791108a934218382c091aea05cb04d41a6625a4d",
+    ),
+    (
+        "scaled to one and a half, premultiplied",
+        "e268cde8ce07e63b3f12421e041b61443ec0f01bb8b7c5cf9abbeb2af68b0704",
+    ),
+    (
+        "scaled to a third, ink",
+        "962784835443df1ff30b6f1991c50a0e646738ac0b470f36c11487de078ba329",
+    ),
+    (
+        "subsampled by 3 by 2",
+        "dbbc5dab48bfaa0be9bb732e3ff9cbcc79f779faa936f87687f0884a02e2b8d5",
+    ),
+    (
+        "converted to Lab",
+        "32968cdfab5e3895426a2565f5a47aed7011f8b35b06e89c9cdcc10e2a1b3a9a",
+    ),
+    (
+        "converted from Lab",
+        "ccc025a6c15867027824be40325fae582a095d8adb25d17fac25f3f148663e36",
+    ),
+    (
+        "converted to ink, premultiplied",
+        "7098a6fb10b5bff7bed5e88cb145009ecca527ff87c70ca6ea4d71148acf8d6d",
+    ),
+    (
+        "converted from ink to grey and alpha",
+        "96175111aa4b788e2491c0dae1501bcd071de501c9338661bff49b022d704e12",
+    ),
 ];
 
 /// Each toolbox operation over [`fingerprinted_golden`], by the name
