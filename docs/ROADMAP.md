@@ -274,23 +274,24 @@ owner; K-03.8c lands from that run, its exact defect lists read off it. Then
 the long proofs, several lanes at once:
 
 MS-18.2, K-06.2, K-02.5, MS-13.2, MS-13.3, MS-13.4, MS-13.5, K-04.12,
-RC-16.6a, RC-20.16, FT-01.7, FT-01.12, FT-11.10, FT-14.9, FT-30.7, FT-30.9,
+RC-20.16, FT-01.7, FT-01.12, FT-11.10, FT-14.9, FT-30.7, FT-30.9,
 FT-31.2, FT-31.3, ED-04.5, ED-25.5, ED-38.4, ED-44.7, AN-01.2, K-04.11b,
 MS-22.2b, MS-25.2b, MS-27.2b, K-05.3b, RC-01.9b.
 
 Then the timing runs, on the named machine with nothing else running:
 
-MS-24.1, MS-24.2, MS-04.10, MS-02.6, MS-02.7, P-01.5, P-02.8, P-03.7,
-P-04.6, P-05.9, MS-10.3, P-06.4, P-07.10, P-09.11, P-10.13, P-11.5, P-12.5,
+MS-24.1, MS-24.2, MS-04.10, MS-02.6, MS-02.7, RC-16.6a, P-01.5, P-02.8, P-03.7,
+P-04.6, P-05.9, MS-10.3, P-06.4, P-09.11, P-10.13, P-11.5, P-12.5,
 P-13.9, P-14.6, P-16.11, P-17.9, P-20.3, P-20.6, P-21.2, P-21.3, P-22.8,
-P-23.3, P-24.5, P-25.5, P-26.5, P-04.8, MS-07.4, P-08.10, P-15.11, P-18.6,
-MS-09.5; then the `b` pieces, each after its `a`: MS-09.2b, MS-09.3b,
+P-23.3, P-24.5, P-25.5, P-26.5, P-04.8, MS-07.4, P-08.10, P-15.11, P-18.6;
+then the `b` pieces, each after its `a`: MS-09.2b, MS-09.3b,
 MS-10.1b, MS-10.2b, P-07.9b, P-09.9b, P-10.4b, P-10.12b, P-15.10b, P-16.10b, P-17.8b,
 P-20.1b, RC-01.8b, RC-03.9b, RC-04.17b, RC-05.6b, RC-06.7b, RC-07.16b,
 RC-08.12b, RC-09.7b, RC-10.7b, RC-11.7b, RC-12.7b, RC-15.5b, RC-16.6b,
 RC-17.6b, RC-18.10b, RC-20.15b, FT-04c.9b, FT-04d.8b, FT-05.17b, FT-06.17b,
 FT-07a.7b, FT-07b.9b, FT-07e.8b, FT-08.18b, FT-14.5b, FT-32.7b, ED-02.16b,
-ED-26.14b.
+ED-26.14b; then P-07.10, after MS-10's `b` pieces, and MS-09.5, after
+P-15's.
 
 **After them**, the capability tiers in the order of the table above, then
 container depth, then OCR.
