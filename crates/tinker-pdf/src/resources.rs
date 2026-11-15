@@ -4081,12 +4081,17 @@ impl PageResources {
             colorants: false,
             ..how
         };
+        // Table 71: each entry's value is an array defining a `/Separation`
+        // space. `ColorSpace::Separation` holds a `/DeviceN` too, so the
+        // family is read off the array as written, and an entry of any other
+        // family — the `/DeviceN` itself among them — is not read at all.
         let separations = attributes
             .colorants
             .iter()
+            .filter(|(_, space)| self.is_separation_array(space))
             .filter_map(|(colorant, space)| {
                 let space = self.read_space(space, depth + 1, name, nested)?;
-                matches!(space, ColorSpace::Separation { .. }).then(|| (colorant.clone(), space))
+                Some((colorant.clone(), space))
             })
             .collect();
         let process = attributes.process.as_ref().and_then(|(space, components)| {
@@ -4102,6 +4107,18 @@ impl PageResources {
             separations,
             process,
         }
+    }
+
+    /// Whether `object` is a `/Separation` space's array, its family read as
+    /// [`Self::read_space`] reads it.
+    fn is_separation_array(&self, object: &Object) -> bool {
+        let resolved = self.doc.resolve(object);
+        resolved
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(Object::as_name)
+            .and_then(|family| self.doc.name_bytes(family))
+            .is_some_and(|family| family.as_ref() == b"Separation")
     }
 
     /// Reads a shading dictionary, wherever it was found.

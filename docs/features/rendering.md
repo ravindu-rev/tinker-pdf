@@ -838,7 +838,9 @@ deep and the listing at 4 096 spots, each with what it had read
 apart in a `/Separation`, while a `/DeviceN`, which 8.6.6.5 gives no `/All`,
 names a colorant called `All` — and a `/DeviceN`'s attributes, `/Subtype
 /NChannel`, each `/Colorants` entry that is a `/Separation` space, the
-colorant alone, and `/Process`, its space and its components' names.
+colorant alone — an entry of another family, a `/DeviceN` among them, is not
+kept, its family read off the array as written — and `/Process`, its space
+and its components' names.
 `parse_space` reads the names through the readers `Page::images` uses, so the
 two give every space the same names in the same order
 (`parse_space_and_describe_space_read_the_same_names`), and reads the spaces
