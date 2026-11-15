@@ -11483,9 +11483,16 @@ mod tests {
         }
     }
 
-    /// The graphics state with a fill colour of `grey`.
+    /// The initial graphics state (8.4.1): opaque, under `Normal`. A derived
+    /// default fills, and composites a group, at alpha 0, which paints
+    /// nothing.
+    fn initial() -> GraphicsState {
+        GraphicsState::new(Matrix::IDENTITY)
+    }
+
+    /// The initial graphics state with a fill colour of `grey`.
     fn filled(grey: u8) -> GraphicsState {
-        let mut state = GraphicsState::default();
+        let mut state = initial();
         state.fill_color = tinker_pdf_content::Rgb {
             r: grey,
             g: grey,
@@ -11517,7 +11524,7 @@ mod tests {
         let draw = |canvas: Canvas| {
             let mut r =
                 Renderer::new(canvas, page_transform(40.0, 1.0), &NoGlyphs).with_page_size(60, 40);
-            let plain = GraphicsState::default();
+            let plain = initial();
             assert!(r.begin_soft_mask(
                 &luminosity_mask(pale),
                 &rect_path(15.0, 10.0, 45.0, 30.0),
@@ -11622,7 +11629,7 @@ mod tests {
         let cancel = CancelToken::new();
         let mut r =
             Renderer::new(canvas, page_transform(30.0, 1.0), &NoGlyphs).with_cancel(cancel.clone());
-        let plain = GraphicsState::default();
+        let plain = initial();
         r.fill_path(&rect_path(0.0, 0.0, 40.0, 30.0), &filled(128), false);
         r.save_state();
         r.clip_path(&rect_path(4.0, 3.0, 34.0, 27.0), &plain, false);
