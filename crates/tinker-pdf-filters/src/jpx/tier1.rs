@@ -115,10 +115,10 @@ pub(crate) const MAX_PASSES: u32 = 3 * MAX_BIT_PLANES - 2;
 /// which is the worst possible failure signature. Hence
 /// `super::tests::tier1`'s exhaustive assertion against the table.
 ///
-/// A `const fn`, because the decoder's lookup tables ([`ZERO_CODING_LL_LH`]
-/// and its two siblings) are this function evaluated at every neighbourhood
-/// when the crate is compiled, so the tables the tests assert and the tables
-/// the passes read are one transcription.
+/// The decoder's lookup tables ([`Tables::zero_ll_lh`] and its two
+/// siblings) are this function evaluated at every neighbourhood, so the
+/// tables the tests assert and the tables the passes read are one
+/// transcription.
 pub(crate) const fn zero_coding_context(orientation: Orientation, h: u32, v: u32, d: u32) -> usize {
     // Table D.1's HL column is the LL/LH column with ΣH and ΣV interchanged.
     // Writing it as a swap rather than as a second nine-row table is the one
@@ -366,8 +366,8 @@ const fn flag(bits: usize, at: usize) -> u32 {
 }
 
 /// Table D.1 in `orientation`'s column at every neighbourhood a row's nine
-/// window bits can hold: [`zero_coding_context`] itself, evaluated when the
-/// crate is compiled.
+/// window bits can hold: [`zero_coding_context`] itself, evaluated at every
+/// one.
 const fn zero_coding_table(orientation: Orientation) -> [u8; 512] {
     let mut table = [0; 512];
     let mut bits = 0;
@@ -384,17 +384,8 @@ const fn zero_coding_table(orientation: Orientation) -> [u8; 512] {
     table
 }
 
-/// Table D.1's LL and LH column, by neighbourhood.
-pub(crate) static ZERO_CODING_LL_LH: [u8; 512] = zero_coding_table(Orientation::Ll);
-
-/// Table D.1's HL column, by neighbourhood.
-pub(crate) static ZERO_CODING_HL: [u8; 512] = zero_coding_table(Orientation::Hl);
-
-/// Table D.1's HH column, by neighbourhood.
-pub(crate) static ZERO_CODING_HH: [u8; 512] = zero_coding_table(Orientation::Hh);
-
-/// Neighbour `k`'s state in a [`SIGN_TABLE`] index, as Table D.2 reads it: 0
-/// insignificant, 1 significant and positive, −1 significant and negative.
+/// Neighbour `k`'s state in a [`Tables::sign`] index, as Table D.2 reads it:
+/// 0 insignificant, 1 significant and positive, −1 significant and negative.
 const fn signed(index: usize, k: usize) -> i32 {
     if (index >> (2 * k)) & 1 == 0 {
         0
@@ -425,8 +416,30 @@ const fn sign_table() -> [u8; 256] {
     table
 }
 
-/// [`sign_table`], evaluated when the crate is compiled.
-pub(crate) static SIGN_TABLE: [u8; 256] = sign_table();
+/// The context tables a block's passes read, from Tables D.1 to D.3: built
+/// once at first use rather than evaluated into the binary, as every table
+/// the codec crates derive is (P-19.1). A block takes them when its state is
+/// made ([`Packed::new`]), so no context it forms pays for the `LazyLock`'s
+/// check, and each context stays a mask and a lookup on one word.
+pub(crate) struct Tables {
+    /// Table D.1's LL and LH column, by neighbourhood.
+    pub(crate) zero_ll_lh: [u8; 512],
+    /// Table D.1's HL column, by neighbourhood.
+    pub(crate) zero_hl: [u8; 512],
+    /// Table D.1's HH column, by neighbourhood.
+    pub(crate) zero_hh: [u8; 512],
+    /// [`sign_table`]: Tables D.2 and D.3, the context with its XOR bit at
+    /// bit 7, by the four neighbours across a coefficient.
+    pub(crate) sign: [u8; 256],
+}
+
+/// [`Tables`], built the first time a block is decoded.
+pub(crate) static TABLES: std::sync::LazyLock<Tables> = std::sync::LazyLock::new(|| Tables {
+    zero_ll_lh: zero_coding_table(Orientation::Ll),
+    zero_hl: zero_coding_table(Orientation::Hl),
+    zero_hh: zero_coding_table(Orientation::Hh),
+    sign: sign_table(),
+});
 
 /// Row `r`'s eight neighbours in `word`, as an index of a zero-coding table.
 const fn neighbourhood(word: u64, r: usize) -> usize {
@@ -471,6 +484,8 @@ pub(crate) struct Packed {
     causal: bool,
     /// Table D.1 in this block's orientation.
     zero_coding: &'static [u8; 512],
+    /// Tables D.2 and D.3 ([`Tables::sign`]).
+    sign: &'static [u8; 256],
     /// What forming the contexts has read, for `a_context_costs_one_state_word`.
     #[cfg(test)]
     tally: std::cell::Cell<Tally>,
@@ -489,6 +504,7 @@ impl Packed {
     pub(crate) fn new(w: usize, h: usize, orientation: Orientation, causal: bool) -> Packed {
         let stripes = h.div_ceil(4);
         let stride = w + 2;
+        let tables: &'static Tables = &TABLES;
         Packed {
             w,
             h,
@@ -499,10 +515,11 @@ impl Packed {
             known: vec![0; w * h],
             causal,
             zero_coding: match orientation {
-                Orientation::Ll | Orientation::Lh => &ZERO_CODING_LL_LH,
-                Orientation::Hl => &ZERO_CODING_HL,
-                Orientation::Hh => &ZERO_CODING_HH,
+                Orientation::Ll | Orientation::Lh => &tables.zero_ll_lh,
+                Orientation::Hl => &tables.zero_hl,
+                Orientation::Hh => &tables.zero_hh,
             },
+            sign: &tables.sign,
             #[cfg(test)]
             tally: std::cell::Cell::new(Tally::default()),
         }
@@ -545,7 +562,7 @@ impl Packed {
         let word = self.word(i);
         let across = (word >> (3 * r)) & CROSS;
         let signs = (word >> (CHI + 3 * r)) & CROSS;
-        let entry = SIGN_TABLE[((across >> 1) | signs) as usize];
+        let entry = self.sign[((across >> 1) | signs) as usize];
         (usize::from(entry & 0x7F), entry >> 7)
     }
 

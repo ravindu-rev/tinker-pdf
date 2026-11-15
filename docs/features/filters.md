@@ -356,7 +356,7 @@ word to each column of each four-row stripe: σ over a window three columns
 wide and six rows tall around the column's four coefficients, the signs D.3
 reads, and the four coefficients' π and refined flags. So each context of
 Tables D.1, D.3 and D.4 is a mask and a lookup, in tables the crate builds
-from its transcriptions of those tables when it compiles, and a coefficient
+at first use from its transcriptions of those tables, and a coefficient
 that becomes significant sets its bits in the words around it; magnitudes
 and the plane each coefficient is known to stay one a coefficient. The test
 encoder keeps the transcribed state, a flag a coefficient, and the packed one

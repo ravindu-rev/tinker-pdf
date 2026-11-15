@@ -88,10 +88,12 @@ So a context of Table D.1, D.3 or D.4 is a shift, a mask and a lookup on one
 word: a row's nine σ bits index a 512-entry Table D.1 for the block's
 orientation, the four across the coefficient with their signs index a
 256-entry Tables D.2 and D.3, and Table D.4 reads whether any of the nine is
-set beside the refined bit. The tables are `zero_coding_context`,
-`sign_coding_context` and `magnitude_refinement_context` evaluated at every
-index when the crate is compiled. When a coefficient becomes significant the
-pass sets its bits in its own word and in the up to eight words around it,
+set beside the refined bit. The two tables are `zero_coding_context` and
+`sign_coding_context` evaluated at every index, built once at first use in a
+`LazyLock` rather than into the binary (P-19.1) and taken by each block when
+its state is made, so a context pays for no check; Table D.4 is
+`magnitude_refinement_context` itself. When a coefficient becomes significant
+the pass sets its bits in its own word and in the up to eight words around it,
 the code-block's words bordered by one on every side so an edge needs no
 check. Magnitudes and the known plane stay per coefficient, since they are
 values, not flags. Under the vertically causal mode a stripe's first row sets
