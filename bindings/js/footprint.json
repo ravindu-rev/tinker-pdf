@@ -53,6 +53,28 @@
         ]
       }
     },
+    "cjk-fonts": {
+      "figure": {
+        "bytes": 20945238,
+        "date": "2026-11-15",
+        "run": "20a3fbda@x86_64-pc-windows-msvc#1"
+      },
+      "tolerance": {
+        "bytes": 3098,
+        "runs": [
+          "20a3fbda@x86_64-pc-windows-msvc#1",
+          "20a3fbda@x86_64-pc-windows-msvc#2",
+          "20a3fbda@x86_64-pc-windows-msvc#3",
+          "20a3fbda@x86_64-pc-windows-msvc#4",
+          "20a3fbda@x86_64-pc-windows-msvc#5",
+          "20a3fbda@x86_64-pc-windows-msvc#6"
+        ],
+        "toolchains": [
+          "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+          "rustc 1.98.1 (48a229cea 2026-09-01)"
+        ]
+      }
+    },
     "default": {
       "figure": {
         "bytes": 3424464,
