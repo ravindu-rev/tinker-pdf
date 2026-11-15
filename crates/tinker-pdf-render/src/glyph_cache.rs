@@ -435,6 +435,13 @@ mod tests {
         }
     }
 
+    /// The state a page begins in (8.4.1): black, at `ca` 1.0 (Table 52).
+    /// `GraphicsState::default()` is every field's zero, its alphas among
+    /// them, and a glyph shown at alpha 0 paints nothing.
+    fn initial() -> GraphicsState {
+        GraphicsState::new(Matrix::IDENTITY)
+    }
+
     /// Shows one glyph on the page at `(10, 10)` and one inside the form at
     /// `(60, 10)`, both font 7 code 65 at one phase, and returns the canvas
     /// and the counts.
@@ -453,7 +460,7 @@ mod tests {
         };
         let canvas = Canvas::new(100, 40, PixelFormat::Rgb8, Color::WHITE);
         let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &page);
-        let state = GraphicsState::default();
+        let state = initial();
         renderer.show_glyph(&glyph(10.0, 10.0), &state);
         assert!(renderer.begin_form(1, b"Fm"));
         renderer.show_glyph(&glyph(60.0, 10.0), &state);
@@ -527,7 +534,7 @@ mod tests {
         };
         let canvas = Canvas::new(100, 40, PixelFormat::Rgb8, Color::WHITE);
         let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &page);
-        let state = GraphicsState::default();
+        let state = initial();
         renderer.show_glyph(&glyph(10.0, 10.0), &state);
         renderer.push_resources(pushed);
         renderer.show_glyph(&glyph(60.0, 10.0), &state);
@@ -545,16 +552,22 @@ mod tests {
 
     /// Three glyphs of font 7, code 65: at `(10, 10)` and `(30, 10)`, one
     /// phase, and at `(50.5, 10)`, half a pixel over; rendered through
-    /// `source`, anti-aliased as `antialias` says.
+    /// `source`, anti-aliased as `antialias` says. A source that keeps masks
+    /// holds them and the render none; one that keeps none leaves the render
+    /// its own, one for each of the two phases.
     fn three_glyphs(source: &Source, antialias: bool) -> (Canvas, crate::RenderCounts) {
         let canvas = Canvas::new(100, 40, PixelFormat::Rgb8, Color::WHITE);
         let mut renderer =
             Renderer::new(canvas, page_transform(40.0, 1.0), source).with_antialias(antialias);
-        let state = GraphicsState::default();
+        let state = initial();
         for x in [10.0, 30.0, 50.5] {
             renderer.show_glyph(&glyph(x, 10.0), &state);
         }
-        assert_eq!(renderer.glyph_cache.len(), 0, "the source holds the masks");
+        if source.store.is_some() {
+            assert_eq!(renderer.glyph_cache.len(), 0, "the source holds the masks");
+        } else {
+            assert_eq!(renderer.glyph_cache.len(), 2, "the render holds its own");
+        }
         let (canvas, _, counts) = renderer.finish_counted();
         (canvas, counts)
     }
