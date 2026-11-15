@@ -535,11 +535,15 @@ mod tests {
         Spots::new(count).expect("under the cap")
     }
 
+    /// One colorant a test colour names: its name, its tint and its own
+    /// process ink, where it has one.
+    type Named<'a> = (&'a [u8], u8, Option<[u8; 4]>);
+
     /// A colour of `kind` naming `named`, each at its tint, its alternate
     /// `alternate` and its other process space's ink `process`.
     fn colour(
         kind: ColorantKind,
-        named: &[(&[u8], u8, Option<[u8; 4]>)],
+        named: &[Named<'_>],
         alternate: Option<[u8; 4]>,
         process: Option<[u8; 4]>,
     ) -> ColorantTints {

@@ -18,6 +18,8 @@
 //! shading's `t` and a radial shading's quadratic terms step from column to
 //! column there instead of being evaluated afresh ([`ShadingRow`]).
 
+use std::cmp::Ordering;
+
 use tinker_pdf_color::icc::Conversion;
 use tinker_pdf_color::{ColorSpace, Function};
 use tinker_pdf_content::Matrix;
@@ -298,7 +300,7 @@ impl ShadingScratch {
             || !function.tabulable()
             || !low.is_finite()
             || !high.is_finite()
-            || !(high > low)
+            || high <= low
         {
             return;
         }
@@ -612,8 +614,9 @@ impl ShadingRow<'_> {
             ) => {
                 let t = axial_step(&self.map, *coords, *dt, at, px);
                 let e = STEP_ERROR * (1.0 + t.abs() + 64.0 * dt.abs());
-                // Negated, so an error no comparison can order is undecided.
-                let undecided = !(e <= PRECISION)
+                // An error no comparison can order is undecided too.
+                let undecided = e.is_nan()
+                    || e > PRECISION
                     || (!extend.0 && t.abs() <= MARGIN * e)
                     || (!extend.1 && (t - 1.0).abs() <= MARGIN * e);
                 (!undecided).then(|| (space, function, clamp_extend(t, *extend)))
@@ -744,8 +747,9 @@ impl Radial {
         let e_c = 4.0 * STEP_ERROR * self.c_scale;
         let discriminant = b * b - a * c;
         let e_discriminant = 2.0 * b.abs() * e_b + e_b * e_b + a.abs() * e_c;
-        // Negated, so a value no comparison can order is undecided too.
-        if !(discriminant.abs() > MARGIN * e_discriminant) {
+        // Undecided unless it is surely past its error: a value no comparison
+        // can order is undecided too.
+        if discriminant.abs().partial_cmp(&(MARGIN * e_discriminant)) != Some(Ordering::Greater) {
             return Err(Undecided);
         }
         if discriminant < 0.0 {
@@ -757,8 +761,9 @@ impl Radial {
         for candidate in [(b + root) * self.inverse_a, (b - root) * self.inverse_a] {
             let e = (e_b + e_root) * self.inverse_a.abs() + STEP_ERROR * candidate.abs();
             // A candidate past every number, or an error bound too wide to
-            // keep a colour within a level, is the clause's to decide.
-            if !candidate.is_finite() || !(e <= PRECISION) {
+            // keep a colour within a level or not a number, is the clause's to
+            // decide.
+            if !candidate.is_finite() || e.is_nan() || e > PRECISION {
                 return Err(Undecided);
             }
             let radius = r0 + candidate * dr;

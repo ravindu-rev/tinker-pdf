@@ -1853,7 +1853,7 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// The parameter sets the plane names, entry `i + 1` at `sets[i]`.
     sets: Vec<ParameterSet>,
     /// Each transfer function met, sampled once, by the functions' identity.
-    transfers: Vec<([usize; 4], Arc<[[u8; 256]; 4]>)>,
+    transfers: Vec<([usize; 4], Arc<TransferTables>)>,
     /// Each black generation and undercolour removal pair met, sampled once.
     removals: Vec<((usize, usize), Arc<InkTables>)>,
     /// Whether a page met more parameter sets than the plane names.
@@ -1894,13 +1894,17 @@ pub struct Renderer<'g, G: GlyphSource> {
     text_depth: u32,
 }
 
+/// Four transfer functions (10.5), each sampled at every byte: red or cyan,
+/// green or magenta, blue or yellow, grey or black.
+type TransferTables = [[u8; 256]; 4];
+
 /// One set of the rendering parameters 11.7.5.2 keeps per point: the
 /// transfer functions, red or cyan, green or magenta, blue or yellow, grey or
 /// black (10.5), and whether the topmost object was DeviceGray, which on a
 /// CMYK output takes the grey function alone.
 #[derive(Clone, Debug)]
 struct ParameterSet {
-    transfer: Arc<[[u8; 256]; 4]>,
+    transfer: Arc<TransferTables>,
     gray: bool,
 }
 
