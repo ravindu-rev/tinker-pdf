@@ -389,8 +389,10 @@ colours. A sampled function of more than one input — a `/DeviceN` tint
 transform, a type 1 shading's — is 7.10.2's multilinear interpolation, the
 first input varying fastest, across up to eight inputs and at the nearest
 sample past that, where 2^m corners a lookup stops being a cost worth paying
-(`a_two_input_sampled_function_shades_across_both_inputs`). A type 1
-shading's `/Matrix` is not read. An evaluation enumerates only the axes the
+(`a_two_input_sampled_function_shades_across_both_inputs`); a type 1
+shading's function is read at the point of its domain the shading's
+`/Matrix` maps each pixel to (*Shadings*, below). An evaluation enumerates
+only the axes the
 point is strictly inside, reads a byte-aligned sample in a few instructions
 and reads no more than 8 192 samples whatever `/Range` asks for — past that,
 the nearest sample, as past eight inputs
