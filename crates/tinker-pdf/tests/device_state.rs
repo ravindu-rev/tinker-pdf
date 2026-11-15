@@ -1671,7 +1671,12 @@ fn stroke_adjustment_gives_a_thin_line_one_width() {
             "width {width}: /SA false moved the glyph"
         );
         // The left edge across rows 26 to 36, the bottom edge across columns
-        // 12 to 19: whole pixels, none beside them.
+        // 12 to 18: whole pixels, none beside them. Column 19 is left out:
+        // the curve rising from the bottom edge's far corner, at device x 21
+        // once the grid moves it, bends left as it rises, so at two pixels
+        // wide its stroke reaches a few hundredths of a pixel into column 19
+        // in the row above the bottom edge, as a curve the grid keeps the
+        // shape of does.
         let columns = covered(10.1, whole);
         for y in 26..37 {
             for x in columns.start - 1..columns.end + 1 {
@@ -1684,7 +1689,7 @@ fn stroke_adjustment_gives_a_thin_line_one_width() {
             }
         }
         let rows = covered(37.9, whole);
-        for x in 12..20 {
+        for x in 12..19 {
             for y in rows.start - 1..rows.end + 1 {
                 let want = if rows.contains(&y) { 0 } else { 255 };
                 assert_eq!(
