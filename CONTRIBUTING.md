@@ -22,7 +22,10 @@ runs them again before it releases; everything else
 change's proof. Each gate's whole output is kept in
 `target/gates/<gate>.log`, and a gate that fails prints its failing tests,
 its first compiler errors and the lines it had to print and did not. It
-needs Python 3; the build does not.
+needs Python 3; the build does not. Its fmt gate checks one workspace
+package at a time: on Windows `cargo fmt --all` hands rustfmt more paths
+than a command line holds (os error 206), and `cargo fmt -p <package>`
+formats one package there.
 
 Test binaries built with full debug info, and cargo's incremental state, are
 large: on a machine short of disk, run the gates with

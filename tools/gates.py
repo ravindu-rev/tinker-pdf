@@ -2,7 +2,9 @@
 
 usage: python3 -I tools/gates.py [GATE ...] [--first] [--log DIR] [--list]
 
-The gates are a change's local proof, in this order: fmt; clippy; the
+The gates are a change's local proof, in this order: fmt, one package at a
+time, because `cargo fmt --all` hands rustfmt every target of the workspace
+on one command line, which passes Windows's limit (os error 206); clippy; the
 workspace's tests; the determinism and shaping fingerprints, with the lines
 that say they ran, the determinism ones again with `hyphenation`, whose page
 needs the dictionaries; the font crate and the facade without default features;
@@ -21,6 +23,7 @@ exist. It runs cargo and nothing else, and changes nothing but its logs and
 cargo's own target directory.
 """
 import argparse
+import json
 import os
 import re
 import shutil
@@ -43,9 +46,11 @@ FMT_DIFF = re.compile(r'^Diff in (\S+?)(?::(\d+):| at line (\d+):)$', re.M)
 EXAMPLES = [('open', 'pages     3'), ('render', 'rendered  '), ('extract', 'Tinker fixture'),
             ('edit', 'the original, untouched'), ('create', 'read back page 1 says'),
             ('convert', 'as a document'), ('parallel', 'byte-identical to the serial render')]
+# A command naming this runs once for each member of the workspace, in its place.
+EACH_PACKAGE = '<each workspace package>'
 # (name, [(command, lines it must print, whether it must print anything)])
 GATES = [
-    ('fmt', [(['cargo', 'fmt', '--all', '--', '--check'], [], False)]),
+    ('fmt', [(['cargo', 'fmt', '-p', EACH_PACKAGE, '--', '--check'], [], False)]),
     ('clippy', [(['cargo', 'clippy', '--workspace', '--all-targets', '--', '-D', 'warnings'], [], False)]),
     ('test', [(['cargo', 'test', '--workspace'], [], False)]),
     ('determinism', [(['cargo', 'test', '-p', 'tinker-pdf', '--test', 'determinism'],
@@ -128,12 +133,54 @@ def execute(argv, log, cwd):
         return 127
 
 
+def members(log, cwd):
+    """The workspace's members by name, sorted, as `cargo metadata` lists them,
+    and None; or no names and why, which the log holds too."""
+    argv = ['cargo', 'metadata', '--no-deps', '--format-version', '1']
+    log.write(f'$ {" ".join(argv)}\n')
+    log.flush()
+    shown_argv = f'`{" ".join(argv[1:])}`'
+    argv, env = resolve(argv)
+    try:
+        done = subprocess.run(argv, cwd=cwd, capture_output=True, env=env)
+    except OSError as exc:
+        log.write(f'cannot run {argv[0]}: {exc}\n')
+        return [], f'cannot run {argv[0]}: {exc}'
+    log.write(done.stderr.decode('utf-8', 'replace'))
+    if done.returncode != 0:
+        return [], f'{shown_argv} exited {done.returncode}'
+    try:
+        names = sorted(package['name'] for package in json.loads(done.stdout)['packages'])
+    except (ValueError, KeyError, TypeError) as exc:
+        log.write(f'its output is not the metadata: {exc}\n')
+        return [], f'{shown_argv} printed no metadata'
+    log.write(f'{len(names)} packages: {", ".join(names)}\n')
+    return names, (None if names else f'{shown_argv} named no package')
+
+
+def expand(steps, log, cwd, problems):
+    """The steps as they run: one naming EACH_PACKAGE becomes one step a
+    workspace member, the members read once for the gate."""
+    out, names = [], None
+    for argv, required, prints in steps:
+        if EACH_PACKAGE not in argv:
+            out.append((argv, required, prints))
+            continue
+        if names is None:
+            names, why = members(log, cwd)
+            if why:
+                problems.append(f'{why}, so no package was checked')
+        out.extend(([name if arg == EACH_PACKAGE else arg for arg in argv], required, prints)
+                   for name in names)
+    return out
+
+
 def run_gate(name, steps, repo, logdir):
     path = os.path.join(logdir, f'{name}.log')
     start = time.monotonic()
     problems = []
     with open(path, 'w', encoding='utf-8') as log:
-        for argv, required, prints in steps:
+        for argv, required, prints in expand(steps, log, repo, problems):
             mark = log.tell()
             code = execute(argv, log, repo)
             log.flush()
@@ -173,6 +220,11 @@ def main(argv):
             print(f'{g}: ' + '; '.join(' '.join(a) for a, _, _ in steps))
         return 0
     os.makedirs(args.log, exist_ok=True)
+    # Under -I Python reads neither PYTHONUTF8 nor PYTHONIOENCODING, and a
+    # console's code page cannot print every character a log may hold: one
+    # it cannot is replaced, where raising would stop every later gate.
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(errors='replace')
     failed, ran = [], 0
     for g, steps in chosen:
         ran += 1
@@ -184,7 +236,7 @@ def main(argv):
             failed.append(g)
             for line in problems + details(text, args.repo):
                 print(f'      {line}')
-            print(f'      log: {os.path.relpath(path, args.repo)}')
+            print(f'      log: {shown(path, args.repo)}')
             if args.first:
                 break
     print(f'{ran} gates: {ran - len(failed)} ok' + (f', {len(failed)} failed ({", ".join(failed)})' if failed else ''))
