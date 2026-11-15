@@ -152,9 +152,7 @@ impl<const N: usize> Uint<N> {
     /// the stack and moved. Returns false, with the value half-written, when
     /// the bytes are too wide; the caller drops it.
     pub(crate) fn read_be_bytes(&mut self, bytes: &[u8]) -> bool {
-        for limb in &mut self.limbs {
-            *limb = 0;
-        }
+        self.limbs.fill(0);
         let mut limb = 0usize;
         let mut shift = 0u32;
         for &byte in bytes.iter().rev() {
@@ -881,9 +879,7 @@ impl<const N: usize> Modulus<N> {
 /// wanted one by mask (rule 2): the memory a selection touches is the whole
 /// table whichever entry the secret names.
 fn select_entry<const N: usize>(table: &[Uint<N>; 16], index: u64, used: usize, out: &mut Uint<N>) {
-    for limb in &mut out.limbs {
-        *limb = 0;
-    }
+    out.limbs.fill(0);
     for (position, entry) in (0u64..).zip(table.iter()) {
         let keep = equal_mask(position, index);
         for (limb, &held) in out.limbs.iter_mut().zip(&entry.limbs).take(used) {
@@ -1215,6 +1211,12 @@ impl<const N: usize> Modulus<N> {
     }
 
     /// `out = a · R mod m`: into Montgomery form, for any `a` below `R`.
+    #[allow(
+        clippy::wrong_self_convention,
+        reason = "`to_` names the conversion of `a`, as `to_montgomery` does; `self` can be a \
+                  secret prime's modulus, which taken by value would be copied onto the stack, \
+                  where nothing wipes it"
+    )]
     pub(crate) fn to_montgomery_secret(&self, a: &Uint<N>, out: &mut Uint<N>) {
         self.montgomery_secret(a, &self.r2, out);
     }

@@ -1053,7 +1053,7 @@ impl EntropySource for Stream {
 /// the verifier's side of the `DigestInfo` prefixes the two share.
 #[test]
 fn cavp_pkcs1_v15_generation_vectors_pass() {
-    let mut entropy = Stream::new(0x5347_2d30_312e_35);
+    let mut entropy = Stream::new(0x0053_472d_3031_2e35);
     let mut by_digest = BTreeMap::<&str, usize>::new();
     for (name, text, _) in [CAVP[0], CAVP[1]] {
         for vector in cavp_keys(text) {
@@ -1177,7 +1177,7 @@ fn wycheproof_rsa_signature_vectors_pass() {
 /// signature also verifies under the same parameters.
 #[test]
 fn cavp_pss_generation_vectors_pass_with_their_salts() {
-    let mut entropy = Stream::new(0x5347_2d30_312e_36);
+    let mut entropy = Stream::new(0x0053_472d_3031_2e36);
     let mut by_digest = BTreeMap::<&str, usize>::new();
     let mut empty_salts = 0usize;
     for (name, text, _) in [CAVP[2], CAVP[3]] {

@@ -2826,7 +2826,7 @@ mod tests {
     /// odd.
     #[test]
     fn crt_equals_the_plain_private_operation_on_every_vector_key() {
-        let mut entropy = Stream::new(0x5347_2d30_312e_34);
+        let mut entropy = Stream::new(0x0053_472d_3031_2e34);
         let sigver = sigver15_keys();
         let pss = pss_vector_keys();
         assert_eq!(sigver.len(), 15, "five moduli, three exponent pairs each");
@@ -2916,7 +2916,7 @@ mod tests {
     fn the_private_operation_counts_alike_over_messages() {
         use crate::bignum::counts;
 
-        let mut entropy = Stream::new(0x5031_332e_38);
+        let mut entropy = Stream::new(0x0050_3133_2e38);
         let mut sizes = Vec::new();
         for vector in pss_vector_keys() {
             let key = vector.key();
@@ -3426,7 +3426,7 @@ mod tests {
     /// reach.
     #[test]
     fn the_pss_encoding_makes_rsa_laboratories_signatures() {
-        let mut entropy = Stream::new(0x7073_73);
+        let mut entropy = Stream::new(0x0070_7373);
         let mut made = 0usize;
         for (index, example) in pss_examples().into_iter().enumerate() {
             let [d, p, q, dp, dq, q_inv] = example.private.clone();
