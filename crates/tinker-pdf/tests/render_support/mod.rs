@@ -2371,13 +2371,16 @@ pub struct SpotPage {
     pub spots: Vec<(String, [u8; 4])>,
 }
 
-/// The colour `cs` and `scn` set for spot `i` of a page in `spaces` at
-/// `tint`, every other spot of its `/DeviceN` at 0.
-pub fn spot_colour(spaces: SpotSpaces, i: usize, tint: f64) -> String {
+/// The colour `cs` and `scn` set for spot `i` of a page of `count` spots in
+/// `spaces` at `tint`, every other spot of its `/DeviceN` at 0: one operand
+/// for each of the space's components, as Table 73 has `scn` take them — four
+/// for each full `/DeviceN`, and as many as the last one names.
+pub fn spot_colour(spaces: SpotSpaces, count: usize, i: usize, tint: f64) -> String {
     match spaces {
         SpotSpaces::Separation => format!("/S{i} cs {tint} scn"),
         SpotSpaces::DeviceN => {
-            let tints: Vec<String> = (0..4)
+            let components = count.saturating_sub(i / 4 * 4).min(4);
+            let tints: Vec<String> = (0..components)
                 .map(|j| {
                     if j == i % 4 {
                         tint.to_string()
@@ -2444,7 +2447,7 @@ pub fn spot_page_with(
         let tint = SPOT_TINTS[i % SPOT_TINTS.len()];
         content.push_str(&format!(
             "{} {} 4 6 6 re f\n",
-            spot_colour(spaces, i, tint),
+            spot_colour(spaces, count, i, tint),
             2 + 7 * i
         ));
     }
@@ -2500,14 +2503,17 @@ pub fn spot_page_with(
         }
     }
     if count >= 2 {
-        content.push_str(&format!("{} 4 6 10 2 re f\n", spot_colour(spaces, 1, 0.4)));
+        content.push_str(&format!(
+            "{} 4 6 10 2 re f\n",
+            spot_colour(spaces, count, 1, 0.4)
+        ));
         content.push_str("0.5 0 0 0.2 k 6 8 6 1 re f\n");
     }
     content.push_str("BT /F0 10 Tf 0 0.6 0.4 0 k 2 26 Td (AB) Tj ET\n");
     if count >= 1 {
         content.push_str(&format!(
             "BT /F0 10 Tf {} 30 26 Td (CD) Tj ET\n",
-            spot_colour(spaces, 0, 0.8)
+            spot_colour(spaces, count, 0, 0.8)
         ));
     }
     content.push_str(extra);
