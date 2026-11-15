@@ -3413,10 +3413,16 @@ a colour, in both builds alike, since every face they draw is embedded:
 
 The other pins draw no glyph, or draw one only through a stroke, a pattern, a
 clip or a Type 3 procedure — the `type3-glyph` golden among them — and do not
-move. MS-01.6's pinned render counts do not move in P-06.2 either: a mask is an
-outline built into a path and filled, once a glyph, which is what
-`outlines_filled` counts; they move in P-06.3, where a hit builds none, each
-with its reason.
+move. A render and its double round the phase each on its own grid, a
+sixteenth of a point at one scale and a thirty-second at two, so a line of
+text drawn at both stands in each within a thirty-second of its own pixel of
+its outline: `metamorphic_classes.rs`'s
+`what_moves_under_a_change_of_sampling_grid` holds its text page to what that
+moves, the relation's tolerance and a sixteenth of the contrast between the
+ink and the backdrop past it. MS-01.6's pinned render counts do not move in
+P-06.2 either: a mask is an outline built into a path and filled, once a
+glyph, which is what `outlines_filled` counts; they move in P-06.3, where a
+hit builds none, each with its reason.
 
 #### How P-16 takes the bound over
 

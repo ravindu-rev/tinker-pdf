@@ -14,7 +14,10 @@
 //! # The answer, in one table
 //!
 //! Seven constructs, each alone on a page, each put through all three
-//! relations. Every figure is measured by this file; the zeros are asserted.
+//! relations. Every figure is measured by this file; the zeros are asserted,
+//! and so is text's bound under `dpi`: a filled glyph stands at its origin's
+//! phase, a sixteenth of a pixel, and a change of scale moves it by what that
+//! phase can move and no more (`what_moves_under_a_change_of_sampling_grid`).
 //!
 //! | Construct | `dpi` | `rotate` | `crop` |
 //! | --- | ---: | ---: | ---: |
@@ -23,7 +26,7 @@
 //! | the same, in an isolated group at half alpha | 0 | 1.90 % | 0 |
 //! | an axial shading | 0 | 0 | 0 |
 //! | an image at a non-integer scale | 0 | 0 | 0 |
-//! | text | 0 | **2.64 %** | 0 |
+//! | text | its phase | **2.64 %** | 0 |
 //! | **a tiling pattern off the grid** | **27.00 %** | **22.05 %** | **2.05 %** |
 //!
 //! Two classes, and they are different classes:
@@ -148,6 +151,17 @@ const ROTATE_WATCH: f64 = 0.03;
 /// And its own per-channel tolerance.
 const CHANNEL_TOLERANCE: i32 = 8;
 
+/// The phases a filled glyph's origin stands at, on each axis
+/// (`docs/design/performance.md`, P-06): its fraction of a device pixel is
+/// rounded to the nearest sixteenth, so a glyph is drawn at most a
+/// thirty-second of a pixel from where its outline says.
+const GLYPH_PHASES: f64 = 16.0;
+
+/// [`text_page`]'s backdrop and ink, as DeviceRGB components.
+const TEXT_BACKDROP: [f64; 3] = [0.95, 0.95, 0.6];
+/// See [`TEXT_BACKDROP`].
+const TEXT_INK: [f64; 3] = [0.1, 0.1, 0.1];
+
 const SIZE: f64 = 64.0;
 
 fn channels(bitmap: &Bitmap, x: u32, y: u32) -> (i32, i32, i32) {
@@ -164,6 +178,21 @@ fn channels(bitmap: &Bitmap, x: u32, y: u32) -> (i32, i32, i32) {
 /// scale, box-filter the four pixels down to one, and count the pixels that
 /// move by more than the tolerance on any channel.
 fn dpi_relation(bytes: Vec<u8>) -> (u64, u64) {
+    let resampled = dpi_resampled(bytes);
+    (resampled.moved, resampled.total)
+}
+
+/// What [`dpi_relation`] compares, pixel by pixel: how many pixels moved past
+/// the tolerance, of how many, and the most any pixel moved on each channel.
+struct Resampled {
+    moved: u64,
+    total: u64,
+    worst: [i32; 3],
+}
+
+/// [`dpi_relation`]'s arithmetic, keeping the most each channel moved as well
+/// as the count, for a construct held to a bound rather than to zero.
+fn dpi_resampled(bytes: Vec<u8>) -> Resampled {
     let document = Document::open(bytes).expect("it opens");
     let page = document.page(0).expect("a page");
     let options = RenderOptions {
@@ -183,6 +212,7 @@ fn dpi_relation(bytes: Vec<u8>) -> (u64, u64) {
     let across = base.width.min(doubled.width / 2);
     let down = base.height.min(doubled.height / 2);
     let mut moved = 0u64;
+    let mut worst = [0i32; 3];
     for y in 0..down {
         for x in 0..across {
             let mut sum = (0i32, 0i32, 0i32);
@@ -194,15 +224,38 @@ fn dpi_relation(bytes: Vec<u8>) -> (u64, u64) {
             }
             let filtered = (sum.0 / 4, sum.1 / 4, sum.2 / 4);
             let here = channels(&base, x, y);
-            if (filtered.0 - here.0).abs() > CHANNEL_TOLERANCE
-                || (filtered.1 - here.1).abs() > CHANNEL_TOLERANCE
-                || (filtered.2 - here.2).abs() > CHANNEL_TOLERANCE
-            {
+            let apart = [
+                (filtered.0 - here.0).abs(),
+                (filtered.1 - here.1).abs(),
+                (filtered.2 - here.2).abs(),
+            ];
+            if apart.iter().any(|levels| *levels > CHANNEL_TOLERANCE) {
                 moved += 1;
+            }
+            for (most, levels) in worst.iter_mut().zip(apart) {
+                *most = (*most).max(levels);
             }
         }
     }
-    (moved, u64::from(across) * u64::from(down))
+    Resampled {
+        moved,
+        total: u64::from(across) * u64::from(down),
+        worst,
+    }
+}
+
+/// The most [`dpi_resampled`] may find a pixel of [`text_page`] moved on each
+/// channel: the relation's own tolerance, and a sixteenth of the channel's
+/// contrast between the ink and the backdrop, which is what the glyphs' phase
+/// can move a pixel by on that page (`what_moves_under_a_change_of_sampling_grid`
+/// says why).
+fn text_phase_bound() -> [i32; 3] {
+    let mut bound = [0i32; 3];
+    for ((slot, backdrop), ink) in bound.iter_mut().zip(TEXT_BACKDROP).zip(TEXT_INK) {
+        let contrast = (backdrop - ink).abs() * 255.0;
+        *slot = CHANNEL_TOLERANCE + (contrast / GLYPH_PHASES).ceil() as i32;
+    }
+    bound
 }
 
 fn share(moved: u64, total: u64) -> f64 {
@@ -428,7 +481,8 @@ fn text_page() -> Vec<u8> {
     builder.set_subset_fonts(false);
     assert!(builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()));
     builder.add_page(SIZE, SIZE, |page| {
-        page.set_fill_rgb(0.95, 0.95, 0.6);
+        let [r, g, b] = TEXT_BACKDROP;
+        page.set_fill_rgb(r, g, b);
         page.raw(
             format!(
                 "0 0 {SIZE} {SIZE} re f
@@ -436,7 +490,8 @@ fn text_page() -> Vec<u8> {
             )
             .as_bytes(),
         );
-        page.set_fill_rgb(0.1, 0.1, 0.1);
+        let [r, g, b] = TEXT_INK;
+        page.set_fill_rgb(r, g, b);
         page.text(b"F0", 13.0, 4.0, 40.0, "Abcde");
         page.text(b"F0", 9.0, 4.0, 20.0, "fghijkl");
     });
@@ -881,15 +936,16 @@ fn what_moves_when_the_page_box_moves() {
     );
 }
 
-/// **A tiling pattern is the class, and it is the only construct that moves.**
+/// **A tiling pattern is the class: besides it, text moves only by its
+/// glyphs' phase, and nothing else moves at all.**
 ///
 /// Seven constructs, each alone on a page over the same backdrop, each put
-/// through the relation. Six move **zero** pixels — a rectangle on integers,
+/// through the relation. Five move **zero** pixels — a rectangle on integers,
 /// diagonal path edges, the same inside an isolated transparency group at half
-/// alpha, an axial shading, an image at a scale that lands on no sample
-/// boundary at either resolution, and text whose outlines are flattened in
-/// device space. The seventh, a tiling pattern whose cell and step are not
-/// whole device pixels, moves **27 %**.
+/// alpha, an axial shading, and an image at a scale that lands on no sample
+/// boundary at either resolution. Text moves by what the phase its glyphs
+/// stand at can move, and no more (below). The seventh, a tiling pattern whose
+/// cell and step are not whole device pixels, moves **27 %**.
 ///
 /// The mechanism is not mysterious once it is isolated. `fill_with_tiles`
 /// rasterises the cell **once** and blits the copies at *rounded* device
@@ -899,6 +955,30 @@ fn what_moves_when_the_page_box_moves() {
 /// why `render_differential.rs`'s tiling pair has to run at scale 1 on integer
 /// steps to be byte-equal at all; this test is that constraint seen from the
 /// other side.
+///
+/// # Text, and the phase its glyphs stand at
+///
+/// A filled glyph is drawn from a mask placed at its origin's phase, the
+/// fraction of a device pixel the origin stands past a whole one, rounded to
+/// the nearest sixteenth on each axis (`docs/design/performance.md`, P-06).
+/// Each render therefore draws a glyph at most a thirty-second of its own
+/// pixel from where its outline says, each on its own grid: a sixteenth of a
+/// point at one scale, a thirty-second at two. On [`text_page`] every line
+/// starts on a whole point with its baseline on a whole pixel at either
+/// scale, so the step is horizontal alone, and its sizes are whole pixels an
+/// em at either scale, which the 2x2's 1/256 steps hold exactly, so that step
+/// moves nothing. A shape moved along a row changes what a sub-scanline
+/// covers of a pixel by at most the distance moved, since what enters the
+/// pixel at one side and what leaves it at the other are each no more than
+/// that. So against the glyph drawn where its outline says, a pixel at one
+/// scale moves by at most a thirty-second of the contrast between the ink and
+/// the backdrop, and so does the mean of the four pixels that cover it at
+/// twice the scale; the relation's difference moves by at most a sixteenth of
+/// that contrast, which is all a sixteenth-of-a-pixel phase can move here.
+/// Text is held to exactly that, pixel by pixel and channel by channel: the
+/// relation's own tolerance, which a construct drawn where its geometry says
+/// keeps, and a sixteenth of the contrast past it ([`text_phase_bound`]). A
+/// pixel past it moved further than any such phase can move one.
 ///
 /// # It is the corpus's class too, and by how much
 ///
@@ -920,13 +1000,14 @@ fn what_moves_when_the_page_box_moves() {
 /// # What this does not explain
 ///
 /// Twenty-six `dpi` files, thirty `crop` and a hundred and sixty-four `rotate`
-/// carry no pattern at all, and nothing here says what moves them. The six
-/// zeros above rule out the constructs that were suspected; the next witness
-/// has to come from the files themselves, as this one did.
+/// carry no pattern at all, and nothing here says what moves them. The five
+/// zeros above and text's bound rule out the constructs that were suspected;
+/// the next witness has to come from the files themselves, as this one did.
 ///
-/// The zeros are asserted rather than printed, because they are a claim: the
-/// day one of those six starts moving pixels under a change of sampling grid,
-/// that is a rasteriser change, and this is the only test that would say so.
+/// The zeros and text's bound are asserted rather than printed, because they
+/// are claims: the day one of those five starts moving pixels under a change
+/// of sampling grid, or text moves past what its phase can, that is a
+/// rasteriser change, and this is the only test that would say so.
 #[test]
 fn what_moves_under_a_change_of_sampling_grid() {
     let mut zero = Vec::new();
@@ -937,7 +1018,6 @@ fn what_moves_under_a_change_of_sampling_grid() {
         ("the same, in a transparency group", group_page()),
         ("an axial shading", shading_page()),
         ("an image at a non-integer scale", image_page()),
-        ("text", text_page()),
         ("a tiling pattern off the grid", tiling_page()),
     ] {
         let (moved, total) = dpi_relation(bytes);
@@ -953,12 +1033,37 @@ fn what_moves_under_a_change_of_sampling_grid() {
     }
     assert!(
         moves.len() <= 1,
-        "one of these constructs has started moving pixels under a change of          sampling grid, which it did not on 4 September 2026: {moves:?}"
+        "one of these constructs has started moving pixels under a change of \
+         sampling grid, where only the tiling pattern may: {moves:?}"
     );
     assert_eq!(
         zero.len() + moves.len(),
-        7,
-        "and all seven are still measured"
+        6,
+        "and all six besides text are still measured"
+    );
+
+    let text = dpi_resampled(text_page());
+    let bound = text_phase_bound();
+    println!(
+        "  {:<36} {:>6} of {} ({:.2}%), at most {:?} levels where its phase allows {:?}",
+        "text",
+        text.moved,
+        text.total,
+        share(text.moved, text.total) * 100.0,
+        text.worst,
+        bound
+    );
+    assert!(
+        text.worst
+            .iter()
+            .zip(bound)
+            .all(|(worst, allowed)| *worst <= allowed),
+        "text moved under a change of sampling grid by {:?} levels on its three \
+         channels, past the {:?} its glyphs' sixteenth-of-a-pixel phase can move \
+         a pixel: a glyph stands further from its outline than its phase allows, \
+         or something besides the phase moved it",
+        text.worst,
+        bound
     );
 }
 
