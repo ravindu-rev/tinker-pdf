@@ -12,7 +12,8 @@
 //! - [`authored`]: a document this engine wrote from nothing it did not write.
 //!   Every verdict is empty.
 //! - [`rewritten`]: a save of somebody else's file. It owns the structure it
-//!   wrote, and leaves every other class of finding no worse than its input.
+//!   wrote, and leaves every other class of finding no worse than its input,
+//!   a copy it recorded owing what its source owes.
 //! - [`expecting`]: a document damaged on purpose. Its findings are exactly the
 //!   ones the test lists.
 //!
@@ -43,6 +44,8 @@ pub struct Item {
     pub class: String,
     /// The byte it is at, when it has one.
     pub at: Option<u64>,
+    /// The number of the object it is about, when it is about one.
+    pub object: Option<u32>,
     /// How a failure prints it.
     pub shown: String,
 }
@@ -57,6 +60,10 @@ pub struct Read {
     /// What a failure prints beside a verdict's lines: for a claimed profile,
     /// the claim, the groups that ran and how much this build did not decide.
     pub notes: Vec<(&'static str, String)>,
+    /// The objects the save that wrote these bytes recorded as copies, each
+    /// with the object it copies, by number: what [`rewritten`] counts a
+    /// copy's findings by. Empty for bytes no such save wrote.
+    pub copies: Vec<(u32, u32)>,
 }
 
 /// One finding a test says it wrote on purpose.
@@ -106,15 +113,17 @@ pub fn authored(label: &str, door: &str, read: &Read) {
 ///   more of each class than the input's and to none at or past the input's
 ///   last byte, where everything is the update's;
 /// - a profile the output claims is held to no more findings of each class
-///   than the input's under the same claim, which is part of the class.
+///   than the input's under the same claim, which is part of the class;
+/// - a copy the save recorded owes what its source owes, no more and no less:
+///   its semantics findings are counted as its source's ([`classes`]).
 ///
 /// With a clean input this is [`authored`]: no more than nothing is nothing.
 #[track_caller]
 pub fn rewritten(label: &str, input: &Read, output: &Read) {
     let incremental = output.bytes.starts_with(&input.bytes);
     let end = input.bytes.len() as u64;
-    let had = classes(&input.items);
-    let has = classes(&output.items);
+    let had = classes(&input.items, &input.copies);
+    let has = classes(&output.items, &output.copies);
     let mut lines = Vec::new();
     for item in &output.items {
         let key = (item.verdict, item.class.as_str());
@@ -192,13 +201,54 @@ pub fn refuse(label: &str, door: &str, why: &str) -> ! {
     panic!("`{label}` fails `{door}`: {why}")
 }
 
-/// How many findings of each verdict and class a document holds.
-fn classes(items: &[Item]) -> BTreeMap<(&'static str, &str), usize> {
+/// How many findings of each verdict and class a document holds, a recorded
+/// copy's semantics findings counted as its source's.
+///
+/// A copy carries its source's dictionary, and with it whatever the source
+/// says wrongly of itself. So of each semantics class, a source and its copies
+/// hold together as many findings as the one of them that holds the most: a
+/// defect they all carry counts once, as the source's, and a copy holding more
+/// of a class than its source adds the difference. A finding on an object that
+/// is neither a recorded copy nor the source of one, on no object at all, and
+/// every structure and profile finding count as themselves.
+fn classes<'i>(
+    items: &'i [Item],
+    copies: &[(u32, u32)],
+) -> BTreeMap<(&'static str, &'i str), usize> {
+    let copies: BTreeMap<u32, u32> = copies.iter().copied().collect();
     let mut out = BTreeMap::new();
+    // (verdict, class, source) -> how many each of the source's objects holds
+    let mut carried: BTreeMap<(&'static str, &str, u32), BTreeMap<u32, usize>> = BTreeMap::new();
     for item in items {
-        *out.entry((item.verdict, item.class.as_str())).or_default() += 1;
+        match item.object.filter(|_| item.verdict == "semantics") {
+            Some(object) => {
+                *carried
+                    .entry((item.verdict, item.class.as_str(), source(object, &copies)))
+                    .or_default()
+                    .entry(object)
+                    .or_default() += 1;
+            }
+            None => *out.entry((item.verdict, item.class.as_str())).or_default() += 1,
+        }
+    }
+    for ((verdict, class, _), held) in carried {
+        *out.entry((verdict, class)).or_default() += held.values().copied().max().unwrap_or(0);
     }
     out
+}
+
+/// The object `object` copies, followed through a copy of a copy to the first
+/// object that is not one; `object` itself when it is no copy. Bounded by the
+/// number of copies, so records that name each other end.
+fn source(object: u32, copies: &BTreeMap<u32, u32>) -> u32 {
+    let mut at = object;
+    for _ in 0..copies.len() {
+        match copies.get(&at) {
+            Some(&next) => at = next,
+            None => break,
+        }
+    }
+    at
 }
 
 /// The panic every door fails with: one line per finding not admitted,

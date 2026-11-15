@@ -101,9 +101,13 @@ pub struct Item {
     pub exact: String,         // the finding's kind as `Debug` prints it: the expected form's key
     pub class: String,         // what survives renumbering: a rewrite's key
     pub at: Option<u64>,       // the byte it is at, when it has one
+    pub object: Option<u32>,   // the object it is about, when it is about one
     pub shown: String,         // how a failure prints it
 }
 ```
+
+A reading hands the policy, beside the items, the copies the save that
+wrote the bytes recorded (*A copy owes what its source owes*, below).
 
 Because the policy names no engine type, it compiles under either crate,
 and a verdict SD-20 adds is more items from the two readings with no change
@@ -242,6 +246,9 @@ own key.
 - A profile the output claims is held to no more findings of each class
   than the input's under the same claim. The claim is part of the class, so
   an output claiming what the input did not is held to none.
+- A copy the save recorded owes what its source owes, no more and no less
+  (*A copy owes what its source owes*, below): its semantics findings are
+  counted as its source's.
 
 Classes rather than findings, because a rewrite renumbers: a defect's
 object and offset move, and so do the kinds that carry a number
@@ -252,6 +259,45 @@ also move from one phase of the reading to another and which is classed by
 its warning. With a clean input, no more than nothing is nothing:
 `rewritten` is then `authored`, so choosing it cannot loosen a test whose
 input is this engine's.
+
+#### A copy owes what its source owes
+
+An edit that copies one of the document's objects writes the source's
+dictionary again, and with it whatever the source says wrongly of itself:
+the redactor's copy of a form for a placement whose cut differs from the
+form's other placements (`decide`, `crates/tinker-pdf/src/redact.rs`) carries
+a damaged form's missing `/BBox` into every copy. Counted as itself, each copy
+would be a defect the input has once and the output several times, though
+nothing new was made. So the save records its copies and the policy counts
+them as their sources:
+
+- **The record.** `DocumentEditor::record_copy(copy, source)` records that an
+  object the editor writes copies one of the document's own, and
+  `DocumentEditor::copies()` hands the records back, in the editor's numbers,
+  which a save writes as they are unless it linearizes. Every writer that
+  copies one of the document's objects records it: the redactor's
+  per-placement copies, and `import_page` and `import_page_as_form` when the
+  page comes from the document the editor edits, for every object their deep
+  copy writes. A rollback forgets what it recorded. Nothing a save writes
+  depends on it.
+- **The door.** A test hands the output to `rewritten` as
+  `Handed::from(bytes).with_copies(editor.copies())`; bytes handed without
+  copies have none, and every door but `rewritten` ignores them.
+- **The count.** Of each semantics class, a source and its recorded copies —
+  a copy of a copy follows the chain to the first object that is not one —
+  hold together as many findings as the one of them that holds the most. A
+  defect they all carry counts once, as the source's; a copy holding more of
+  a class than its source adds the difference, so a copy that gains a defect
+  its source lacks is held as a new one. A finding on an object that is
+  neither a recorded copy nor the source of one, on no object, and every
+  structure and profile finding count as themselves, as before: structure
+  stays the writer's, and a class the input lacks fails whatever made it.
+- **What it does not admit.** A writer that duplicates a defect without
+  recording a copy is held as before, and fails; a record is a claim about
+  how an object was made, so a writer records only copies it made.
+  `written_helper.rs`'s `a_copy_owes_what_its_source_owes` holds all three
+  sides, and `redact.rs`'s hostile fixtures hold the redactor's own copies of
+  damaged forms.
 
 **`expecting(label, bytes, expected)`** — the expected-defects form, for a
 test that writes damage on purpose: `strict_validator.rs`'s injections, a
@@ -577,6 +623,7 @@ path is outside the agreement.
 | A new writing test is put on the pending list instead of calling the helper | The list is K-03.3's snapshot and every later change to it is a deletion; adding to it weakens a check, which `AGENTS.md` forbids; K-03.8 deletes it, and then there is nothing to add to |
 | The cos reading's claim test misses a packet that spells the identification only through character references or in UTF-32, and passes a claim it cannot hold | No writer in this tree emits one; the test reads the identification schemas' own spellings in UTF-8 and in both UTF-16 orders; a test that writes a claim belongs in the facade tree, where each validator's own reading applies |
 | Holding a rewrite by class lets it cure one defect and introduce another of the same kind | Stated. The class is the unit renumbering leaves, and with a clean input the rewrite form is the authored form, so it is loose only where the input was already wrong |
+| A recorded copy hides a defect it adds, or a record names an object that is no copy | A copy's findings count as its source's only up to what the most damaged of them holds, so a copy that gains a defect adds it; the record is written by the writer that made the copy, at the call that made it, and `a_copy_owes_what_its_source_owes` fails a copy that gains a defect and a duplicate that was not recorded |
 | The facade reading opens through `Document::open`, which converts what is not a PDF | It fails any document whose `archive()` is `Some`, so it validates the bytes handed to it as a PDF or not at all, and `the_two_readings_give_one_strict_verdict` holds the two readings together |
 | A test target names a file outside its package by `#[path]`, so a published crate's tests do not build on their own | Already so for `include_bytes!` from `testdata/`; publishing builds the library |
 | Validating every written document lengthens the suite | One strict read per door call; a profile validator only on a claim; the strict and profile verdicts from one open |

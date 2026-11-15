@@ -1108,3 +1108,55 @@ fn a_save_of_a_document_with_no_catalog_writes_an_empty_one() {
         }
     }
 }
+
+/// **A copy is recorded with its source, and a rollback forgets it.** A page
+/// imported from the document the editor edits is a copy, and so is every
+/// object it reaches: each is recorded with the object it copies — the page
+/// with the page, its content with the content — so a save's reader can count
+/// what each carries as its source's. A page imported from another document
+/// copies nothing of this one and records nothing; an object is no copy of
+/// itself; and restoring a checkpoint forgets what was recorded after it, as
+/// it forgets the objects.
+#[test]
+fn copies_are_recorded_with_their_sources_and_rolled_back() {
+    let doc = document(2);
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let before = editor.checkpoint();
+
+    let original = pages::collect(&doc)[0].clone();
+    let page = editor.import_page(&doc, 0, 2).expect("the page duplicates");
+    let copies = editor.copies();
+    assert!(
+        copies.contains(&(page, original.reference)),
+        "the page, as a copy of the page: {copies:?}"
+    );
+    let content = pages::contents(&doc, &original)[0];
+    let Some(Object::Dict(copied)) = editor.get(page) else {
+        panic!("the copy is a dictionary");
+    };
+    let copied_content = copied.get_ref(Name::CONTENTS).expect("its content");
+    assert!(
+        copies.contains(&(copied_content, content)),
+        "its content, as a copy of the content: {copies:?}"
+    );
+    let highest = doc.max_object_number();
+    assert!(
+        copies
+            .iter()
+            .all(|(copy, source)| copy.num > highest && source.num <= highest),
+        "every copy new, every source the document's: {copies:?}"
+    );
+
+    let other = document(1);
+    assert!(editor.import_page(&other, 0, 0).is_some());
+    assert_eq!(
+        editor.copies(),
+        copies,
+        "another document's page copies none of this one"
+    );
+    editor.record_copy(page, page);
+    assert_eq!(editor.copies(), copies, "no object is a copy of itself");
+
+    editor.restore(&before);
+    assert!(editor.copies().is_empty(), "the rollback forgets them");
+}

@@ -2,6 +2,7 @@
 //! page in from another document.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::{without, DocumentEditor};
 use crate::doc::CosDocument;
@@ -199,6 +200,11 @@ impl DocumentEditor {
     /// merges the streams among the copies, by dictionary and content, since a
     /// guess at sameness silently merges two different fonts.
     ///
+    /// `source` may be the document this editor edits: the page is then
+    /// duplicated, and the new page and every object copied with it are
+    /// recorded as copies of the objects they copy
+    /// ([`DocumentEditor::record_copy`]).
+    ///
     /// Returns the new page's reference, or `None` when the source has no such
     /// page.
     pub fn import_page(&mut self, source: &CosDocument, page: u32, index: u32) -> Option<ObjRef> {
@@ -238,8 +244,17 @@ impl DocumentEditor {
 
         let reference = self.allocate();
         self.put(reference, copied);
+        if self.is_own(source) {
+            self.record_copy(reference, from.reference);
+        }
         self.ensure_order().insert(index as usize, reference);
         Some(reference)
+    }
+
+    /// Whether `source` is the very document this editor edits, so that what
+    /// is copied from it is a copy of one of its own objects.
+    pub(super) fn is_own(&self, source: &CosDocument) -> bool {
+        std::ptr::eq(source, Arc::as_ptr(&self.doc))
     }
 
     /// Copies one value from `source`, following every reference it holds.
@@ -272,6 +287,9 @@ impl DocumentEditor {
                 // Recorded *before* recursing, so a cycle finds the number
                 // rather than allocating forever.
                 mapping.insert(r.num, target);
+                if self.is_own(source) {
+                    self.record_copy(target, *r);
+                }
 
                 let loaded = source.get(*r).ok()?;
                 match loaded.as_ref() {

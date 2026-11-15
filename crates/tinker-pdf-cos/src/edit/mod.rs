@@ -14,7 +14,7 @@
 //! `impl DocumentEditor` block. A child module sees the private fields, so an
 //! operation added later is a new file rather than a longer one.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::doc::CosDocument;
@@ -118,6 +118,9 @@ pub struct DocumentEditor {
     /// — whose objects arrive as plaintext, since the source was
     /// authenticated to read them. [`DocumentEditor::check_save`] reads it.
     encrypted_source: bool,
+    /// The objects this editor wrote as copies of the document's own, each
+    /// with the object it copies ([`DocumentEditor::record_copy`]).
+    copies: BTreeMap<u32, ObjRef>,
     /// The tally [`DocumentEditor::count_work`] started, which the editor's
     /// page walks and decodes and every pass over it count into until it is
     /// dropped.
@@ -129,7 +132,7 @@ pub struct DocumentEditor {
 
 /// Everything a rollback restores: an editor's state, taken as a value.
 ///
-/// Exhaustive by construction: [`DocumentEditor`] holds these six fields and
+/// Exhaustive by construction: [`DocumentEditor`] holds these seven fields and
 /// two more -- the `Arc<CosDocument>` it overlays, which is immutable and
 /// therefore has nothing to restore, and the tally
 /// [`DocumentEditor::count_work`] starts, which a rollback keeps because the
@@ -149,8 +152,7 @@ pub struct DocumentEditor {
 /// left in a condition a later reader cannot classify -- has no spelling here.
 ///
 /// The fields stay private. A checkpoint is meaningful only to the editor it
-/// came from, and this crate does not promise which five things an editor
-/// keeps.
+/// came from, and this crate does not promise which things an editor keeps.
 ///
 /// Restoring a checkpoint into a *different* editor is not checked and not
 /// meaningful: object numbers are relative to the document, so the result is
@@ -164,6 +166,7 @@ pub struct EditCheckpoint {
     page_order: Option<Vec<ObjRef>>,
     trailer: Dict,
     encrypted_source: bool,
+    copies: BTreeMap<u32, ObjRef>,
 }
 
 impl core::fmt::Debug for EditCheckpoint {
@@ -176,6 +179,7 @@ impl core::fmt::Debug for EditCheckpoint {
             .field("next", &self.next)
             .field("page_order_disturbed", &self.page_order.is_some())
             .field("trailer_entries", &self.trailer.len())
+            .field("copies", &self.copies.len())
             .finish()
     }
 }
@@ -194,6 +198,7 @@ impl DocumentEditor {
             page_order: None,
             trailer: Dict::new(),
             encrypted_source: false,
+            copies: BTreeMap::new(),
             work: None,
         }
     }
@@ -329,6 +334,44 @@ impl DocumentEditor {
         r
     }
 
+    /// Records that `copy`, an object this editor writes, is a copy of
+    /// `source`, an object of the document it edits: the provenance a save's
+    /// reader needs to tell an object carried twice from one made twice.
+    ///
+    /// An edit that copies an object owes what its source owes, no more and
+    /// no less: a copy carries its source's dictionary, so whatever the
+    /// source says wrongly of itself, the copy says too. The validate-on-save
+    /// helper reads these records to count a defect a copy carries as its
+    /// source's, once (`docs/design/validate-on-save.md`). Every writer here
+    /// that copies one of the document's objects records it: the
+    /// redactor's copy of a form for a placement (the facade's `redact`);
+    /// [`DocumentEditor::import_page`], the page and every object it reaches,
+    /// and [`DocumentEditor::import_page_as_form`], every object the page's
+    /// resources reach, when the page comes from the document itself.
+    ///
+    /// Nothing a save writes depends on it. A copy of a copy names its own
+    /// source, the copy, and a reader follows the chain. A rollback forgets
+    /// what it recorded, as it forgets the objects. An object recorded as a
+    /// copy of itself is no copy, and is not recorded.
+    pub fn record_copy(&mut self, copy: ObjRef, source: ObjRef) {
+        if copy.num != source.num {
+            self.copies.insert(copy.num, source);
+        }
+    }
+
+    /// Every copy [`DocumentEditor::record_copy`] recorded, by ascending
+    /// object number, each with the object it copies.
+    ///
+    /// The numbers are this editor's, which every save writes as they are
+    /// but a linearized one, which renumbers its objects into its layout.
+    #[must_use]
+    pub fn copies(&self) -> Vec<(ObjRef, ObjRef)> {
+        self.copies
+            .iter()
+            .map(|(&copy, &source)| (ObjRef::new(copy, 0), source))
+            .collect()
+    }
+
     /// Runs `body` as one edit: everything it changes lands together, or
     /// nothing does.
     ///
@@ -411,6 +454,7 @@ impl DocumentEditor {
             page_order: self.page_order.clone(),
             trailer: self.trailer.clone(),
             encrypted_source: self.encrypted_source,
+            copies: self.copies.clone(),
         }
     }
 
@@ -420,7 +464,7 @@ impl DocumentEditor {
     /// restores, because it is the same function: objects written, objects
     /// deleted, the page order, the trailer entries, and the object-number
     /// counter (see [`DocumentEditor`]'s `next` for why that last one, and
-    /// what it costs).
+    /// what it costs), and the copies recorded.
     ///
     /// **Idempotent.** Restoring the same checkpoint twice leaves the editor
     /// where restoring it once did, so a caller that cannot tell whether it
@@ -437,6 +481,7 @@ impl DocumentEditor {
         self.page_order = saved.page_order.clone();
         self.trailer = saved.trailer.clone();
         self.encrypted_source = saved.encrypted_source;
+        self.copies = saved.copies.clone();
     }
 
     /// Reads an object, seeing this editor's changes.

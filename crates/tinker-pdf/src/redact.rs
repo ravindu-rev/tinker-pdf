@@ -2803,6 +2803,10 @@ fn decide(
             Some((_, copy)) => *copy,
             None => {
                 let copy = editor.allocate();
+                // A copy carries the form's dictionary, and what that says
+                // wrongly of itself: recorded, so a save's reader counts it
+                // as the form's ([`DocumentEditor::record_copy`]).
+                editor.record_copy(copy, entry.reference);
                 copies.push((outcome.clone(), copy));
                 writes.push((copy, n, outcome.clone()));
                 copy
@@ -12112,10 +12116,15 @@ mod hostile {
         bytes
     }
 
-    /// Redacts and saves a damaged document, and hands back what was read and
-    /// what was written, for the validate-on-save helper to hold outside the
-    /// `catch_unwind` that asks whether the pass panicked.
-    fn exercise(bytes: Vec<u8>) -> Option<(Vec<u8>, Vec<u8>)> {
+    /// What [`exercise`] read, what it wrote, and the copies the redaction
+    /// recorded.
+    type Exercised = (Vec<u8>, Vec<u8>, Vec<(ObjRef, ObjRef)>);
+
+    /// Redacts and saves a damaged document, and hands back what was read,
+    /// what was written and the copies of forms the redaction recorded, for
+    /// the validate-on-save helper to hold outside the `catch_unwind` that
+    /// asks whether the pass panicked.
+    fn exercise(bytes: Vec<u8>) -> Option<Exercised> {
         let Ok(doc) = CosDocument::open(bytes.clone()) else {
             return None;
         };
@@ -12146,7 +12155,7 @@ mod hostile {
         let _ = apply(&mut editor, 0, &areas[..1]);
         let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
         let _ = saved.fonts.removed();
-        Some((bytes, saved.bytes))
+        Some((bytes, saved.bytes, editor.copies()))
     }
 
     #[test]
@@ -12179,12 +12188,14 @@ mod hostile {
             let result = std::panic::catch_unwind(|| exercise(mutated));
             assert!(result.is_ok(), "case {case} panicked");
             // A rewrite of somebody else's damaged file owns its structure and
-            // leaves the rest no worse than it was.
-            if let Ok(Some((input, output))) = result {
+            // leaves the rest no worse than it was; a copy of a damaged form
+            // the redaction made for a placement owes what the form owes.
+            if let Ok(Some((input, output, copies))) = result {
                 crate::subset::tests_support::written_support::rewritten(
                     &format!("damaged case {case}, redacted and saved"),
                     &input,
-                    &output,
+                    crate::subset::tests_support::written_support::Handed::from(output)
+                        .with_copies(copies),
                 );
             }
         }

@@ -332,7 +332,9 @@ impl DocumentEditor {
     /// The page's content streams are decoded and joined as the form's
     /// content, its `/BBox` is the page's crop box, and its resources are
     /// copied with everything they reach by the deep copy
-    /// [`DocumentEditor::import_page`] uses, renumbered into this document.
+    /// [`DocumentEditor::import_page`] uses, renumbered into this document —
+    /// and recorded as copies ([`DocumentEditor::record_copy`]) when `source`
+    /// is the document this editor edits.
     /// `/Rotate` is **not** applied — a form has no such key — so a caller
     /// importing a rotated page states the turn in `matrix`, which becomes
     /// the form's `/Matrix`.

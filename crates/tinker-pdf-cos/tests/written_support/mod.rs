@@ -22,7 +22,7 @@ pub mod held;
 
 use std::sync::Arc;
 
-use tinker_pdf_cos::{CosDocument, Defect, DefectKind, Name, Recipient, Tier};
+use tinker_pdf_cos::{CosDocument, Defect, DefectKind, Name, ObjRef, Recipient, Tier};
 
 /// How an encrypted document is opened: the two ways this crate authenticates.
 pub enum Key<'k> {
@@ -41,10 +41,27 @@ pub struct Locked<'k> {
 }
 
 /// What a door is handed: a document's bytes, with their key when they are
-/// locked. Built from the bytes or from a [`Locked`].
+/// locked, and the copies the save that wrote them recorded. Built from the
+/// bytes or from a [`Locked`], and given the copies by
+/// [`Handed::with_copies`].
 pub struct Handed<'k> {
     bytes: Arc<[u8]>,
     key: Option<Key<'k>>,
+    copies: Vec<(u32, u32)>,
+}
+
+impl Handed<'_> {
+    /// The same bytes, with the copies the save that wrote them recorded,
+    /// each with the object it copies — an editor's `copies()` — for
+    /// [`rewritten`] to count a copy's findings as its source's.
+    #[must_use]
+    pub fn with_copies(mut self, copies: impl IntoIterator<Item = (ObjRef, ObjRef)>) -> Self {
+        self.copies = copies
+            .into_iter()
+            .map(|(copy, source)| (copy.num, source.num))
+            .collect();
+        self
+    }
 }
 
 impl From<Vec<u8>> for Handed<'_> {
@@ -52,6 +69,7 @@ impl From<Vec<u8>> for Handed<'_> {
         Handed {
             bytes: bytes.into(),
             key: None,
+            copies: Vec::new(),
         }
     }
 }
@@ -67,13 +85,18 @@ impl From<&[u8]> for Handed<'_> {
         Handed {
             bytes: bytes.into(),
             key: None,
+            copies: Vec::new(),
         }
     }
 }
 
 impl From<Arc<[u8]>> for Handed<'_> {
     fn from(bytes: Arc<[u8]>) -> Self {
-        Handed { bytes, key: None }
+        Handed {
+            bytes,
+            key: None,
+            copies: Vec::new(),
+        }
     }
 }
 
@@ -82,6 +105,7 @@ impl<'k> From<Locked<'k>> for Handed<'k> {
         Handed {
             bytes: locked.bytes.into(),
             key: Some(locked.key),
+            copies: Vec::new(),
         }
     }
 }
@@ -142,12 +166,12 @@ pub fn items<'k>(label: &str, bytes: impl Into<Handed<'k>>) -> Vec<held::Item> {
 /// Opens, authenticates and validates one document.
 #[track_caller]
 fn read(label: &str, door: &str, handed: Handed<'_>) -> (CosDocument, held::Read) {
-    let bytes = Arc::clone(&handed.bytes);
+    let Handed { bytes, key, copies } = handed;
     let doc = match CosDocument::open(Arc::clone(&bytes)) {
         Ok(doc) => doc,
         Err(error) => held::refuse(label, door, &format!("the bytes do not open: {error:?}")),
     };
-    unlock(label, door, &doc, handed.key);
+    unlock(label, door, &doc, key);
     if let Some(claim) = claim(&doc) {
         held::refuse(
             label,
@@ -164,6 +188,7 @@ fn read(label: &str, door: &str, handed: Handed<'_>) -> (CosDocument, held::Read
         bytes,
         items,
         notes: Vec::new(),
+        copies,
     };
     (doc, read)
 }
@@ -263,6 +288,7 @@ pub fn item(defect: &Defect) -> held::Item {
         exact: format!("{:?}", defect.kind),
         class: class(defect.kind),
         at: defect.offset,
+        object: defect.object.map(|object| object.num),
         shown: format!("[{}] {defect}", defect.kind.as_str()),
     }
 }

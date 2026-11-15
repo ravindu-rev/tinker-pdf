@@ -108,7 +108,9 @@ caller states it and never clipped here — 14.11.2 lets a crop box and a media
 box disagree and the *reader* reconciles them; a rectangle of no area is
 refused), `insert_page` (a blank page of the
 given size), `import_page` (a page and its resource closure copied from
-another `CosDocument`), `keep_pages` (the complement of delete, in one
+another `CosDocument`, or from the edited document itself, which duplicates
+the page and records every object it copies as a copy of its source —
+`record_copy`, below), `keep_pages` (the complement of delete, in one
 call), `append_content` (operators appended to a page's content array) and
 `page_box`. Page operations apply to whichever object set the save mode
 builds — rewrite or incremental — so a reordered `/Kids` reaches the file
@@ -291,13 +293,29 @@ editor, and `import_page_as_form(source, page, matrix)` turns another
 document's page into one — its content joined, its crop box the `/BBox`, its
 resources deep-copied by the copy `import_page` uses.
 
-**Transactions.** `transaction(|tx| ...)` snapshots all five mutable fields
-and restores them if the closure returns `Err`. It is a closure rather than
+**Transactions.** `transaction(|tx| ...)` snapshots every field an edit
+changes — the objects written and deleted, the object-number counter, the
+page order, the trailer entries, whether anything came from an encrypted
+document, and the copies recorded — and restores them if the closure returns
+`Err`. It is a closure rather than
 a begin/commit/rollback triple because the failure it prevents is silent —
 a closure has no scope exit that neither commits nor rolls back. The
 object-number counter is restored deliberately: leaving it advanced grows
 the file on every *failed* edit. [Forms](forms.md) build their all-or-nothing
 multi-field fill on this primitive.
+
+**Copies.** `record_copy(copy, source)` records that an object the editor
+writes is a copy of one of the document's own, and `copies()` hands the
+records back by ascending number, in the editor's numbers, which every save
+writes as they are but a linearized one. Every writer that copies one of the
+document's objects records it: the redactor's copy of a form for a
+placement, `import_page` of the document's own page (the page and every
+object it reaches) and `import_page_as_form` of one (every object its
+resources reach). Nothing a save writes depends on the records, a rollback
+forgets them, and an object is no copy of itself. They are what lets the
+validate-on-save helper count a defect a copy carries as its source's
+(`docs/design/validate-on-save.md`;
+`copies_are_recorded_with_their_sources_and_rolled_back`).
 
 **Annotations** (12.5). Reading and rendering of existing `/AP` appearance
 streams is the [renderer](rendering.md)'s job; the editor adds and removes.
@@ -505,7 +523,10 @@ is **cut exactly at each**: every placement is measured against the form as
 it was, and each distinct outcome gets a stream of its own — a copy of the
 form cut in that placement's frame, which the placement's `Do` is pointed at
 through a fresh resource name (`Rd` and the copy's object number) in a
-resources dictionary of the page's, or of the enclosing copy's, own. A form
+resources dictionary of the page's, or of the enclosing copy's, own. Each
+copy is recorded as a copy of the form (`DocumentEditor::record_copy`), so a
+save's reader counts what a damaged form's dictionary carries into its
+copies as the form's (`docs/design/validate-on-save.md`). A form
 drawn inside a copied form is decided first, because a form whose `Do` names
 a copy is itself a different outcome. Placements that cut the same share one
 stream, and a form nothing was cut from is not written at all. The form's
@@ -726,7 +747,7 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 
 `DocumentEditor` (facade re-export of `tinker_pdf_cos::DocumentEditor`):
 `document()`, `is_dirty()`, `has_changed()`, `changed_numbers()`,
-`allocate()`, `get()`, `put()`,
+`allocate()`, `record_copy()`, `copies()`, `get()`, `put()`,
 `put_stream()`, `delete()`, `intern()`, `stream_bytes()`, `catalog()`,
 `update_catalog()`,
 `add_name_tree()`, `add_number_tree()`, `add_named_destination()`,

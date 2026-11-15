@@ -170,6 +170,125 @@ fn untabled_hex_page() -> Vec<u8> {
     out
 }
 
+/// A one-page file whose page draws two forms: `/A` (object 4) has no
+/// `/BBox`, which 8.10.2 Table 93 requires, and `/B` (object 5) names in its
+/// resources an XObject that is null, a name that resolves to nothing
+/// (7.8.3). Two semantics defects of somebody else's file, one of each class,
+/// each on its own form. Hand-built, because this engine's writer writes
+/// neither.
+fn two_forms() -> Vec<u8> {
+    let stream = |dict: &str, data: &str| {
+        format!(
+            "<< {dict} /Length {} >>\nstream\n{data}\nendstream",
+            data.len()
+        )
+    };
+    let bodies = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] \
+         /Resources << /XObject << /A 4 0 R /B 5 0 R >> >> /Contents 6 0 R >>"
+            .to_string(),
+        stream("/Type /XObject /Subtype /Form", "0 0 m 10 10 l S"),
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 20 20] \
+             /Resources << /XObject << /Gone null >> >>",
+            "0 0 m 20 20 l S",
+        ),
+        stream("", "/A Do /B Do"),
+    ];
+    let mut out = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in bodies.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    let table = out.len();
+    let size = bodies.len() + 1;
+    out.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// [`two_forms`] edited as a writer that copies its form `/A` twice for two
+/// placements would edit it: each copy carries the form's dictionary and
+/// data, and the page draws both beside the form. `record` says whether the
+/// writer records each as a copy of `/A` ([`DocumentEditor::record_copy`]),
+/// and `extra` whether the second copy gains what its source does not have:
+/// resources naming an XObject that is null, `/B`'s defect. Saved as a full
+/// rewrite; the bytes and the copies recorded.
+fn copied_twice(record: bool, extra: bool) -> (Vec<u8>, Vec<(ObjRef, ObjRef)>) {
+    use tinker_pdf::{Dict, Object};
+    use tinker_pdf_cos::StreamData;
+
+    let doc = Arc::new(CosDocument::open(two_forms()).expect("it opens"));
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let form = ObjRef::new(4, 0);
+    let dict = doc
+        .get(form)
+        .expect("the form reads")
+        .as_stream()
+        .expect("the form is a stream")
+        .dict
+        .clone();
+    let data = doc.stream_raw(form).expect("its data reads");
+    let x_object = editor.intern(b"XObject");
+    let mut names = Vec::new();
+    for (index, name) in [b"A1".as_slice(), b"A2"].into_iter().enumerate() {
+        let copy = editor.allocate();
+        let mut dict = dict.clone();
+        if extra && index == 1 {
+            let mut gone = Dict::new();
+            gone.insert(editor.intern(b"Gone"), Object::Null);
+            let mut resources = Dict::new();
+            resources.insert(x_object, Object::Dict(gone));
+            dict.insert(editor.intern(b"Resources"), Object::Dict(resources));
+        }
+        editor.put_stream(
+            copy,
+            StreamData {
+                dict,
+                data: data.clone(),
+            },
+        );
+        if record {
+            editor.record_copy(copy, form);
+        }
+        names.push((editor.intern(name), copy));
+    }
+    let page = ObjRef::new(3, 0);
+    let Some(Object::Dict(mut page_dict)) = editor.get(page) else {
+        panic!("the page is a dictionary");
+    };
+    let resources = editor.intern(b"Resources");
+    let mut xobjects = page_dict
+        .get_dict(resources)
+        .and_then(|r| r.get_dict(x_object))
+        .cloned()
+        .expect("the page names its forms");
+    for (name, copy) in &names {
+        xobjects.insert(*name, Object::Ref(*copy));
+    }
+    let mut scope = page_dict.get_dict(resources).cloned().expect("resources");
+    scope.insert(x_object, Object::Dict(xobjects));
+    page_dict.insert(resources, Object::Dict(scope));
+    editor.put(page, Object::Dict(page_dict));
+    editor.put_stream(
+        ObjRef::new(6, 0),
+        StreamData {
+            dict: Dict::new(),
+            data: b"/A Do /B Do /A1 Do /A2 Do".to_vec(),
+        },
+    );
+    let bytes = editor.save(&WriteOptions::default());
+    (bytes, editor.copies())
+}
+
 // ---- byte surgery -----------------------------------------------------------
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -516,6 +635,7 @@ fn a_repair_is_one_class_whichever_phase_met_it() {
             .map(|&kind| written_support::item(&met(kind)))
             .collect(),
         notes: Vec::new(),
+        copies: Vec::new(),
     };
     let input = read(b"the input".as_slice(), &[DefectKind::Repaired(unknown)]);
     let output = read(
@@ -608,6 +728,70 @@ fn a_rewrite_that_copies_a_damaged_stream_is_held_to_its_input() {
     });
     assert!(message.contains("[repaired-while-reading]"), "{message}");
     assert!(message.contains("non-hex byte skipped"), "{message}");
+}
+
+/// **A copy owes what its source owes, no more and no less.** A rewrite that
+/// copies a damaged form for two placements and records the copies passes
+/// `rewritten`: the `/BBox` the form lacks, which each copy lacks too, counts
+/// once, as the form's. The same copies written without the record are three
+/// forms without a `/BBox`, and fail; and a recorded copy that gains a defect
+/// its source does not have — `/B`'s, a class the input has once, on `/B` —
+/// fails as well, since its source holds none of that class to carry.
+#[test]
+fn a_copy_owes_what_its_source_owes() {
+    use tinker_pdf::DefectKind::{ResourceUnresolved, XObjectMalformed};
+
+    let input = two_forms();
+    expecting(
+        "two forms, each with a defect",
+        &input,
+        &[
+            Expected::Defect(XObjectMalformed { entry: "/BBox" }),
+            Expected::Defect(ResourceUnresolved),
+        ],
+    );
+
+    let (copied, copies) = copied_twice(true, false);
+    assert_eq!(copies.len(), 2, "both copies recorded: {copies:?}");
+    let message = refusal(|| {
+        rewritten("the copies, unrecorded", &input, &copied);
+    });
+    assert!(
+        message.contains("`xobject-malformed`: 3 in the output, 1 in the input"),
+        "a reading without the record counts each copy: {message}"
+    );
+    rewritten(
+        "a form copied for two placements",
+        &input,
+        written_support::Handed::from(&copied).with_copies(copies),
+    );
+
+    let (unrecorded, none) = copied_twice(false, false);
+    assert!(none.is_empty());
+    let message = refusal(|| {
+        rewritten("a writer that duplicates a defect", &input, &unrecorded);
+    });
+    assert!(
+        message.contains("`xobject-malformed`: 3 in the output, 1 in the input"),
+        "{message}"
+    );
+
+    let (added, copies) = copied_twice(true, true);
+    let message = refusal(|| {
+        rewritten(
+            "a copy that adds a defect",
+            &input,
+            written_support::Handed::from(&added).with_copies(copies),
+        );
+    });
+    assert!(
+        message.contains("`resource-unresolved`: 2 in the output, 1 in the input"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("xobject-malformed"),
+        "and only that: {message}"
+    );
 }
 
 // ---- the two readings -------------------------------------------------------
