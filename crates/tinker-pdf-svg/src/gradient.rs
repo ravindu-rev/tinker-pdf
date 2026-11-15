@@ -28,7 +28,7 @@
 use crate::document::{self, Node, Tree};
 use crate::path::Outline;
 use crate::shape::{self, Shape};
-use crate::style::Style;
+use crate::style::{Applied, Style};
 use crate::transform::{self, IDENTITY};
 use crate::{Clip, Paint, Refusal, Spread, Stop};
 
@@ -103,6 +103,11 @@ enum Units {
 pub struct Resolved {
     /// The paint.
     pub paint: Paint,
+    /// The properties of its stops whose value was not the property's
+    /// grammar, deduplicated: what the caller names
+    /// [`crate::Warning::ValueUnreadable`], as it names an element's own
+    /// (ruling 10).
+    pub unreadable: Vec<String>,
 }
 
 /// Whether resolving the gradient at `at` needs the painted element's box:
@@ -166,7 +171,7 @@ pub fn resolve(
     };
     let matrix = transform::concat(space, matrix);
 
-    let stops = stops(tree, &chain, style);
+    let (stops, unreadable) = stops(tree, &chain, style);
     // §13.2.4: no stops is `none`, and one stop is that colour everywhere.
     if stops.is_empty() {
         return None;
@@ -213,6 +218,7 @@ pub fn resolve(
             let last = stops.last()?;
             return Some(Resolved {
                 paint: Paint::Solid(last.colour),
+                unreadable,
             });
         }
         Paint::Radial {
@@ -224,17 +230,27 @@ pub fn resolve(
             spread,
         }
     };
-    Some(Resolved { paint })
+    Some(Resolved { paint, unreadable })
 }
 
-/// §13.2.4's stops, from the first element of the chain that has any.
+/// §13.2.4's stops, from the first element of the chain that has any, and
+/// the properties among their declarations whose value was not the
+/// property's grammar — a `stop-color` of a `currentColor` the caller keeps
+/// among them, a colour no stop can hold — deduplicated, each left at what
+/// the stop inherited, as an element's own are.
 ///
 /// **All or nothing from one element**, which is §13.2.3's rule and not a
 /// simplification: a gradient that references another either states its own
 /// complete ramp or takes the other's whole, and a build that merged the two
 /// lists would invent a ramp neither file describes.
-fn stops(tree: &Tree, chain: &[usize], style: &Style) -> Vec<Stop> {
+fn stops(tree: &Tree, chain: &[usize], style: &Style) -> (Vec<Stop>, Vec<String>) {
     let mut out: Vec<Stop> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    let mut note = |applied: Applied, name: &str| {
+        if matches!(applied, Applied::Unreadable) && !unreadable.iter().any(|held| held == name) {
+            unreadable.push(name.to_owned());
+        }
+    };
     for parent in chain {
         for child in tree.element_children(*parent) {
             let node = &tree.nodes[child];
@@ -248,17 +264,19 @@ fn stops(tree: &Tree, chain: &[usize], style: &Style) -> Vec<Stop> {
             for (name, value) in &node.attributes {
                 let lower = name.to_ascii_lowercase();
                 if crate::style::PROPERTIES.contains(&lower.as_str()) {
-                    own.apply(
+                    let applied = own.apply(
                         &lower,
                         &tinker_pdf_css::parser::component_values(
                             tinker_pdf_css::tokenizer::tokenize(value),
                         ),
                     );
+                    note(applied, &lower);
                 }
             }
             if let Some(text) = node.style.as_deref() {
                 for declaration in crate::style::inline_declarations(text) {
-                    own.apply(&declaration.name, &declaration.values);
+                    let applied = own.apply(&declaration.name, &declaration.values);
+                    note(applied, &declaration.name);
                 }
             }
             let offset = node
@@ -291,7 +309,7 @@ fn stops(tree: &Tree, chain: &[usize], style: &Style) -> Vec<Stop> {
             ..only
         });
     }
-    out
+    (out, unreadable)
 }
 
 /// A `<clipPath>` read for one element: the union of its shapes, and the

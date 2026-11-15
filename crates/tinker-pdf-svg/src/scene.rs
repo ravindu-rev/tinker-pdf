@@ -1359,6 +1359,9 @@ impl Walk<'_> {
                     if let Some(resolved) =
                         gradient::resolve(self.tree, at, matrix, extent.measured, style)
                     {
+                        for name in resolved.unreadable {
+                            self.warn(Warning::ValueUnreadable { attribute: name });
+                        }
                         return Ok(resolved.paint);
                     }
                     // §13.2.4: a gradient with no stops paints **as if `none`

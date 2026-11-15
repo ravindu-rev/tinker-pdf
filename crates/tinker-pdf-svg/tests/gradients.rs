@@ -370,6 +370,34 @@ fn stop_colour_does_not_inherit_from_an_ancestor() {
     );
 }
 
+/// A `<stop>` declaration that is not its property's grammar is named, in
+/// an attribute and in `style=""` alike, and leaves the stop what it
+/// inherited: the dropped `stop-color` black, the dropped `stop-opacity`
+/// whole (ruling 10).
+#[test]
+fn a_stop_value_that_is_not_its_grammar_is_named() {
+    let markup = br##"<svg xmlns="http://www.w3.org/2000/svg">
+      <defs><linearGradient id="g"><stop offset="0" stop-color="#0000zz"/>
+        <stop offset="1" style="stop-color: #00ff00; stop-opacity: half"/></linearGradient></defs>
+      <rect fill="url(#g)" width="10" height="10"/></svg>"##;
+    let scene = scene(markup);
+    let Paint::Linear { stops, .. } = fill(&scene, 0) else {
+        panic!("a linear gradient: {:?}", fill(&scene, 0));
+    };
+    assert_eq!(stops[0].colour, rgb(0, 0, 0), "the dropped colour");
+    assert_eq!(stops[1].colour, rgb(0, 255, 0));
+    assert_eq!(stops[1].opacity, 1.0, "the dropped opacity");
+    for attribute in ["stop-color", "stop-opacity"] {
+        assert!(
+            scene.warnings.contains(&Warning::ValueUnreadable {
+                attribute: attribute.to_owned()
+            }),
+            "{attribute}: {:?}",
+            scene.warnings
+        );
+    }
+}
+
 // ---- §14.3's clipping ---------------------------------------------------------
 
 /// §14.3.5: a clipping path is the **union** of its children's silhouettes.
