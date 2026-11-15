@@ -1413,79 +1413,79 @@ fn hex(bytes: &[u8]) -> String {
 const TOOLBOX_FINGERPRINTS: [(&str, &str); 19] = [
     (
         "gamma 2.2",
-        "e8ec9374d9ded7964d4ffee85602b1be279c3d5561105963090bd6386cf01dcc",
+        "add09af95298788ed01b829d2cda67735b3d0e531d6451866c8273ff47d4c5a7",
     ),
     (
         "gamma 1/2.2, premultiplied",
-        "a7124f1270d9afa824c0a86634eb2ba8eaebd923bd600a046840b3e728f92fb9",
+        "5e8051ef940d2e12b8b29697cedcd699445d4ffd67bb246e711ac6641d8cbe4a",
     ),
     (
         "gamma 1.8, ink",
-        "74bad0dbc8ecca76b9dffe87b0e06f7f2a278abd2ed942012d3d568090aa1cb7",
+        "0f08fdb38134deeb4e05ee6786164e89ecbd1c3e06defc82b313d323bf81d27e",
     ),
     (
         "gamma 2.4, Lab",
-        "a448a2b9ab61305a7376528b0f15a3807b520064d0871e78843fcab2f4a7681d",
+        "61d297c2bd4f38042f4a4f0ec2375e6d58964ca6d41bb5883180e62c1164db1a",
     ),
     (
         "invert",
-        "825ad2ba02fa17b683de7ddd0baa2895cb050c82586ae9fd246282b999aa0ed9",
+        "bf03dc36edcde1137b4212ae0242dfe20c2eae139ec2d984bc4570922521b575",
     ),
     (
         "invert by luminance",
-        "aaf97ef7fe7e7483fe984945b9482966f156fe5a2a9a22653a230d389a5c6dea",
+        "72909cb2143683f2b1f255f10dcfbb0db48dcaf4fdc16d7e57ee3ee9cc2e309b",
     ),
     (
         "invert by luminance, ink",
-        "f3cbb8c125e50db628060ebfdd6725c269918e0161fa30e49ed8582ec8dbba33",
+        "ddf0781f88a4a854677f9c1f2e121bd41cc6086db50f36840edade73c0acda4e",
     ),
     (
         "tint",
-        "8a77784cb2e5d89303ed7b405fae6ef5b804ad2a84fed229d75bf1d141334b7a",
+        "a45cede53164d785e0bbbf323670d2c3e1382a134d6504a3350bdb39056e2279",
     ),
     (
         "grayscale",
-        "3f8b1d56f41cf14b0d8b7b795dff9adb22ddf89dff728fd4ebf73fb296bcb3b4",
+        "3f09a4fab3cd81855357b6d19de7fd8a9f55e1aacc805302b9762b8c6137dc00",
     ),
     (
         "grayscale, ink",
-        "efedccf1ab3946b46d1f0434253df0aba076ba45cd0a6a3f4d27e39c352b7123",
+        "e3601813e26dd20ecf67b9372eeaed2a99e4dfc0def9f21df65dd7e24852b14b",
     ),
     (
         "the colour count, unicolour and monochrome tests",
-        "a9b8f55557554fd973fa8cb444b1885dbabd6551d0397b7f8bfa70b458d881e1",
+        "109ef068c4fb77ee255df544ed358ca858c555fed532f3c6ceb817cc58ca966e",
     ),
     (
         "scaled to two thirds",
-        "3972d47b1175194d905100a9791108a934218382c091aea05cb04d41a6625a4d",
+        "d08db6112a78638f582b5ee854a78bd2e875695736f0379e0d6d044bf7f49b1c",
     ),
     (
         "scaled to one and a half, premultiplied",
-        "e268cde8ce07e63b3f12421e041b61443ec0f01bb8b7c5cf9abbeb2af68b0704",
+        "3d0b12f0b62e26514356b621a9bb112994e6e716eec6e53377eefe0d3ffcc645",
     ),
     (
         "scaled to a third, ink",
-        "962784835443df1ff30b6f1991c50a0e646738ac0b470f36c11487de078ba329",
+        "9d9215c69feee0e712f2bbf670595e647c67246e226ec9349e789026b9ef65e0",
     ),
     (
         "subsampled by 3 by 2",
-        "dbbc5dab48bfaa0be9bb732e3ff9cbcc79f779faa936f87687f0884a02e2b8d5",
+        "e9f8cb0e85ed3f0c6cd2d1622675e2de8652d37c74beb48633fe761babf7a1f1",
     ),
     (
         "converted to Lab",
-        "32968cdfab5e3895426a2565f5a47aed7011f8b35b06e89c9cdcc10e2a1b3a9a",
+        "631ca86bdb3747ed8c7540a66a7a87f79561306b38fdc325df9e6aee718490c1",
     ),
     (
         "converted from Lab",
-        "ccc025a6c15867027824be40325fae582a095d8adb25d17fac25f3f148663e36",
+        "07451d410dbf442acc2f8d490c45b69cf4da45a8f49e416ff71f6ab2efcf4aca",
     ),
     (
         "converted to ink, premultiplied",
-        "7098a6fb10b5bff7bed5e88cb145009ecca527ff87c70ca6ea4d71148acf8d6d",
+        "726affb17cd93b8162415beecb60436e1eec36b6ed680c97e53cc6787a193ed5",
     ),
     (
         "converted from ink to grey and alpha",
-        "96175111aa4b788e2491c0dae1501bcd071de501c9338661bff49b022d704e12",
+        "19e6a6caf5177889533ae924f2deb853a0a2d079fcffeec776f4e2088c0dfdf2",
     ),
 ];
 
