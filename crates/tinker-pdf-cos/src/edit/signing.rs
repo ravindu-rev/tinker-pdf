@@ -129,17 +129,16 @@ impl DocumentEditor {
         reserved: impl FnOnce(Option<ObjRef>) -> crate::sign::Reserved,
         producer: &dyn Signer,
     ) -> Result<Vec<u8>, SignError> {
-        let (set, standing, previous) = self.update_parts();
-        let trailer = self.update_trailer();
+        let parts = self.update_parts();
         let key = self.doc.file_key();
         let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
-        let catalog = trailer.get_ref(Name::ROOT);
+        let catalog = parts.trailer.get_ref(Name::ROOT);
         let reserved = reserved(catalog);
         let (mut out, placeholder) = write::incremental_update_reserving(
             self.doc.bytes(),
-            &set,
-            &trailer,
-            previous,
+            &parts.set,
+            &parts.trailer,
+            parts.previous,
             &write::UpdatePlan {
                 names: self.doc.names_table(),
                 compress: options.compress,
@@ -147,7 +146,7 @@ impl DocumentEditor {
                 reserved: Some((signature_ref.num, &reserved)),
                 parallelism: options.parallelism,
                 work: self.work.as_deref(),
-                standing: &standing,
+                standing: &parts.standing,
             },
         );
         let placeholder = placeholder.ok_or(SignError::RangeDoesNotFit)?;

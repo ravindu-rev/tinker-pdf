@@ -1045,3 +1045,66 @@ fn an_update_over_a_rescanned_document_states_every_object() {
         "the page and the members it writes out: {changed:?}"
     );
 }
+
+/// A damaged file whose trailer's entries are `trailer`: a catalog whose
+/// header the repair scanner cannot read, the page tree it named, a null
+/// object, and no cross-reference table.
+fn catalogless(trailer: &str) -> Arc<CosDocument> {
+    let text = format!(
+        "%PDF-1.7
+1 0 orj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Resources << >> >>
+endobj
+4 0 obj
+null
+endobj
+trailer
+<< /Size 5 {trailer} >>
+%%EOF
+"
+    );
+    let doc = CosDocument::open(text.into_bytes()).expect("the scanner opens it");
+    assert_eq!(doc.ladder_level(), crate::LadderLevel::Rescan);
+    Arc::new(doc)
+}
+
+/// **A save of a document with no catalog writes an empty one** (ISO
+/// 32000-2 Table 15, 7.7.2). The document's trailer names no object the scan
+/// found, names a null one, or names no root at all, so it reads no catalog,
+/// and a save that wrote that trailer as it stands would name a root no table
+/// places. A rewrite and an incremental update each write a catalog over a
+/// page tree of no pages — what the document reads — at the number the
+/// trailer names where it names one, and each opens on `Trust`.
+#[test]
+fn a_save_of_a_document_with_no_catalog_writes_an_empty_one() {
+    for (trailer, number) in [
+        ("/Root 1 0 R", Some(1)),
+        ("/Root 4 0 R", Some(4)),
+        ("", None),
+    ] {
+        let doc = catalogless(trailer);
+        assert!(doc.catalog().is_none(), "{trailer:?}: no catalog to read");
+        for mode in [WriteMode::Rewrite, WriteMode::Incremental] {
+            let what = format!("{trailer:?}, {mode:?}");
+            let saved = reopen(&DocumentEditor::new(Arc::clone(&doc)), mode);
+            assert_eq!(saved.ladder_level(), crate::LadderLevel::Trust, "{what}");
+            let root = saved.trailer().get_ref(Name::ROOT).expect("a root");
+            if let Some(number) = number {
+                assert_eq!(root, ObjRef::new(number, 0), "{what}");
+            }
+            let catalog = saved.catalog().expect("a catalog");
+            assert_eq!(
+                catalog.get_name(Name::TYPE),
+                Some(saved.intern(b"Catalog")),
+                "{what}"
+            );
+            assert_eq!(pages::count(&saved), 0, "{what}: no pages, as it read");
+        }
+    }
+}

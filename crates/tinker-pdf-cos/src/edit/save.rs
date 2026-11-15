@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use super::{without, DocumentEditor};
 use crate::limits;
+use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
 use crate::resolve::Resolve;
 use crate::work::Work;
@@ -294,15 +295,14 @@ impl DocumentEditor {
     /// [`CosDocument::open_appended`]: crate::CosDocument::open_appended
     #[must_use]
     pub fn save_update(&self, options: &WriteOptions) -> Vec<u8> {
-        let (set, standing, previous) = self.update_parts();
-        let trailer = self.update_trailer();
+        let parts = self.update_parts();
         let key = self.doc.file_key();
         let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
         write::update_section_reserving(
             self.doc.prefix(),
-            &set,
-            &trailer,
-            previous,
+            &parts.set,
+            &parts.trailer,
+            parts.previous,
             &write::UpdatePlan {
                 names: self.doc.names_table(),
                 compress: options.compress,
@@ -310,7 +310,7 @@ impl DocumentEditor {
                 reserved: None,
                 parallelism: options.parallelism,
                 work: self.work.as_deref(),
-                standing: &standing,
+                standing: &parts.standing,
             },
         )
         .0
@@ -320,12 +320,13 @@ impl DocumentEditor {
     /// writes, ascending: every object this editor has put or written, every
     /// one it has deleted, and each page-tree node a page operation rewrites
     /// — and, over a document the repair scanner rebuilt, each member of an
-    /// object stream the section writes out. They are the numbers a reopen
-    /// over that section parses afresh ([`crate::CosDocument::reopen`]);
-    /// object zero's free head, which its table also states, is not one.
+    /// object stream the section writes out, and the catalog it writes for a
+    /// document that has none. They are the numbers a reopen over that
+    /// section parses afresh ([`crate::CosDocument::reopen`]); object zero's
+    /// free head, which its table also states, is not one.
     #[must_use]
     pub fn changed_numbers(&self) -> Vec<u32> {
-        self.update_parts().0.numbers()
+        self.update_parts().set.numbers()
     }
 
     /// Saves the edits as a document **sealed to recipients** rather than to
@@ -391,11 +392,10 @@ impl DocumentEditor {
         match options.mode {
             WriteMode::Incremental => {
                 // With every entry removed here written as null, so an earlier
-                // revision's trailer does not bring it back.
-                let trailer = self.update_trailer();
-                // Over a document the repair scanner rebuilt, the section
-                // states every object and chains to nothing (`update_parts`).
-                let (set, standing, previous) = self.update_parts();
+                // revision's trailer does not bring it back; over a document
+                // the repair scanner rebuilt, the section states every object
+                // and chains to nothing (`update_parts`).
+                let parts = self.update_parts();
                 // 7.6.2: the update is sealed with the key the document was
                 // opened with, because it appends into a file whose /Encrypt
                 // still stands. An unencrypted document, or one never
@@ -407,9 +407,9 @@ impl DocumentEditor {
                 let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
                 write::incremental_update_reserving(
                     self.doc.bytes(),
-                    &set,
-                    &trailer,
-                    previous,
+                    &parts.set,
+                    &parts.trailer,
+                    parts.previous,
                     &write::UpdatePlan {
                         names: self.doc.names_table(),
                         compress: options.compress,
@@ -417,7 +417,7 @@ impl DocumentEditor {
                         reserved: None,
                         parallelism: options.parallelism,
                         work,
-                        standing: &standing,
+                        standing: &parts.standing,
                     },
                 )
                 .0
@@ -434,7 +434,7 @@ impl DocumentEditor {
                 // exists, writing a readable file is the honest outcome, and
                 // it is what `WriteOptions::encryption` will replace.
                 let encrypt = self.intern(b"Encrypt");
-                let trailer = without(&trailer, encrypt);
+                let mut trailer = without(&trailer, encrypt);
                 let encrypt_num = self.doc.trailer().get_ref(encrypt).map(|r| r.num);
 
                 // A rewrite must carry everything, not only the changes.
@@ -508,10 +508,10 @@ impl DocumentEditor {
                 for (num, object) in &tree_updates {
                     all.insert(*num, object.clone());
                 }
+                self.catalog_stated(&mut all, &mut trailer, &mut Vec::new());
                 if options.garbage_collect {
                     all = self.reachable(&all, &trailer);
                 }
-                let mut trailer = trailer;
                 if options.deduplicate_streams {
                     let content =
                         |num: u32, stream: &StreamData| self.dedup_content(num, stream, work);
@@ -594,11 +594,19 @@ impl DocumentEditor {
     /// the scan found in the document's own bytes where it lies, under the
     /// generation its header gives, and each member of an object stream,
     /// which a classic table cannot place, written into the update; it names
-    /// no `/Prev`.
-    pub(super) fn update_parts(&self) -> (ObjectSet, Vec<write::Standing>, u64) {
+    /// no `/Prev`, and it gives a document that has no catalog one
+    /// ([`DocumentEditor::catalog_stated`]), since no earlier table places a
+    /// root for it.
+    pub(super) fn update_parts(&self) -> UpdateParts {
         let mut set = self.changed_set();
+        let mut trailer = self.update_trailer();
         if self.doc.ladder_level() != crate::LadderLevel::Rescan {
-            return (set, Vec::new(), self.doc.last_startxref());
+            return UpdateParts {
+                set,
+                standing: Vec::new(),
+                previous: self.doc.last_startxref(),
+                trailer,
+            };
         }
         let mut standing = Vec::new();
         for (num, entry) in self.doc.xref().iter() {
@@ -619,7 +627,90 @@ impl DocumentEditor {
                 crate::XrefEntry::Free { .. } => {}
             }
         }
-        (set, standing, 0)
+        self.catalog_stated(&mut set, &mut trailer, &mut standing);
+        UpdateParts {
+            set,
+            standing,
+            previous: 0,
+            trailer,
+        }
+    }
+
+    /// Gives a save of a document that has no catalog one of its own: an
+    /// empty document's, `<< /Type /Catalog /Pages p >>` over a page tree of
+    /// no pages, named by the trailer's `/Root`.
+    ///
+    /// The trailer and the table under it are the writer's (Table 15: `/Root`
+    /// is required, an indirect reference to the catalog, and 7.7.2's catalog
+    /// names its page tree). A document has no catalog when its trailer names
+    /// no root, or names one it reads as null (7.3.10): no object at the
+    /// number, which is what a damaged file whose catalog's header the scan
+    /// could not read leaves, or a null one. Written as it stands, such a
+    /// trailer names nothing the table places, and a reader finds no catalog
+    /// through it and rescans the file. The catalog written in its place says
+    /// what the document says — that it has no pages — at the number the
+    /// trailer names where it names one under generation zero, and at new
+    /// numbers otherwise. A root the document reads as anything else is its
+    /// own catalog, whatever that says about itself, and is copied through.
+    ///
+    /// `set` is what the save writes and `standing` what it states where it
+    /// lies, the row of a root it replaces among them.
+    fn catalog_stated(
+        &self,
+        set: &mut ObjectSet,
+        trailer: &mut Dict,
+        standing: &mut Vec<write::Standing>,
+    ) {
+        let named = match trailer.get(Name::ROOT) {
+            Some(Object::Dict(_)) => return,
+            Some(Object::Ref(root)) => Some(*root),
+            _ => None,
+        };
+        if let Some(root) = named {
+            let written = match set.get(root.num) {
+                Some(Written::Object(Object::Null)) => false,
+                Some(_) => true,
+                None => {
+                    standing.iter().any(|row| row.num == root.num)
+                        && self
+                            .doc
+                            .get(root)
+                            .is_ok_and(|object| !matches!(object.as_ref(), Object::Null))
+                }
+            };
+            if written {
+                return;
+            }
+        }
+        // Above every number the document, the save and this editor's
+        // allocations use: a signature's dictionary is allocated and
+        // written by the signer, outside `set`.
+        let unused = set
+            .max_number()
+            .max(standing.iter().map(|row| row.num).max().unwrap_or(0))
+            .max(self.doc.max_object_number())
+            .saturating_add(1)
+            .max(self.next);
+        let catalog = match named {
+            Some(root) if root.num > 0 && root.gen == 0 => root.num,
+            _ => unused,
+        };
+        let pages = if catalog == unused {
+            unused.saturating_add(1)
+        } else {
+            unused
+        };
+        let mut tree = Dict::new();
+        tree.insert(Name::TYPE, Object::Name(Name::PAGES));
+        tree.insert(Name::KIDS, Object::Array(Vec::new()));
+        tree.insert(Name::COUNT, Object::Int(0));
+        let mut root = Dict::new();
+        root.insert(Name::TYPE, Object::Name(self.intern(b"Catalog")));
+        root.insert(Name::PAGES, Object::Ref(ObjRef::new(pages, 0)));
+        set.insert(catalog, Object::Dict(root));
+        set.insert(pages, Object::Dict(tree));
+        standing.retain(|row| row.num != catalog && row.num != pages);
+        trailer.insert(Name::ROOT, Object::Ref(ObjRef::new(catalog, 0)));
     }
 
     /// The overlay, deletions and page-tree rewrites as one object set.
@@ -643,6 +734,18 @@ impl DocumentEditor {
         }
         set
     }
+}
+
+/// What an incremental update writes ([`DocumentEditor::update_parts`]).
+pub(super) struct UpdateParts {
+    /// The objects the section writes.
+    pub(super) set: ObjectSet,
+    /// The objects it states where they lie in the document's bytes.
+    pub(super) standing: Vec<write::Standing>,
+    /// The section it chains to through `/Prev`, zero for none.
+    pub(super) previous: u64,
+    /// Its trailer.
+    pub(super) trailer: Dict,
 }
 
 #[cfg(test)]

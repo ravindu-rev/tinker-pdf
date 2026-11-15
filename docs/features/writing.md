@@ -38,6 +38,21 @@ such a file has no `trailer` keyword at all (7.5.8.2). The trailer `/Size`
 is one more than the highest object number *in the file*, containers and
 the `/Encrypt` dictionary included (7.5.5 Table 15).
 
+**A document with no catalog.** Table 15 makes `/Root` a required reference
+to the catalog, and 7.7.2's catalog names the page tree. A damaged file can
+leave its document with none: a trailer naming an object the repair scanner
+never found (a catalog whose header it could not read), one the document
+reads as null, or no root at all. Written as it stands, such a trailer would
+name a root no table places, and a reader would rescan the file for one.
+The editor's save — a rewrite, and an incremental update of a document the
+scanner rebuilt, whose section is the file's only table — writes a catalog
+of its own in its place, `<< /Type /Catalog /Pages p >>` over a page tree of
+no pages, which is what the document reads: at the number the trailer names
+where it names one under generation zero, at new numbers otherwise
+(`edit::tests::a_save_of_a_document_with_no_catalog_writes_an_empty_one`). A
+root the document reads as anything else is its catalog, whatever it says
+about itself, and is copied through.
+
 **Incremental update.** The output starts with the original, byte for
 byte — asserted by tests, not assumed — with the appended section opening
 on its own newline (7.5.6). Only the changed objects are written, followed
