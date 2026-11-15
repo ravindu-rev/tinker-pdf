@@ -337,16 +337,20 @@ mod tests {
     /// **A thread with a fill open never waits.** Two threads each claim a
     /// key and, inside the fill, read the key the other is filling: each
     /// computes it for itself, and both finish — where waiting would be a
-    /// cycle of two.
+    /// cycle of two. Neither fill publishes until both have read the other's
+    /// key, so on every schedule each read finds the other's slot being
+    /// filled, never its published value.
     #[test]
     fn crossed_fills_compute_rather_than_deadlock() {
         let flights: Flights<u32, u32> = Flights::new();
         let claimed = Barrier::new(2);
+        let crossed = Barrier::new(2);
         let (one, two) = std::thread::scope(|scope| {
             let one = scope.spawn(|| {
                 flights.read(1, || {
                     claimed.wait();
                     let other = flights.read(2, || Filled::Keep(20));
+                    crossed.wait();
                     Filled::Keep(10 + other)
                 })
             });
@@ -354,6 +358,7 @@ mod tests {
                 flights.read(2, || {
                     claimed.wait();
                     let other = flights.read(1, || Filled::Keep(10));
+                    crossed.wait();
                     Filled::Keep(20 + other)
                 })
             });

@@ -1434,16 +1434,21 @@ mod tests {
 
     /// **A thread with a fill open never waits**, in this table or in a
     /// `Flights`: two threads each claim a key and, inside the fill, request
-    /// the key the other is filling, and each computes it for itself.
+    /// the key the other is filling, and each computes it for itself. Neither
+    /// fill publishes until both have requested the other's key, so on every
+    /// schedule each request finds the other's slot being filled, never its
+    /// published value.
     #[test]
     fn crossed_fills_compute_rather_than_deadlock() {
         let cache = DocumentCache::new(CacheLimits::new(1 << 20));
         let claimed = Barrier::new(2);
+        let crossed = Barrier::new(2);
         let (one, two) = std::thread::scope(|scope| {
             let one = scope.spawn(|| {
                 cache.read(1u32, None, || {
                     claimed.wait();
                     let other = cache.read(2u32, None, || value(20)).0;
+                    crossed.wait();
                     Fill::Keep(Arc::new(vec![other.len() as u8 + 10]), 1)
                 })
             });
@@ -1451,6 +1456,7 @@ mod tests {
                 cache.read(2u32, None, || {
                     claimed.wait();
                     let other = cache.read(1u32, None, || value(10)).0;
+                    crossed.wait();
                     Fill::Keep(Arc::new(vec![other.len() as u8 + 20]), 1)
                 })
             });
@@ -1461,14 +1467,16 @@ mod tests {
 
         // Across this table and a `Flights`: a thread inside a `Flights` fill
         // requests a key here another thread is filling, while that thread
-        // waits on the `Flights` key.
+        // requests the `Flights` key.
         let flights: tinker_pdf_cos::Flights<u32, u32> = tinker_pdf_cos::Flights::new();
         let claimed = Barrier::new(2);
+        let crossed = Barrier::new(2);
         let (here, there) = std::thread::scope(|scope| {
             let here = scope.spawn(|| {
                 cache.read(7u32, None, || {
                     claimed.wait();
                     let other = flights.read(8, || tinker_pdf_cos::Filled::Keep(80));
+                    crossed.wait();
                     Fill::Keep(Arc::new(vec![(other % 256) as u8]), 1)
                 })
             });
@@ -1476,6 +1484,7 @@ mod tests {
                 flights.read(8, || {
                     claimed.wait();
                     let other = cache.read(7u32, None, || value(3)).0;
+                    crossed.wait();
                     tinker_pdf_cos::Filled::Keep(other.len() as u32 + 77)
                 })
             });
