@@ -284,6 +284,11 @@ impl<'d, D: Device + ?Sized> Culled<'d, D> {
 }
 
 /// The state a forwarded call carries: the call's own, or its forced copy.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value a forwarded call, made on its stack and dropped when it returns; a \
+              boxed forced state would cost an allocation a paint"
+)]
 enum PaintState<'s> {
     Kept(&'s GraphicsState),
     Forced(GraphicsState),
@@ -1145,12 +1150,15 @@ mod tests {
         }
     }
 
+    /// Each form's kept drawing, by the form's name and its invocation.
+    type Kept = HashMap<(Vec<u8>, FormInvocation), Arc<FormRecording>>;
+
     /// [`Everything`]'s fonts and forms, in a scope that keeps each form's
     /// drawing (`FontSource::kept_form`) and counts the forms it was told were
     /// drawn from what it kept.
     #[derive(Default)]
     struct Keeping {
-        kept: RefCell<HashMap<(Vec<u8>, FormInvocation), Arc<FormRecording>>>,
+        kept: RefCell<Kept>,
         replayed: Cell<usize>,
     }
 

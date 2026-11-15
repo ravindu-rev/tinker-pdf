@@ -803,6 +803,11 @@ impl FormInvocation {
 
 /// How the interpreter drew a form it entered ([`FontSource::form_drawn`]).
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value a form invocation, handed once to `FontSource::form_drawn` and dropped \
+              there; boxing the recording would change that trait's API and save nothing"
+)]
 pub enum FormDrawn {
     /// Replayed from the recording [`FontSource::kept_form`] handed back:
     /// nothing of the form was interpreted.
@@ -6167,12 +6172,12 @@ mod tests {
         }
     }
 
+    /// One colour at both widths.
+    type BothWidths = (Rgb, Rgb16);
+
     /// The fill colour, both widths, of every fill's state and the stroke
     /// colour of every stroke's, in order.
-    fn wide_colours<F: FontSource>(
-        src: &[u8],
-        fonts: &F,
-    ) -> (Vec<(Rgb, Rgb16)>, Vec<(Rgb, Rgb16)>) {
+    fn wide_colours<F: FontSource>(src: &[u8], fonts: &F) -> (Vec<BothWidths>, Vec<BothWidths>) {
         let mut d = RecordingDevice::new();
         interpret(src, Matrix::IDENTITY, &mut d, fonts);
         let fills = d
@@ -7399,13 +7404,16 @@ mod tests {
         Spoiled,
     }
 
+    /// Each form's kept drawing, by the form's name and its invocation.
+    type Kept = HashMap<(Vec<u8>, FormInvocation), Arc<FormRecording>>;
+
     /// A source of forms that keeps their drawings, up to `keeps` bytes each,
     /// by name and invocation, and remembers how each was drawn. With `keeps`
     /// at zero it keeps none and is asked nothing, as every source that does
     /// not opt in.
     struct Keeping {
         keeps: usize,
-        kept: RefCell<HashMap<(Vec<u8>, FormInvocation), Arc<FormRecording>>>,
+        kept: RefCell<Kept>,
         heard: RefCell<Vec<(Vec<u8>, Heard)>>,
     }
 
