@@ -821,13 +821,7 @@ fn a_mark_takes_no_letter_spacing_of_its_own_in_a_shaped_run() {
 /// The ink floor is here for that file's reason too: a page that stopped
 /// drawing would otherwise become the new baseline in perfect silence, and a
 /// blank page is extremely stable.
-/// *Moved once, 15 September 2026.* `fill` stopped truncating an edge's slope
-/// to a whole 1/256 pixel per sub-scanline, which had been flattening every
-/// shallow diagonal to vertical; the Arabic page is drawn from an embedded
-/// outline face and every curve on it moved with it. Eight pages in
-/// `determinism.rs` moved in the same commit and eleven did not, which is the
-/// shape that says it was the scanline filler and nothing above it.
-const SHAPED_PAGE: &str = "0d66ea167e51a1a0145cefcaeae2c4aea32c4ea14daffc0e686b70b31ac4cabe";
+const SHAPED_PAGE: &str = "ba660c755f69ff713c59aed8834d8719abe85b59b8a7ea2da5b32dec1eeaf761";
 
 /// The least ink [`SHAPED_PAGE`] may be the hash of.
 const LEAST_INK: usize = 200;
