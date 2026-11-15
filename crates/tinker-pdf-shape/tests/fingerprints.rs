@@ -692,7 +692,7 @@ fn unescape(text: &str) -> String {
 /// repository: ask what a check actually covers, not what its name says it
 /// covers. Two tests named `..._on_every_target` had exactly one target for
 /// the same class of reason.
-const SHAPING: &str = "d07a70e4ccd9c31c";
+const SHAPING: &str = "a65c954c637252bf";
 const BIDI: &str = "d77c9e938eb9c996";
 
 /// The vertical fingerprint (FT-07b.8): [`vertical_cases`]' columns. A run's
