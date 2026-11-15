@@ -55,9 +55,9 @@
     },
     "cjk-fonts": {
       "figure": {
-        "bytes": 20945238,
+        "bytes": 20361715,
         "date": "2026-11-15",
-        "run": "20a3fbda@x86_64-pc-windows-msvc#1"
+        "run": "26eff89f@x86_64-pc-windows-msvc"
       },
       "tolerance": {
         "bytes": 3098,
@@ -77,9 +77,9 @@
     },
     "default": {
       "figure": {
-        "bytes": 3424464,
-        "date": "2026-11-13",
-        "run": "b629b285@x86_64-pc-windows-msvc#1"
+        "bytes": 3341032,
+        "date": "2026-11-15",
+        "run": "26eff89f@x86_64-pc-windows-msvc"
       },
       "tolerance": {
         "bytes": 5675,
