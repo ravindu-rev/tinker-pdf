@@ -98,10 +98,15 @@ What ends a run: anything that paints, any change of alpha, blend mode, clip or
 soft mask, a knockout group (11.4.5 gives each element its own shape), the page
 itself, and a draw that would land on coverage the run already holds — adding
 an overlap would show both pictures at once. What does *not* end a run is `q`,
-`Q` or a form boundary, none of which paints. That distinction is the whole
-difference between the feature working and not: real content brackets every
-image in `q`/`Q`, and flushing there would leave no run holding two of
-anything.
+or a `Q` or a form boundary with no clip or soft mask in force on either side
+of it, none of which paints. That distinction is the whole difference between
+the feature working and not: real content brackets every image in `q`/`Q`,
+and flushing there would leave no run holding two of anything. A `Q` or a
+form's end that restores other masks composites the run before it restores
+them: a run reaches the canvas under the masks in force when it is
+composited, and its draws were made under the ones the restore takes away, so
+a clipped image drawn in its own `q`/`Q` would otherwise be composited
+unclipped.
 
 Bounded at `MAX_IMAGE_RUN_PIXELS`, a quarter of `MAX_PAGE_PIXELS`: past it,
 images composite one at a time and abutting ones conflate again, which is a
@@ -129,7 +134,7 @@ and the unit tests of `crates/tinker-pdf-raster/src/image.rs`.
 
 | Risk | Mitigation |
 |---|---|
-| A run composited under the wrong clip paints through it | A run records the identity of the clip and soft mask in force and ends when either changes; every operation that swaps the canvas flushes outright |
+| A run composited under the wrong clip paints through it | A run records the identity of the clip and soft mask in force and ends when either changes: the clip, the soft mask or the group that changes them flushes it first, and so does a `Q` or a form's end that restores others; every operation that swaps the canvas flushes outright |
 | Fragments are added, so an overlap would show both pictures | Asked before every draw, over the band where the new draw meets what the run already covered rather than over either whole; a real overlap ends the run |
 | Memory: a run buffers the canvas | Bounded to a quarter of `MAX_PAGE_PIXELS`, past which the per-draw path runs |
 | Anti-aliased image edges add transposition noise, which `rotate` measures | Not mitigated: an anti-aliased edge at a fractional offset does not transpose exactly, as a quantised one would. It is a cost of the anti-aliased edge, paid in the `rotate` relation's budget |

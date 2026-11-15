@@ -2373,7 +2373,9 @@ planner reads the list for each sequence of two image draws or more with
 nothing the renderer ends a run on between them
 (`tinker_pdf_render::ends_image_run`, which
 `the_planners_rule_is_the_renderers_flush` holds to the renderer one kind of
-call at a time), in the content, its forms, groups and soft masks and the
+call at a time; a `Q` or a form's end that puts other masks in force ends a
+run the rule counts on, so a sequence may hold two runs and no run reaches
+past one), in the content, its forms, groups and soft masks and the
 annotations drawn after it, takes the rows of the page its draws cover, and
 moves each cut from `round(k × height ÷ n)` to the nearest row no such
 sequence has rows on both sides of, between the cut before it and the next

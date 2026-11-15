@@ -267,7 +267,12 @@ JPEG page cuts where it likes. The planner's rule for what ends a sequence is
 the renderer's for what flushes a run — a `q`, a `Q` and a form boundary do
 not, every call that draws anything else does — and a test holds the two to
 each other one event kind at a time, so the planner cannot drift from the
-renderer. A tiling pattern's cell is drawn into a canvas of its own, the
+renderer. A `Q` or a form's end that puts other masks in force composites
+the run as well, since a run reaches the canvas under the clip and the soft
+mask in force then and its draws were made under the ones being taken away;
+the rule counts the kind as no end, so a sequence may hold two runs and no
+run reaches past one, which only keeps a cut out of rows it could have
+taken. A tiling pattern's cell is drawn into a canvas of its own, the
 same in a band as on the page, so the runs inside it constrain no cut. A
 scanned page assembled from strips is one sequence that covers the page, and
 renders as one band until RC-21 decides runs in the page frame; then every

@@ -1314,6 +1314,18 @@ const MAX_IMAGE_RUN_PIXELS: u64 = MAX_PAGE_PIXELS / 4;
 /// tell them apart by.
 type MaskId = (i32, i32, u32, u32, usize, u8);
 
+/// `mask`'s [`MaskId`].
+fn mask_id(mask: &Mask) -> MaskId {
+    (
+        mask.x0,
+        mask.y0,
+        mask.width,
+        mask.height,
+        mask.data.as_ptr() as usize,
+        mask.outside,
+    )
+}
+
 /// A run of consecutive image draws, accumulated before any of it is
 /// composited.
 struct ImageRun {
@@ -1325,12 +1337,17 @@ struct ImageRun {
     blend: RasterBlend,
     /// The clip and soft mask in force when the run was opened.
     ///
-    /// A run survives `q`, `Q` and a form boundary, because none of those
-    /// draws anything — but any of them can put a *different* clip in force,
-    /// and a run composited under the wrong one would paint through it. Each
-    /// mask is identified by its rectangle, the address of its coverage and
-    /// the value it reads outside itself, which is cheap and cannot collide
-    /// while the mask is alive.
+    /// A run survives `q`, and a `Q` or a form's end with no clip or soft
+    /// mask in force on either side of it, because none of those draws
+    /// anything. A run is composited under the masks in force when it
+    /// reaches the canvas, so whatever puts *different* masks in force
+    /// composites it first: a clip, a soft mask or a group as it changes
+    /// them, a `Q` or a form's end as it restores others
+    /// (`Renderer::restore_held`) — a run composited under the wrong ones
+    /// would paint through the clip its draws were made under.
+    /// Each mask is identified by its rectangle, the address of its coverage
+    /// and the value it reads outside itself, which is cheap and cannot
+    /// collide while the mask is alive.
     masks: (Option<MaskId>, Option<MaskId>),
     /// The ink every draw in the run painted, when the canvas composites
     /// ink: a stencil's fill colour's own components (8.9.6.2), handed to
@@ -2245,8 +2262,25 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
     }
 
-    /// Puts back what [`Renderer::held`] saved.
+    /// Puts back what [`Renderer::held`] saved: at `Q`, and at a form's end,
+    /// which 8.10.1 brackets in a `q` and a `Q` of its own.
+    ///
+    /// A run of images held back is composited first where the restore puts
+    /// other masks in force: a run reaches the canvas under the clip and the
+    /// soft mask in force then ([`Renderer::composite_run`]), and its draws
+    /// were made under the ones in force now, which the restore takes away —
+    /// a clipped image drawn inside `q` and `Q` would otherwise be composited
+    /// unclipped. A restore that leaves no mask in force where none was keeps
+    /// the run, so abutting images drawn each in a `q` and `Q` of its own
+    /// stay one.
     fn restore_held(&mut self, held: Held) {
+        let restored = (
+            held.clip.as_ref().map(mask_id),
+            held.soft.as_ref().map(mask_id),
+        );
+        if self.run.is_some() && restored != self.mask_ids() {
+            self.flush_run();
+        }
         self.clip = held.clip;
         self.soft = held.soft;
         self.clip_bounds = held.clip_bounds;
@@ -2774,17 +2808,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
     /// How the clip and the soft mask in force can be told apart cheaply.
     fn mask_ids(&self) -> (Option<MaskId>, Option<MaskId>) {
-        let id = |mask: &Mask| {
-            (
-                mask.x0,
-                mask.y0,
-                mask.width,
-                mask.height,
-                mask.data.as_ptr() as usize,
-                mask.outside,
-            )
-        };
-        (self.clip.as_ref().map(id), self.soft.as_ref().map(id))
+        (
+            self.clip.as_ref().map(mask_id),
+            self.soft.as_ref().map(mask_id),
+        )
     }
 
     /// Resolves names against `resources` until [`Renderer::pop_resources`].
@@ -2860,10 +2887,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
     /// Composites the run of images held back so far, if any.
     ///
-    /// Called at the top of every device operation that is not an image draw,
-    /// which is what makes the run's graphics state constant: the clip and the
-    /// soft mask can only change through one of those, so the state in force
-    /// now is the state every draw in the run was made with.
+    /// Called at the top of every device operation that paints, clips or
+    /// changes the soft mask, and by a `Q` or a form's end that restores other
+    /// masks ([`Renderer::restore_held`]), which is what makes the run's
+    /// graphics state constant: the clip and the soft mask can only change
+    /// through one of those, so the state in force now is the state every
+    /// draw in the run was made with.
     fn flush_run(&mut self) {
         // What ends the real run for anything but an overlap ends the page's,
         // so it ends every shadow's too (`run_shadows`).
@@ -7083,8 +7112,11 @@ pub fn page_transform(page_height: f64, scale: f64) -> Matrix {
 /// Whether the renderer composites the run of images it is holding back when
 /// it is handed a call of `kind` (`Renderer::flush_run`): every call that
 /// draws anything but an image, a clip, `ET`, and either end of a group or a
-/// soft mask, and `/SMask /None`; never `BT`, a `q`, a `Q`, a form's bracket,
-/// a marked-content scope, or what the interpreter reports of its budgets. An
+/// soft mask, and `/SMask /None`; never `BT`, a `q`, a marked-content scope,
+/// or what the interpreter reports of its budgets; and not a `Q` or a form's
+/// end, which composite the run only where they put other masks in force
+/// (`Renderer::restore_held`) — a kind this rule counts as no end, so a
+/// sequence it reads may hold two runs, and no run reaches past one. An
 /// image draw decides for itself whether it joins the run, and is no end of
 /// one here.
 ///
@@ -9527,10 +9559,13 @@ mod tests {
 
     /// **The band planner's rule is the renderer's flush** (`ends_image_run`):
     /// for every kind of call, a renderer holding a run of images — one drawn
-    /// just before, inside the bracket a closing kind ends — has composited it
-    /// after the call exactly when the rule says the kind ends a run. So the
-    /// planner, which reads runs off a display list by the rule, cannot drift
-    /// from the renderer, which decides them.
+    /// just before with no mask in force, inside the bracket a closing kind
+    /// ends — has composited it after the call exactly when the rule says the
+    /// kind ends a run. So the planner, which reads runs off a display list by
+    /// the rule, cannot drift from the renderer, which decides them; a `Q` or
+    /// a form's end that puts other masks in force composites a run the rule
+    /// counts on, which only keeps a cut out of rows it could have taken
+    /// (`a_run_is_composited_under_the_masks_its_draws_were_made_under`).
     #[test]
     fn the_planners_rule_is_the_renderers_flush() {
         let source = OneImage {
@@ -9568,6 +9603,129 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// **A run reaches the canvas under the masks its draws were made under**
+    /// (`Renderer::restore_held`). `OneImage`'s image ten pixels square,
+    /// drawn under a clip of its left half inside `q` and `Q`, and inside a
+    /// form, which 8.10.1 brackets in a `q` and a `Q` of its own, paints that
+    /// half and nothing of the other, though the run it joined is composited
+    /// only once the bracket has put the unclipped page back; drawn under a
+    /// soft mask whose group painted nothing, which reads black's luminosity
+    /// and so hides everything, inside `q` and `Q`, it paints nothing. A `Q`
+    /// that puts no other mask in force keeps the run: two abutting images
+    /// drawn each in a `q` and `Q` of its own are one run still.
+    #[test]
+    fn a_run_is_composited_under_the_masks_its_draws_were_made_under() {
+        use tinker_pdf_content::{Event, Form, MaskGroup};
+
+        let source = OneImage {
+            color: (40, 90, 160),
+            alpha: Vec::new(),
+        };
+        let replayed = |events: &[Event]| {
+            let canvas = Canvas::new(60, 60, PixelFormat::Rgb8, Color::WHITE);
+            let mut renderer = Renderer::new(canvas, page_transform(60.0, 1.0), &source);
+            let replay = tinker_pdf_content::replay(events, &mut renderer);
+            assert_eq!(replay.delivered, events.len(), "every call delivered");
+            renderer
+        };
+        let state = || Some(Box::new(GraphicsState::new(Matrix::IDENTITY)));
+        // The image's left half: x 10 to 15 of its 10 to 20, every row.
+        let clip = || Event::ClipPath {
+            path: vec![
+                PathSegment::MoveTo { x: 10.0, y: 10.0 },
+                PathSegment::LineTo { x: 15.0, y: 10.0 },
+                PathSegment::LineTo { x: 15.0, y: 20.0 },
+                PathSegment::LineTo { x: 10.0, y: 20.0 },
+                PathSegment::Close,
+            ],
+            even_odd: false,
+            state: state(),
+        };
+        let form = || Event::BeginForm {
+            id: 1,
+            name: b"Fm0".to_vec(),
+            entered: true,
+        };
+        let painted = |canvas: &Canvas, x: usize, y: usize| {
+            let at = (y * 60 + x) * 3;
+            canvas.data[at..at + 3] != [255, 255, 255]
+        };
+        for (what, events) in [
+            (
+                "inside q and Q",
+                vec![
+                    Event::SaveState,
+                    clip(),
+                    image_draw(10.0),
+                    Event::RestoreState,
+                ],
+            ),
+            (
+                "inside a form",
+                vec![form(), clip(), image_draw(10.0), Event::EndForm { id: 1 }],
+            ),
+        ] {
+            let (canvas, _) = replayed(&events).finish();
+            for y in 40..50 {
+                for x in 10..20 {
+                    assert_eq!(
+                        painted(&canvas, x, y),
+                        x < 15,
+                        "{what}: ({x}, {y}) painted only under the clip"
+                    );
+                }
+            }
+        }
+
+        let masked = vec![
+            Event::SaveState,
+            Event::BeginSoftMask {
+                mask: Box::new(MaskGroup {
+                    form: Form {
+                        content: Vec::new(),
+                        matrix: Matrix::IDENTITY,
+                        bbox: None,
+                        group: None,
+                        stream: 0,
+                    },
+                    luminosity: true,
+                    backdrop: None,
+                    transfer: None,
+                }),
+                bbox: Vec::new(),
+                entered: true,
+                state: state(),
+            },
+            Event::EndSoftMask,
+            image_draw(10.0),
+            Event::RestoreState,
+        ];
+        let (canvas, _) = replayed(&masked).finish();
+        for y in 40..50 {
+            for x in 10..20 {
+                assert!(
+                    !painted(&canvas, x, y),
+                    "({x}, {y}): hidden by the soft mask it was drawn under"
+                );
+            }
+        }
+
+        let abutting = replayed(&[
+            Event::SaveState,
+            image_draw(10.0),
+            Event::RestoreState,
+            Event::SaveState,
+            image_draw(20.0),
+            Event::RestoreState,
+        ]);
+        let run = abutting.run.as_ref().expect("the run held");
+        assert_eq!(
+            (run.covered.0, run.covered.2),
+            (10, 30),
+            "both images in the one run"
+        );
     }
 
     /// A source whose `Im0` and `Im1` are one bilevel image, held as its two
