@@ -94,18 +94,18 @@ const SIZES: [i32; 13] = [8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 32, 48, 72];
 /// output, recorded with the targets agreeing; a mismatch prints the lines to
 /// paste.
 const HINTED: [(&str, &str); 12] = [
-    ("LiberationMono-Bold", ""),
-    ("LiberationMono-BoldItalic", ""),
-    ("LiberationMono-Italic", ""),
-    ("LiberationMono-Regular", ""),
-    ("LiberationSans-Bold", ""),
-    ("LiberationSans-BoldItalic", ""),
-    ("LiberationSans-Italic", ""),
-    ("LiberationSans-Regular", ""),
-    ("LiberationSerif-Bold", ""),
-    ("LiberationSerif-BoldItalic", ""),
-    ("LiberationSerif-Italic", ""),
-    ("LiberationSerif-Regular", ""),
+    ("LiberationMono-Bold", "2b143d26f8945b04 28668 12"),
+    ("LiberationMono-BoldItalic", "31d2277cef7bc5ae 28644 12"),
+    ("LiberationMono-Italic", "3593872ab6481631 28656 12"),
+    ("LiberationMono-Regular", "3f16b23df6ce9cfe 28680 12"),
+    ("LiberationSans-Bold", "4f11da73897337f5 30720 0"),
+    ("LiberationSans-BoldItalic", "40ba616541ecf8fc 30600 0"),
+    ("LiberationSans-Italic", "2b85704b3694b92a 30672 0"),
+    ("LiberationSans-Regular", "58f301b4960188da 30696 0"),
+    ("LiberationSerif-Bold", "5e9cd6571b2b0943 30720 0"),
+    ("LiberationSerif-BoldItalic", "591cf8e328c583d2 30744 0"),
+    ("LiberationSerif-Italic", "fb235872e05b0c4e 30744 0"),
+    ("LiberationSerif-Regular", "f006b41fda311e68 25650 0"),
 ];
 
 /// FNV-1a, 64 bits: `u64` multiplication and exclusive-or, the same on every
