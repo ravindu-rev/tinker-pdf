@@ -283,7 +283,10 @@ fn a_face_is_indexed_once_per_book() {
     let paragraph = vec![LINE; 60].join(" ");
     let cost = |bodies: &[&str], what: &str| {
         let bytes = chapters_book(&faces, 24, "", bodies);
-        let doc = synthesised(what, Document::open(bytes).expect("a book"));
+        let doc = synthesised(
+            what,
+            Document::open_with(bytes, &OpenOptions::at_page(PAGE.0, PAGE.1)).expect("a book"),
+        );
         let cost = doc
             .archive()
             .expect("a book")
