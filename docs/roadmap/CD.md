@@ -231,7 +231,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | CD-14.1 | build | `quotes: auto` per language from HTML's per-language table, vendored under a licence the allowlist admits. | `crates/tinker-pdf-css/src/counter.rs`, `crates/tinker-pdf-css/data/quotes` (new), `THIRDPARTY.md`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each language's marks equal the table's on reftest pairs; the count against `quotes` stops firing; in the default and `bundled-fonts` builds. | H-116 |
-| CD-14.2 | build | `text-transform` in Lithuanian, Turkish and Azeri from the special-casing data, and `full-width` and `full-size-kana` from their specification's tables. | `crates/tinker-pdf-layout/src/case.rs`, `crates/tinker-pdf-layout/src/unicode.rs`, `THIRDPARTY.md`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each mapping equals its table's on reftest pairs; the refusals by value stop firing. | H-116 |
+| CD-14.2 | build | `text-transform` in Lithuanian, Turkish and Azeri from the special-casing data, and `full-width` and `full-size-kana` from their specification's tables. | `crates/tinker-pdf-layout/src/case.rs`, `crates/tinker-pdf-unicode/src/unicode.rs`, `THIRDPARTY.md`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each mapping equals its table's on reftest pairs; the refusals by value stop firing. | H-116 |
 
 ## CD-15 — Replaced-element and pseudo-element remainder
 
@@ -278,7 +278,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| CD-17.1 | build | Paragraph-optimal line breaking as a layout option: minimum total demerits over UAX #14's break opportunities. | `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf-layout/src/uax14.rs`, `crates/tinker-pdf/tests/line_breaking.rs` (new) | `line_breaking.rs` (new): an optimal break equals the minimum-demerits solution computed in the test; with the option off every reftest is unchanged. | — |
+| CD-17.1 | build | Paragraph-optimal line breaking as a layout option: minimum total demerits over UAX #14's break opportunities. | `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf-unicode/src/uax14.rs`, `crates/tinker-pdf/tests/line_breaking.rs` (new) | `line_breaking.rs` (new): an optimal break equals the minimum-demerits solution computed in the test; with the option off every reftest is unchanged. | — |
 | CD-17.2 | build | Optical margin alignment as an option: punctuation and edges protruding by a stated table. | `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf/tests/line_breaking.rs` (new) | Each protrusion equals the table's amount on a fixture; defaults unchanged. | — |
 | CD-17.3 | build | Glyph-scaling justification as an option, within stated bounds. | `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/line_breaking.rs` (new) | Each line's scale equals the one computed in the test and stays within the bounds; defaults unchanged. | CD-17.1 |
 

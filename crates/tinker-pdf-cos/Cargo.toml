@@ -38,6 +38,13 @@ tinker-pdf-pki = { workspace = true }
 # serially otherwise. The edge goes down into a leaf with nothing under it,
 # which ruling 8 allows without argument; `xtask`'s ALLOWED declares it.
 tinker-pdf-pool = { workspace = true }
+# The sixteenth amendment: `src/appearance.rs` wraps a free text annotation's
+# `/Contents` inside its box where UAX #14 allows a line to break, and breaks
+# a word wider than the box between UAX #29's typographic character units —
+# the line breaker the layout crate breaks a book's lines by, in a leaf with
+# nothing under it. The edge goes down into that leaf, which ruling 8 allows
+# without argument, and the leaf learns no PDF vocabulary from it.
+tinker-pdf-unicode = { workspace = true }
 
 [dev-dependencies]
 # Its default `fork` and `timeout` features, which no test uses, pull in

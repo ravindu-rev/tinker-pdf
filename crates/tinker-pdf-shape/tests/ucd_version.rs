@@ -7,7 +7,7 @@
 //!
 //! # Why skew is worse than being out of date
 //!
-//! `tinker-pdf-layout` breaks lines with UAX #14 and `tinker-pdf-shape`
+//! `tinker-pdf-unicode` breaks lines with UAX #14 and `tinker-pdf-shape`
 //! resolves direction with UAX #9, and a paragraph goes through both. Two
 //! versions means two answers about the same character: one crate knows a code
 //! point is assigned and the other does not, one gives it a Line_Break class
@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 /// trees are.
 const TREES: &[&str] = &[
     "crates/tinker-pdf-shape/data/ucd",
-    "crates/tinker-pdf-layout/data/ucd",
+    "crates/tinker-pdf-unicode/data/ucd",
     "crates/tinker-pdf-content/data/ucd",
 ];
 
@@ -222,7 +222,7 @@ fn each_tree_holds_the_files_its_algorithms_need() {
         "the shaping crate's vendored UCD changed shape"
     );
     assert_eq!(
-        names("crates/tinker-pdf-layout/data/ucd"),
+        names("crates/tinker-pdf-unicode/data/ucd"),
         vec![
             "DerivedCoreProperties.txt",
             "DerivedGeneralCategory.txt",
@@ -236,7 +236,7 @@ fn each_tree_holds_the_files_its_algorithms_need() {
             "UnicodeData.txt",
             "emoji-data.txt",
         ],
-        "the layout crate's vendored UCD changed shape"
+        "the unicode crate's vendored UCD changed shape"
     );
     assert_eq!(
         names("crates/tinker-pdf-content/data/ucd"),

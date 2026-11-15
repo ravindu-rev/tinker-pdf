@@ -8,11 +8,12 @@ repository.workspace = true
 authors.workspace = true
 description = "Layout, hand-rolled: css-box-3's box model with margin collapsing, CSS 2.2's block and inline formatting contexts, css-text-3's white-space processing, UAX #14 line breaking, and fragmentation into pages"
 
-# The vendored UCD ships, for `tinker-pdf-font`'s reason recorded one crate
-# over: build time is *the consumer's* build time, and `build.rs` panics when
-# the tables are missing, so a crate published without `data/` is a crate
-# nobody who downloads it can build. `target/` would otherwise be swept in by
-# the default on a machine that has built here.
+# The vendored hyphenation dictionaries ship, for `tinker-pdf-font`'s reason
+# recorded one crate over: build time is *the consumer's* build time, and
+# `build.rs` panics when a dictionary the feature compiles is missing, so a
+# crate published without `data/` is a crate nobody who downloads it can build
+# with the feature. `target/` would otherwise be swept in by the default on a
+# machine that has built here.
 exclude = ["target/"]
 
 [features]
@@ -36,6 +37,11 @@ hyphenation = []
 # there would be. Nothing here is transcendental; see `limits.rs`'s header and
 # the amendment.
 tinker-pdf-css = { workspace = true }
+# The sixteenth amendment: UAX #14, UAX #29 and the UCD tables both read live
+# in a leaf below this one, which `tinker-pdf-cos` breaks a free text
+# annotation's lines by too. Re-exported as `uax14`, `grapheme` and `unicode`,
+# so this crate's own paths to them are what they were.
+tinker-pdf-unicode = { workspace = true }
 
 [dev-dependencies]
 # Property tests, the exempt dev tooling CONTRIBUTING rule 1 names: arbitrary

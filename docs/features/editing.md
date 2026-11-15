@@ -402,9 +402,18 @@ is `/Rect` less `/RD`, filled with `/C` (12.5.2's "background of the
 annotation's icon", which a free text annotation's box is) and bordered at
 the `/BS` width and dash in the text's colour, since ISO 32000-1 names no
 other; the text is laid out as a multiline field's is — two units in from
-the border, wrapped at the last space that fits (or between characters, for
-a word wider than the box) and at each line break, the spaces it breaks
-at belonging to neither line, the first baseline 0.85
+the border, broken at each mandatory break UAX #14 names (a line feed, a
+carriage return with or without its line feed, a next line, a line or
+paragraph separator, a vertical tab, a form feed), none of them drawn, and
+otherwise at the last opportunity the untailored algorithm allows that fits —
+after a space or a hyphen, between two ideographs — and, for a word wider
+than the box, between two of its typographic character units (UAX #29's
+extended grapheme clusters, a mark never starting one), as many as fit and at
+least one, so a letter keeps its marks, a Hangul syllable its jamo, an emoji
+its modifier and its ZWJ sequence and a flag both its halves however narrow
+the box (`tinker_pdf_unicode`, the line breaker layout breaks a book by;
+`a_free_text_breaks_between_units_and_where_uax14_allows`); the spaces it
+breaks at belong to neither line, the first baseline sits 0.85
 of the size below the top and the lines 1.15 apart, aligned by `/Q` and
 clipped to the box — in the `/DA` font, size and colour, a size of zero being
 the largest whole size from twelve down to four at which every line fits. A
@@ -412,9 +421,11 @@ line wholly below the box is not written, nor any after it, and each line
 after the first costs its text and at most one number (`TL` once, then `T*`),
 so that the stream grows with what the box shows rather than with a large
 number repeated once a line; the lines are laid out one at a time and the
-layout stops where the writing does, so a long `/Contents` in a box
-narrower than a glyph costs the lines the box shows, and one with no room
-inside its border is not laid out at all.
+layout stops where the writing does — each line's break opportunities
+decided over as long a start of its paragraph as the line reaches, twice as
+long each time one is too short, and its units walked from its own start — so
+a long `/Contents` in a box narrower than a glyph costs the lines the box
+shows, and one with no room inside its border is not laid out at all.
 Only the font, the size and a `g`, `rg` or `k` colour are read from `/DA`;
 the rest of the string is not copied into the appearance, where a `Q` or an
 `ET` of the producer's would unbalance it. `/DA` is read with the object

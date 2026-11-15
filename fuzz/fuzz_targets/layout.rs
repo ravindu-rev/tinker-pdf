@@ -52,7 +52,7 @@
 //!
 //! Finite is a long way from right: a layout that put every line in the same
 //! place satisfies it. Correctness lives in `crates/tinker-pdf-
-//! layout/tests/uax14_conformance.rs` for line breaking and in the EPUB
+//! unicode/tests/uax14_conformance.rs` for line breaking and in the EPUB
 //! reftests for the rest.
 //!
 #![no_main]
@@ -67,7 +67,7 @@ use tinker_pdf_css::property::{
     TextAlign, TextTransform, UnicodeBidi, Visibility, WhiteSpace, WordBreak,
 };
 use tinker_pdf_layout::metrics::FixedPitch;
-use tinker_pdf_layout::uax14::{opportunities, Tailoring};
+use tinker_pdf_layout::uax14::{self, opportunities, Tailoring};
 use tinker_pdf_layout::{layout_with, BoxNode, Budget, Content, Limits, Options};
 
 /// The alphabet the generator writes text out of.
@@ -520,8 +520,8 @@ fuzz_target!(|data: &[u8]| {
         Tailoring::default(),
         Tailoring::UAX14,
         Tailoring {
-            strictness: LineBreakStrictness::Anywhere,
-            word_break: WordBreak::Normal,
+            strictness: uax14::LineBreakStrictness::Anywhere,
+            word_break: uax14::WordBreak::Normal,
         },
     ] {
         let at = opportunities(&source, tailoring);

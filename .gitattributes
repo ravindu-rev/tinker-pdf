@@ -83,11 +83,15 @@ crates/tinker-pdf-font/data/** -text linguist-vendored
 # seventeen megabytes of fonts out of the language statistics.
 crates/tinker-pdf-font-cjk-*/data/** -text linguist-vendored
 
-# The UCD (gap 31 milestone 7, THIRDPARTY.md). `-text` for cmap-resources'
-# reason and one more of its own: the published files are CRLF, the licence
-# asks a redistribution to carry the notice, and normalising line endings is
-# still a modification. `linguist-vendored` keeps four megabytes of Unicode
-# out of the diff a reviewer reads and out of the language statistics.
+# The UCD (gap 31 milestone 7, THIRDPARTY.md), in the leaf both the layout and
+# the object model break text by. `-text` for cmap-resources' reason and one
+# more of its own: the published files are CRLF, the licence asks a
+# redistribution to carry the notice, and normalising line endings is still a
+# modification. `linguist-vendored` keeps four megabytes of Unicode out of the
+# diff a reviewer reads and out of the language statistics.
+crates/tinker-pdf-unicode/data/** -text linguist-vendored
+# The hyphenation dictionaries (THIRDPARTY.md), for the same two reasons: each
+# is its authors' file verbatim, under its own licence.
 crates/tinker-pdf-layout/data/** -text linguist-vendored
 
 # Adobe's aots conformance corpus (design/shaping.md milestone 1,
@@ -104,7 +108,7 @@ crates/tinker-pdf-layout/data/** -text linguist-vendored
 crates/tinker-pdf-shape/data/** -text linguist-vendored
 # The UCD a third time (THIRDPARTY.md), for `tinker-pdf-content`'s UAX #29 word
 # boundaries and its search's diacritic folding. `-text` and
-# `linguist-vendored` for the layout tree's reasons.
+# `linguist-vendored` for the first tree's reasons.
 crates/tinker-pdf-content/data/** -text linguist-vendored
 # RFC 7932's static dictionary (THIRDPARTY.md). `-text` because it is binary --
 # the RFC publishes it as hexadecimal and this is that dump decoded, so it is

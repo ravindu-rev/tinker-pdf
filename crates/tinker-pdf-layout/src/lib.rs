@@ -24,7 +24,8 @@
 //! own 19 338-case conformance file.** A breaker that splits at spaces passes
 //! every English test ever written. See [`uax14`]. And no line breaks inside a
 //! typographic character unit, UAX #29's extended grapheme cluster, checked
-//! against its own 766-case file: see [`grapheme`].
+//! against its own 766-case file: see [`grapheme`]. Both, and the character
+//! properties they read, are `tinker-pdf-unicode`'s, re-exported here.
 //!
 //! **White-space processing is `css-text-3` §4.1.1 *and* §4.1.2**, and the two
 //! run at different times over different things. See [`text`].
@@ -116,7 +117,7 @@ pub mod flex;
 pub mod floats;
 pub mod flow;
 pub mod fragment;
-pub mod grapheme;
+pub use tinker_pdf_unicode::grapheme;
 pub mod hyphenate;
 pub mod limits;
 pub mod metrics;
@@ -126,8 +127,7 @@ pub mod style;
 pub use style::{BackgroundLayer, Outline};
 pub mod table;
 pub mod text;
-pub mod uax14;
-pub mod unicode;
+pub use tinker_pdf_unicode::{uax14, unicode};
 
 #[cfg(test)]
 mod tests;

@@ -20,9 +20,10 @@
 //!
 //! `tinker-pdf-css` has an empty DAG allow-list, no third-party dependency and
 //! no build script, so the whole crate compiles with a bare `rustc` — which is
-//! what made milestone 6's proof possible. This one adds one step: compile the
-//! css crate to metadata, then compile the **real** `style.rs`, `metrics.rs`,
-//! `uax14.rs` and `unicode.rs` against it with `--extern`. Nothing here is a
+//! what made milestone 6's proof possible. This one adds two steps: compile the
+//! css crate to metadata, and the **real** `tinker-pdf-unicode` beside it,
+//! against the tables its own build script wrote, then compile the **real**
+//! `style.rs` and `metrics.rs` against both with `--extern`. Nothing here is a
 //! copy of the pattern; the file that fails to build is the file that ships.
 //!
 //! # Four builds, and three of them are controls
@@ -159,8 +160,44 @@ fn build_css(name: &str, with_field: bool) -> PathBuf {
     scratch.join("libtinker_pdf_css.rmeta")
 }
 
-/// Compiles the real layout modules against a given css, and answers whether
-/// it built and what it said.
+/// Compiles the real `tinker-pdf-unicode` to metadata, once for each scratch
+/// name, and answers where the `.rmeta` landed.
+///
+/// Every module of it, verbatim: its `unicode.rs` is
+/// `include!(concat!(env!("OUT_DIR"), "/ucd.rs"))`, and the child compiler is
+/// handed the directory that crate's own build script wrote the tables to,
+/// which cargo gives this crate's build script and that script gives this
+/// test (`TINKER_PDF_UNICODE_OUT_DIR`), so the build reads the real tables
+/// rather than a stand-in for them.
+fn build_unicode(name: &str) -> PathBuf {
+    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).expect("the scratch directory");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .join("tinker-pdf-unicode");
+    let output = rustc()
+        .args(["--edition", "2021"])
+        .args(["--crate-type", "lib"])
+        .args(["--crate-name", "tinker_pdf_unicode"])
+        .arg("--emit=metadata")
+        .arg("--out-dir")
+        .arg(&scratch)
+        .arg(root.join("src/lib.rs"))
+        .env("OUT_DIR", env!("TINKER_PDF_UNICODE_OUT_DIR"))
+        .output()
+        .expect("rustc could not be run");
+    assert!(
+        output.status.success(),
+        "the unicode crate did not build, so nothing below proves anything:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    scratch.join("libtinker_pdf_unicode.rmeta")
+}
+
+/// Compiles the real layout modules against a given css and the real
+/// unicode crate, and answers whether it built and what it said.
 fn build_layout(name: &str, css: &Path, with_binding: bool) -> (bool, String) {
     let root = layout_root();
     let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -168,26 +205,22 @@ fn build_layout(name: &str, css: &Path, with_binding: bool) -> (bool, String) {
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&src).expect("the scratch directory");
 
-    // The four real files, verbatim but for the one anchor. `unicode.rs`
-    // carries the `include!` of the generated tables and `OUT_DIR` is passed
-    // through below, so the build below reads this crate's own build script's
-    // output rather than a stand-in for it.
-    for file in ["metrics.rs", "uax14.rs", "unicode.rs"] {
-        std::fs::write(src.join(file), read(&root.join("src").join(file))).expect("write");
-    }
+    // The two real files, verbatim but for the one anchor.
+    std::fs::write(src.join("metrics.rs"), read(&root.join("src/metrics.rs"))).expect("write");
     let mut style = read(&root.join("src/style.rs"));
     if with_binding {
         style = inject(&style, BINDING_ANCHOR, BINDING);
     }
     std::fs::write(src.join("style.rs"), style).expect("write");
-    // A root that declares exactly the modules `style.rs` reaches for. It is
-    // four lines because everything with any behaviour in it is the real file
-    // beside it.
+    // A root that declares exactly the modules `style.rs` reaches for, the
+    // line breaker re-exported as the real crate root re-exports it. It is
+    // three lines because everything with any behaviour in it is a real file.
     std::fs::write(
         src.join("lib.rs"),
-        "pub mod metrics;\npub mod style;\npub mod uax14;\npub mod unicode;\n",
+        "pub mod metrics;\npub mod style;\npub use tinker_pdf_unicode::uax14;\n",
     )
     .expect("write");
+    let unicode = build_unicode(&format!("{name}-unicode"));
 
     let output = rustc()
         .args(["--edition", "2021"])
@@ -196,14 +229,11 @@ fn build_layout(name: &str, css: &Path, with_binding: bool) -> (bool, String) {
         .arg("--emit=metadata")
         .arg("--extern")
         .arg(format!("tinker_pdf_css={}", css.display()))
+        .arg("--extern")
+        .arg(format!("tinker_pdf_unicode={}", unicode.display()))
         .arg("--out-dir")
         .arg(&scratch)
         .arg(src.join("lib.rs"))
-        // `unicode.rs` is `include!(concat!(env!("OUT_DIR"), "/ucd.rs"))`, and
-        // an integration test of a crate with a build script is compiled with
-        // `OUT_DIR` set — so the child compiler is handed the same tables the
-        // real build uses.
-        .env("OUT_DIR", env!("OUT_DIR"))
         .output()
         .expect("rustc could not be run");
     (

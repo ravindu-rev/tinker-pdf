@@ -51,6 +51,7 @@ tinker-pdf-filters  → pool
 tinker-pdf-crypto
 tinker-pdf-xml
 tinker-pdf-css
+tinker-pdf-unicode
 tinker-pdf-color    → math
 tinker-pdf-raster   → math, color
 tinker-pdf-font     → filters, font-cjk-jp, font-cjk-cn, font-cjk-tw, font-cjk-kr
@@ -58,13 +59,13 @@ tinker-pdf-zip      → filters
 tinker-pdf-archive  → filters
 tinker-pdf-pki      → crypto
 tinker-pdf-shape    → font
-tinker-pdf-layout   → css
+tinker-pdf-layout   → css, unicode
 tinker-pdf-svg      → xml, css, math
 
-tinker-pdf-cos      → filters, crypto, font, pki, shape, pool
+tinker-pdf-cos      → filters, crypto, font, pki, shape, pool, unicode
 tinker-pdf-content  → cos, font, color
 tinker-pdf-render   → content, raster, font, color
-tinker-pdf          → every crate above but math and the four face crates
+tinker-pdf          → every crate above but math, unicode and the four face crates
 tinker-pdf-ffi      → tinker-pdf
 
 tools: pdfcmp, tpdf (both on the facade and nothing below it)
@@ -72,7 +73,8 @@ tools: pdfcmp, tpdf (both on the facade and nothing below it)
 
 **The leaf crates** — `filters`, `crypto`, `font`, `color`, `raster`,
 `math`, `zip`, `xml`, `css`, `layout`, `pki`, `shape`, `svg`, `archive`,
-`pool`, `font-cjk-jp`, `font-cjk-cn`, `font-cjk-tw`, `font-cjk-kr` — are
+`pool`, `font-cjk-jp`, `font-cjk-cn`, `font-cjk-tw`, `font-cjk-kr`,
+`unicode` — are
 bytes-in/values-out with zero PDF types (ruling 8 defines a leaf; the
 definition binds, not the list). `archive` is late rather than next to `zip`
 because the ordinals in `xtask`'s `ALLOWED` table are positions in this list.
@@ -104,7 +106,11 @@ already depends on both, hands `tinker_pdf_archive::lzma`,
 that need a second leaf's decoder cost an argument rather than an edge),
 `archive → filters` (the same two, for the same two reasons — 7z method
 040108 *is* RFC 1951, and 7z and RAR both record a per-file CRC-32),
-`layout → css` (computed styles in, boxes out), `pki → crypto` (RFC 5280's
+`layout → css` (computed styles in, boxes out), `layout → unicode` (UAX #14's
+line breaking, UAX #29's grapheme clusters and the UCD tables they and
+`text-transform` read, which live in a leaf of their own because `cos` breaks
+a free text annotation's lines by them too and may not depend on `layout`;
+`layout` re-exports them), `pki → crypto` (RFC 5280's
 key identifier is a SHA-1, and DER stays out of the cipher crate because the
 two fail differently — a wrong number caught by published vectors, against a
 panic or an overread on untrusted structure), `shape → font` (`Sfnt` parses
@@ -123,8 +129,8 @@ above it *“nothing internal beyond the maths”* — so depending on it is the
 baseline every leaf starts from and not a coupling anyone has to argue for.
 
 **Three** of `cos`'s edges into a leaf need an argument — its full set is
-`filters`, `crypto`, `font`, `shape`, `pki`, `pool` — and the first two make
-the same argument:
+`filters`, `crypto`, `font`, `shape`, `pki`, `pool`, `unicode` — and the first
+two make the same argument:
 
 - `cos → font` — reading a font *dictionary* (`/Encoding`, `/ToUnicode`,
   standard-14 metrics) is object-model work that needs the leaf's CMap parser
@@ -162,7 +168,9 @@ reader might expect *not* to be here:
 `cos → pool` needs none: the writer compresses the streams it writes side
 by side on the engine's own pool when `WriteOptions::parallelism` asks, and
 the pool is a leaf with nothing under it that learns nothing of what it
-schedules.
+schedules. Nor does `cos → unicode`: a free text annotation's appearance
+wraps its `/Contents` where UAX #14 allows and breaks a word wider than its
+box between UAX #29's units, and the leaf takes text and returns offsets.
 
 `cos` is not a leaf, so none of the three is leaf-to-leaf however useful
 it is.
@@ -213,6 +221,7 @@ Convenient shortcuts between crates are how seams die.
 | `tinker-pdf-css` | CSS engine | [epub](features/epub.md) | `css` |
 | `tinker-pdf-svg` | SVG 1.1: markup in, a display list out | [epub](features/epub.md) | `svg` |
 | `tinker-pdf-layout` | box model, fragmentation, line breaking | [epub](features/epub.md) | `layout` |
+| `tinker-pdf-unicode` | UAX #14 line breaking, UAX #29 extended grapheme clusters, and the UCD tables they and `text-transform` read | [epub](features/epub.md), [editing](features/editing.md) | — (driven via `layout` and `annotation_appearance`) |
 | `tinker-pdf-ffi` | C ABI | [bindings](features/bindings.md) | — |
 
 Tools: `tpdf` (the CLI over the facade, whose `render` writes a `.png` a

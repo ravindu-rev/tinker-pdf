@@ -111,8 +111,9 @@ const COPY_ARM: &str = "        Longhand::TabSize => into.color = from.color.clo
 /// property this build had decided never to have.
 ///
 /// `text-transform` was the fourth and it moved on 3 October 2026, when
-/// `SpecialCasing.txt` arrived in `crates/tinker-pdf-layout/data/ucd` and the
-/// property was implemented over Unicode's full case mappings — the paragraph
+/// `SpecialCasing.txt` arrived in the vendored UCD
+/// (`crates/tinker-pdf-unicode/data/ucd`) and the property was implemented
+/// over Unicode's full case mappings — the paragraph
 /// that stood here said that file was what it waited on, and it was.
 ///
 /// `tab-size` is the successor and it is chosen the same way, on the three

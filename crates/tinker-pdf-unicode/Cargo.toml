@@ -1,0 +1,28 @@
+[package]
+name = "tinker-pdf-unicode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Unicode text segmentation, hand-rolled: UAX #14 line breaking and UAX #29 extended grapheme clusters, and the character properties they and text-transform read, compiled from the vendored Unicode Character Database"
+
+# The vendored UCD ships, for `tinker-pdf-font`'s reason: build time is *the
+# consumer's* build time, and `build.rs` panics when the tables are missing,
+# so a crate published without `data/` is a crate nobody who downloads it can
+# build. `target/` would otherwise be swept in by the default on a machine
+# that has built here.
+exclude = ["target/"]
+# Not a native library: the key is how cargo hands a dependent's build script
+# this crate's build-script metadata, and the one entry is where `build.rs`
+# wrote the tables (`DEP_TINKER_PDF_UNICODE_OUT_DIR`), which
+# `tinker-pdf-layout`'s compile proof compiles this crate's real modules
+# against.
+links = "tinker_pdf_unicode"
+
+# No dependencies, internal or external: text in, byte offsets and property
+# values out. A leaf with nothing under it, which `tinker-pdf-layout` and
+# `tinker-pdf-cos` both break their text by (`xtask/src/main.rs`'s sixteenth
+# amendment).
+[dependencies]

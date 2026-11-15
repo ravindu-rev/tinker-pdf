@@ -156,7 +156,7 @@ value outside the single-byte range, writing a CID-keyed run into the
 synthesized appearance (12.7's variable text), with the quadding and comb
 logic (12.7.4.3) operating on shaped advances.
 
-**Vendored data.** Beyond the UCD in `crates/tinker-pdf-layout/data/ucd`
+**Vendored data.** Beyond the UCD in `crates/tinker-pdf-unicode/data/ucd`
 (`LineBreak.txt`, `EastAsianWidth.txt`, `DerivedGeneralCategory.txt`,
 `emoji-data.txt`), `tinker-pdf-shape/data/ucd` vendors, at the *same pinned
 Unicode version*: `Scripts.txt`, `DerivedBidiClass.txt`, `BidiBrackets.txt`,

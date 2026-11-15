@@ -7,11 +7,13 @@
 //! within typographic character units"*. So every place a line may break —
 //! UAX #14's opportunities under every `line-break` and `word-break`, a soft
 //! hyphen's, a point `hyphens: auto` finds, and the break `overflow-wrap`
-//! makes inside a word — is held to a boundary [`units`] gives
-//! ([`crate::flow`]), and so is every point [`crate::hyphenate`] returns. A
-//! letter is never parted from its marks, a Hangul syllable from its jamo, a
-//! conjunct from its consonants, an emoji from its modifier or the rest of its
-//! ZWJ sequence, or a flag from the other half of its pair.
+//! makes inside a word — is held to a boundary [`units`] gives, in
+//! `tinker-pdf-layout`'s line breaker, and so is every point its hyphenator
+//! returns; and `tinker-pdf-cos`'s free text appearance breaks its lines on
+//! the same boundaries. A letter is never parted from its marks, a Hangul
+//! syllable from its jamo, a conjunct from its consonants, an emoji from its
+//! modifier or the rest of its ZWJ sequence, or a flag from the other half of
+//! its pair.
 //!
 //! # The rules, from the specification
 //!
@@ -44,9 +46,9 @@
 //! where GB4's boundary stands. UAX #29 Table 2 leaves a list of spacing marks
 //! out of `SpacingMark` — Myanmar's vowel sign AA, U+102C, among them — so its
 //! clusters break before each; UAX #14's LB9 attaches every one of them to the
-//! letter before it, and so did this crate's hyphenator, so a line breaks
-//! round a Myanmar syllable and not inside it. The tailoring changes no
-//! boundary GB1 to GB13 decide: only GB999's, before a mark.
+//! letter before it, and so did the hyphenator, so a line breaks round a
+//! Myanmar syllable and not inside it. The tailoring changes no boundary GB1
+//! to GB13 decide: only GB999's, before a mark.
 
 use crate::unicode::{
     grapheme_break, indic_conjunct_break, is_extended_pictographic, is_mark, Gcb, Incb,
@@ -57,9 +59,7 @@ use crate::unicode::{
 /// among them, and none at all for empty text.
 #[must_use]
 pub fn boundaries(text: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    walk(text, false, |at| out.push(at));
-    out
+    Units::clusters(text).collect()
 }
 
 /// Every boundary of `text`'s typographic character units, as byte offsets
@@ -67,9 +67,121 @@ pub fn boundaries(text: &str) -> Vec<usize> {
 /// the boundaries no line may break off them.
 #[must_use]
 pub fn units(text: &str) -> Vec<usize> {
-    let mut out = Vec::new();
-    walk(text, true, |at| out.push(at));
-    out
+    Units::of(text).collect()
+}
+
+/// The boundaries of a text's typographic character units — or, untailored,
+/// of its extended grapheme clusters — one at a time, in order, so a caller
+/// that stops early has read only as far as it went: [`units`] and
+/// [`boundaries`] are this, collected.
+///
+/// The walk is forward and keeps no more than GB9c's, GB11's and GB12's
+/// state, so it may also start at any boundary of a longer text — a line's
+/// start — and give the boundaries after it that the whole text's walk does:
+/// at a boundary the character after it was not joined to what came before,
+/// so neither its cluster nor any later one depends on it.
+#[derive(Clone, Debug)]
+pub struct Units<'t> {
+    chars: std::str::CharIndices<'t>,
+    len: usize,
+    tailored: bool,
+    /// The walk so far: `None` before the first character, and after the end.
+    state: Option<State>,
+    started: bool,
+}
+
+/// What the walk carries from one character to the next.
+#[derive(Clone, Copy, Debug)]
+struct State {
+    before: Gcb,
+    conjunct: Conjunct,
+    emoji: Emoji,
+    indicators: usize,
+}
+
+impl State {
+    /// The state after `c`, its break property `property`, following `self`.
+    fn after(self, c: char, property: Gcb) -> State {
+        State {
+            before: property,
+            conjunct: self.conjunct.after(c),
+            emoji: self.emoji.after(c, property),
+            indicators: if property == Gcb::RI {
+                self.indicators.saturating_add(1)
+            } else {
+                0
+            },
+        }
+    }
+}
+
+impl<'t> Units<'t> {
+    /// The typographic character units of `text`, as [`units`] gives them.
+    #[must_use]
+    pub fn of(text: &'t str) -> Units<'t> {
+        Units::new(text, true)
+    }
+
+    /// The extended grapheme clusters of `text`, as [`boundaries`] gives
+    /// them.
+    #[must_use]
+    pub fn clusters(text: &'t str) -> Units<'t> {
+        Units::new(text, false)
+    }
+
+    fn new(text: &'t str, tailored: bool) -> Units<'t> {
+        Units {
+            chars: text.char_indices(),
+            len: text.len(),
+            tailored,
+            state: None,
+            started: false,
+        }
+    }
+}
+
+impl Iterator for Units<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        if !self.started {
+            self.started = true;
+            // GB1 and GB2 break at the ends of text, *"unless the text is
+            // empty"*.
+            let (_, first) = self.chars.next()?;
+            let property = grapheme_break(first);
+            self.state = Some(State {
+                before: property,
+                conjunct: Conjunct::None.after(first),
+                emoji: Emoji::None.after(first, property),
+                indicators: usize::from(property == Gcb::RI),
+            });
+            return Some(0);
+        }
+        let mut state = self.state?;
+        for (at, c) in self.chars.by_ref() {
+            let after = grapheme_break(c);
+            let boundary = match decide(
+                state.before,
+                (c, after),
+                state.conjunct,
+                state.emoji,
+                state.indicators,
+            ) {
+                Decision::Control => true,
+                Decision::Joined => false,
+                Decision::Otherwise => !(self.tailored && is_mark(c)),
+            };
+            state = state.after(c, after);
+            if boundary {
+                self.state = Some(state);
+                return Some(at);
+            }
+        }
+        // GB2.
+        self.state = None;
+        Some(self.len)
+    }
 }
 
 /// What one boundary is.
@@ -178,40 +290,6 @@ fn decide(
     }
     // GB999.
     Decision::Otherwise
-}
-
-/// The walk both answers share, handing each boundary to `sink` in order.
-fn walk(text: &str, tailored: bool, mut sink: impl FnMut(usize)) {
-    let mut chars = text.char_indices();
-    // GB1 and GB2 break at the ends of text, *"unless the text is empty"*.
-    let Some((_, first)) = chars.next() else {
-        return;
-    };
-    sink(0);
-    let mut before = grapheme_break(first);
-    let mut conjunct = Conjunct::None.after(first);
-    let mut emoji = Emoji::None.after(first, before);
-    let mut indicators = usize::from(before == Gcb::RI);
-    for (at, c) in chars {
-        let after = grapheme_break(c);
-        let boundary = match decide(before, (c, after), conjunct, emoji, indicators) {
-            Decision::Control => true,
-            Decision::Joined => false,
-            Decision::Otherwise => !(tailored && is_mark(c)),
-        };
-        if boundary {
-            sink(at);
-        }
-        conjunct = conjunct.after(c);
-        emoji = emoji.after(c, after);
-        indicators = if after == Gcb::RI {
-            indicators.saturating_add(1)
-        } else {
-            0
-        };
-        before = after;
-    }
-    sink(text.len());
 }
 
 #[cfg(test)]

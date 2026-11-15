@@ -6,12 +6,12 @@
 //! the questions this crate's own tests would not think to.
 //!
 //! It drives [`boundaries`], the untailored algorithm that
-//! [`tinker_pdf_layout::grapheme::units`] tailors once, and asserts that
+//! [`tinker_pdf_unicode::grapheme::units`] tailors once, and asserts that
 //! tailoring touches no case but the ones it is for: a boundary before a
 //! mark that GB999 decided.
 
-use tinker_pdf_layout::grapheme::{boundaries, units};
-use tinker_pdf_layout::unicode::{grapheme_break, is_mark, Gcb};
+use tinker_pdf_unicode::grapheme::{boundaries, units};
+use tinker_pdf_unicode::unicode::{grapheme_break, is_mark, Gcb};
 
 const CASES: &str = include_str!("../data/ucd/GraphemeBreakTest.txt");
 
@@ -119,6 +119,38 @@ fn the_units_are_the_clusters_less_a_boundary_before_a_mark() {
         }
     }
     assert!(taken > 0, "no case reaches the tailoring");
+}
+
+/// **A walk started at a boundary gives the boundaries after it that the
+/// whole text's walk does** ([`Units`]), for the clusters and for the units:
+/// over every case of the file, from each of its boundaries, the walk of the
+/// rest of the text, shifted back by where it starts, is the whole walk's
+/// tail — so a line breaker may walk each line's units from the line's start
+/// without reading the text before it.
+#[test]
+fn a_walk_from_any_boundary_is_the_whole_walks_tail() {
+    use tinker_pdf_unicode::grapheme::Units;
+    let mut walks = 0usize;
+    for case in parse() {
+        for (whole, tailored) in [(boundaries(&case.text), false), (units(&case.text), true)] {
+            for &start in &whole {
+                let rest = &case.text[start..];
+                let walk = if tailored {
+                    Units::of(rest)
+                } else {
+                    Units::clusters(rest)
+                };
+                let tail: Vec<usize> = walk.map(|at| at + start).collect();
+                let expected: Vec<usize> =
+                    whole.iter().copied().filter(|&at| at >= start).collect();
+                if start < case.text.len() {
+                    assert_eq!(tail, expected, "line {} from {start}", case.line);
+                    walks += 1;
+                }
+            }
+        }
+    }
+    assert!(walks > 1_000, "only {walks} walks");
 }
 
 /// The file was parsed rather than skipped: a harness that parsed nothing

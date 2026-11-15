@@ -125,7 +125,7 @@ a word either side of an inline block or a picture keeps its space
 (`Collapser::passed_atomic`).
 Line breaking is **UAX #14** over vendored Unicode 17.0.0 data, checked
 against every case of Unicode's own `LineBreakTest.txt`
-(`tinker-pdf-layout/tests/uax14_conformance.rs`). **No line breaks inside a
+(`tinker-pdf-unicode/tests/uax14_conformance.rs`). **No line breaks inside a
 typographic character unit** (`css-text-3` §5.5), UAX #29's extended grapheme
 cluster (§1.4) with one tailoring — a mark never starts one, so the spacing
 marks UAX #29 leaves out of `SpacingMark`, Myanmar's vowel sign AA among
@@ -134,10 +134,12 @@ UAX #14 under every `line-break` and `word-break`, whose `anywhere` and
 `break-all` break between its LB9 units, `hyphens`, or `overflow-wrap`, which
 breaks a word between units. A letter keeps its marks, a Hangul syllable its
 jamo, a conjunct its consonants, an emoji its modifier and its ZWJ sequence,
-and a flag its pair, however narrow the line (`tinker_pdf_layout::grapheme`,
+and a flag its pair, however narrow the line (`tinker_pdf_unicode::grapheme`,
 held to every case of Unicode's own `GraphemeBreakTest.txt` by
-`tests/grapheme_conformance.rs`;
-`no_break_parts_a_typographic_character_unit`). Advances come from the face
+`tinker-pdf-unicode/tests/grapheme_conformance.rs`;
+`no_break_parts_a_typographic_character_unit`). Both algorithms are
+`tinker-pdf-unicode`'s, a leaf below the layout that `tinker-pdf-cos` wraps a
+free text annotation by too. Advances come from the face
 (embedded, host-provided, or the standard-14 metrics for an unembedded
 family), one per character. Which face a character is drawn in is
 `css-fonts-4` §5's per-character walk of its run's `font-family` list — the

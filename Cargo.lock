@@ -488,6 +488,7 @@ dependencies = [
  "tinker-pdf-pki",
  "tinker-pdf-pool",
  "tinker-pdf-shape",
+ "tinker-pdf-unicode",
 ]
 
 [[package]]
@@ -547,6 +548,7 @@ version = "0.0.1"
 dependencies = [
  "proptest",
  "tinker-pdf-css",
+ "tinker-pdf-unicode",
 ]
 
 [[package]]
@@ -597,6 +599,10 @@ dependencies = [
  "tinker-pdf-math",
  "tinker-pdf-xml",
 ]
+
+[[package]]
+name = "tinker-pdf-unicode"
+version = "0.0.1"
 
 [[package]]
 name = "tinker-pdf-xml"

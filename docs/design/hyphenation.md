@@ -163,7 +163,7 @@ The hyphenator is asked about words, found over the context's text:
   piece into a `manual` one breaks only in the first — and where it is a
   boundary of the text's typographic character units (`css-text-3` §5.5:
   UAX #29's extended grapheme clusters, a mark never starting one;
-  `tinker_pdf_layout::grapheme`), so no point parts a letter from its mark,
+  `tinker_pdf_unicode::grapheme`), so no point parts a letter from its mark,
   a Hangul syllable from its jamo or a conjunct from its consonants. The
   hyphenator keeps to its word's units, and layout to the context's, as it
   does for every break opportunity.

@@ -69,6 +69,9 @@ use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
 use crate::pages::Rect;
 use crate::write::StreamData;
+use tinker_pdf_unicode::grapheme::Units;
+use tinker_pdf_unicode::uax14::{self, Opportunity, Tailoring};
+use tinker_pdf_unicode::unicode::{line_break_class, Class};
 
 /// The number of user-space units by which a border straddles its path.
 ///
@@ -1157,10 +1160,22 @@ fn form_font(doc: &CosDocument, name: &[u8]) -> Option<(Object, crate::font::Fon
 }
 
 /// Breaks text into the lines a box `width` wide holds (12.7.3.3's multiline
-/// layout), handing each to `each` in order until it returns `false`: at each
-/// line break in the text, and otherwise at the last space that fits, or —
-/// for a word longer than the box — between two characters. `advance` is a
-/// character's width at the size being laid out.
+/// layout), handing each to `each` in order until it returns `false`.
+///
+/// A line ends where UAX #14 says one must — at each mandatory break the text
+/// holds, a line feed, a carriage return and the line feed after it, a next
+/// line, a line or paragraph separator, a vertical tab or a form feed
+/// ([`is_line_break`]) — and otherwise at the last opportunity it allows that
+/// fits: after a space, after a hyphen, between two ideographs, by the
+/// untailored algorithm ([`Tailoring::UAX14`]), since an annotation has no
+/// `line-break` to tailor it by. A word wider than the box is broken where
+/// no opportunity is, between two of its typographic character units
+/// (UAX #29's extended grapheme clusters, a mark never starting one), as many
+/// as fit and at least one; and an opportunity inside a unit is no break at
+/// all. So a letter keeps its marks, a Hangul syllable its jamo, an emoji its
+/// modifier and the rest of its ZWJ sequence, and a flag both its halves,
+/// however narrow the box. `advance` is a character's width at the size
+/// being laid out.
 ///
 /// The spaces a line is broken at are not part of either line, so a line set
 /// against the right of the box ends at its last character.
@@ -1168,40 +1183,161 @@ fn form_font(doc: &CosDocument, name: &[u8]) -> Option<(Object, crate::font::Fon
 /// Lines are handed over one at a time rather than collected, so what a
 /// caller that stops early has paid for is the lines it took: a box narrower
 /// than a glyph makes a line of every character, and `/Contents` can be as
-/// long as a string in the file.
+/// long as a string in the file. Each line's opportunities are decided over
+/// as long a start of its paragraph as the line reaches ([`Opportunities`]),
+/// and its units are walked from its own start, so the text read is about the
+/// text the lines took.
 fn wrap(text: &str, advance: impl Fn(char) -> f64, width: f64, mut each: impl FnMut(&str) -> bool) {
-    let mut line = String::new();
-    for paragraph in text.split("\r\n").flat_map(|p| p.split(['\r', '\n'])) {
-        line.clear();
-        let mut line_width = 0.0;
-        for word in paragraph.split(' ') {
-            let word_width: f64 = word.chars().map(&advance).sum();
-            let space = if line.is_empty() { 0.0 } else { advance(' ') };
-            if !line.is_empty() && line_width + space + word_width > width {
-                if !each(line.trim_end_matches(' ')) {
-                    return;
-                }
-                line.clear();
-                line_width = 0.0;
-            } else if !line.is_empty() {
-                line.push(' ');
-                line_width += space;
+    for paragraph in paragraphs(text) {
+        let mut breaks = Opportunities::new(paragraph);
+        let mut start = 0usize;
+        loop {
+            let end = line_end(paragraph, start, &advance, width, &mut breaks);
+            let line = paragraph.get(start..end).unwrap_or("");
+            if !each(line.trim_end_matches(' ')) {
+                return;
             }
-            for c in word.chars() {
-                let w = advance(c);
-                if !line.is_empty() && line_width + w > width && line_width > 0.0 {
-                    if !each(line.trim_end_matches(' ')) {
-                        return;
-                    }
-                    line.clear();
-                    line_width = 0.0;
-                }
-                line.push(c);
-                line_width += w;
+            if end >= paragraph.len() {
+                break;
+            }
+            start = end;
+        }
+    }
+}
+
+/// Whether `c` is a mandatory line break, UAX #14's `BK`, `CR`, `LF` or `NL`
+/// (LB4, LB5): a line ends after it, and it is not drawn.
+fn is_line_break(c: char) -> bool {
+    matches!(
+        line_break_class(c),
+        Class::BK | Class::CR | Class::LF | Class::NL
+    )
+}
+
+/// The text between `text`'s mandatory breaks, in order, a carriage return
+/// and the line feed after it one break, and the text after the last break
+/// the last, even where it is empty: a trailing line feed leaves an empty
+/// last line, as two in a row leave an empty one between.
+fn paragraphs(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = Some(text);
+    std::iter::from_fn(move || {
+        let current = rest?;
+        match current.char_indices().find(|&(_, c)| is_line_break(c)) {
+            Some((at, c)) => {
+                let after = at + c.len_utf8();
+                let after = if c == '\r' && current[after..].starts_with('\n') {
+                    after + 1
+                } else {
+                    after
+                };
+                rest = current.get(after..);
+                current.get(..at)
+            }
+            None => {
+                rest = None;
+                Some(current)
             }
         }
-        if !each(line.trim_end_matches(' ')) {
-            return;
+    })
+}
+
+/// Where the line that starts at byte `start` of `paragraph` ends: at the last
+/// UAX #14 opportunity that is a unit boundary at or before the first
+/// character, a space excepted, whose end passes `width` — spaces at a line's
+/// end hang past the box — or, where none is, after as many of the line's
+/// units as fit before that character and at least one; and at the
+/// paragraph's end where nothing passes. `start` is itself a unit boundary, so
+/// the units are walked from it.
+fn line_end(
+    paragraph: &str,
+    start: usize,
+    advance: &impl Fn(char) -> f64,
+    width: f64,
+    breaks: &mut Opportunities<'_>,
+) -> usize {
+    let rest = paragraph.get(start..).unwrap_or("");
+    let mut used = 0.0;
+    let mut over = None;
+    for (offset, c) in rest.char_indices() {
+        used += advance(c);
+        if c != ' ' && used > width {
+            over = Some(start + offset);
+            break;
+        }
+    }
+    let Some(over) = over else {
+        return paragraph.len();
+    };
+    // The unit boundaries after the line's start up to that character, and
+    // the first past it, for a first unit wider than the box.
+    let mut within = Vec::new();
+    let mut past = None;
+    for at in Units::of(rest).skip(1).map(|at| start + at) {
+        if at <= over {
+            within.push(at);
+        } else {
+            past = Some(at);
+            break;
+        }
+    }
+    if over > start {
+        breaks.reach(over);
+        let known = &breaks.known;
+        let last = known.partition_point(|opportunity| opportunity.at <= over);
+        let found = known
+            .get(..last)
+            .unwrap_or(&[])
+            .iter()
+            .rev()
+            .map(|opportunity| opportunity.at)
+            .take_while(|&at| at > start)
+            .find(|at| within.binary_search(at).is_ok());
+        if let Some(at) = found {
+            return at;
+        }
+    }
+    within.last().copied().or(past).unwrap_or(paragraph.len())
+}
+
+/// UAX #14's opportunities over a paragraph, decided over as long a start of
+/// it as anything has asked about ([`uax14::decided`]).
+struct Opportunities<'t> {
+    paragraph: &'t str,
+    /// Every opportunity at or before `to`, in order.
+    known: Vec<Opportunity>,
+    to: usize,
+    /// How long a start of the paragraph `known` was decided over.
+    read: usize,
+}
+
+impl<'t> Opportunities<'t> {
+    fn new(paragraph: &'t str) -> Opportunities<'t> {
+        Opportunities {
+            paragraph,
+            known: Vec::new(),
+            to: 0,
+            read: 0,
+        }
+    }
+
+    /// Decides every opportunity at or before byte `at`, each time over a
+    /// start of the paragraph at least twice as long as the last, so all the
+    /// asking costs about as much as the longest start asked about.
+    fn reach(&mut self, at: usize) {
+        let length = self.paragraph.len();
+        while self.to < at && self.read < length {
+            let mut next = at
+                .saturating_add(64)
+                .max(self.read.saturating_mul(2))
+                .min(length);
+            while !self.paragraph.is_char_boundary(next) {
+                next += 1;
+            }
+            let prefix = self.paragraph.get(..next).unwrap_or("");
+            let (known, to) = uax14::decided(prefix, Tailoring::UAX14, next == length);
+            self.known = known;
+            self.to = to;
+            self.read = next;
         }
     }
 }
@@ -1282,7 +1418,7 @@ fn free_text(
     let codes = codes_of(&font);
     if contents
         .chars()
-        .any(|c| !matches!(c, '\r' | '\n') && !codes.contains_key(&c))
+        .any(|c| !is_line_break(c) && !codes.contains_key(&c))
     {
         return None;
     }
@@ -1348,7 +1484,7 @@ fn free_text(
     // A line is not empty exactly when it holds a character that is neither
     // a space nor a line break. With none, or with no room inside the
     // border, nothing is laid out at all.
-    let has_text = contents.chars().any(|c| !matches!(c, ' ' | '\r' | '\n'));
+    let has_text = contents.chars().any(|c| c != ' ' && !is_line_break(c));
     if !has_text || inner_w <= 0.0 || inner_h <= 0.0 {
         return Some((da.font, resource));
     }
@@ -3455,6 +3591,202 @@ mod tests {
         assert_eq!(lines("Hello  world", 30.0, 9), ["Hello", "world"]);
         assert_eq!(lines("Hello   world ", 100.0, 9), ["Hello   world"]);
         assert_eq!(lines("ab\n\ncd", 100.0, 9), ["ab", "", "cd"]);
+    }
+
+    /// One kind of typographic character unit each, as UAX #29 and its one
+    /// tailoring make them: a letter and a nonspacing, a spacing and an
+    /// enclosing mark, a letter and a ZWJ, a Hangul syllable written in jamo,
+    /// a conjunct, an emoji and its modifier, an emoji ZWJ sequence, a flag,
+    /// and Myanmar's vowel sign AA on its letter.
+    const UNITS: [&str; 10] = [
+        "e\u{301}",
+        "\u{915}\u{93f}",
+        "a\u{20dd}",
+        "a\u{200d}",
+        "\u{1100}\u{1161}\u{11a8}",
+        "\u{915}\u{94d}\u{924}",
+        "\u{1f44d}\u{1f3fd}",
+        "\u{1f469}\u{200d}\u{1f4bb}",
+        "\u{1f1ec}\u{1f1e7}",
+        "\u{1019}\u{102c}",
+    ];
+
+    /// Every line `wrap` makes of `text` at `width`, five units a character.
+    fn wrapped(text: &str, width: f64) -> Vec<String> {
+        let mut lines = Vec::new();
+        wrap(
+            text,
+            |_| 5.0,
+            width,
+            |line| {
+                lines.push(line.to_owned());
+                true
+            },
+        );
+        lines
+    }
+
+    /// **A word wider than the box breaks between its units, never inside
+    /// one** (UAX #29, and `css-text-3` §5.5's rule that no soft wrap
+    /// opportunity falls inside a typographic character unit): three of each
+    /// kind of unit in a box one character wide make three lines of one whole
+    /// unit each, overflowing, where a break between any two characters
+    /// parted every one of them. And a plain word is broken into as many
+    /// characters as fit: `abcdefgh` in three is `abc`, `def` and `gh`.
+    #[test]
+    fn a_word_wider_than_the_box_breaks_between_its_units() {
+        for unit in UNITS {
+            assert_eq!(
+                wrapped(&unit.repeat(3), 7.0),
+                vec![unit.to_owned(); 3],
+                "{unit:?}"
+            );
+        }
+        assert_eq!(wrapped("abcdefgh", 15.0), ["abc", "def", "gh"]);
+    }
+
+    /// **A line breaks where UAX #14 allows and only there, past the
+    /// spaces**: after a hyphen, between two ideographs, not between a letter
+    /// and an emoji modifier UAX #14 would break before but that is the
+    /// letter's own unit, and at each mandatory break — line feed, carriage
+    /// return with or without its line feed, next line, line and paragraph
+    /// separator, vertical tab, form feed — each its own line's end, a
+    /// trailing one leaving an empty last line.
+    #[test]
+    fn a_line_breaks_where_uax14_allows() {
+        assert_eq!(wrapped("well-known", 25.0), ["well-", "known"]);
+        assert_eq!(
+            wrapped("\u{6771}\u{4eac}\u{90fd}", 7.0),
+            ["\u{6771}", "\u{4eac}", "\u{90fd}"]
+        );
+        assert_eq!(
+            wrapped("a\u{1f3fd}a\u{1f3fd}", 7.0),
+            ["a\u{1f3fd}", "a\u{1f3fd}"]
+        );
+        assert_eq!(
+            wrapped("a\nb\rc\r\nd\u{85}e\u{2028}f\u{2029}g\u{b}h\u{c}i\n", 100.0),
+            ["a", "b", "c", "d", "e", "f", "g", "h", "i", ""]
+        );
+        assert_eq!(wrapped("ab cd ef", 27.0), ["ab cd", "ef"]);
+    }
+
+    /// A form whose `/Mk` font draws, past WinAnsi's Latin, every character
+    /// [`UNITS`] holds — at codes 128 to 145, by `/Differences` naming each
+    /// glyph by its AGL `uniXXXX` or `uXXXXX` name — every code 500 wide.
+    fn marks_form() -> CosDocument {
+        let names = [
+            "uni0301", "uni200D", "uni1100", "uni1161", "uni11A8", "u1F1EC", "u1F1E7", "u1F469",
+            "u1F4BB", "uni20DD", "uni093F", "uni0915", "uni094D", "uni0924", "u1F44D", "u1F3FD",
+            "uni1019", "uni102C",
+        ];
+        let differences: String = names.iter().map(|name| format!(" /{name}")).collect();
+        let widths = vec!["500"; 145 - 32 + 1].join(" ");
+        form_doc(
+            "/Mk 4 0 R",
+            &[&format!(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 32 \
+                 /LastChar 145 /Widths [{widths}] /Encoding << /BaseEncoding \
+                 /WinAnsiEncoding /Differences [128{differences}] >> >>"
+            )],
+        )
+    }
+
+    /// The bytes of each line a free text annotation in [`marks_form`]'s
+    /// `/Mk` at ten points shows, in order: `/Contents` is `contents` as a
+    /// UTF-16 text string, in a box whose inside is `inside` units wide.
+    fn free_text_lines(form: &CosDocument, contents: &str, inside: f64) -> Vec<Vec<u8>> {
+        let hex: String = contents
+            .encode_utf16()
+            .map(|unit| format!("{unit:04X}"))
+            .collect();
+        let stream = synthesize(
+            form,
+            &parsed(
+                form,
+                &format!(
+                    "<< /Subtype /FreeText /Rect [10 10 {} 300] /BS << /W 0 >> \
+                     /DA (/Mk 10 Tf 0 g) /Contents <FEFF{hex}> >>",
+                    10.0 + inside + 4.0
+                ),
+            ),
+        )
+        .expect("an appearance");
+        let mut lines = Vec::new();
+        let mut rest = &stream.data[..];
+        while let Some(end) = rest.windows(5).position(|w| w == b") Tj\n") {
+            let start = rest[..end]
+                .iter()
+                .rposition(|b| *b == b'(')
+                .expect("a string")
+                + 1;
+            lines.push(rest[start..end].to_vec());
+            rest = &rest[end + 5..];
+        }
+        lines
+    }
+
+    /// **A free text annotation breaks its lines between units and where
+    /// UAX #14 allows**, as [`wrap`] does: three of each kind of unit in a
+    /// box one ten-point character wide show three lines of one whole unit
+    /// each, in the bytes the font draws them with; a plain word is broken
+    /// into as many letters as fit; `well-known` breaks after its hyphen; and
+    /// a line separator, which the encoding has no byte for, ends a line and
+    /// is not drawn.
+    #[test]
+    fn a_free_text_breaks_between_units_and_where_uax14_allows() {
+        let form = marks_form();
+        let codes = codes_of(
+            &form_font(&form, b"Mk")
+                .map(|(_, font)| font)
+                .expect("the form's font"),
+        );
+        let bytes = |text: &str| -> Vec<u8> {
+            text.chars()
+                .map(|c| *codes.get(&c).expect("the font draws it"))
+                .collect()
+        };
+        for unit in UNITS {
+            assert_eq!(
+                free_text_lines(&form, &unit.repeat(3), 7.0),
+                vec![bytes(unit); 3],
+                "{unit:?}"
+            );
+        }
+        assert_eq!(
+            free_text_lines(&form, "abcdefgh", 15.0),
+            [bytes("abc"), bytes("def"), bytes("gh")]
+        );
+        assert_eq!(
+            free_text_lines(&form, "well-known", 25.0),
+            [bytes("well-"), bytes("known")]
+        );
+        assert_eq!(
+            free_text_lines(&form, "ab\u{2028}cd", 100.0),
+            [bytes("ab"), bytes("cd")]
+        );
+    }
+
+    /// **Each line reads only as far as it reaches**: a paragraph of a
+    /// million words breaks its first three lines over a start of it, and a
+    /// caller that takes three has had three made — the whole paragraph's
+    /// opportunities are never decided for them.
+    #[test]
+    fn a_long_paragraph_is_read_only_as_far_as_its_lines() {
+        let long = "word ".repeat(1_000_000);
+        let mut lines = Vec::new();
+        let mut breaks = Opportunities::new(&long);
+        let mut start = 0;
+        while lines.len() < 3 {
+            let end = line_end(&long, start, &|_| 5.0, 52.0, &mut breaks);
+            lines.push(long[start..end].trim_end_matches(' ').to_owned());
+            start = end;
+        }
+        assert_eq!(lines, ["word word", "word word", "word word"]);
+        assert!(
+            breaks.read < 1024,
+            "{} bytes were read for three lines",
+            breaks.read
+        );
     }
 
     /// Set against the right of a box too narrow for both words, the first

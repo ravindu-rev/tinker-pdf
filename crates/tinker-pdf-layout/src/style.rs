@@ -519,10 +519,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         orphans: (*orphans).max(1),
         widows: (*widows).max(1),
         overflow_wrap: *overflow_wrap,
-        tailoring: Tailoring {
-            strictness: *line_break,
-            word_break: *word_break,
-        },
+        tailoring: tailoring(*line_break, *word_break),
         float: *float,
         clear: *clear,
         border_collapse: *border_collapse,
@@ -771,6 +768,32 @@ pub struct BoxPaint {
     /// Here and not on [`Consumed`] for [`Consumed::paint`]'s reason: a
     /// `Consumed` is in every recursion's frame.
     pub transformed: bool,
+}
+
+/// `line-break` and `word-break` as UAX #14 is tailored by them, value for
+/// value: the line breaker is a crate below the CSS engine and names the
+/// properties' values itself, so the computed ones are converted here, at
+/// the one door.
+fn tailoring(
+    line_break: tinker_pdf_css::property::LineBreakStrictness,
+    word_break: tinker_pdf_css::property::WordBreak,
+) -> Tailoring {
+    use crate::uax14::{LineBreakStrictness, WordBreak};
+    use tinker_pdf_css::property::{LineBreakStrictness as Css, WordBreak as CssWords};
+    Tailoring {
+        strictness: match line_break {
+            Css::Auto => LineBreakStrictness::Auto,
+            Css::Loose => LineBreakStrictness::Loose,
+            Css::Normal => LineBreakStrictness::Normal,
+            Css::Strict => LineBreakStrictness::Strict,
+            Css::Anywhere => LineBreakStrictness::Anywhere,
+        },
+        word_break: match word_break {
+            CssWords::Normal => WordBreak::Normal,
+            CssWords::BreakAll => WordBreak::BreakAll,
+            CssWords::KeepAll => WordBreak::KeepAll,
+        },
+    }
 }
 
 /// [`Consumed::paint`], resolved at the one door.

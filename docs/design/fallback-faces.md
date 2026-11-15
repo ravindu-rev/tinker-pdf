@@ -435,7 +435,7 @@ lookup the producing path and the reading path both ask (ROADMAP FT-02).
 **The classes, from data the tree vendors** (Unicode 17.0.0). A character's
 script is `Scripts.txt`'s, through `tinker_pdf_shape::unicode::script`
 (`crates/tinker-pdf-shape/data/ucd`). Its classes are read from
-`crates/tinker-pdf-layout/data/ucd`: **emoji** is `emoji-data.txt`'s
+`crates/tinker-pdf-unicode/data/ucd`: **emoji** is `emoji-data.txt`'s
 `Emoji_Presentation`, and `Extended_Pictographic` where U+FE0F follows; a
 character followed by U+FE0E asks text presentation and is no emoji;
 **mathematics** is `DerivedCoreProperties.txt`'s `Math`; **symbols** are

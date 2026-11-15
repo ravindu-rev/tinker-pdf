@@ -25,7 +25,7 @@ fails the same allowlist a crate licence would.
 | --- | --- | --- |
 | `crates/tinker-pdf-font/data/cmap-resources` | [adobe-type-tools/cmap-resources](https://github.com/adobe-type-tools/cmap-resources) at `f5cf3bc` (2023-11-15) | `BSD-3-Clause` |
 | `crates/tinker-pdf-filters/data/brotli` | [RFC 7932](https://www.rfc-editor.org/rfc/rfc7932.txt), Appendix A, "Static Dictionary Data" (July 2016) | `BSD-3-Clause` |
-| `crates/tinker-pdf-layout/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
+| `crates/tinker-pdf-unicode/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
 | `crates/tinker-pdf-font/data/liberation` | [liberationfonts/liberation-fonts](https://github.com/liberationfonts/liberation-fonts), release `2.1.5` (2021-10-01) | `OFL-1.1` |
 | `crates/tinker-pdf-shape/data/aots` | [adobe-type-tools/aots](https://github.com/adobe-type-tools/aots) at `d256691` (2025-11-29), fonts via [harfbuzz/harfbuzz](https://github.com/harfbuzz/harfbuzz) `test/shape/data/aots/fonts` at `e0d7060` (2021-08-12) | `Apache-2.0` |
 | `crates/tinker-pdf-shape/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
@@ -421,7 +421,7 @@ face once a process, on its first request, behind `cjk-fonts`, which
 `bundled-fonts` turns on. A build without the feature links none of the
 four.
 
-### `crates/tinker-pdf-layout/data/ucd`
+### `crates/tinker-pdf-unicode/data/ucd`
 
 The Unicode Character Database, at the five files [UAX #14](https://www.unicode.org/reports/tr14/)'s
 line breaking algorithm needs, two more for [UAX #29](https://www.unicode.org/reports/tr29/)'s extended grapheme
@@ -430,7 +430,9 @@ ASCII heuristic that breaks at spaces *"works on Project Gutenberg's entire
 catalogue, and is catastrophically wrong on CJK"* — and CONTRIBUTING rule 1 has
 no exception for a line breaker, so the third route is the one taken: published
 facts about text, vendored verbatim and compiled into static tables by
-`build.rs`, exactly as Adobe's CMap registry is one crate over.
+`build.rs`, exactly as Adobe's CMap registry is in `tinker-pdf-font`. The tree
+is `tinker-pdf-unicode`'s, the leaf both `tinker-pdf-layout` and
+`tinker-pdf-cos` break text by.
 
 | File | What it is |
 | --- | --- |
@@ -628,7 +630,7 @@ The Unicode Character Database again, at the files [UAX #9](https://www.unicode.
 bidirectional algorithm, [UAX #24](https://www.unicode.org/reports/tr24/)'s
 script property and [UAX #50](https://www.unicode.org/reports/tr50/)'s vertical
 orientation need. It is a **second** tree rather than a share of
-`tinker-pdf-layout`'s because ruling 8 keeps the two crates leaves: neither
+`tinker-pdf-unicode`'s because ruling 8 keeps the two crates leaves: neither
 depends on the other, and a build script cannot read across a crate boundary.
 The cost of the duplication is version skew, which
 `tests/ucd_version.rs` asserts away by comparing the two trees' headers — the
@@ -656,7 +658,7 @@ like a pass.** They compress to a small fraction of that in a published crate,
 which is what `crates.io`'s ceiling is measured against.
 
 `LICENSE.txt` is upstream's own, byte for byte the same file
-`crates/tinker-pdf-layout/data/ucd` carries — asserted, so that one tree cannot
+`crates/tinker-pdf-unicode/data/ucd` carries — asserted, so that one tree cannot
 end up describing terms the other was not given under. The Unicode License v3
 is `Unicode-3.0` in SPDX terms, which `deny.toml` already permits; its text is
 reproduced above.
@@ -1082,7 +1084,7 @@ The Unicode Character Database a third time, at the files
 `TextLine::words` and the word boxes it returns, and the two the search
 options' diacritic folding needs, for `TextPage::search_with`. A **third** tree
 rather than a share of either existing one, for the reason the second exists:
-this crate may depend on neither `tinker-pdf-layout` nor `tinker-pdf-shape`
+this crate may depend on neither `tinker-pdf-unicode` nor `tinker-pdf-shape`
 (`cargo xtask dag`), and a build script cannot read across a crate boundary.
 `crates/tinker-pdf-shape/tests/ucd_version.rs` holds all three trees to one
 Unicode version, one licence text and a fixed list of files each.
@@ -1095,7 +1097,7 @@ of bytes:
 `https://raw.githubusercontent.com/unicode-org/unicodetools/0509b4b256ff75c65300c8aaecb9e6ec816d9520/unicodetools/data/ucd/17.0.0/<path>`.
 Each file's first line states its own version — except `UnicodeData.txt`,
 which has no header anywhere — and `emoji-data.txt` and `UnicodeData.txt` are
-byte for byte the copies `crates/tinker-pdf-layout/data/ucd` and
+byte for byte the copies `crates/tinker-pdf-unicode/data/ucd` and
 `crates/tinker-pdf-shape/data/ucd` already carried; `tests/ucd_version.rs`
 asserts the second, since no header can.
 

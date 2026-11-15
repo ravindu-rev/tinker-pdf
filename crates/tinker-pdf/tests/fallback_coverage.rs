@@ -12,7 +12,7 @@
 //! functions the lookup will read through — `tinker_pdf_shape::unicode::script`
 //! for a character's script, compiled from the vendored `Scripts.txt`, and
 //! `Sfnt::glyph_for_char` for a face's cover — and reads the classes from the
-//! layout crate's vendored UCD files, as the design names them.
+//! unicode crate's vendored UCD files, as the design names them.
 //!
 //! # Fetched, never committed
 //!
@@ -446,10 +446,10 @@ const MUSIC_NAMES: [&str; 5] = [
     "ZNAMENNY ",
 ];
 
-/// One of the layout crate's vendored UCD files.
+/// One of the unicode crate's vendored UCD files.
 fn ucd(file: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../tinker-pdf-layout/data/ucd")
+        .join("../tinker-pdf-unicode/data/ucd")
         .join(file);
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }

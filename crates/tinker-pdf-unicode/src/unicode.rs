@@ -127,9 +127,9 @@ pub enum Class {
 
 /// UAX #11's East_Asian_Width, which UAX #14 itself needs.
 ///
-/// Not for measurement — advance widths come from [`crate::metrics::Metrics`]
-/// and never from here. LB30's parenthesis rules exclude the Wide, Full-width
-/// and Half-width forms, and LB19a's quotation rules turn on the same
+/// Not for measurement — advance widths come from `tinker-pdf-layout`'s
+/// `Metrics` and never from here. LB30's parenthesis rules exclude the Wide,
+/// Full-width and Half-width forms, and LB19a's quotation rules turn on the same
 /// distinction, so a breaker without this table gets `A(` and `Ａ（` the same
 /// way and one of the two is wrong.
 #[allow(clippy::upper_case_acronyms)]
@@ -320,7 +320,7 @@ pub fn to_upper(c: char) -> Option<&'static str> {
 }
 
 /// The full lowercase mapping, **without** Final_Sigma, which needs the
-/// characters around this one and is [`crate::case`]'s to apply.
+/// characters around this one and is `tinker-pdf-layout`'s `case` to apply.
 #[must_use]
 pub fn to_lower(c: char) -> Option<&'static str> {
     mapped(LOWER_MAP, c as u32)

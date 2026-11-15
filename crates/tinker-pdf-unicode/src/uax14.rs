@@ -43,8 +43,6 @@
 //! [`Tailoring::required_only`], so a `word-break: break-all` cannot open a
 //! break inside an emoji ZWJ sequence.
 
-use tinker_pdf_css::property::{LineBreakStrictness, WordBreak};
-
 use crate::unicode::{
     is_combining, is_east_asian, is_extended_pictographic, is_final_punctuation,
     is_initial_punctuation, is_unassigned, line_break_class, Class,
@@ -61,6 +59,39 @@ pub struct Opportunity {
     /// A mandatory break — LB4 and LB5's `!`, which is a newline in the
     /// source rather than a place a line happens to be full.
     pub mandatory: bool,
+}
+
+/// `line-break`, `css-text-3` §5.3: how strictly the algorithm prohibits
+/// breaks, the values this module tailors it by.
+///
+/// The property's own five values, written here rather than taken from the
+/// CSS engine, since this crate is below every crate that reads CSS: a caller
+/// with a computed style converts at its own boundary, and one with none —
+/// an annotation's appearance — names the value it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineBreakStrictness {
+    /// `auto`: the user agent's own default, which is `normal`'s here.
+    Auto,
+    /// `loose`.
+    Loose,
+    /// `normal`.
+    Normal,
+    /// `strict`, which is the untailored algorithm ([`Tailoring::UAX14`]).
+    Strict,
+    /// `anywhere`: an opportunity round every typographic character unit.
+    Anywhere,
+}
+
+/// `word-break`, `css-text-3` §5.2: what counts as a place to break a word,
+/// with [`LineBreakStrictness`]'s reason for being written here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WordBreak {
+    /// `normal`.
+    Normal,
+    /// `break-all`: an opportunity before every letter.
+    BreakAll,
+    /// `keep-all`: none between two letters.
+    KeepAll,
 }
 
 /// How `css-text-3` §5 tailors the algorithm.
@@ -246,6 +277,55 @@ pub fn opportunities(text: &str, tailoring: Tailoring) -> Vec<Opportunity> {
     let mut out = Vec::new();
     for_each_opportunity(text, tailoring, |opportunity| out.push(opportunity));
     out
+}
+
+/// How many units past a boundary a rule may read: LB25's
+/// `(PR | PO) × OP IS NU` reads the unit after the one after the boundary's
+/// next, three in all, and no rule reads further. [`decided`] leaves the
+/// boundaries this close to a prefix's end undecided.
+const LOOKAHEAD: usize = 3;
+
+/// The opportunities of `prefix`, the start of a text whose rest the caller
+/// has not read, and where the part of it they decide ends.
+///
+/// Every boundary of the prefix is decided by the text before it, which the
+/// prefix holds, and by at most [`LOOKAHEAD`] units after it — so each
+/// boundary with that many units after it in the prefix is decided as it is
+/// in the whole text, and is returned, and the rest are left for a longer
+/// prefix. The second value is the byte offset up to which the answer is the
+/// whole text's: every opportunity at or before it is in the list, and none
+/// after it is. Where `whole` says the prefix is all of the text, this is
+/// [`opportunities`], LB3's end of text included, and the offset is its end.
+///
+/// What makes it worth having is a caller that breaks a text a line at a time
+/// and may stop early — `tinker-pdf-cos`'s free text appearance, whose
+/// `/Contents` can be as long as a string in the file: it asks of a prefix as
+/// long as its next line needs, doubling it when it is not, so it reads about
+/// as much of the text as the lines it takes.
+#[must_use]
+pub fn decided(prefix: &str, tailoring: Tailoring, whole: bool) -> (Vec<Opportunity>, usize) {
+    if whole {
+        return (opportunities(prefix, tailoring), prefix.len());
+    }
+    let units = units(prefix, tailoring);
+    let mut out = Vec::new();
+    // A boundary is between unit `index` and unit `index + 1`, and is decided
+    // where units `index + 1` to `index + LOOKAHEAD` are all in the prefix.
+    let decidable = units.len().saturating_sub(LOOKAHEAD);
+    for index in 0..decidable {
+        let decision = tailor(&units, index, tailoring, decide(&units, index, tailoring));
+        if decision != Decision::Prohibited {
+            out.push(Opportunity {
+                at: units[index + 1].at,
+                mandatory: decision == Decision::Mandatory,
+            });
+        }
+    }
+    let to = decidable
+        .checked_sub(1)
+        .and_then(|last| units.get(last + 1))
+        .map_or(0, |unit| unit.at);
+    (out, to)
 }
 
 /// The same walk, without the allocation, for a caller that measures as it

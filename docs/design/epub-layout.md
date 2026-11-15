@@ -35,7 +35,9 @@ from XHTML and the cascade, and paints the fragments into a PDF — and
   typographic character unit** (`css-text-3` §5.5): UAX #29's extended
   grapheme clusters, a mark never starting one, checked against every case of
   `GraphemeBreakTest.txt`, hold every opportunity — UAX #14's under each
-  `line-break` and `word-break`, `hyphens`' and `overflow-wrap`'s.
+  `line-break` and `word-break`, `hyphens`' and `overflow-wrap`'s. Both
+  algorithms and the UCD they read are `tinker-pdf-unicode`'s, a leaf below
+  `tinker-pdf-layout`, which re-exports them.
 - **Bounds**: every recursion and every collection has a cap in `Limits` with a
   `Refusal` that names it.
 

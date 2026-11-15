@@ -840,6 +840,32 @@ fn quiet(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// so none can cycle, and `font` is the one crate that reads the bytes: it
 /// decodes them through its own `woff.rs`, so no crate above it learns that
 /// the faces live anywhere else.
+///
+/// **`layout -> unicode` and `cos -> unicode` are the sixteenth amendment**,
+/// and the crate they point at is the twentieth leaf: UAX #14's line breaking,
+/// UAX #29's extended grapheme clusters, and the Unicode Character Database
+/// tables they read, which until then were modules of `tinker-pdf-layout`.
+/// They moved because a second crate needs them. `tinker-pdf-cos` builds a
+/// free text annotation's appearance (12.5.6.6) and wraps its `/Contents`
+/// inside the box, and wrapping it right is the same two questions a book's
+/// lines ask — where UAX #14 lets a line break, and where a word wider than
+/// the box may be cut without parting a letter from its marks, a Hangul
+/// syllable from its jamo or a flag from its other half. `cos` may not depend
+/// on `layout`, which is a CSS layout engine above the CSS crate, and the two
+/// had no crate below both; so the algorithms, their vendored data and their
+/// two conformance files went down into a leaf of their own rather than into
+/// a second copy one crate over. The content crate's own UCD tree is the
+/// precedent this does not follow: it holds UAX #29's *word* boundaries,
+/// which nothing else asks, where these are asked by two crates.
+///
+/// It is a leaf on ruling 8's definition: text and plain parameters in, byte
+/// offsets and property values out, with no PDF, CSS or font vocabulary —
+/// `css-text-3`'s `line-break` and `word-break` values are written in it as
+/// UAX #14's tailorings, and `tinker-pdf-layout` converts the computed ones
+/// at its own boundary, `style::consume`. It depends on nothing, so neither
+/// edge can cycle; both point down into it, which ruling 8 allows without
+/// argument; and `layout` re-exports the three modules, so every path to
+/// them through it is what it was.
 const ALLOWED: &[(&str, &[&str])] = &[
     // The bottom: nothing at all, internal or otherwise.
     ("tinker-pdf-math", &[]),
@@ -894,6 +920,10 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("tinker-pdf-font-cjk-cn", &[]),
     ("tinker-pdf-font-cjk-tw", &[]),
     ("tinker-pdf-font-cjk-kr", &[]),
+    // The twentieth leaf, with nothing internal under it: UAX #14, UAX #29
+    // and the UCD tables they read, below both `layout` and `cos`, which
+    // break text by them. See the sixteenth amendment above.
+    ("tinker-pdf-unicode", &[]),
     // The eighth leaf, and the first with nothing under it since `crypto`.
     ("tinker-pdf-xml", &[]),
     // The ninth, and the fourth crate here with no internal dependency at all.
@@ -903,7 +933,10 @@ const ALLOWED: &[(&str, &[&str])] = &[
     // The tenth, and the third leaf-to-leaf edge. **Not** `tinker-pdf-math`,
     // which gap 31's plan predicted and milestone 7 answered: nothing here is
     // transcendental. See the sixth amendment above.
-    ("tinker-pdf-layout", &["tinker-pdf-css"]),
+    (
+        "tinker-pdf-layout",
+        &["tinker-pdf-css", "tinker-pdf-unicode"],
+    ),
     // The eleventh, and the fourth leaf-to-leaf edge. It takes the sfnt table
     // directory and nothing else; the OpenType Layout tables are parsed here
     // rather than in `font` because that crate's charter is the tables
@@ -978,6 +1011,10 @@ const ALLOWED: &[(&str, &[&str])] = &[
             // under it, which ruling 8 allows without argument, and the pool
             // learns nothing of what it compresses.
             "tinker-pdf-pool",
+            // A free text annotation's appearance wraps its `/Contents` where
+            // UAX #14 allows and breaks an overlong word between UAX #29's
+            // units. See the sixteenth amendment above.
+            "tinker-pdf-unicode",
         ],
     ),
     // Content interpretation emits to a `Device`; it never rasterizes.

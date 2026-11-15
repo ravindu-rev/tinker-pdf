@@ -4,7 +4,7 @@
 //! authority; these are about the **tailorings**, which the conformance file
 //! says nothing about because they are CSS's and not Unicode's.
 
-use tinker_pdf_css::property::{LineBreakStrictness, WordBreak};
+use super::{LineBreakStrictness, WordBreak};
 
 use super::{opportunities, Opportunity, Tailoring};
 use crate::unicode::{is_east_asian, line_break_class, Class};

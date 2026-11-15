@@ -17,7 +17,7 @@
 //! own. A conformance run against a private code path proves that the private
 //! code path is conformant.
 
-use tinker_pdf_layout::uax14::{opportunities, Tailoring};
+use tinker_pdf_unicode::uax14::{opportunities, Tailoring};
 
 const CASES: &str = include_str!("../data/ucd/LineBreakTest.txt");
 
@@ -108,6 +108,76 @@ fn the_whole_of_unicodes_own_line_break_test() {
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// **A prefix decides what the whole text decides, as far as it says it
+/// does** ([`decided`]): over every case of the file and every prefix of it
+/// that ends on a character, at the untailored algorithm and at `anywhere`
+/// and `break-all`, the opportunities a prefix decides are the whole text's
+/// up to the offset it returns — none missing, none extra — that offset is
+/// inside the prefix, and the whole text as a prefix is [`opportunities`]
+/// exactly. A rule that read further past a boundary than the prefix keeps
+/// would fail here on the cases that reach it — and since no case of the file
+/// reaches the furthest, LB25's `(PR | PO) × OP IS NU`, three units past its
+/// boundary, the strings after the file's cases do.
+#[test]
+fn a_prefix_decides_what_the_whole_text_decides() {
+    use tinker_pdf_unicode::uax14::{decided, LineBreakStrictness, WordBreak};
+    let tailorings = [
+        Tailoring::UAX14,
+        Tailoring {
+            strictness: LineBreakStrictness::Anywhere,
+            word_break: WordBreak::Normal,
+        },
+        Tailoring {
+            strictness: LineBreakStrictness::Normal,
+            word_break: WordBreak::BreakAll,
+        },
+    ];
+    let mut failures = Vec::new();
+    let mut decisions = 0usize;
+    let furthest = ["$(.5", "a $(.5 b", "+(.5", "$(5"].map(|text| Case {
+        line: 0,
+        text: text.to_owned(),
+        breaks: Vec::new(),
+        source: text.to_owned(),
+    });
+    for case in parse().into_iter().chain(furthest) {
+        for tailoring in tailorings {
+            let whole = opportunities(&case.text, tailoring);
+            assert_eq!(
+                decided(&case.text, tailoring, true),
+                (whole.clone(), case.text.len())
+            );
+            for (end, _) in case.text.char_indices().skip(1) {
+                let (some, to) = decided(&case.text[..end], tailoring, false);
+                let expected: Vec<_> = whole.iter().copied().filter(|o| o.at <= to).collect();
+                decisions += some.len();
+                if to > end || some != expected {
+                    failures.push(format!(
+                        "line {} at {end} under {tailoring:?}: decided {some:?} to {to}, the whole \
+                         text's {expected:?}",
+                        case.line
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} prefixes disagree:\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        decisions > 10_000,
+        "the prefixes decided too little to be a test"
     );
 }
 
