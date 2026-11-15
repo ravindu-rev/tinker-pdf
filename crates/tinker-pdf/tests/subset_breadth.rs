@@ -341,7 +341,12 @@ fn pages_drawn(bytes: &[u8]) -> Vec<Vec<u8>> {
 /// Every embedded program in the document: the stream's dictionary and its
 /// decoded bytes, with the descriptor that names it.
 fn programs(bytes: &[u8]) -> Vec<(Dict, Vec<u8>, Dict)> {
-    let doc = CosDocument::open(bytes.to_vec()).expect("it opens");
+    programs_in(&CosDocument::open(bytes.to_vec()).expect("it opens"))
+}
+
+/// [`programs`], of a document already open, whose names the dictionaries'
+/// keys are.
+fn programs_in(doc: &CosDocument) -> Vec<(Dict, Vec<u8>, Dict)> {
     let mut out = Vec::new();
     for (number, entry) in doc.xref().iter() {
         if number == 0 || matches!(entry, XrefEntry::Free { .. }) {
@@ -364,12 +369,15 @@ fn programs(bytes: &[u8]) -> Vec<(Dict, Vec<u8>, Dict)> {
     out
 }
 
-/// The one Type 1 program in a document, parsed.
+/// The one Type 1 program in a document, parsed, and the document its
+/// dictionaries were read from: a name means something only against the
+/// table of the document that issued it, so their keys are looked up through
+/// this one.
 fn only_program(bytes: &[u8]) -> (Dict, Vec<u8>, Dict, CosDocument) {
-    let mut found = programs(bytes);
+    let doc = CosDocument::open(bytes.to_vec()).expect("it opens");
+    let mut found = programs_in(&doc);
     assert_eq!(found.len(), 1, "one program");
     let (dict, decoded, descriptor) = found.remove(0);
-    let doc = CosDocument::open(bytes.to_vec()).expect("it opens");
     (dict, decoded, descriptor, doc)
 }
 
