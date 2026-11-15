@@ -9176,8 +9176,22 @@ mod tests {
             ],
             "each draw in the intent in force at it"
         );
+        // What a tile reaches and shows of each image is its own part
+        // (`a_draw_asks_for_the_parts_of_its_image_the_canvas_reaches_and_shows`);
+        // the image, the size the page draws it at and the intent are the
+        // page's.
+        let drawn = |asked: &[(Vec<u8>, ImageRequest, RenderingIntent)]| {
+            asked
+                .iter()
+                .map(|(name, request, intent)| (name.clone(), request.drawn, *intent))
+                .collect::<Vec<_>>()
+        };
         let tile = asked(Canvas::new(23, 11, PixelFormat::Rgb8, Color::WHITE).at_origin(17, 5));
-        assert_eq!(tile, page, "a tile asks in the intents the page asks in");
+        assert_eq!(
+            drawn(&tile),
+            drawn(&page),
+            "a tile asks in the intents the page asks in"
+        );
     }
 
     /// One image under two names: `Im0` three by two samples standing for a
