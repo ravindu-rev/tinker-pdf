@@ -21,6 +21,9 @@ use tinker_pdf_shape::Shaper;
 
 use crate::epub_support::typeface::{Colour, Face};
 
+#[path = "../written_support/mod.rs"]
+mod written_support;
+
 /// A version 0 `COLR` (*COLR header*, *BaseGlyph and Layer records*): each
 /// base glyph with its layers, bottom first, as glyph ids and palette
 /// indices, the records in increasing glyph order as the chapter requires.
@@ -816,5 +819,10 @@ pub fn colour_glyphs_page() -> Vec<u8> {
         colour.warnings()
     );
     builder.add_page(200.0, 80.0, |page| page.raw(&content));
-    builder.finish()
+    let bytes = builder.finish();
+    // Held as a document this engine wrote from nothing it did not write
+    // (`docs/design/validate-on-save.md`); the door reads its own copy, so
+    // the bytes a fingerprint is taken of are the ones written.
+    written_support::authored("a page of colour glyphs", &bytes);
+    bytes
 }

@@ -16,6 +16,7 @@
 mod colour_support;
 mod epub_support;
 mod pdfa_support;
+mod written_support;
 
 use colour_support::{
     cbdt_tables, colr_v0, colr_v1, cpal, f2dot14, gzip, line, rgb_png, rgb_tiff, rgba_png,
@@ -38,6 +39,16 @@ const EM: u16 = 2048;
 
 /// The render's pixels per point.
 const SCALE: f64 = 2.0;
+
+/// What `builder` writes, held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write
+/// (`docs/design/validate-on-save.md`), every profile it claims with it.
+#[track_caller]
+fn built(label: &str, builder: DocumentBuilder) -> Vec<u8> {
+    let bytes = builder.finish();
+    written_support::authored(label, &bytes);
+    bytes
+}
 
 /// `r g b rg x y w h re f`: a rectangle `[x0 y0 x1 y1]` in font units, filled
 /// in a colour given in eight-bit components.
@@ -162,7 +173,7 @@ fn three_glyph_document(builder: &mut DocumentBuilder) -> Vec<u8> {
         &glyphs
     ));
     builder.add_page(200.0, 100.0, |page| page.raw(&content));
-    builder.finish()
+    built("a run of three colour glyphs", builder)
 }
 
 /// The characters of a page's text that are not white space, with where each
@@ -529,7 +540,7 @@ fn many_glyph_document() -> (Vec<u8>, Vec<u8>) {
         &glyphs
     ));
     builder.add_page(620.0, 100.0, |page| page.raw(&content));
-    (builder.finish(), content)
+    (built("a run of many colour glyphs", builder), content)
 }
 
 /// **FT-06.10's exit.** A run of three hundred glyphs spills from the face's
@@ -618,7 +629,7 @@ fn a_glyph_that_draws_nothing_is_its_width_alone() {
         &glyphs
     ));
     builder.add_page(200.0, 100.0, |page| page.raw(&content));
-    let bytes = builder.finish();
+    let bytes = built("a glyph that draws nothing", builder);
 
     let fonts = type3_fonts(&bytes);
     let cos = CosDocument::open(bytes.clone()).expect("opens");
@@ -666,7 +677,7 @@ fn the_first_text_a_glyph_is_drawn_with_stands() {
         ));
     }
     builder.add_page(200.0, 100.0, |page| page.raw(&content));
-    let document = Document::open(builder.finish()).expect("opens");
+    let document = Document::open(built("a glyph drawn with two texts", builder)).expect("opens");
     let chars = inked_chars(&document);
     assert_eq!(chars.len(), 3, "{chars:?}");
     assert!(chars.iter().all(|(text, _)| text == "Q"), "{chars:?}");
@@ -703,7 +714,7 @@ fn a_glyph_off_the_baseline_is_drawn_and_read_there() {
     assert!(text.contains("15 Ts"), "{text}");
     assert!(text.trim_end().ends_with("0 Ts\nET"), "{text}");
     builder.add_page(200.0, 100.0, |page| page.raw(&content));
-    let document = Document::open(builder.finish()).expect("opens");
+    let document = Document::open(built("a glyph off the baseline", builder)).expect("opens");
     let page = document.page(0).expect("a page");
     let bitmap = page.render(&RenderOptions {
         scale: SCALE,
@@ -895,7 +906,7 @@ fn colour_document(
         },
     ));
     builder.add_page(900.0, 100.0, |page| page.raw(&content));
-    (builder.finish(), colour.warnings())
+    (built("a colour run", builder), colour.warnings())
 }
 
 /// A point of the glyph at `pen` ems along the run, in font units.
@@ -1015,7 +1026,7 @@ fn a_foreground_layer_takes_whatever_colour_the_text_is_in() {
         ));
     }
     builder.add_page(200.0, 100.0, |page| page.raw(&content));
-    let (bitmap, text) = rendered(builder.finish());
+    let (bitmap, text) = rendered(built("a glyph in two text colours", builder));
     assert_eq!(text, "AA");
     // The bar's middle in each, and the em's corner, which no text colour
     // reaches.
@@ -2467,7 +2478,7 @@ fn bitmap_document(
         &placed
     ));
     builder.add_page(900.0, 100.0, |page| page.raw(&content));
-    (builder.finish(), colour.warnings())
+    (built("a run of bitmap glyphs", builder), colour.warnings())
 }
 
 /// How many colour images a written document holds: image XObjects in
@@ -2925,6 +2936,7 @@ fn svg_glyphs_draw_their_document() {
         let (bytes, warnings) =
             colour_document(&face, "AB", PaletteChoice::Default, DocumentBuilder::new());
         assert!(warnings.is_empty(), "{warnings:?}");
+        std::fs::write("C:/Users/ravin/AppData/Local/Temp/claude/54cd9edf2323493e/5a5578ec-ca6b-4110-ba24-8cf02203e725/scratchpad/L8/svgglyph.pdf", &bytes).expect("written");
         let (bitmap, text) = rendered(bytes);
         assert_eq!(text, "AB");
         let samples: [(u16, [f64; 2], u8); 9] = [
@@ -3431,7 +3443,7 @@ fn cost_cases() -> Vec<[String; 3]> {
 fn empty_document() -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
     builder.add_page(900.0, 100.0, |page| page.raw(b"0 0.5 0 rg\n"));
-    builder.finish()
+    built("an empty page", builder)
 }
 
 /// `text` in `face` as a writer without colour glyphs writes it: the face
@@ -3458,7 +3470,7 @@ fn outline_document(face: &Face, text: &str) -> Vec<u8> {
         },
     ));
     builder.add_page(900.0, 100.0, |page| page.raw(&content));
-    builder.finish()
+    built("a run of outlines", builder)
 }
 
 /// The vector fixtures the census prices, each a face and the text whose one
@@ -3733,7 +3745,7 @@ fn image_glyph_document(mode: u8, per_em: u32) -> Vec<u8> {
         }]
     ));
     builder.add_page(900.0, 100.0, |page| page.raw(&run));
-    builder.finish()
+    built("an image glyph", builder)
 }
 
 /// The largest difference, in levels of 255 over the white page, between
