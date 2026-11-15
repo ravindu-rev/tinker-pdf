@@ -1945,8 +1945,9 @@ live, and it holds what they stand on.
   a text extraction's, a save's and a page lookup's counts over one fixed page
   to committed values — only the counts the page decides, never how a cache
   or a walk does the work — so a target that counted differently fails. A pin
-  a fix has to move is a finding the owner rules on, as a moved fingerprint
-  is.
+  a fix has to move is decided as a moved fingerprint is (ruling 24): the fix
+  is checked against the specification and its design, and the pin recorded
+  again in the fix where it is correct.
 - **No clock**: `the_guard_suite_reads_no_clock` fails on a clock in any
   source the suite is built from or names.
 - **On three targets**: CI's tests run `guards.rs` and

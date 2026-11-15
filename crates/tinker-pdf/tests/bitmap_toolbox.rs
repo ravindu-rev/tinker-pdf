@@ -1,14 +1,16 @@
 //! The bitmap toolbox held to its closed forms (`docs/design/bitmap-toolbox.md`).
 //!
 //! Every reviewed raster golden in `tests/goldens/` and `tests/goldens/surfaces/`
-//! is read through `golden_support`'s PPM reader — the goldens are never
-//! rewritten here (H-133) — and laid out in each of the eight pixel formats,
-//! and, where the format has an alpha, with an alpha plane this file lays on,
-//! straight and premultiplied. Each map, each reduction, the scale, the
-//! subsample and every conversion between two formats run over every one of
-//! those, and every byte and every answer is held to the closed form the
-//! design states, computed here from the formula and the canvas's own colour
-//! relations (`tinker_pdf_raster::canvas`), never from the toolbox.
+//! is read through `golden_support`'s PPM reader — never rewritten here, since
+//! only `render_goldens.rs`'s and `surface_goldens.rs`'s writers write a
+//! golden, once the change that moves it is checked (ruling 24) — and laid out
+//! in each of the eight pixel formats, and, where the format has an alpha,
+//! with an alpha plane this file lays on, straight and premultiplied. Each
+//! map, each reduction, the scale, the subsample and every conversion between
+//! two formats run over every one of those, and every byte and every answer
+//! is held to the closed form the design states, computed here from the
+//! formula and the canvas's own colour relations (`tinker_pdf_raster::canvas`),
+//! never from the toolbox.
 //!
 //! Gamma is taken at exponents of one half, one and two, whose powers this
 //! file computes exactly in integers: `floor(255 * pow(v / 255, g) + 0.5)` is
@@ -1572,9 +1574,10 @@ fn toolbox_outputs(golden: &Bitmap) -> Vec<(&'static str, String)> {
 /// output over one golden ([`toolbox_outputs`]) hashed as `determinism.rs`
 /// hashes a render, to its committed value ([`TOOLBOX_FINGERPRINTS`]). Every
 /// row is checked before any fails, and a failure prints every line that
-/// moved; the golden is read, never rewritten (H-133). In the determinism
-/// roster (`xtask/src/determinism.rs`), so `cargo xtask determinism` holds it
-/// to running.
+/// moved; the golden is read, never rewritten: `render_goldens.rs`'s writer
+/// alone writes it, once the change that moves it is checked (ruling 24).
+/// In the determinism roster (`xtask/src/determinism.rs`), so
+/// `cargo xtask determinism` holds it to running.
 #[test]
 fn the_toolbox_is_stable_across_targets() {
     let outputs = toolbox_outputs(&fingerprinted_golden());

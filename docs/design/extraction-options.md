@@ -482,8 +482,11 @@ fails on every page whose digest moved, naming the document and the page, on
 every page of the `default` and `bundled-fonts` builds with no row, as
 unrecorded, and on a row naming a page that is not there; in another build with
 no rows it prints a `SKIPPED` line. It prints a `RAN` line with the documents
-and pages read. A digest that moves is a finding put to the owner, and never
-re-pinned to match.
+and pages read. A digest that moves is decided by ruling 24: an option moves
+none, so a move one makes is a bug in it, and a change to the default reading
+is checked against the specification and its design and writes the table
+again, by the writer, in that change when it is correct — never re-pinned to
+match.
 
 ### The `TextChar` fields, this row's and its neighbours'
 
@@ -564,4 +567,4 @@ rule through `clip`.
 | A letter-spaced or tracked line reads with a space inside its words | The threshold is above a tenth of an em; tracking past 0.15 em is display setting, and the option is opt-in |
 | A centred or ragged block is cut at every line by the indent rule | The rule cuts only where flush lines outnumber indented ones and only before an indented line that follows a flush one |
 | A character straddling a clip's edge is kept on one side and lost on the other | The centre rule is one rule, stated once and cited by the region crop and the selection, so every reader of a rectangle agrees |
-| A digest moves for a reason no step intended | It is a finding put to the owner, never re-pinned; the record names its fields, so a field added elsewhere cannot move it |
+| A digest moves for a reason no step intended | A move its change does not account for is a bug in that change, never re-pinned (ruling 24); the record names its fields, so a field added elsewhere cannot move it |

@@ -333,10 +333,11 @@ pub fn svg_mismatch(family: &str, committed: &str, svg: &str) -> Option<String> 
 /// The failure message for goldens a build does not reproduce.
 pub fn disagreement(wrong: &[String]) -> String {
     format!(
-        "the goldens and this build disagree. If the change is deliberate, \
-         re-run the writer with --ignored and have the new pictures reviewed \
-         again -- a golden replaced without a second reading is a regression \
-         test that agreed with whatever arrived:\n{}",
+        "the goldens and this build disagree. Check the change against the clause \
+         each golden's header names and the design it implements (ruling 24): \
+         if it is correct, re-run the writer with --ignored and commit the \
+         goldens with it; if not, fix the change -- a golden replaced without \
+         that check is a regression test that agreed with whatever arrived:\n{}",
         wrong.join("\n")
     )
 }

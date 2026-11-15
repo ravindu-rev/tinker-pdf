@@ -756,7 +756,10 @@ instead of living in one feature's head.
     pixel. A shaded pixel stays within one level of 255 of the expression
     evaluated directly, the analytic tier's shading assertions hold that
     bound in place of equality, and a fingerprint or golden the mechanism
-    moves is reviewed by the owner before it is committed (H-76, H-133).
+    moves is decided as ruling 24 decides a moved pin: the move is checked
+    against that bound, and the pin is recorded again in the change that
+    moves it where the move holds to it, the mechanism fixed where it does
+    not.
 
 23. **The owner's answers stand as rules.** Binds every row and step that
     names one. Each owner row below left the roadmap on the answer written

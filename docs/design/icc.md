@@ -1835,7 +1835,8 @@ other fingerprint the grid reaches.
    conversions, none once every node is filled and at most one a node before;
    `icc.rs`'s known-answer tests, `colour_spaces.rs`'s ICC tests and
    `cargo xtask libm`; the `icc` and `default_spaces` fingerprints, if they
-   move, re-recorded once after H-76's review, the four targets agreeing.
+   move, checked against the bound and recorded again in the change
+   (ruling 24), the four targets agreeing.
 5. **P-22.5: the row path.** Exit: `icc.rs`
    `a_row_of_bytes_converts_as_apply_does` — every 8-bit input of a one- and a
    three-input transform of each model, and a 17-level lattice of a four-input
@@ -1867,7 +1868,7 @@ other fingerprint the grid reaches.
 
 | Risk | Mitigation |
 | --- | --- |
-| The grid misses a real profile by more than the bound | The bound is held on every lookup-table model P-22.1 prices, the probe prices the built grid beside its own forms, and the fingerprint moves are the owner's to review (H-76) |
+| The grid misses a real profile by more than the bound | The bound is held on every lookup-table model P-22.1 prices, the probe prices the built grid beside its own forms, and a fingerprint the grid moves is checked against the bound and recorded again in the change that moves it, a move past the bound being a bug in the grid (ruling 24) |
 | A fill and an image pixel of one colour part | One locating function serves both, the axis table is built from it, and P-22.5's test holds every byte to `apply` |
 | What a page draws depends on which nodes were filled | A node is a function of the profile, the conversion and its position; filling is idempotent and order-free, so tiles, threads and cache hits read the same values |
 | A page with one ICC colour pays for a whole grid | Nodes are evaluated at first read; a colour costs the nodes it reads |

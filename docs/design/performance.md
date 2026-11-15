@@ -398,8 +398,10 @@ extraction's one decode of the content; a save's image pass, its one walk of
 the one-page tree and its two decodes, the content and the samples; and a
 lookup's walk of the root and the page. A cache's hits and misses, the font
 dictionaries read and the outlines filled are how the code does the work, and
-are not pinned. A pin a fix has to move is a finding the owner rules on, as a
-moved fingerprint is.
+are not pinned. A pin a fix has to move is decided as a moved fingerprint is,
+by ruling 24: the fix is checked against the specification and this design,
+and the pin is recorded again in the fix where the fix is correct; where it is
+not, the move is a bug in the fix.
 
 **No clock.** `the_guard_suite_reads_no_clock` reads the suite's sources —
 `guards.rs` and `guard_allocations.rs`, `guard_support/mod.rs` and
@@ -534,7 +536,7 @@ thread.
 | Two threads' counts mix | One `Work` an operation, never on `Document`, in a global or in a thread-local; an operation's own workers add to one total in any order |
 | Hits and misses depend on interleaving when threads share a cache | Guards and pins read serial runs; A9 compares pixels and warnings, not counts; P-15.6's single-flight fills make a shared cache's counts deterministic and its test reads them |
 | A count differs by target | `u64` counters with saturating adds, a `BTreeMap` for the per-stream decodes, no count of a hash-ordered walk; the pins are read on all three measured targets |
-| The pins are goldens and the P rows exist to cut work | The pins hold counts that are the fixture's rather than the algorithm's, and say which; a pin a fix has to move is a finding the owner rules on, raised by the row that moves it |
+| The pins are goldens and the P rows exist to cut work | The pins hold counts that are the fixture's rather than the algorithm's, and say which; a pin a fix has to move is checked by the row that moves it against the specification and this design, and recorded again in that row's change where the fix is correct (ruling 24) |
 | A2 reads only what is counted | A superlinear loop that counts nothing passes A2; P-01.1 records each leg's superlinear site at the tip and the counter that sees it, and a site outside P-01 is a finding, not absorbed |
 | A byte total hides a step count | `work()` leaves out maxima and quantities, and a failing leg prints every counter's ratio |
 | A guard is absent and reads as green | The roster checks each landed name is an un-ignored `#[test]` in its file, and `cargo xtask determinism` holds the suite's entries in K-07's roster to the same (`docs/verification.md`) |
@@ -3128,8 +3130,9 @@ the generators, `PAGE_LIKE_LEVEL_SIX.count` and `PHOTO_LIKE_LEVEL_SIX.count`
 Only P-04.7 moves written bytes: with document writing on the ratio level,
 every stream the writer deflates re-encodes and decodes to what it did. The
 committed hashes over written bytes that hold a stream the encoder wrote are
-two, both in `crates/tinker-pdf/tests/determinism.rs`, re-recorded once after
-H-138's review:
+two, both in `crates/tinker-pdf/tests/determinism.rs`, and P-04.7 records them
+again in its own change once the move is checked, as ruling 24 decides a moved
+pin: each stream decodes to the bytes it held and each page renders as it did:
 
 | Hash | The encoder's stream in it |
 | --- | --- |
@@ -3170,9 +3173,9 @@ decoded samples, so P-04.5's change of PNG bytes moves no hash.
    `the_ratio_level_holds_level_six_size` and A8 green on every measured
    target.
 6. **P-04.7: document writing on the ratio level.** Exit: the two hashes
-   above re-recorded once after H-138, agreeing on linux and windows in CI's
-   tests and on `wasm32-wasip1` locally; every round trip, `stream_dedup.rs`
-   and the `png_embed` and `tiff_embed` tests pass.
+   above recorded again in the change under ruling 24, agreeing on linux and
+   windows in CI's tests and on `wasm32-wasip1` locally; every round trip,
+   `stream_dedup.rs` and the `png_embed` and `tiff_embed` tests pass.
 7. **P-04.8: the row's close** in MS-02's paired run, with MS-05's 300-dpi
    render-to-PNG band at 60 MB.
 
@@ -3185,7 +3188,7 @@ decoded samples, so P-04.5's change of PNG bytes moves no hash.
 | Block boundaries follow the writes | Boundaries are symbol counts; `the_stream_round_trips_however_it_is_fed` compares the bytes of whole, byte-at-a-time and random-piece feeds |
 | A dynamic code is incomplete or longer than the format allows | `code_lengths_are_complete_and_at_most_fifteen` holds Kraft equality within the limit, and every block round-trips through this crate's inflate |
 | A fast-level PNG is larger than today's | P-04.5 records each PNG input's bytes at today's encoder and at both levels, and one larger than today's stops the step for H-42 |
-| Written bytes move unseen | Only P-04.7 moves them, the two hashes above with them, under H-138 |
+| Written bytes move unseen | Only P-04.7 moves them, the two hashes above with them, each move checked against the decoded streams and the rendered pages and named with its cause in the change that records the hashes again (ruling 24) |
 
 ## P-06 — Glyph coverage cache
 
@@ -3383,8 +3386,9 @@ none is evicted: 80 are rasterised and 5 520 hit.
 #### What the steps move
 
 A kept mask is the mask a miss computes for its key, so only the quantisation
-moves pixels, and it moves them once, in P-06.2, under H-76's and H-133's
-review:
+moves pixels, and it moves them once, in P-06.2, which checks each moved pin
+against the bounds below and records it again in its own change, as ruling 24
+decides a moved pin:
 
 - **The phase step.** A glyph stands at most a thirty-second of a pixel from
   where its outline says on each axis, so only a pixel an edge passes through
@@ -3445,10 +3449,11 @@ render that decoded it.
    `a_glyph_moved_by_whole_pixels_draws_the_same_mask` (new);
    `render_regions.rs`'s `every_tile_is_byte_equal_to_the_page_under_it` and
    its siblings, with the text page's tiles at every scale they test; the pins
-   above re-recorded once after H-76's and H-133's review, agreeing under
-   `cargo test` on linux and windows and under `--target wasm32-wasip1`
-   locally; `text_render_modes.rs`, `render_differential.rs` and `stats.rs`'s
-   render counts unchanged, in both builds.
+   above recorded again in the change, each move checked against the steps'
+   bounds (ruling 24), agreeing under `cargo test` on linux and windows and
+   under `--target wasm32-wasip1` locally; `text_render_modes.rs`,
+   `render_differential.rs` and `stats.rs`'s render counts unchanged, in both
+   builds.
 3. **P-06.3: the cache.** Exit: `guards.rs`
    `a4_glyph_masks_rasterised_are_at_most_their_distinct_keys` flips from owed
    and joins K-07's roster; `glyph_cache.rs`
@@ -3472,7 +3477,7 @@ render that decoded it.
 | A huge glyph, or a hostile one, is rasterised whole | A mask past 65 536 pixels, or outside `i32`, is not made, and the path route bounds such a glyph by its clip and canvas (ruling 1) |
 | A mode 2 glyph's fill and stroke part | Mode 2 keeps the path route for both |
 | What the glyph source reports depends on hits | The outline is asked for at every glyph, hit or miss |
-| The quantisation moves pixels nobody reviews | It moves them once, in P-06.2, in the pins above, under H-76 and H-133; a later step that moves a glyph pin is a finding |
+| The quantisation moves pixels nobody checks | It moves them once, in P-06.2, in the pins above, each move checked against the bounds above and recorded again in that change (ruling 24); a later step that moves a glyph pin is checked the same way, and a move its change does not account for is a bug |
 
 ## P-16 — Caches with byte budgets and a caller memory budget
 

@@ -1260,8 +1260,9 @@ fn a_surface_golden_stays_small_enough_to_review() {
     assert_small_enough(&goldens, PER_SURFACE, ALL_SURFACES);
 }
 
-/// Writes the surface goldens. Run with `--ignored` when a picture is meant to
-/// change, and have the result reviewed before it is committed.
+/// Writes the surface goldens. Run with `--ignored` when a change moves a
+/// picture and has been checked against the clause the golden's header names
+/// (ruling 24), and commit what it writes in that change.
 #[test]
 #[ignore = "writes the committed goldens"]
 fn write_the_surface_goldens() {

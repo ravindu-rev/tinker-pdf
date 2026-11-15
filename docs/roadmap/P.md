@@ -210,7 +210,7 @@ exit criterion are the pinned machine's (MS-03).
 
 **Glyph coverage cache** keyed by font, glyph, quantised 2×2 transform and sub-pixel phase, bounded by bytes with deterministic eviction; masks blitted through the existing mask path
 
-**Exit criterion.** guard A4; **text page ≤ 6 ms at 72 dpi, ≤ 15 ms at 150, ≤ 35 ms at 300**; if phase quantisation changes pixels, the one-time fingerprint change is reviewed (H-76)
+**Exit criterion.** guard A4; **text page ≤ 6 ms at 72 dpi, ≤ 15 ms at 150, ≤ 35 ms at 300**; if phase quantisation changes pixels, each fingerprint it moves is checked against the quantisation's bounds and recorded again in the change that moves it (ruling 24)
 
 **Doc:** [design/performance.md](../design/performance.md), P-06 · **Depends on:** MS-01
 
@@ -415,7 +415,7 @@ exit criterion are the pinned machine's (MS-03).
 
 **Colour conversion throughput**: ICC transforms cached per document, keyed by source and destination profile, intent and black-point compensation, inside P-16's byte budget; each transform precomputed into an integer lookup table with fixed-point tetrahedral interpolation; an 8-bit CMYK-to-RGB fast path through a 17- or 33-point grid; Gray and RGB identity paths; an image converted once at its decoded size rather than per drawn pixel
 
-**Exit criterion.** counted guard: transforms built ≤ distinct (profile pair, intent, compensation) keys per document; fingerprints unchanged on four targets, or the one-time change reviewed (H-76); **an ICC-based CMYK image converted to sRGB at ≥ 100 Mpixel/s**
+**Exit criterion.** counted guard: transforms built ≤ distinct (profile pair, intent, compensation) keys per document; fingerprints unchanged on four targets, or each one-time move checked against the grid's bound and recorded again in the change that moves it (ruling 24); **an ICC-based CMYK image converted to sRGB at ≥ 100 Mpixel/s**
 
 **Doc:** [design/icc.md](../design/icc.md), P-22 · **Depends on:** MS-01, MS-04
 

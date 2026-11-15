@@ -361,8 +361,10 @@ per object:
 - **What moves.** A knockout group's whole pixels are today's; a pixel an
   element covers partly moves, because 11.4.6 weights by shape after
   compositing at the opacity, where today's restore weights before. RC-08.6
-  measures those pixels on the committed knockout fixtures first and puts what
-  moves to the owner; it re-pins nothing.
+  measures those pixels on the committed knockout fixtures first, checks each
+  against 11.4.6's composite, and records again in its own change every pin
+  whose move that composite accounts for; a move it does not account for is a
+  bug (ruling 24).
 
 ### Text knockout (`/TK`, 9.3.8)
 
@@ -463,6 +465,6 @@ per object:
 | Transfer applied per object rather than per point, which parts from 11.7.5.2 wherever a translucent object lies over a transferred one | The plane is 11.7.5.2's mechanism; RC-08.2's test lays a translucent object, a masked one, a grouped one and an image with a soft mask over transferred ones |
 | An object's shape for the plane is not the shape it painted | Each paint writes from the coverage it composited through, without the soft mask; an image's shape is drawn by the same sampler; a tile is held to the page |
 | Black generation reaches colours 11.7.5.3 keeps it from | The colour's family decides; a `g` and a `k` fill under both functions are pinned at their own conversions |
-| Exact knockout moves committed renders | RC-08.6 measures the knockout fixtures' partly covered pixels first and the owner decides; text knockout is taken only where it differs for whole pixels, so opaque text keeps its bytes |
+| Exact knockout moves committed renders | RC-08.6 measures the knockout fixtures' partly covered pixels first and records a pin again only where 11.4.6's composite moves it (ruling 24); text knockout is taken only where it differs for whole pixels, so opaque text keeps its bytes |
 | A screen or a type 1 cell differs across targets | Integer thresholds and comparisons; the cell's sine and cosine from `tinker-pdf-math`, built once; RC-08.11 fingerprints each halftone type on four targets |
 | A hostile halftone or a page of distinct parameter sets | Threshold arrays decoded within `MAX_DECODED_STREAM` where they screen; a type 1 cell capped at 2²⁰ pixels; the plane's table capped at 255 sets, each refusal named |

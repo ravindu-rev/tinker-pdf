@@ -1153,7 +1153,7 @@ loses no passing case, so it is **not** applied: FT-08.16 records the gap in
 | --- | --- |
 | The published grammar and the Tai Tham corpus disagree, and a grammar fitted to Tai Tham would be a guess about every other USE script | The published grammar where the corpus agrees with it and for every script with no fixture; Tai Tham keeps the cluster the corpus adjudicates, by name, with the two changes the corpus states; the disagreement is a table above, so a later Tai Tham fixture or a revised specification reopens one row rather than a model |
 | The Indic scripts with no fixture change model and are no more verified than before | They stay on [features/fonts.md](../features/fonts.md)'s shaped-and-unverified list until H-64's person-written cases arrive (FT-09) |
-| A change of model moves the shaping fingerprint | Every `SHAPING` move is H-144's to review, against the cases the step names as moving it |
+| A change of model moves the shaping fingerprint | Every `SHAPING` move is checked against the cases the step names as moving it and recorded again in that step where they account for it; a move they do not account for is a bug in the step (ruling 24) |
 | A case the face cannot produce reads as a defect still to fix | H-146: nothing is declined; such a case stays in `TRIAGE` and `PASSING`'s shortfall, with the trace's reason |
 | A second model costs time on every Brahmic run | FT-08.18 measures both models against P-26's targets in the timing phase |
 | An inserted dotted circle reaches extracted text | It carries its cluster's offset and no text of its own, and is drawn inside a span whose `/ActualText` is empty; `shaped_creation.rs` extracts the typed text in both builds, beside a typed U+25CC too |

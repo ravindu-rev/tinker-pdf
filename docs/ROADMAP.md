@@ -269,9 +269,9 @@ SU-12.42, SU-12.43, SU-12.44, SU-12.10, SU-12.45, SU-12.46, SU-12.47,
 SU-12.48.
 
 **The end phase.** First the full test and gate run on every target, each
-failure traced to the step that wrote it and each moved pin reviewed by the
-owner; K-03.8c lands from that run, its exact defect lists read off it. Then
-the long proofs, several lanes at once:
+failure traced to the step that wrote it and each moved pin decided by
+correctness (ruling 24); K-03.8c lands from that run, its exact defect lists
+read off it. Then the long proofs, several lanes at once:
 
 MS-18.2, K-06.2, K-02.5, MS-13.2, MS-13.3, MS-13.4, MS-13.5, K-04.12,
 RC-20.16, FT-01.7, FT-01.12, FT-11.10, FT-14.9, FT-30.7, FT-30.9,

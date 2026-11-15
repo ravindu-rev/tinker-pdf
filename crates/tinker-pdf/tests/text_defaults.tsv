@@ -5,7 +5,8 @@
 # the others':
 # cargo test -p tinker-pdf --test text_defaults -- --ignored write_text_defaults --exact
 # cargo test -p tinker-pdf --features bundled-fonts --test text_defaults -- --ignored write_text_defaults --exact
-# A digest that moves is a finding put to the owner, never re-pinned to match.
+# A digest that moves is decided by ruling 24: written again only when the
+# change that moved it is checked correct, never re-pinned to match.
 build	document	page	digest
 bundled-fonts	crates/tinker-pdf/tests/epub/calibre-book-cover.epub	0	8042121d081524f0ae1e3d10976da0ea8dbb7606d6d2be0b81f9578f1a5b6e3a
 bundled-fonts	crates/tinker-pdf/tests/epub/calibre-book-cover.epub	1	dc1584034eaa527a1004ffc7183be0a3780e150eedf2f0d931d470e36fb9b3dc

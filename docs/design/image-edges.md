@@ -556,7 +556,9 @@ answers by geometry too:
 
 The fingerprints and goldens that may move are those of pages drawing a run
 of two images or more, and which of them do is found by RC-21.4's run if
-H-15 takes C, each a finding the owner reviews and never an edit.
+H-15 takes C, each checked against C's rule and recorded again in RC-21.4
+where one of the three cases above accounts for it, a bug in the mechanism
+where none does (ruling 24).
 
 **The bands.** A question's band on the page is the draw's bounds within the
 frame met with the hull of the members' bounds within the frame. Under B a
@@ -645,6 +647,6 @@ holds a render with every shadow on to the render with none; and
 | A shadow that answers wrongly prices a mechanism that does not exist | Mechanisms A and B answer as the page does by construction, so every tile whose answer each changes is a tile of the class; a shadow that changes an answer elsewhere is a finding about the shadow |
 | A page's runs hold hundreds of members, and B and C scan them all | The scan is counted per question in the table; RC-21.4 may index members by row where the table says the scan dominates |
 | The time of a debug build misleads | Both builds are priced, and a time is only ever a ratio to today's on the same machine |
-| C moves pages that render correctly today | Named as its price above; under C a moved fingerprint is a finding the owner reviews before anything is committed |
+| C moves pages that render correctly today | Named as its price above, which H-15 weighs; under C a moved fingerprint is checked against C's rule and recorded again in the change where one of the three cases accounts for it, a bug where none does (ruling 24) |
 | A soft mask's or a group's frame differs from the page's canvas | Every shadow asks in the frame of the canvas it is on, the rectangle that canvas would have on the whole page, and is reset where the canvas swaps |
 | A decode that holds a window of its image (`SourceWindow`) has no samples outside it, so B resamples a stand-in alpha there | The window keeps every pixel of the square covered, so an opaque member is exact; for one whose alpha the window cuts, B asks the decode for the band's part, which RC-21.4 prices if H-15 takes B |

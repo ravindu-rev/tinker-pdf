@@ -1562,7 +1562,8 @@ key — each page's blocks, lines and characters, text, quad, origin, font and
 size, its warnings and `plain_text()`, written as a record of named fields and
 digested — held to `text_defaults.tsv` per build, a moved or unrecorded
 digest failing with its document and page; the table is written only by the
-command in its header, and a digest that moves is a finding for the owner,
+command in its header, and a digest that moves is decided by ruling 24, the
+table written again only when the change that moved it is correct,
 [design](../design/extraction-options.md)),
 `words.rs` (the table compiled from the file, segments of contractions,
 decimals and abbreviations, combining marks, flag pairs, word boxes from a

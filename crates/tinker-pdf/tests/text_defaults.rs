@@ -21,7 +21,10 @@
 //!
 //! A book or an XPS document is laid out or converted by this engine with the
 //! faces its build bundles, so every row is kept per build ([`build`]). A
-//! digest that moves is a finding put to the owner, never re-pinned to match.
+//! digest that moves is decided by ruling 24: the change that moved it is
+//! checked against the specification and its design, and the table written
+//! again by the writer in that change when it is correct, never re-pinned to
+//! match.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -331,7 +334,8 @@ const HEADER: &str = "\
 # the others':
 # cargo test -p tinker-pdf --test text_defaults -- --ignored write_text_defaults --exact
 # cargo test -p tinker-pdf --features bundled-fonts --test text_defaults -- --ignored write_text_defaults --exact
-# A digest that moves is a finding put to the owner, never re-pinned to match.
+# A digest that moves is decided by ruling 24: written again only when the
+# change that moved it is checked correct, never re-pinned to match.
 ";
 
 /// **The writer**: this build's rows, from a read of the set, written into
@@ -423,9 +427,10 @@ fn default_extraction_of_every_committed_fixture_is_pinned() {
     );
     assert!(
         problems.is_empty(),
-        "{} of {} pages of the {build} build differ from text_defaults.tsv; a moved digest is a \
-         finding for the owner, and an unrecorded one is written by the command in the table's \
-         header:\n{}",
+        "{} of {} pages of the {build} build differ from text_defaults.tsv; a moved digest is \
+         decided by ruling 24 (the change that moved it checked against the specification and \
+         its design, the table written again only when it is correct), and an unrecorded one is \
+         written by the command in the table's header:\n{}",
         problems.len(),
         read.digests.len(),
         problems.join("\n")
