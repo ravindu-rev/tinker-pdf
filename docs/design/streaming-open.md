@@ -225,15 +225,22 @@ reader will not act on falls back rather than guess), and each renders page
 one without reaching past `/E` but those `REACHES_PAST_E` names: `badlin1.pdf`,
 qpdf's deliberately damaged linearization fixture, whose declared `/E` is not
 where its first page ends. Page one is **compared** with
-the page the page tree walk draws, not counted. The files where the two differ
-are named in `PAGE_ONE_ONLY_FROM_THE_HEAD`, and they are files the walk cannot
-answer for at all: both are sealed under a password the sweep does not have,
-and the difference is which route survives that — `/O` names the object
-outright and a page dictionary is structure rather than content, so the head
-path builds a page and draws whatever its content stream decrypts to, which is
-nothing; the walk cannot start, because the catalogue is inside an object
-stream and an object stream is a stream. They are named rather than excluded,
-because it is a real difference between two routes to the same page.
+the page the page tree walk draws, not counted, and an encrypted file is
+compared in one state on both sides: the empty user password, the one a reader
+tries before it asks anyone, is given to both opens before either draws. A
+sealed page draws its content stream's ciphertext, which is nothing, so a
+sealed render agrees with an unsealed one only where the unsealed page draws
+nothing either, as a page of text in a font the file does not embed does in a
+build with no faces of its own. The generated `a_sealed_linearized_document`,
+whose pages are paths, holds the same pair in every build. The files where the
+two differ are named in `PAGE_ONE_ONLY_FROM_THE_HEAD`, and they are files the
+walk cannot answer for at all: both are sealed under a password the sweep does
+not have, and the difference is which route survives that — `/O` names the
+object outright and a page dictionary is structure rather than content, so the
+head path builds a page and draws whatever its content stream decrypts to,
+which is nothing; the walk cannot start, because the catalogue is inside an
+object stream and an object stream is a stream. They are named rather than
+excluded, because it is a real difference between two routes to the same page.
 
 **Every file with a second page to ask for draws the page the main table
 draws** — compared bitmap against bitmap, because a cheap render of the wrong

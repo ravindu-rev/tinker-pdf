@@ -582,10 +582,16 @@ The tests that cover opening ([verification](../verification.md)):
   not a page, a hint stream the section places elsewhere — and each asserts the
   same page comes out, off the page tree, with the leniency named — and a
   fourth, a page length of zero, which is the one hint that could hand back the
-  page before it. Over the fetched qpdf corpus, a file that opens from its head
-  draws the page one the page tree draws, but for the files
-  `PAGE_ONE_ONLY_FROM_THE_HEAD` names, which the walk cannot answer for at
-  all; and **every one with a page two draws the page the main table draws**.
+  page before it. An encrypted linearized file whose user password is empty
+  draws the page one from its head that it draws from a buffer, sealed and
+  unsealed, without reading its tail
+  (`a_sealed_linearized_file_draws_page_one_from_its_head_as_a_buffer_does`;
+  its pages are paths, so the two states differ in every build). Over the
+  fetched qpdf corpus, a file that opens from its head draws the page one the
+  page tree draws, but for the files `PAGE_ONE_ONLY_FROM_THE_HEAD` names, which
+  the walk cannot answer for at all; and **every one with a page two draws the
+  page the main table draws**. An encrypted corpus file is compared unsealed
+  by the empty user password, given to both opens before either draws.
 - **`crates/tinker-pdf/tests/standalone.rs`** — a standalone SVG, a bare image
   and a loose XHTML file through `Document::open`: an SVG's page at the size
   its root states with its pixels and its text, a loose XHTML file **pixel for

@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tinker_pdf::{
-    AuthLevel, CountingSource, Document, DocumentBuilder, Name, Object, RenderOptions, SliceSource,
-    WarningKind, WriteMode, WriteOptions, CHUNK_SIZE,
+    AuthLevel, CountingSource, Document, DocumentBuilder, Encryption, Name, Object, RenderOptions,
+    SliceSource, WarningKind, WriteMode, WriteOptions, CHUNK_SIZE,
 };
 
 /// How many bytes opening the 120-page fixture may read.
@@ -254,6 +254,52 @@ fn a_linearized_document(pages: usize) -> Vec<u8> {
 /// [`a_linearized_document`]'s pages, saved with or without linearization and
 /// with object streams off, so the two files differ in layout alone.
 fn pages_saved(pages: usize, linearize: bool) -> Vec<u8> {
+    let base = Document::open(pages_built(pages)).expect("it opens");
+    let out = base.editor().save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        linearize,
+        object_streams: false,
+        ..WriteOptions::default()
+    });
+    written_support::rewritten("pages saved", base.cos().bytes(), &out);
+    out
+}
+
+/// [`a_linearized_document`], encrypted to restrict permissions only: the user
+/// password is empty, so the empty password every reader tries first opens it,
+/// and printing, changing, copying and annotating are withheld (`/P` -64).
+///
+/// The shape of `enc-R2,V1.pdf` and its three siblings in the qpdf corpus, with
+/// one difference that is the point of making it: their page one is text in a
+/// font they do not embed, which draws nothing in a build with no faces of its
+/// own, and these pages are paths, which draw in every build.
+fn a_sealed_linearized_document(pages: usize) -> Vec<u8> {
+    let base = Document::open(pages_built(pages)).expect("it opens");
+    let out = base.editor().save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        linearize: true,
+        object_streams: false,
+        encryption: Some(Encryption {
+            user_password: String::new(),
+            owner_password: "owner".to_string(),
+            permissions: -64,
+            entropy: [0x5A; 48],
+        }),
+        ..WriteOptions::default()
+    });
+    written_support::rewritten(
+        "pages saved linearized and encrypted",
+        base.cos().bytes(),
+        written_support::Locked {
+            bytes: out.clone(),
+            key: written_support::Key::Password(""),
+        },
+    );
+    out
+}
+
+/// The pages [`pages_saved`] saves, as the builder writes them.
+fn pages_built(pages: usize) -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
     for index in 0..pages {
         builder.add_page(200.0, 100.0, |page| {
@@ -279,15 +325,7 @@ fn pages_saved(pages: usize, linearize: bool) -> Vec<u8> {
             page.raw(&ops);
         });
     }
-    let base = Document::open(built("pages saved", builder)).expect("it opens");
-    let out = base.editor().save(&WriteOptions {
-        mode: WriteMode::Rewrite,
-        linearize,
-        object_streams: false,
-        ..WriteOptions::default()
-    });
-    written_support::rewritten("pages saved", base.cos().bytes(), &out);
-    out
+    built("pages saved", builder)
 }
 
 /// Pixels that are not the white the page started as.
@@ -900,6 +938,82 @@ fn asking_for_the_page_count_is_what_pays_for_the_tail() {
     );
 }
 
+/// An encrypted linearized file draws the page one from its head that it draws
+/// from a buffer, sealed and unsealed, and reads none of its tail doing it.
+///
+/// The shape of four files in the qpdf corpus, made here because over them the
+/// comparison holds in a `bundled-fonts` build only: their page one is text in
+/// a font they do not embed. Before the password the content stream is
+/// ciphertext (7.6.2) and neither open draws it; with the empty user password
+/// both must draw the same page. The two states draw different pages, so a
+/// render in one compared with a render in the other fails here in every
+/// build, and not only where the text draws.
+#[test]
+fn a_sealed_linearized_file_draws_page_one_from_its_head_as_a_buffer_does() {
+    let bytes = a_sealed_linearized_document(6);
+
+    let buffered = Document::open(bytes.clone()).expect("it opens from a buffer");
+    assert!(buffered.is_encrypted(), "the fixture is encrypted");
+    let sealed = buffered
+        .page(0)
+        .expect("page one")
+        .render(&RenderOptions::default());
+    buffered
+        .authenticate("")
+        .expect("the empty user password opens it");
+    let unsealed = buffered
+        .page(0)
+        .expect("page one")
+        .render(&RenderOptions::default());
+    assert!(
+        ink(&unsealed) > 1000,
+        "unsealed, page one draws its paths, in every build"
+    );
+    assert_ne!(
+        sealed.data, unsealed.data,
+        "the password changes what page one draws, or this test could not fail"
+    );
+
+    let source = Arc::new(CountingSource::new(SliceSource::new(bytes.clone())));
+    let document = Document::open_streaming(source.clone()).expect("it opens");
+    let end_of_first_page = document
+        .first_page_end()
+        .expect("the head-only path engages on an encrypted file");
+    // Taken and drawn before the password, as a caller that looks at a page
+    // and then supplies one does.
+    let page = document.page(0).expect("page one from the head");
+    assert_eq!(
+        page.render(&RenderOptions::default()).data,
+        sealed.data,
+        "sealed, the head draws the page the buffer draws"
+    );
+    document
+        .authenticate("")
+        .expect("the empty user password opens it");
+    assert_eq!(
+        document
+            .page(0)
+            .expect("page one from the head")
+            .render(&RenderOptions::default())
+            .data,
+        unsealed.data,
+        "unsealed, the head draws the page the buffer draws"
+    );
+    assert_eq!(
+        page.render(&RenderOptions::default()).data,
+        unsealed.data,
+        "and so does the page taken before the password"
+    );
+
+    let tail = end_of_first_page.div_ceil(CHUNK_SIZE) * CHUNK_SIZE..bytes.len() as u64;
+    assert!(
+        !source.touched(&tail),
+        "reads past /E ({end_of_first_page}) in a {} byte file: {:?}",
+        bytes.len(),
+        source.touching(&tail)
+    );
+}
+
 // ---- Files this project did not write ----------------------------------
 
 /// Where `cargo xtask corpus-fetch` puts the qpdf corpus, and the override for
@@ -945,6 +1059,7 @@ fn linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads() {
     let mut engaged = 0usize;
     let mut rendered = 0usize;
     let mut matched = 0usize;
+    let mut differed: Vec<String> = Vec::new();
     let mut head_only: Vec<String> = Vec::new();
     let mut trespassed: Vec<String> = Vec::new();
     for path in &files {
@@ -963,6 +1078,16 @@ fn linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads() {
             continue;
         };
         engaged += 1;
+        // The empty user password and nothing else, which is what a reader
+        // tries before it asks anyone, given before page one is drawn and
+        // given the buffered open below as well: the two renders compared are
+        // of one document in one state. Sealed, a page draws its content
+        // stream's ciphertext, which is nothing, so a sealed render agrees with
+        // an unsealed one only where that one draws nothing either -- text in
+        // a font the file does not embed, in a build with no faces of its own.
+        if document.is_encrypted() {
+            let _ = document.authenticate("");
+        }
         let Some(page) = document.page(0) else {
             continue;
         };
@@ -973,8 +1098,7 @@ fn linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads() {
         // of the wrong page passes every byte budget there is, so the two are
         // compared rather than counted.
         if let Ok(buffered) = Document::open(bytes.clone()) {
-            if document.is_encrypted() {
-                let _ = document.authenticate("");
+            if buffered.is_encrypted() {
                 let _ = buffered.authenticate("");
             }
             match buffered.page(0) {
@@ -982,6 +1106,8 @@ fn linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads() {
                     let want = reference.render(&RenderOptions::default());
                     if got.data == want.data {
                         matched += 1;
+                    } else {
+                        differed.push(name.clone());
                     }
                 }
                 None => head_only.push(name.clone()),
@@ -1015,7 +1141,8 @@ fn linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads() {
     assert_eq!(
         matched + head_only.len(),
         engaged,
-        "and every file the walk *can* answer for drew the page the walk draws"
+        "and every file the walk *can* answer for drew the page the walk draws; these did \
+         not: {differed:?}"
     );
 }
 
