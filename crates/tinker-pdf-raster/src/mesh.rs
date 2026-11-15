@@ -765,6 +765,22 @@ trait Pixels {
     /// Paints pixel `(px, py)` of `region`, `width` pixels a row, with what
     /// the interpolated inputs `mixed` paint, marking it painted.
     fn put(&mut self, region: &Region, width: u32, px: i64, py: i64, mixed: &[f64]);
+
+    /// Whether pixel `(px, py)` of `region` is painted already: false off the
+    /// buffer, where [`Pixels::put`] writes nothing either.
+    fn painted(&self, region: &Region, width: u32, px: i64, py: i64) -> bool;
+}
+
+/// The index of pixel `(px, py)` of `region`, `width` pixels a row, in a
+/// buffer of one entry a pixel; `None` before the region's first row or
+/// column.
+fn index_of(region: &Region, width: u32, px: i64, py: i64) -> Option<usize> {
+    let column = px - i64::from(region.x0);
+    let row = py - i64::from(region.y0);
+    if column < 0 || row < 0 {
+        return None;
+    }
+    Some((row as usize) * (width as usize) + column as usize)
 }
 
 /// A light draw's colour buffer and the conversion that fills it.
@@ -776,6 +792,12 @@ struct LightPixels<'p, 'a> {
 impl Pixels for LightPixels<'_, '_> {
     fn put(&mut self, region: &Region, width: u32, px: i64, py: i64, mixed: &[f64]) {
         write(self.color, region, width, px, py, (self.paint)(mixed));
+    }
+
+    fn painted(&self, region: &Region, width: u32, px: i64, py: i64) -> bool {
+        index_of(region, width, px, py)
+            .and_then(|index| self.color.get(index))
+            .is_some_and(|pixel| pixel[3] != 0)
     }
 }
 
@@ -807,6 +829,13 @@ impl Pixels for TintPixels<'_, '_> {
             tints.copy_from_slice(&self.colour);
             *painted = 0xFF;
         }
+    }
+
+    fn painted(&self, region: &Region, width: u32, px: i64, py: i64) -> bool {
+        let stride = self.channels + 1;
+        index_of(region, width, px, py)
+            .and_then(|index| self.bytes.get(index * stride + stride - 1))
+            .is_some_and(|painted| *painted != 0)
     }
 }
 
@@ -963,6 +992,10 @@ fn paint_into<P: Pixels>(draw: &MeshDraw<'_>, region: &Region, width: u32, pixel
             // found spans for it. Its centroid colour goes in the one pixel
             // its centroid falls in, which gives the fringe spread something
             // to work from; the coverage mask still decides what composites.
+            // Only into a pixel nothing painted yet: a triangle holding the
+            // pixel's centre gives it the colour interpolated there, which a
+            // centroid up to a pixel away is not, and it writes over a
+            // centroid's colour whichever triangle comes first.
             let centroid = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
             for (component, slot) in mixed.iter_mut().enumerate() {
                 *slot = (at(inputs[0], component)
@@ -972,7 +1005,12 @@ fn paint_into<P: Pixels>(draw: &MeshDraw<'_>, region: &Region, width: u32, pixel
             }
             let px = centroid.0.floor().clamp(-1.0e18, 1.0e18) as i64;
             let py = centroid.1.floor().clamp(-1.0e18, 1.0e18) as i64;
-            if px >= bounds.x0 && px < bounds.x1 && py >= bounds.y0 && py < bounds.y1 {
+            if px >= bounds.x0
+                && px < bounds.x1
+                && py >= bounds.y0
+                && py < bounds.y1
+                && !pixels.painted(region, width, px, py)
+            {
                 pixels.put(region, width, px, py, &mixed);
             }
         }
@@ -1315,6 +1353,38 @@ mod tests {
         assert_eq!(colour.r, 102, "and it is the mesh's colour, not black");
     }
 
+    /// **A speck never paints over a pixel a triangle holds the centre of**:
+    /// a triangle inside pixel (4, 4) and clear of its centre, drawn before
+    /// and after one that holds the centre, leaves the pixel the colour
+    /// interpolated at its centre, never its own centroid's; drawn alone, it
+    /// gives the pixel its centroid's colour for the fringe spread.
+    #[test]
+    fn a_speck_never_paints_over_a_pixel_a_triangle_holds_the_centre_of() {
+        let positions = [
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (0.0, 10.0),
+            (4.1, 4.1),
+            (4.3, 4.1),
+            (4.1, 4.3),
+        ];
+        let values = [0.2, 0.6, 0.4, 1.0, 1.0, 1.0];
+        let centre = draw(&positions, &values, &[[0, 1, 2]], 12)
+            .at(4, 4)
+            .expect("the big triangle holds the centre");
+        assert_ne!(centre.r, 255, "the two colours differ");
+        for triangles in [[[0, 1, 2], [3, 4, 5]], [[3, 4, 5], [0, 1, 2]]] {
+            let buffer = draw(&positions, &values, &triangles, 12);
+            assert_eq!(buffer.at(4, 4), Some(centre), "{triangles:?}");
+        }
+        let alone = draw(&positions, &values, &[[3, 4, 5]], 12);
+        assert_eq!(
+            alone.at(4, 4).map(|colour| colour.r),
+            Some(255),
+            "alone, its centroid"
+        );
+    }
+
     /// A mesh far larger than the region costs the region, not the mesh.
     #[test]
     fn a_mesh_is_bounded_by_the_region_it_is_drawn_into() {
@@ -1443,9 +1513,10 @@ mod tests {
     }
 
     /// The colour pass as it was before a row walked its span: every column of
-    /// the clamped box, through the same inside test and weights. Kept, word
-    /// for word, as the reference `a_span_walk_paints_what_the_box_walk_paints`
-    /// holds the span walk to.
+    /// the clamped box, through the same inside test and weights, and the same
+    /// centroid for a triangle that holds no pixel centre, written only into a
+    /// pixel nothing painted. Kept as the reference
+    /// `a_span_walk_paints_what_the_box_walk_paints` holds the span walk to.
     fn paint_triangles_by_box(
         draw: &MeshDraw<'_>,
         region: &Region,
@@ -1516,7 +1587,15 @@ mod tests {
                 }
                 let px = centroid.0.floor().clamp(-1.0e18, 1.0e18) as i64;
                 let py = centroid.1.floor().clamp(-1.0e18, 1.0e18) as i64;
-                if px >= bounds.x0 && px < bounds.x1 && py >= bounds.y0 && py < bounds.y1 {
+                let unpainted = index_of(region, width, px, py)
+                    .and_then(|index| color.get(index))
+                    .is_some_and(|pixel| pixel[3] == 0);
+                if px >= bounds.x0
+                    && px < bounds.x1
+                    && py >= bounds.y0
+                    && py < bounds.y1
+                    && unpainted
+                {
                     write(color, region, width, px, py, (draw.color)(&mixed));
                 }
             }

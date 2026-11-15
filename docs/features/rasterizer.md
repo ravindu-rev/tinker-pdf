@@ -713,7 +713,13 @@ area for the triangle (`a_span_divides_once`), and each input as
 exactly. A pixel whose stepped weights are not clear of zero by four times
 their error bound takes the inside test itself, so the pixels painted do not
 change, and a stepped colour is within one level of 255 of the test's
-weights' (ruling 22). One buffer rather than
+weights' (ruling 22). A triangle that holds no pixel centre puts the mean of
+its corners' inputs in the pixel its centroid falls in, and only where nothing
+has painted that pixel yet, so a triangle that holds the pixel's centre paints
+it with the inputs interpolated there whichever comes first
+(`a_speck_never_paints_over_a_pixel_a_triangle_holds_the_centre_of`): a patch
+cut finer than a pixel stays within the colour its cells interpolate, as
+10.7.3's smoothness asks. One buffer rather than
 one fill per triangle is what removes the lattice of pale seams that
 per-triangle compositing paints along every shared edge. A silhouette pixel no
 triangle's interior reaches takes its colour from a neighbour, spread two
