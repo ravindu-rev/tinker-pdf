@@ -734,7 +734,7 @@ fn msirp_moves_as_specified() {
     for (f, pv) in VECTORS {
         for flag in [0u8, 1] {
             for d in [0, 64, -100, 333, 1000] {
-                for p in 1..4usize {
+                for (p, &current) in CURRENT.iter().enumerate().skip(1) {
                     for (round_op, cut_in) in [(op::RTG, 0), (op::RDTG, 68)] {
                         let mut vm = setup(&CURRENT, &ORIGINAL, &[]);
                         let code = program(&[
@@ -751,7 +751,7 @@ fn msirp_moves_as_specified() {
                         // "Makes the distance between a point p and rp0 equal to
                         // the value specified on the stack", which the cut-in
                         // and the round state do not touch.
-                        let (c, rc) = (wide(CURRENT[p]), wide(CURRENT[0]));
+                        let (c, rc) = (wide(current), wide(CURRENT[0]));
                         let expected =
                             shifted(c, f, pv, i64::from(d) - proj(pv, c.0 - rc.0, c.1 - rc.1));
                         let case = format!("MSIRP[{flag}] {p} by {d} along {f:?} on {pv:?}");

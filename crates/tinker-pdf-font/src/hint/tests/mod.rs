@@ -273,9 +273,12 @@ pub(super) const VECTORS: [(V, V); 7] = [
     (X, SKEW),
 ];
 
+/// A round state's period, phase and threshold, in 26.6.
+pub(super) type RoundState = (i64, i64, i64);
+
 /// Each predefined round state's opcode and its period, phase and threshold
 /// in 26.6; `None` for `ROFF`.
-pub(super) const ROUNDS: [(u8, Option<(i64, i64, i64)>); 6] = [
+pub(super) const ROUNDS: [(u8, Option<RoundState>); 6] = [
     (op::RTG, Some((64, 0, 32))),
     (op::RTHG, Some((64, 32, 32))),
     (op::RTDG, Some((32, 0, 16))),
@@ -285,7 +288,7 @@ pub(super) const ROUNDS: [(u8, Option<(i64, i64, i64)>); 6] = [
 ];
 
 /// `n` rounded by a state of [`ROUNDS`].
-pub(super) fn round(n: i64, state: Option<(i64, i64, i64)>) -> i64 {
+pub(super) fn round(n: i64, state: Option<RoundState>) -> i64 {
     match state {
         None => n,
         Some((period, phase, threshold)) => {

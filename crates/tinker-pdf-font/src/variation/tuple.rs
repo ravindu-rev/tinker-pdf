@@ -453,6 +453,11 @@ mod tests {
         assert_eq!(used, fifty.len());
 
         let mut wide = vec![0x81, 0x22];
+        #[allow(
+            clippy::same_item_push,
+            reason = "each pass writes a run's control byte and then its 128 words, \
+                      not one item over and over"
+        )]
         for _ in 0..2 {
             // Two runs of 128 words, then one of 34 bytes: 290 in all.
             wide.push(0xFF);

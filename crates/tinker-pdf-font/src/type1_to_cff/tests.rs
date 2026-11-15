@@ -542,8 +542,11 @@ fn refused(glyph: Vec<u8>, extra: &[(i64, Vec<u8>)]) -> Type1CffRefusal {
 // Reading a CFF back.
 // ---------------------------------------------------------------------------
 
+/// A DICT read back, as [`parse_dict`]'s `(operator, operands)` pairs.
+type Dict = Vec<(u16, Vec<f64>)>;
+
 /// The Top DICT, the Private DICT and the String INDEX of a CFF.
-fn dicts(program: &[u8]) -> (Vec<(u16, Vec<f64>)>, Vec<(u16, Vec<f64>)>, Vec<Vec<u8>>) {
+fn dicts(program: &[u8]) -> (Dict, Dict, Vec<Vec<u8>>) {
     let header = usize::from(program[2]);
     let (_, names_end) = Index::parse(program, header).expect("a Name INDEX");
     let (top, top_end) = Index::parse(program, names_end).expect("a Top DICT INDEX");

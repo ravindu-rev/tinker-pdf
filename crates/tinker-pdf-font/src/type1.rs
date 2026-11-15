@@ -1323,9 +1323,7 @@ fn value_after<T>(data: &[u8], key: &[u8], read: impl Fn(&[u8]) -> Option<T>) ->
             continue;
         }
         let rest = data.get(after..)?;
-        let Some(start) = rest.iter().position(|b| !b.is_ascii_whitespace()) else {
-            return None;
-        };
+        let start = rest.iter().position(|b| !b.is_ascii_whitespace())?;
         if let Some(value) = read(&rest[start..]) {
             return Some(value);
         }
@@ -2211,8 +2209,8 @@ mod tests {
     /// many quantities, `callothersubr` and one `pop` a quantity.
     fn blended(masters: &[Vec<i32>], out: &mut Vec<u8>) {
         let quantities = masters[0].len();
-        for q in 0..quantities {
-            push_number(masters[0][q], out);
+        for &value in &masters[0] {
+            push_number(value, out);
         }
         for q in 0..quantities {
             for master in &masters[1..] {

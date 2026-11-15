@@ -367,6 +367,10 @@ impl Input {
     }
 }
 
+/// One size a [`Report`] holds: the size in pixels per em, its `prep`'s
+/// answer and, where that ran, glyph 0's and glyph 1's.
+pub type SizeReport = (i32, Result<(), Unhinted>, Vec<Result<Hinted, Unhinted>>);
+
 /// What hinting one input came to: the face's answer, and at each size the
 /// size's answer and then each glyph's.
 #[derive(Clone, Debug)]
@@ -375,7 +379,7 @@ pub struct Report {
     pub face: Result<(), Unhinted>,
     /// Each size hinted at, in pixels per em, with its `prep`'s answer and,
     /// where that ran, glyph 0's and glyph 1's.
-    pub sizes: Vec<(i32, Result<(), Unhinted>, Vec<Result<Hinted, Unhinted>>)>,
+    pub sizes: Vec<SizeReport>,
 }
 
 impl Report {

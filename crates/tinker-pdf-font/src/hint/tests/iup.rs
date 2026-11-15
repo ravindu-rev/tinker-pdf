@@ -13,9 +13,13 @@ use super::super::storage::Size;
 use super::super::vm::{Error, Program, Vm};
 use super::{exec, machine, op, program, push, shifted, touches, vectors, D45, SKEW, X, Y};
 
+/// One point of a test zone: its original position, its current position
+/// and its touched flags.
+type ZonePoint = ((i32, i32), (i32, i32), u8);
+
 /// A glyph zone from each point's original and current position and its
 /// touched flags, and each contour's last point. Every point is on the curve.
-fn zone(points: &[((i32, i32), (i32, i32), u8)], ends: &[usize]) -> Zone {
+fn zone(points: &[ZonePoint], ends: &[usize]) -> Zone {
     let original: Vec<Point> = points
         .iter()
         .map(|&((x, y), _, _)| Point { x, y })
@@ -81,7 +85,7 @@ fn interpolation_glyph(vertical: bool) -> Zone {
         (0, 0, false),
         (0, 0, false),
     ];
-    let points: Vec<((i32, i32), (i32, i32), u8)> = rows
+    let points: Vec<ZonePoint> = rows
         .iter()
         .enumerate()
         .map(|(i, &(original, current, touched))| {

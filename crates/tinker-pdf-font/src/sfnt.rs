@@ -420,7 +420,7 @@ impl<'a> Sfnt<'a> {
         } else if self.vorg_origin(0).is_some() {
             OriginSource::Vorg
         } else {
-            OriginSource::Cff(self.table(TAG_CFF).and_then(Cff::parse))
+            OriginSource::Cff(self.table(TAG_CFF).and_then(Cff::parse).map(Box::new))
         };
         VerticalOrigins { face: self, source }
     }
@@ -1453,7 +1453,7 @@ enum OriginSource<'a> {
     Vorg,
     /// CFF outlines without one: each glyph's charstring, through the parsed
     /// `CFF ` table, or nothing where the face has no table this crate reads.
-    Cff(Option<Cff<'a>>),
+    Cff(Option<Box<Cff<'a>>>),
 }
 
 /// A face's vertical origins, read for as many glyphs as a caller asks
@@ -2825,7 +2825,9 @@ mod tests {
             },
             terminator(),
         ]);
-        let cases: Vec<(&str, Vec<u8>, Vec<(char, u16)>)> = vec![
+        // A case's name, its face, and the glyph each character maps to.
+        type Case = (&'static str, Vec<u8>, Vec<(char, u16)>);
+        let cases: Vec<Case> = vec![
             (
                 "format 4, in order, a delta and a glyph array",
                 mapped_face(3, 1, ordered),

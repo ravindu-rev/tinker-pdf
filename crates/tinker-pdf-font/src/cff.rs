@@ -2350,9 +2350,9 @@ impl Blend<'_> {
     }
 }
 
-/// An `f64` rounded to 16.16 by the overview's conversion: `floor(x · 65536
-/// + ½) / 65536`. Every step is exact in IEEE 754 for a value a charstring
-/// carries.
+/// An `f64` rounded to 16.16 by the overview's conversion:
+/// `floor(x · 65536 + ½) / 65536`. Every step is exact in IEEE 754 for a
+/// value a charstring carries.
 pub(crate) fn round_to_fixed(value: f64) -> f64 {
     (value * 65_536.0 + 0.5).floor() / 65_536.0
 }

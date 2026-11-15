@@ -103,7 +103,7 @@ impl Face {
     /// The face's bytes.
     pub fn build(&self) -> Vec<u8> {
         let mut tables = self.tables.clone();
-        tables.sort_by(|a, b| a.0.cmp(&b.0));
+        tables.sort_by_key(|table| table.0);
         let count = u16::try_from(tables.len()).expect("a test face has few tables");
         let mut power = 1u16;
         let mut selector = 0u16;
@@ -1575,7 +1575,7 @@ pub mod spec {
                         .find(|r| **r > target)
                         .or(referenced.first())
                         .expect("a referenced point");
-                    for axis in 0..2 {
+                    for (axis, slot) in net[target].iter_mut().enumerate() {
                         let coordinate = |i: usize| {
                             i128::from(if axis == 0 { points[i].0 } else { points[i].1 })
                         };
@@ -1598,7 +1598,7 @@ pub mod spec {
                             // proportion is (t − p) / (n − p).
                             nearest(((n - t) * dp + (t - p) * dn) * 65_536, n - p)
                         };
-                        net[target][axis] += nearest(inferred * i128::from(scalar), 65_536) as i64;
+                        *slot += nearest(inferred * i128::from(scalar), 65_536) as i64;
                     }
                 }
             }
@@ -2619,7 +2619,7 @@ pub fn glyf_fixture() -> GlyfFixture {
         .map(|(row, (tag, _))| (*tag, 0, u16::try_from(row).expect("few rows")))
         .collect();
     mvar_records.push((*b"gsp0", 1, 0));
-    mvar_records.sort_by(|a, b| a.0.cmp(&b.0));
+    mvar_records.sort_by_key(|record| record.0);
 
     GlyfFixture {
         family: "Tinker Var Glyf",

@@ -82,13 +82,16 @@ enum Encoding {
     Codes(Vec<Option<Vec<u8>>>),
 }
 
+/// One `/CharStrings` entry: a glyph name and its glyph index.
+type NamedGlyph = (Vec<u8>, u16);
+
 /// A Type 42 program, read.
 #[derive(Clone, Debug)]
 pub struct Type42 {
     /// The `/sfnts` strings, each without its padding byte, concatenated.
     face: Vec<u8>,
     /// `/CharStrings`, in the order written: glyph name and glyph index.
-    charstrings: Vec<(Vec<u8>, u16)>,
+    charstrings: Vec<NamedGlyph>,
     /// The first index each name was given.
     by_name: BTreeMap<Vec<u8>, u16>,
     /// How many `/CharStrings` entries were procedures, passed over.
@@ -667,7 +670,7 @@ fn unhex(hex: &[u8]) -> Vec<u8> {
 /// `/CharStrings`: `<n> dict dup begin … end`, or `<< … >>`, each entry a
 /// name and a glyph index (`def` after it in the first form), or a name and
 /// a procedure, which is passed over and counted.
-fn charstrings(tokens: &[Token<'_>]) -> Result<(Vec<(Vec<u8>, u16)>, usize), Type42Refusal> {
+fn charstrings(tokens: &[Token<'_>]) -> Result<(Vec<NamedGlyph>, usize), Type42Refusal> {
     let at = tokens
         .iter()
         .position(|t| *t == Token::Name(b"CharStrings"))
@@ -692,7 +695,7 @@ fn charstrings(tokens: &[Token<'_>]) -> Result<(Vec<(Vec<u8>, u16)>, usize), Typ
         _ => return Err(Type42Refusal::CharStrings),
     };
 
-    let mut out: Vec<(Vec<u8>, u16)> = Vec::new();
+    let mut out: Vec<NamedGlyph> = Vec::new();
     let mut procedures = 0usize;
     loop {
         match tokens.get(i) {

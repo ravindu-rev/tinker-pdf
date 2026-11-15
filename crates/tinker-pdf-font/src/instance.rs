@@ -302,7 +302,12 @@ pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, Insta
             glyph_count,
         )?)
     } else if let Some(table) = sfnt.table(tag_value(TAG_CFF2)) {
-        Outlines::Cff2(Cff2Instance::read(table, &space, &location, glyph_count)?)
+        Outlines::Cff2(Box::new(Cff2Instance::read(
+            table,
+            &space,
+            &location,
+            glyph_count,
+        )?))
     } else {
         Outlines::None
     };
@@ -910,11 +915,9 @@ fn varied_glyph(
             let mut record = *record;
             if record.offset_is_xy() {
                 if let Some(delta) = deltas.get(index) {
-                    for axis in 0..2 {
-                        let moved = Fixed::from_int(record.arguments[axis])
-                            .saturating_add(delta[axis])
-                            .round();
-                        record.arguments[axis] = i32::try_from(moved)
+                    for (argument, &shift) in record.arguments.iter_mut().zip(delta) {
+                        let moved = Fixed::from_int(*argument).saturating_add(shift).round();
+                        *argument = i32::try_from(moved)
                             .ok()
                             .filter(|v| i16::try_from(*v).is_ok())
                             .ok_or(InstanceError::CoordinateRange { glyph })?;
@@ -1361,7 +1364,7 @@ impl Metrics {
 /// outlines are in a table that does not vary, copied as it is.
 enum Outlines<'a> {
     Glyf(GlyfInstance),
-    Cff2(Cff2Instance<'a>),
+    Cff2(Box<Cff2Instance<'a>>),
     None,
 }
 
@@ -1691,7 +1694,7 @@ fn cff_table(parts: &CffParts) -> Option<Vec<u8>> {
         None
     };
 
-    let name_index = write_index(&[parts.name.clone()])?;
+    let name_index = write_index(std::slice::from_ref(&parts.name))?;
     let string_index = write_index(&strings)?;
     let gsubrs = write_index(&[])?;
     let charstrings = write_index(&parts.charstrings)?;

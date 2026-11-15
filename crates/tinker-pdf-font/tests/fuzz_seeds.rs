@@ -764,498 +764,483 @@ fn hinting_seeds() -> Vec<HintingSeed> {
         bytes: input.encode(),
         comes: Comes::Fails(program, error),
     };
-    let mut seeds = Vec::new();
-
-    // The stack, logic, arithmetic and DEBUG, each operand traced: 5 7 9,
-    // DUP and POP, SWAP to 5 9 7, DEPTH and CINDEX 3 to 5 9 7 5, MINDEX 2 to
-    // 5 9 5 7, ROLL to 5 5 7 9, CLEAR; 1 2 3 300 −2, ADD, SUB, MUL to 1 −9,
-    // ABS, NEG, MAX to 1, DIV by 128 to 0, MIN, FLOOR, CEILING of 65 and the
-    // six comparisons, AND, OR and NOT, each leaving one value, and DEBUG
-    // popping the last.
-    seeds.push(hints(
-        "stack-and-arithmetic",
-        hinting::Input {
-            glyph: cat(&[
-                &push(&[5, 7, 9]),
-                &[DUP, POP, SWAP, DEPTH, CINDEX],
-                &push(&[2]),
-                &[MINDEX, ROLL, CLEAR],
-                &[NPUSHB, 3, 1, 2, 3],
-                &[NPUSHW, 2, 0x01, 0x2C, 0xFF, 0xFE],
-                &[ADD, SUB, MUL, ABS, NEG, MAX],
-                &push(&[128]),
-                &[DIV],
-                &push(&[100]),
-                &[MIN, FLOOR],
-                &push(&[65]),
-                &[CEILING, LT],
-                &push(&[1]),
-                &[LTEQ],
-                &push(&[0]),
-                &[GT],
-                &push(&[1]),
-                &[GTEQ],
-                &push(&[1]),
-                &[EQ],
-                &push(&[0]),
-                &[NEQ],
-                &push(&[1]),
-                &[AND],
-                &push(&[0]),
-                &[OR, NOT, DEBUG],
-            ]),
-            ..base_input()
+    vec![
+        // The stack, logic, arithmetic and DEBUG, each operand traced: 5 7 9,
+        // DUP and POP, SWAP to 5 9 7, DEPTH and CINDEX 3 to 5 9 7 5, MINDEX 2 to
+        // 5 9 5 7, ROLL to 5 5 7 9, CLEAR; 1 2 3 300 −2, ADD, SUB, MUL to 1 −9,
+        // ABS, NEG, MAX to 1, DIV by 128 to 0, MIN, FLOOR, CEILING of 65 and the
+        // six comparisons, AND, OR and NOT, each leaving one value, and DEBUG
+        // popping the last.
+        hints(
+            "stack-and-arithmetic",
+            hinting::Input {
+                glyph: cat(&[
+                    &push(&[5, 7, 9]),
+                    &[DUP, POP, SWAP, DEPTH, CINDEX],
+                    &push(&[2]),
+                    &[MINDEX, ROLL, CLEAR],
+                    &[NPUSHB, 3, 1, 2, 3],
+                    &[NPUSHW, 2, 0x01, 0x2C, 0xFF, 0xFE],
+                    &[ADD, SUB, MUL, ABS, NEG, MAX],
+                    &push(&[128]),
+                    &[DIV],
+                    &push(&[100]),
+                    &[MIN, FLOOR],
+                    &push(&[65]),
+                    &[CEILING, LT],
+                    &push(&[1]),
+                    &[LTEQ],
+                    &push(&[0]),
+                    &[GT],
+                    &push(&[1]),
+                    &[GTEQ],
+                    &push(&[1]),
+                    &[EQ],
+                    &push(&[0]),
+                    &[NEQ],
+                    &push(&[1]),
+                    &[AND],
+                    &push(&[0]),
+                    &[OR, NOT, DEBUG],
+                ]),
+                ..base_input()
+            },
+        ),
+        // Flow: fpgm defines function 0, function 1 holding an IF and an ELSE,
+        // and an instruction for 0x91, which no instruction of the set has; the
+        // glyph calls 0, loops it three times, calls 1, takes an IF's false and
+        // true arms, and jumps over a push by JMPR, JROT on true and JROF on
+        // false, falls through a JROF on true, and runs 0x91.
+        hints(
+            "flow-and-definitions",
+            hinting::Input {
+                fpgm: cat(&[
+                    &push(&[0]),
+                    &[FDEF],
+                    &push(&[1]),
+                    &[POP, ENDF],
+                    &push(&[1]),
+                    &[FDEF],
+                    &push(&[1]),
+                    &[IF],
+                    &push(&[2]),
+                    &[POP, ELSE],
+                    &push(&[3]),
+                    &[POP, EIF, ENDF],
+                    &push(&[0x91]),
+                    &[IDEF],
+                    &push(&[4]),
+                    &[POP, ENDF],
+                ]),
+                glyph: cat(&[
+                    &push(&[0]),
+                    &[CALL],
+                    &push(&[3, 0]),
+                    &[LOOPCALL],
+                    &push(&[1]),
+                    &[CALL],
+                    &push(&[0]),
+                    &[IF],
+                    &push(&[9]),
+                    &[POP, EIF],
+                    &push(&[1]),
+                    &[IF],
+                    &push(&[9]),
+                    &[POP, ELSE],
+                    &push(&[8]),
+                    &[POP, EIF],
+                    &push(&[3]),
+                    &[JMPR],
+                    &push(&[99]),
+                    &push(&[3, 1]),
+                    &[JROT],
+                    &push(&[98]),
+                    &push(&[3, 0]),
+                    &[JROF],
+                    &push(&[97]),
+                    &push(&[3, 1]),
+                    &[JROF, 0x91],
+                ]),
+                ..base_input()
+            },
+        ),
+        // Storage, the control value table and the engine's answers, in prep
+        // and in the glyph: WS, RS, WCVTP, WCVTF, RCVT, MPPEM, MPS, GETINFO for
+        // one selector and for all, and INSTCTRL, which in the glyph's program
+        // pops its two values and changes nothing.
+        hints(
+            "storage-and-the-engine",
+            hinting::Input {
+                prep: cat(&[
+                    &push(&[0, 77]),
+                    &[WS],
+                    &push(&[1, 64]),
+                    &[WCVTP],
+                    &push(&[2, 100]),
+                    &[WCVTF],
+                    &push(&[0]),
+                    &[RS, POP],
+                    &push(&[1]),
+                    &[RCVT, POP, MPPEM, POP, MPS, POP],
+                    &push(&[1]),
+                    &[GETINFO, POP],
+                    &push(&[0x3F]),
+                    &[GETINFO, POP],
+                    &push(&[0, 3]),
+                    &[INSTCTRL],
+                ]),
+                glyph: cat(&[
+                    &push(&[0]),
+                    &[RS],
+                    &push(&[1]),
+                    &[RCVT, POP, POP, MPPEM, POP],
+                    &push(&[33]),
+                    &[GETINFO, POP],
+                    &push(&[0, 1]),
+                    &[INSTCTRL],
+                ]),
+                ..base_input()
+            },
+        ),
+        // The graphics state: every vector instruction, the reference points,
+        // the zone pointers, the loop, every round state with SROUND's and
+        // S45ROUND's, ROUND, NROUND, ODD and EVEN, the distance and delta
+        // settings, auto flip, SANGW, and the scan converter's.
+        hints(
+            "graphics-state",
+            hinting::Input {
+                glyph: cat(&[
+                    &[SVTCA, SVTCA + 1, SPVTCA, SPVTCA + 1, SFVTCA, SFVTCA + 1],
+                    &push(&[2, 1]),
+                    &[SPVTL],
+                    &push(&[2, 1]),
+                    &[SPVTL + 1],
+                    &push(&[3, 0]),
+                    &[SFVTL],
+                    &push(&[3, 0]),
+                    &[SFVTL + 1],
+                    &push(&[6, 4]),
+                    &[SDPVTL],
+                    &push(&[6, 4]),
+                    &[SDPVTL + 1],
+                    &push(&[0, 16_384]),
+                    &[SPVFS],
+                    &push(&[16_384, 0]),
+                    &[SFVFS, GPV, POP, POP, GFV, POP, POP, SFVTPV],
+                    &push(&[0]),
+                    &[SRP0],
+                    &push(&[1]),
+                    &[SRP1],
+                    &push(&[2]),
+                    &[SRP2],
+                    &push(&[1]),
+                    &[SZP0],
+                    &push(&[1]),
+                    &[SZP1],
+                    &push(&[1]),
+                    &[SZP2],
+                    &push(&[1]),
+                    &[SZPS],
+                    &push(&[1]),
+                    &[SLOOP, RTG, RTHG, RTDG, RDTG, RUTG, ROFF],
+                    &push(&[0x48]),
+                    &[SROUND],
+                    &push(&[0x48]),
+                    &[S45ROUND],
+                    &push(&[100]),
+                    &[ROUND, POP],
+                    &push(&[100]),
+                    &[ROUND + 3, POP],
+                    &push(&[100]),
+                    &[NROUND, POP],
+                    &push(&[64]),
+                    &[ODD, POP],
+                    &push(&[64]),
+                    &[EVEN, POP],
+                    &push(&[64]),
+                    &[SMD],
+                    &push(&[68]),
+                    &[SCVTCI],
+                    &push(&[0]),
+                    &[SSWCI],
+                    &push(&[0]),
+                    &[SSW, FLIPON, FLIPOFF],
+                    &push(&[0]),
+                    &[SANGW],
+                    &push(&[9]),
+                    &[SDB],
+                    &push(&[3]),
+                    &[SDS],
+                    &push(&[0x1FF]),
+                    &[SCANCTRL],
+                    &push(&[4]),
+                    &[SCANTYPE, SVTCA + 1],
+                ]),
+                ..base_input()
+            },
+        ),
+        // Measuring and moving, across and then up: GC both ways, SCFS, MD both
+        // ways, MDAP both ways, MIAP both ways, MSIRP both ways, MDRP and MIRP
+        // under several of their flag sets, every point and CVT entry in range.
+        hints(
+            "measuring-and-moving",
+            hinting::Input {
+                glyph: cat(&[
+                    &[SVTCA + 1],
+                    &push(&[0]),
+                    &[GC, POP],
+                    &push(&[0]),
+                    &[GC + 1, POP],
+                    &push(&[0, 128]),
+                    &[SCFS],
+                    &push(&[2, 1]),
+                    &[MD, POP],
+                    &push(&[2, 1]),
+                    &[MD + 1, POP],
+                    &push(&[0]),
+                    &[MDAP],
+                    &push(&[1]),
+                    &[MDAP + 1],
+                    &push(&[2, 0]),
+                    &[MIAP],
+                    &push(&[3, 1]),
+                    &[MIAP + 1],
+                    &push(&[4, 64]),
+                    &[MSIRP],
+                    &push(&[5, 32]),
+                    &[MSIRP + 1],
+                    &push(&[6]),
+                    &[MDRP + 0x04],
+                    &push(&[7]),
+                    &[MDRP + 0x0D],
+                    &push(&[4]),
+                    &[MDRP + 0x16],
+                    &push(&[5, 2]),
+                    &[MIRP + 0x05],
+                    &push(&[6, 3]),
+                    &[MIRP + 0x1E, SVTCA],
+                    &push(&[1]),
+                    &[MDAP + 1],
+                    &push(&[2, 0]),
+                    &[MIAP + 1],
+                    &push(&[3]),
+                    &[MDRP + 0x04],
+                ]),
+                ..base_input()
+            },
+        ),
+        // The other point instructions, across: SHP and SHC by rp2 and by rp1,
+        // SHZ, SHPIX, IP between points 0 and 2, ALIGNRP, ALIGNPTS, ISECT of the
+        // bottom edge and the inner contour's left side, UTP, FLIPPT, FLIPRGON,
+        // FLIPRGOFF and AA.
+        hints(
+            "shifting-and-interpolating",
+            hinting::Input {
+                glyph: cat(&[
+                    &[SVTCA + 1],
+                    &push(&[0]),
+                    &[SRP0],
+                    &push(&[1]),
+                    &[SRP1],
+                    &push(&[2]),
+                    &[SRP2],
+                    &push(&[3]),
+                    &[SHP],
+                    &push(&[4]),
+                    &[SHP + 1],
+                    &push(&[1]),
+                    &[SHC],
+                    &push(&[0]),
+                    &[SHC + 1],
+                    &push(&[1]),
+                    &[SHZ],
+                    &push(&[2, 32]),
+                    &[SHPIX],
+                    &push(&[0]),
+                    &[SRP1],
+                    &push(&[5]),
+                    &[IP],
+                    &push(&[0]),
+                    &[SRP0],
+                    &push(&[3]),
+                    &[ALIGNRP],
+                    &push(&[1, 2]),
+                    &[ALIGNPTS],
+                    &push(&[6, 0, 1, 4, 7]),
+                    &[ISECT],
+                    &push(&[6]),
+                    &[UTP],
+                    &push(&[5]),
+                    &[FLIPPT],
+                    &push(&[4, 5]),
+                    &[FLIPRGON],
+                    &push(&[4, 5]),
+                    &[FLIPRGOFF],
+                    &push(&[0]),
+                    &[AA],
+                ]),
+                ..base_input()
+            },
+        ),
+        // Interpolation and exceptions: IUP both ways after points touched each
+        // way, DELTAP1 to DELTAP3 in the glyph, DELTAC1 to DELTAC3 in prep.
+        hints(
+            "interpolation-and-exceptions",
+            hinting::Input {
+                prep: cat(&[
+                    &push(&[0x0F, 0, 1]),
+                    &[DELTAC1],
+                    &push(&[0x0F, 1, 1]),
+                    &[DELTAC2],
+                    &push(&[0x0F, 2, 1]),
+                    &[DELTAC3],
+                ]),
+                glyph: cat(&[
+                    &[SVTCA + 1],
+                    &push(&[0]),
+                    &[MDAP + 1],
+                    &push(&[2]),
+                    &[MDAP + 1, IUP + 1, SVTCA],
+                    &push(&[1]),
+                    &[MDAP + 1, IUP],
+                    &push(&[0x3F, 1, 1]),
+                    &[DELTAP1],
+                    &push(&[0x0F, 2, 1]),
+                    &[DELTAP2],
+                    &push(&[0x0F, 3, 1]),
+                    &[DELTAP3],
+                ]),
+                ..base_input()
+            },
+        ),
+        // The composite every way it places a component: the first's offset
+        // rounded to the grid and its metrics taken, the second matched by a
+        // point and scaled by a half, and the composite's own program over its
+        // sixteen points.
+        hints(
+            "composites-placed-every-way",
+            hinting::Input {
+                options: hinting::ROUND_XY
+                    | hinting::MATCHED
+                    | hinting::SCALED
+                    | hinting::MY_METRICS,
+                glyph: cat(&[&[SVTCA + 1], &push(&[0]), &[MDAP + 1]]),
+                composite: cat(&[
+                    &[SVTCA + 1],
+                    &push(&[0]),
+                    &[MDAP + 1],
+                    &push(&[9]),
+                    &[MDAP + 1, IUP + 1],
+                ]),
+                ..base_input()
+            },
+        ),
+        // maxp at every ceiling: function 32 767 defined and called, storage
+        // location 32 767 written and read, twilight point 16 383 moved.
+        hints(
+            "maxp-at-its-ceilings",
+            hinting::Input {
+                profile: [u16::MAX; 5],
+                fpgm: cat(&[&push(&[32_767]), &[FDEF], &push(&[1]), &[POP, ENDF]]),
+                prep: cat(&[&push(&[32_767, 5]), &[WS]]),
+                glyph: cat(&[
+                    &push(&[0]),
+                    &[SZP0],
+                    &push(&[16_383]),
+                    &[MDAP + 1],
+                    &push(&[1]),
+                    &[SZP0],
+                    &push(&[32_767]),
+                    &[CALL],
+                    &push(&[32_767]),
+                    &[RS, POP],
+                ]),
+                ..base_input()
+            },
+        ),
+        // A gasp that grid-fits to 16 pixels: 12 hints and 33 is declined.
+        HintingSeed {
+            name: "gasp-declines-past-16",
+            bytes: hinting::Input {
+                sizes: 0b0010_1000,
+                options: hinting::GASP,
+                glyph: cat(&[&[SVTCA + 1], &push(&[0]), &[MDAP + 1]]),
+                ..base_input()
+            }
+            .encode(),
+            comes: Comes::Declined,
         },
-    ));
-
-    // Flow: fpgm defines function 0, function 1 holding an IF and an ELSE,
-    // and an instruction for 0x91, which no instruction of the set has; the
-    // glyph calls 0, loops it three times, calls 1, takes an IF's false and
-    // true arms, and jumps over a push by JMPR, JROT on true and JROF on
-    // false, falls through a JROF on true, and runs 0x91.
-    seeds.push(hints(
-        "flow-and-definitions",
-        hinting::Input {
-            fpgm: cat(&[
-                &push(&[0]),
-                &[FDEF],
-                &push(&[1]),
-                &[POP, ENDF],
-                &push(&[1]),
-                &[FDEF],
-                &push(&[1]),
-                &[IF],
-                &push(&[2]),
-                &[POP, ELSE],
-                &push(&[3]),
-                &[POP, EIF, ENDF],
-                &push(&[0x91]),
-                &[IDEF],
-                &push(&[4]),
-                &[POP, ENDF],
-            ]),
-            glyph: cat(&[
-                &push(&[0]),
-                &[CALL],
-                &push(&[3, 0]),
-                &[LOOPCALL],
-                &push(&[1]),
-                &[CALL],
-                &push(&[0]),
-                &[IF],
-                &push(&[9]),
-                &[POP, EIF],
-                &push(&[1]),
-                &[IF],
-                &push(&[9]),
-                &[POP, ELSE],
-                &push(&[8]),
-                &[POP, EIF],
-                &push(&[3]),
-                &[JMPR],
-                &push(&[99]),
-                &push(&[3, 1]),
-                &[JROT],
-                &push(&[98]),
-                &push(&[3, 0]),
-                &[JROF],
-                &push(&[97]),
-                &push(&[3, 1]),
-                &[JROF, 0x91],
-            ]),
-            ..base_input()
+        // Every size, from a pixel to 1 024, monochrome and at integer sizes,
+        // prep turning dropout control on.
+        hints(
+            "every-size-monochrome-and-integer",
+            hinting::Input {
+                sizes: 0xFF,
+                options: hinting::MONOCHROME | hinting::INTEGER_PPEM,
+                prep: cat(&[&push(&[0x1FF]), &[SCANCTRL], &push(&[5]), &[SCANTYPE]]),
+                glyph: cat(&[&[SVTCA + 1], &push(&[0]), &[MDAP + 1, IUP + 1]]),
+                ..base_input()
+            },
+        ),
+        // The empty input: every field zero, no program and no point.
+        HintingSeed {
+            name: "empty",
+            bytes: Vec::new(),
+            comes: Comes::Hints,
         },
-    ));
-
-    // Storage, the control value table and the engine's answers, in prep
-    // and in the glyph: WS, RS, WCVTP, WCVTF, RCVT, MPPEM, MPS, GETINFO for
-    // one selector and for all, and INSTCTRL, which in the glyph's program
-    // pops its two values and changes nothing.
-    seeds.push(hints(
-        "storage-and-the-engine",
-        hinting::Input {
-            prep: cat(&[
-                &push(&[0, 77]),
-                &[WS],
-                &push(&[1, 64]),
-                &[WCVTP],
-                &push(&[2, 100]),
-                &[WCVTF],
-                &push(&[0]),
-                &[RS, POP],
-                &push(&[1]),
-                &[RCVT, POP, MPPEM, POP, MPS, POP],
-                &push(&[1]),
-                &[GETINFO, POP],
-                &push(&[0x3F]),
-                &[GETINFO, POP],
-                &push(&[0, 3]),
-                &[INSTCTRL],
-            ]),
-            glyph: cat(&[
-                &push(&[0]),
-                &[RS],
-                &push(&[1]),
-                &[RCVT, POP, POP, MPPEM, POP],
-                &push(&[33]),
-                &[GETINFO, POP],
-                &push(&[0, 1]),
-                &[INSTCTRL],
-            ]),
-            ..base_input()
-        },
-    ));
-
-    // The graphics state: every vector instruction, the reference points,
-    // the zone pointers, the loop, every round state with SROUND's and
-    // S45ROUND's, ROUND, NROUND, ODD and EVEN, the distance and delta
-    // settings, auto flip, SANGW, and the scan converter's.
-    seeds.push(hints(
-        "graphics-state",
-        hinting::Input {
-            glyph: cat(&[
-                &[SVTCA, SVTCA + 1, SPVTCA, SPVTCA + 1, SFVTCA, SFVTCA + 1],
-                &push(&[2, 1]),
-                &[SPVTL],
-                &push(&[2, 1]),
-                &[SPVTL + 1],
-                &push(&[3, 0]),
-                &[SFVTL],
-                &push(&[3, 0]),
-                &[SFVTL + 1],
-                &push(&[6, 4]),
-                &[SDPVTL],
-                &push(&[6, 4]),
-                &[SDPVTL + 1],
-                &push(&[0, 16_384]),
-                &[SPVFS],
-                &push(&[16_384, 0]),
-                &[SFVFS, GPV, POP, POP, GFV, POP, POP, SFVTPV],
-                &push(&[0]),
-                &[SRP0],
-                &push(&[1]),
-                &[SRP1],
-                &push(&[2]),
-                &[SRP2],
-                &push(&[1]),
-                &[SZP0],
-                &push(&[1]),
-                &[SZP1],
-                &push(&[1]),
-                &[SZP2],
-                &push(&[1]),
-                &[SZPS],
-                &push(&[1]),
-                &[SLOOP, RTG, RTHG, RTDG, RDTG, RUTG, ROFF],
-                &push(&[0x48]),
-                &[SROUND],
-                &push(&[0x48]),
-                &[S45ROUND],
-                &push(&[100]),
-                &[ROUND, POP],
-                &push(&[100]),
-                &[ROUND + 3, POP],
-                &push(&[100]),
-                &[NROUND, POP],
-                &push(&[64]),
-                &[ODD, POP],
-                &push(&[64]),
-                &[EVEN, POP],
-                &push(&[64]),
-                &[SMD],
-                &push(&[68]),
-                &[SCVTCI],
-                &push(&[0]),
-                &[SSWCI],
-                &push(&[0]),
-                &[SSW, FLIPON, FLIPOFF],
-                &push(&[0]),
-                &[SANGW],
-                &push(&[9]),
-                &[SDB],
-                &push(&[3]),
-                &[SDS],
-                &push(&[0x1FF]),
-                &[SCANCTRL],
-                &push(&[4]),
-                &[SCANTYPE, SVTCA + 1],
-            ]),
-            ..base_input()
-        },
-    ));
-
-    // Measuring and moving, across and then up: GC both ways, SCFS, MD both
-    // ways, MDAP both ways, MIAP both ways, MSIRP both ways, MDRP and MIRP
-    // under several of their flag sets, every point and CVT entry in range.
-    seeds.push(hints(
-        "measuring-and-moving",
-        hinting::Input {
-            glyph: cat(&[
-                &[SVTCA + 1],
-                &push(&[0]),
-                &[GC, POP],
-                &push(&[0]),
-                &[GC + 1, POP],
-                &push(&[0, 128]),
-                &[SCFS],
-                &push(&[2, 1]),
-                &[MD, POP],
-                &push(&[2, 1]),
-                &[MD + 1, POP],
-                &push(&[0]),
-                &[MDAP],
-                &push(&[1]),
-                &[MDAP + 1],
-                &push(&[2, 0]),
-                &[MIAP],
-                &push(&[3, 1]),
-                &[MIAP + 1],
-                &push(&[4, 64]),
-                &[MSIRP],
-                &push(&[5, 32]),
-                &[MSIRP + 1],
-                &push(&[6]),
-                &[MDRP + 0x04],
-                &push(&[7]),
-                &[MDRP + 0x0D],
-                &push(&[4]),
-                &[MDRP + 0x16],
-                &push(&[5, 2]),
-                &[MIRP + 0x05],
-                &push(&[6, 3]),
-                &[MIRP + 0x1E, SVTCA],
-                &push(&[1]),
-                &[MDAP + 1],
-                &push(&[2, 0]),
-                &[MIAP + 1],
-                &push(&[3]),
-                &[MDRP + 0x04],
-            ]),
-            ..base_input()
-        },
-    ));
-
-    // The other point instructions, across: SHP and SHC by rp2 and by rp1,
-    // SHZ, SHPIX, IP between points 0 and 2, ALIGNRP, ALIGNPTS, ISECT of the
-    // bottom edge and the inner contour's left side, UTP, FLIPPT, FLIPRGON,
-    // FLIPRGOFF and AA.
-    seeds.push(hints(
-        "shifting-and-interpolating",
-        hinting::Input {
-            glyph: cat(&[
-                &[SVTCA + 1],
-                &push(&[0]),
-                &[SRP0],
-                &push(&[1]),
-                &[SRP1],
-                &push(&[2]),
-                &[SRP2],
-                &push(&[3]),
-                &[SHP],
-                &push(&[4]),
-                &[SHP + 1],
-                &push(&[1]),
-                &[SHC],
-                &push(&[0]),
-                &[SHC + 1],
-                &push(&[1]),
-                &[SHZ],
-                &push(&[2, 32]),
-                &[SHPIX],
-                &push(&[0]),
-                &[SRP1],
-                &push(&[5]),
-                &[IP],
-                &push(&[0]),
-                &[SRP0],
-                &push(&[3]),
-                &[ALIGNRP],
-                &push(&[1, 2]),
-                &[ALIGNPTS],
-                &push(&[6, 0, 1, 4, 7]),
-                &[ISECT],
-                &push(&[6]),
-                &[UTP],
-                &push(&[5]),
-                &[FLIPPT],
-                &push(&[4, 5]),
-                &[FLIPRGON],
-                &push(&[4, 5]),
-                &[FLIPRGOFF],
-                &push(&[0]),
-                &[AA],
-            ]),
-            ..base_input()
-        },
-    ));
-
-    // Interpolation and exceptions: IUP both ways after points touched each
-    // way, DELTAP1 to DELTAP3 in the glyph, DELTAC1 to DELTAC3 in prep.
-    seeds.push(hints(
-        "interpolation-and-exceptions",
-        hinting::Input {
-            prep: cat(&[
-                &push(&[0x0F, 0, 1]),
-                &[DELTAC1],
-                &push(&[0x0F, 1, 1]),
-                &[DELTAC2],
-                &push(&[0x0F, 2, 1]),
-                &[DELTAC3],
-            ]),
-            glyph: cat(&[
-                &[SVTCA + 1],
-                &push(&[0]),
-                &[MDAP + 1],
-                &push(&[2]),
-                &[MDAP + 1, IUP + 1, SVTCA],
-                &push(&[1]),
-                &[MDAP + 1, IUP],
-                &push(&[0x3F, 1, 1]),
-                &[DELTAP1],
-                &push(&[0x0F, 2, 1]),
-                &[DELTAP2],
-                &push(&[0x0F, 3, 1]),
-                &[DELTAP3],
-            ]),
-            ..base_input()
-        },
-    ));
-
-    // The composite every way it places a component: the first's offset
-    // rounded to the grid and its metrics taken, the second matched by a
-    // point and scaled by a half, and the composite's own program over its
-    // sixteen points.
-    seeds.push(hints(
-        "composites-placed-every-way",
-        hinting::Input {
-            options: hinting::ROUND_XY | hinting::MATCHED | hinting::SCALED | hinting::MY_METRICS,
-            glyph: cat(&[&[SVTCA + 1], &push(&[0]), &[MDAP + 1]]),
-            composite: cat(&[
-                &[SVTCA + 1],
-                &push(&[0]),
-                &[MDAP + 1],
-                &push(&[9]),
-                &[MDAP + 1, IUP + 1],
-            ]),
-            ..base_input()
-        },
-    ));
-
-    // maxp at every ceiling: function 32 767 defined and called, storage
-    // location 32 767 written and read, twilight point 16 383 moved.
-    seeds.push(hints(
-        "maxp-at-its-ceilings",
-        hinting::Input {
-            profile: [u16::MAX; 5],
-            fpgm: cat(&[&push(&[32_767]), &[FDEF], &push(&[1]), &[POP, ENDF]]),
-            prep: cat(&[&push(&[32_767, 5]), &[WS]]),
-            glyph: cat(&[
-                &push(&[0]),
-                &[SZP0],
-                &push(&[16_383]),
-                &[MDAP + 1],
-                &push(&[1]),
-                &[SZP0],
-                &push(&[32_767]),
-                &[CALL],
-                &push(&[32_767]),
-                &[RS, POP],
-            ]),
-            ..base_input()
-        },
-    ));
-
-    // A gasp that grid-fits to 16 pixels: 12 hints and 33 is declined.
-    seeds.push(HintingSeed {
-        name: "gasp-declines-past-16",
-        bytes: hinting::Input {
-            sizes: 0b0010_1000,
-            options: hinting::GASP,
-            glyph: cat(&[&[SVTCA + 1], &push(&[0]), &[MDAP + 1]]),
-            ..base_input()
-        }
-        .encode(),
-        comes: Comes::Declined,
-    });
-
-    // Every size, from a pixel to 1 024, monochrome and at integer sizes,
-    // prep turning dropout control on.
-    seeds.push(hints(
-        "every-size-monochrome-and-integer",
-        hinting::Input {
-            sizes: 0xFF,
-            options: hinting::MONOCHROME | hinting::INTEGER_PPEM,
-            prep: cat(&[&push(&[0x1FF]), &[SCANCTRL], &push(&[5]), &[SCANTYPE]]),
-            glyph: cat(&[&[SVTCA + 1], &push(&[0]), &[MDAP + 1, IUP + 1]]),
-            ..base_input()
-        },
-    ));
-
-    // The empty input: every field zero, no program and no point.
-    seeds.push(HintingSeed {
-        name: "empty",
-        bytes: Vec::new(),
-        comes: Comes::Hints,
-    });
-
-    // fpgm jumps back to its own start for ever: −3 pushed, then JMPR.
-    seeds.push(fails(
-        "fpgm-runs-to-its-budget",
-        hinting::Input {
-            fpgm: vec![PUSHW, 0xFF, 0xFD, JMPR],
-            ..base_input()
-        },
-        Program::Font,
-        HintError::Budget,
-    ));
-
-    // Function 0 calls itself, past 64 nested calls.
-    seeds.push(fails(
-        "calls-nest-past-their-depth",
-        hinting::Input {
-            fpgm: cat(&[&push(&[0]), &[FDEF], &push(&[0]), &[CALL, ENDF]]),
-            glyph: cat(&[&push(&[0]), &[CALL]]),
-            ..base_input()
-        },
-        Program::Glyph,
-        HintError::CallDepth,
-    ));
-
-    // Each loop pushes one value more than it pops: 1, then −5 and a JMPR
-    // back to the start, past the stack's 288 entries.
-    seeds.push(fails(
-        "the-stack-past-its-bound",
-        hinting::Input {
-            glyph: vec![PUSHB, 1, PUSHW, 0xFF, 0xFB, JMPR],
-            ..base_input()
-        },
-        Program::Glyph,
-        HintError::StackOverflow,
-    ));
-
-    // A definition with no ENDF.
-    seeds.push(fails(
-        "a-definition-with-no-end",
-        hinting::Input {
-            fpgm: cat(&[&push(&[0]), &[FDEF], &push(&[1]), &[POP]]),
-            ..base_input()
-        },
-        Program::Font,
-        HintError::UnterminatedDefinition,
-    ));
-
-    // prep divides by zero, so every size is unhinted.
-    seeds.push(fails(
-        "prep-divides-by-zero",
-        hinting::Input {
-            prep: cat(&[&push(&[1, 0]), &[DIV]]),
-            ..base_input()
-        },
-        Program::ControlValue,
-        HintError::DivideByZero,
-    ));
-
-    seeds
+        // fpgm jumps back to its own start for ever: −3 pushed, then JMPR.
+        fails(
+            "fpgm-runs-to-its-budget",
+            hinting::Input {
+                fpgm: vec![PUSHW, 0xFF, 0xFD, JMPR],
+                ..base_input()
+            },
+            Program::Font,
+            HintError::Budget,
+        ),
+        // Function 0 calls itself, past 64 nested calls.
+        fails(
+            "calls-nest-past-their-depth",
+            hinting::Input {
+                fpgm: cat(&[&push(&[0]), &[FDEF], &push(&[0]), &[CALL, ENDF]]),
+                glyph: cat(&[&push(&[0]), &[CALL]]),
+                ..base_input()
+            },
+            Program::Glyph,
+            HintError::CallDepth,
+        ),
+        // Each loop pushes one value more than it pops: 1, then −5 and a JMPR
+        // back to the start, past the stack's 288 entries.
+        fails(
+            "the-stack-past-its-bound",
+            hinting::Input {
+                glyph: vec![PUSHB, 1, PUSHW, 0xFF, 0xFB, JMPR],
+                ..base_input()
+            },
+            Program::Glyph,
+            HintError::StackOverflow,
+        ),
+        // A definition with no ENDF.
+        fails(
+            "a-definition-with-no-end",
+            hinting::Input {
+                fpgm: cat(&[&push(&[0]), &[FDEF], &push(&[1]), &[POP]]),
+                ..base_input()
+            },
+            Program::Font,
+            HintError::UnterminatedDefinition,
+        ),
+        // prep divides by zero, so every size is unhinted.
+        fails(
+            "prep-divides-by-zero",
+            hinting::Input {
+                prep: cat(&[&push(&[1, 0]), &[DIV]]),
+                ..base_input()
+            },
+            Program::ControlValue,
+            HintError::DivideByZero,
+        ),
+    ]
 }
 
 /// The instruction family `op` belongs to, as `docs/design/hinting.md`'s

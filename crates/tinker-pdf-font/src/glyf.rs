@@ -644,7 +644,6 @@ pub fn outline_at(
 /// [`outline_at`], and the steps it took: [`outline_counted`]'s, a component
 /// record read for each record a composite's numbering reads, and the point
 /// deltas its glyphs' tables decode, a table times its points each.
-#[must_use]
 pub fn outline_at_counted(
     sfnt: &Sfnt,
     glyph: u16,

@@ -78,9 +78,9 @@ fn shp_shc_shz_and_shpix_shift_as_specified() {
                 ]);
                 assert_eq!(exec(&mut vm, &code), Ok(()));
                 let case = format!("SHP[{flag}] {points:?} along {f:?} on {pv:?}");
-                for i in 0..9 {
+                for (i, &current) in CURRENT.iter().enumerate() {
                     let times = points.iter().filter(|&&p| p == i).count();
-                    let mut expected = wide(CURRENT[i]);
+                    let mut expected = wide(current);
                     for _ in 0..times {
                         expected = shifted(expected, f, pv, shift);
                     }
@@ -143,12 +143,12 @@ fn shp_shc_shz_and_shpix_shift_as_specified() {
                 ]);
                 assert_eq!(exec(&mut vm, &code), Ok(()));
                 let case = format!("SHC[{flag}] {contour} along {f:?} on {pv:?}");
-                for i in 0..9 {
+                for (i, &current) in CURRENT.iter().enumerate() {
                     let moves = range.contains(&i) && i != reference;
                     let expected = if moves {
-                        shifted(wide(CURRENT[i]), f, pv, shift)
+                        shifted(wide(current), f, pv, shift)
                     } else {
-                        wide(CURRENT[i])
+                        wide(current)
                     };
                     assert_eq!(at(&vm, i), expected, "{case}: point {i}");
                     let touch = if moves { touches(f) } else { (false, false) };
@@ -171,11 +171,11 @@ fn shp_shc_shz_and_shpix_shift_as_specified() {
                 &[op::SHZ + flag],
             ]);
             assert_eq!(exec(&mut vm, &code), Ok(()));
-            for i in 0..9 {
+            for (i, &current) in CURRENT.iter().enumerate() {
                 let expected = if i == reference {
-                    wide(CURRENT[i])
+                    wide(current)
                 } else {
-                    shifted(wide(CURRENT[i]), f, pv, shift)
+                    shifted(wide(current), f, pv, shift)
                 };
                 assert_eq!(
                     at(&vm, i),
@@ -201,12 +201,8 @@ fn shp_shc_shz_and_shpix_shift_as_specified() {
                     "SHZ[{flag}] 0: twilight {i}"
                 );
             }
-            for i in 0..9 {
-                assert_eq!(
-                    at(&vm, i),
-                    wide(CURRENT[i]),
-                    "SHZ[{flag}] 0 leaves the glyph"
-                );
+            for (i, &current) in CURRENT.iter().enumerate() {
+                assert_eq!(at(&vm, i), wide(current), "SHZ[{flag}] 0 leaves the glyph");
             }
         }
     }
@@ -230,8 +226,8 @@ fn shp_shc_shz_and_shpix_shift_as_specified() {
                 half_away(i128::from(amount) * i128::from(f.0), 16_384),
                 half_away(i128::from(amount) * i128::from(f.1), 16_384),
             );
-            for i in 0..9 {
-                let c = wide(CURRENT[i]);
+            for (i, &current) in CURRENT.iter().enumerate() {
+                let c = wide(current);
                 let expected = if (2..=4).contains(&i) {
                     (c.0 + step.0, c.1 + step.1)
                 } else {
@@ -345,8 +341,8 @@ fn alignrp_and_alignpts_align_as_specified() {
             ]);
             assert_eq!(exec(&mut vm, &code), Ok(()));
             let reference = wide(CURRENT[1]);
-            for i in 0..9 {
-                let c = wide(CURRENT[i]);
+            for (i, &current) in CURRENT.iter().enumerate() {
+                let c = wide(current);
                 let expected = if points.contains(&i) {
                     shifted(c, f, pv, -proj(pv, c.0 - reference.0, c.1 - reference.1))
                 } else {
@@ -841,9 +837,7 @@ fn the_flip_instructions_toggle_on_curve_as_specified() {
         Ok(())
     );
     let mut expected = [true; 10];
-    for p in 6..=8 {
-        expected[p] = false;
-    }
+    expected[6..=8].fill(false);
     assert_eq!(flags(&vm), expected);
     // Every range over both kinds of point: on puts all of it on, off all of
     // it off, and nothing outside it changes; a range of one point; a highest
@@ -859,8 +853,10 @@ fn the_flip_instructions_toggle_on_curve_as_specified() {
                 Ok(())
             );
             let mut expected = alternate;
-            for p in low..=high {
-                expected[p] = set;
+            for (p, flag) in expected.iter_mut().enumerate() {
+                if (low..=high).contains(&p) {
+                    *flag = set;
+                }
             }
             assert_eq!(flags(&vm), expected, "0x{opcode:02X} {low} to {high}");
             assert!((0..10).all(|i| touched(&vm, i) == (false, false)));

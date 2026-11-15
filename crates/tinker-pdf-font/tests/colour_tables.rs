@@ -1910,14 +1910,14 @@ fn dupe(glyph: u16) -> Vec<u8> {
     glyph_data(0, 0, b"dupe", &glyph.to_be_bytes())
 }
 
+/// One `sbix` strike: its `ppem`, its `ppi` and its glyphs' data in glyph
+/// order, `None` for no data.
+type Strike = (u16, u16, Vec<Option<Vec<u8>>>);
+
 /// An `sbix` table (*Header*, *Strikes*): `flags`, then each strike's `ppem`,
 /// `ppi` and its glyphs' data in glyph order, `None` for no data, for a face
 /// of `glyph_count` glyphs.
-fn sbix_table(
-    flags: u16,
-    glyph_count: u16,
-    strikes: &[(u16, u16, Vec<Option<Vec<u8>>>)],
-) -> Vec<u8> {
+fn sbix_table(flags: u16, glyph_count: u16, strikes: &[Strike]) -> Vec<u8> {
     let header = 8 + 4 * strikes.len();
     let mut out = Vec::new();
     out.extend_from_slice(&1u16.to_be_bytes());

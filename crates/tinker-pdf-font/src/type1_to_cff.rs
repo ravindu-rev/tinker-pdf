@@ -417,17 +417,20 @@ struct Point {
 }
 
 /// One thing a glyph draws, in order.
+///
+/// A curve's and a flex's points are boxed: held in place, they would make
+/// every event of a glyph's list the size of a flex's six points.
 #[derive(Clone, Debug)]
 enum Event {
     /// The stem set at this index of [`Drawn::sets`] holds from here on.
     Hints(usize),
     Move(Point),
     Line(Point),
-    Curve([Point; 3]),
+    Curve(Box<[Point; 3]>),
     /// Chapter 8.3's two curves, from the flex's six points after its
     /// reference point, and the flex height.
     Flex {
-        points: [Point; 6],
+        points: Box<[Point; 6]>,
         depth: Operand,
     },
 }
@@ -490,9 +493,9 @@ fn draw(
         Event::Hints(set) => Event::Hints(set + offset),
         Event::Move(p) => Event::Move(shift(p, seac)),
         Event::Line(p) => Event::Line(shift(p, seac)),
-        Event::Curve(points) => Event::Curve(points.map(|p| shift(p, seac))),
+        Event::Curve(points) => Event::Curve(Box::new((*points).map(|p| shift(p, seac)))),
         Event::Flex { points, depth } => Event::Flex {
-            points: points.map(|p| shift(p, seac)),
+            points: Box::new((*points).map(|p| shift(p, seac))),
             depth,
         },
     }));
@@ -700,7 +703,7 @@ impl Machine<'_, '_> {
         }
         self.x = points[2].x.value;
         self.y = points[2].y.value;
-        self.events.push(Event::Curve(points));
+        self.events.push(Event::Curve(Box::new(points)));
     }
 
     /// Records a stem in the set holding now.
@@ -1097,7 +1100,7 @@ impl Machine<'_, '_> {
                 self.x = points[5].x.value;
                 self.y = points[5].y.value;
                 self.events.push(Event::Flex {
-                    points,
+                    points: Box::new(points),
                     depth: args[0].clone(),
                 });
                 // The two values `pop` asks for: the flex's last point.
@@ -1574,7 +1577,8 @@ impl Writer {
                     self.segment(Shape::Line, vec![dx, dy])
                 }
             }
-            Event::Curve([c1, c2, end]) => {
+            Event::Curve(points) => {
+                let [c1, c2, end] = &**points;
                 self.mask()?;
                 let d1x = delta(self.x, &c1.x)?;
                 let d1y = delta(self.y, &c1.y)?;
@@ -1597,7 +1601,7 @@ impl Writer {
                 self.mask()?;
                 let mut operands = Vec::with_capacity(13);
                 let (mut x, mut y) = (self.x, self.y);
-                for point in points {
+                for point in points.iter() {
                     operands.push(delta(x, &point.x)?);
                     operands.push(delta(y, &point.y)?);
                     x = point.x.value;
@@ -2229,7 +2233,8 @@ fn assemble(
         out
     };
 
-    let names_index = write_index(&[facts.font_name.clone()]).ok_or(Refusal::TooLarge)?;
+    let names_index =
+        write_index(std::slice::from_ref(&facts.font_name)).ok_or(Refusal::TooLarge)?;
     let strings_index = write_index(&strings.custom).ok_or(Refusal::TooLarge)?;
     let gsubrs_index = write_index(&[]).ok_or(Refusal::TooLarge)?;
     let charstrings_index = write_index(charstrings).ok_or(Refusal::TooLarge)?;

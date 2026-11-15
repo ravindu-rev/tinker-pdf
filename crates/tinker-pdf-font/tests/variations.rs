@@ -1459,7 +1459,10 @@ fn hostile_item_stores_are_refused_by_name() {
 
 #[test]
 fn a_delta_set_index_map_maps_every_glyph() {
-    let cases: Vec<(u8, u8, u8, Vec<(u32, u32)>)> = vec![
+    // A map's format, entry size and inner index bits, and its `(outer,
+    // inner)` entries.
+    type Case = (u8, u8, u8, Vec<(u32, u32)>);
+    let cases: Vec<Case> = vec![
         (0, 1, 3, vec![(0, 5), (1, 0), (2, 3), (0, 0)]),
         (0, 1, 1, vec![(0, 1), (127, 0)]),
         (0, 2, 8, vec![(0, 200), (1, 0), (2, 255), (255, 17)]),
@@ -5486,7 +5489,7 @@ fn an_instance_the_face_cannot_give_is_refused_by_name() {
     ];
     let (glyf_table, loca) = glyf_and_loca(&[
         Vec::new(),
-        variable_support::simple_glyph(&[square.clone()]),
+        variable_support::simple_glyph(std::slice::from_ref(&square)),
     ]);
     let short = GlyphVariation {
         shared_points: None,
@@ -5576,7 +5579,7 @@ fn loca_takes_the_long_form_when_the_instances_glyf_needs_it() {
         .map(|i| (1_000 * (i % 2), 1_000 * ((i + 1) % 2), true))
         .collect();
     let mut glyphs = vec![Vec::new()];
-    glyphs.extend((0..599).map(|_| variable_support::simple_glyph(&[zigzag.clone()])));
+    glyphs.extend((0..599).map(|_| variable_support::simple_glyph(std::slice::from_ref(&zigzag))));
     let (glyf_table, loca) = glyf_and_loca(&glyphs);
     let count = u16::try_from(glyphs.len()).expect("few");
     let face = one_axis_face(vec![
@@ -5669,7 +5672,7 @@ fn a_glyphs_program_flags_and_components_survive_the_instance() {
     let triangle = vec![(10, 10, true), (60, 200, false), (110, 10, true)];
     let program = [0xB0, 0x01, 0x21];
     let instructed = with_program(
-        variable_support::simple_glyph(&[triangle.clone()]),
+        variable_support::simple_glyph(std::slice::from_ref(&triangle)),
         1,
         &program,
     );
@@ -5991,10 +5994,13 @@ fn cff_index(data: &[u8], at: usize) -> (Vec<&[u8]>, usize) {
     (items, base + offset(count))
 }
 
+/// A CFF DICT as the test reads one: `(operator, operands)` pairs.
+type Dict = Vec<(u16, Vec<f64>)>;
+
 /// A CFF DICT's entries, from Technical Note 5176's operand encodings —
 /// integers in every form and reals as nibbles — and its operators, a
 /// two-byte one as `0x0C00` and its second byte.
-fn cff_dict(data: &[u8]) -> Vec<(u16, Vec<f64>)> {
+fn cff_dict(data: &[u8]) -> Dict {
     let mut out = Vec::new();
     let mut operands = Vec::new();
     let mut at = 0;
@@ -6053,7 +6059,7 @@ fn cff_dict(data: &[u8]) -> Vec<(u16, Vec<f64>)> {
 
 /// A CFF table's Top DICT and its Private DICTs — a CID-keyed font's one a
 /// Font DICT, a name-keyed font's one — read as the test reads them.
-fn cff_dicts(cff: &[u8]) -> (Vec<(u16, Vec<f64>)>, Vec<Vec<(u16, Vec<f64>)>>) {
+fn cff_dicts(cff: &[u8]) -> (Dict, Vec<Dict>) {
     let (_, names_end) = cff_index(cff, usize::from(cff[2]));
     let (tops, _) = cff_index(cff, names_end);
     let top = cff_dict(tops[0]);
@@ -6331,7 +6337,7 @@ fn a_cff2_instance_carries_no_variation_table() {
         assert!(top.iter().any(|(op, _)| *op == 0x0C1E), "{what}: ROS");
         assert_eq!(privates.len(), 2, "{what}: two Font DICTs");
         for (fd, private) in privates.iter().enumerate() {
-            let blended: Vec<(u16, Vec<f64>)> = cff2
+            let blended: Dict = cff2
                 .private_dict_at(u16::try_from(fd).expect("few"), &blends)
                 .expect("the Private DICT")
                 .into_iter()
@@ -6615,7 +6621,7 @@ fn no_operator_of_a_cff2_instance_passes_type_2s_stack() {
     long.extend(curve(0));
     long.push(Cs::Op(25));
     // hlineto: 49 operands, so a piece starts on the other axis.
-    long.extend(ints(&vec![4; 49]));
+    long.extend(ints(&[4; 49]));
     long.push(Cs::Op(op::HLINETO));
     // rrcurveto: nine curves, 54.
     for i in 0..9 {
