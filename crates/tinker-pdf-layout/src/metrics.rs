@@ -41,7 +41,8 @@ pub struct FontRequest<'a> {
     pub weight: u16,
     /// The computed `font-style`.
     pub style: FontStyle,
-    /// The computed `font-size`, in points.
+    /// The computed `font-size`, in CSS pixels, the unit the layout measures
+    /// in: what `css-fonts-4`'s optical sizing takes as it stands.
     pub size: f64,
     /// The computed `font-kerning`, which a shaper turns into its `kern`
     /// feature and a provider that does not shape has no use for.

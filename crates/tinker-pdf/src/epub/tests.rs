@@ -3464,7 +3464,8 @@ fn variable_set(program: Vec<u8>) -> super::typeface::FaceSet {
     }])
 }
 
-/// A run's request for `Var` at a weight and a size in points.
+/// A run's request for `Var` at a weight and a size in CSS pixels, the unit
+/// the layout measures in and hands a request.
 fn variable_request(
     families: &[tinker_pdf_css::property::FontFamily],
     weight: u16,
@@ -3573,7 +3574,7 @@ fn padded(face: &[u8], bytes: usize) -> Vec<u8> {
 /// `cfg(test)` count): a hundred runs at two weights, each measured, its
 /// line height read, shaped and chosen through as a book's runs are, write
 /// two instances — each the font crate's at its weight and the optical size
-/// of 15 points, 20 CSS pixels — and every run at a weight draws in that
+/// of the runs' 20 CSS pixels — and every run at a weight draws in that
 /// weight's one, past the declared face, under a resource of its own. The
 /// face's default location is the face itself and writes nothing, and a
 /// second size under `auto` optical sizing is a third location.
@@ -3592,7 +3593,7 @@ fn a_book_instances_each_face_once_per_coordinates() {
     let mut chosen = Vec::new();
     for _ in 0..50 {
         for weight in [400u16, 700] {
-            let font = variable_request(&families, weight, 15.0, FontOpticalSizing::Auto);
+            let font = variable_request(&families, weight, 20.0, FontOpticalSizing::Auto);
             let _ = metrics.advance('H', &font);
             let _ = metrics.vertical(&font);
             let _ = Shaper::shape(&metrics, "HIO", &font, false);
@@ -3641,7 +3642,7 @@ fn a_book_instances_each_face_once_per_coordinates() {
     assert_eq!(
         choose(
             &faces,
-            &variable_request(&families, 400, 15.0, FontOpticalSizing::None),
+            &variable_request(&families, 400, 20.0, FontOpticalSizing::None),
             Some('H')
         ),
         Chosen::Embedded(0),
@@ -3710,9 +3711,10 @@ fn instances_past_the_count_are_drawn_at_the_default_and_named() {
     let faces = variable_set(VARIABLE_GLYF.to_vec());
     let families = vec![FontFamily::Named("Var".to_owned())];
     super::typeface::INSTANCES_WRITTEN.with(|n| n.set(0));
-    // Half a point apart from 10 points: 13⅓ to 56 CSS pixels, inside the
-    // axis's 8 to 72, so no two land on one location.
-    let size = |step: u32| 10.0 + f64::from(step) * 0.5;
+    // Half a pixel apart from 13 CSS pixels: 13 to 45, inside the axis's 8
+    // to 72 and past its default of 12, so no two land on one location and
+    // none on the face's own.
+    let size = |step: u32| 13.0 + f64::from(step) * 0.5;
     let chosen: Vec<Chosen> = (0..=64u32)
         .map(|step| {
             choose(

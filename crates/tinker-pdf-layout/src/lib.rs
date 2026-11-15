@@ -657,7 +657,7 @@ pub struct TextRun {
     pub width: f64,
     /// The characters, after `css-text-3` §4.1's processing.
     pub text: String,
-    /// `font-size`, in points.
+    /// `font-size`, in CSS pixels, as the cascade computes it.
     pub font_size: f64,
     /// `font-family`, in the author's order.
     pub families: Vec<FontFamily>,

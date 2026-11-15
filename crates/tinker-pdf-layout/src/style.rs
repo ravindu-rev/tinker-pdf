@@ -65,7 +65,7 @@ pub struct Consumed {
     pub visible: bool,
     /// The font, for [`crate::metrics::Metrics`].
     pub families: Vec<FontFamily>,
-    /// `font-size`, in points.
+    /// `font-size`, in CSS pixels, as the cascade computes it.
     pub font_size: f64,
     /// `font-style`.
     pub font_style: FontStyle,

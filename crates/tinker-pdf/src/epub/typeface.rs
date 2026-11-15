@@ -357,13 +357,15 @@ pub(crate) struct Wanted {
 }
 
 impl Wanted {
-    /// What `font` asks of a variable face.
+    /// What `font` asks of a variable face. Its size is the layout's, in CSS
+    /// pixels, as the whole layout measures (the painter turns it into points
+    /// as it writes a run), and so the optical size `css-fonts-4` asks for
+    /// is that size as it stands.
     pub(crate) fn of(font: &FontRequest<'_>) -> Wanted {
         Wanted {
             weight: font.weight,
             style: font.style,
-            optical_size: (font.optical_sizing == FontOpticalSizing::Auto)
-                .then(|| font.size / super::read::PX_TO_PT),
+            optical_size: (font.optical_sizing == FontOpticalSizing::Auto).then_some(font.size),
             variations: font.variations.to_vec(),
         }
     }
