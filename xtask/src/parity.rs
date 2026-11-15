@@ -84,9 +84,8 @@ use std::process::Command;
 /// `command-stream` is the bytes each surface writes back from the graphics
 /// artefact's page streams, read into its own records and fields: a surface
 /// whose decode drops, reorders or alters a field, or whose encoder writes
-/// one otherwise, prints another hash. The hash is a run's output and is
-/// entered empty, so every surface fails on it until the facade's line is
-/// recorded here.
+/// one otherwise, prints another hash. The hash is a run's output: the
+/// facade's line, which windows/x86_64 and linux/x86_64 print alike.
 const EXPECTED: &[(&str, &str)] = &[
     (
         "fill-and-save",
@@ -136,7 +135,10 @@ const EXPECTED: &[(&str, &str)] = &[
         "graphics",
         "8bf69d84af79241a94e6770e315ce79dfa9cf1d6f85052af122444c3b94dac5f",
     ),
-    ("command-stream", ""),
+    (
+        "command-stream",
+        "5373cd46edc7a92ba54a2e9d7dc6299f051cff22a3cb5038833c827ecf737158",
+    ),
     (
         "tagged",
         "ca75ed2bff10974b46fcc9a55a77fd0b75411085b37a5f263c1559b4d3fba29f",
