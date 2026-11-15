@@ -14,13 +14,13 @@ on pull requests (`.github/workflows/ci.yml`). Name gates to run only those.
 
 Each gate's whole output goes to `target/gates/<gate>.log`. The screen gets
 one line per gate, ok or FAIL with its time and, for tests, the counts; a
-failed gate adds its exit status, its failing tests and where each panicked,
-its first compiler errors with their places, the files fmt would change, and
-the lines it had to print and did not. Open a log only for what those lines
-do not say. Every gate runs, so one run reports every failure; `--first`
-stops at the first. Exits 1 when a gate fails, 2 for a gate that does not
-exist. It runs cargo and nothing else, and changes nothing but its logs and
-cargo's own target directory.
+failed gate adds its exit status, its failing tests and where each panicked
+(or, for a should-panic test, returned), its first compiler errors with their
+places, the files fmt would change, and the lines it had to print and did
+not. Open a log only for what those lines do not say. Every gate runs, so one
+run reports every failure; `--first` stops at the first. Exits 1 when a gate
+fails, 2 for a gate that does not exist. It runs cargo and nothing else, and
+changes nothing but its logs and cargo's own target directory.
 """
 import argparse
 import json
@@ -37,8 +37,17 @@ REPO = os.path.normpath(os.path.join(HERE, '..'))
 SHOWN = 10  # failing tests, errors or files a failed gate lists
 
 TEST_RESULT = re.compile(r'^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored', re.M)
-FAILED_TEST = re.compile(r'^test (\S+) \.\.\. FAILED$', re.M)
-PANICKED = re.compile(r"^thread '([^']+)' panicked at (\S+?):?$", re.M)
+# A test's name, which a doc-test's spaces are part of, without the mode
+# libtest prints after it (`- should panic`, `- compile fail`, `- compile`).
+FAILED_TEST = re.compile(r'^test (.+?)(?: - (?:should panic|compile fail|compile))? \.\.\. FAILED$', re.M)
+# `thread 'name' (id) panicked at place:`, and the same without the id.
+PANICKED = re.compile(r"^thread '([^']+)'(?: \([^)]*\))? panicked at (\S+?):?$", re.M)
+# A failing test's captured output, which holds its panic, under its name.
+SECTION = re.compile(r'^---- (.+?) stdout ----$', re.M)
+# A should-panic test that returned, as its captured output notes it.
+NO_PANIC = re.compile(r'^note: test did not panic as expected(?: at (\S+))?$', re.M)
+# Where one test binary's run, or one crate's doc-tests, begins.
+RUN = re.compile(r'^\s+(?:Running|Doc-tests) ', re.M)
 ERROR = re.compile(r'^(error(?:\[E\d+\])?: .+)$', re.M)
 LOCATION = re.compile(r'^\s*--> (\S+)$', re.M)
 FMT_DIFF = re.compile(r'^Diff in (\S+?)(?::(\d+):| at line (\d+):)$', re.M)
@@ -79,12 +88,41 @@ def counts(text):
     return tuple(sum(int(x[i]) for x in found) for i in range(3))
 
 
+def failures(text):
+    """Each failing test, and how and where its output says it failed, or None.
+
+    A test's place is the first panic in its captured output, whichever thread
+    panicked: its own, `main` in a doc-test, or one it spawned; or, for a
+    should-panic test that returned, the place libtest notes. A test that
+    printed nothing falls back to a panic on a thread of its name. Each test
+    binary's run is read alone, so two binaries' tests of one name keep their
+    own places."""
+    out = []
+    starts = [0] + [m.start() for m in RUN.finditer(text)]
+    for begin, end in zip(starts, starts[1:] + [len(text)]):
+        run = text[begin:end]
+        places = {}
+        for name, place in PANICKED.findall(run):
+            places.setdefault(name, f'panicked at {place}')
+        sections = list(SECTION.finditer(run))
+        for at, section in enumerate(sections):
+            stop = sections[at + 1].start() if at + 1 < len(sections) else len(run)
+            panic = PANICKED.search(run, section.end(), stop)
+            returned = NO_PANIC.search(run, section.end(), stop)
+            if panic:
+                places[section.group(1)] = f'panicked at {panic.group(2)}'
+            elif returned:
+                places[section.group(1)] = 'did not panic as expected' + (
+                    f' at {returned.group(1)}' if returned.group(1) else '')
+        out.extend((name, places.get(name)) for name in FAILED_TEST.findall(run))
+    return out
+
+
 def details(text, repo):
     """What a failed gate's log says went wrong, a line each."""
     out = []
-    panicked = dict(PANICKED.findall(text))
-    for name in FAILED_TEST.findall(text)[:SHOWN]:
-        out.append(f'failed: {name}' + (f' (panicked at {panicked[name]})' if name in panicked else ''))
+    for name, how in failures(text)[:SHOWN]:
+        out.append(f'failed: {name}' + (f' ({how})' if how else ''))
     for m in list(ERROR.finditer(text))[:SHOWN]:
         loc = LOCATION.search(text, m.end(), m.end() + 400)
         follows = loc and not ERROR.search(text, m.end(), loc.start())
