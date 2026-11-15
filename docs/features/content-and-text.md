@@ -140,8 +140,11 @@ of its caller's, and every `q` and marked-content scope it leaves open is
 closed, at the device too, before control returns — so no nested stream, and
 not the page's own content before an annotation's appearance, leaves a device
 clipping or masking what is drawn next by its state (8.4.2, 14.6.2).
-Recursion of all three kinds stops at a shared depth cap, and a depth is not
-a bound on work once the recursion branches, so three more bounds hold it.
+Recursion of all three kinds stops at a shared depth cap (`MAX_FORM_DEPTH`:
+the deepest stream that runs is the sixteenth below the page, and the device
+is told once of the first one it passes over, `Device::depth_refused`), and a
+depth is not a bound on work once the recursion branches, so three more
+bounds hold it.
 A stream already running in its own ancestry is not run again there (8.10):
 a form, a soft mask's group or a Type 3 glyph procedure that names itself,
 directly or through the others — a mask whose `/G` is the page that sets it,
@@ -165,7 +168,8 @@ a stream raises the budget by more than its run costs, so every stream with
 content and an identity runs once whatever has been spent: what the budget
 passes over is further runs of content already drawn, and the device is told
 once (`Device::nested_budget_spent`). The renderer and the SVG writer report
-the three as `RecursiveContent`, `GroupBudgetSpent` and `NestedBudgetSpent`.
+the four as `NestedTooDeep`, `RecursiveContent`, `GroupBudgetSpent` and
+`NestedBudgetSpent`.
 Hostile streams meet bounds throughout — operand stack, save stack, path
 length — rather than allocation.
 
@@ -1423,7 +1427,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | --- | --- | --- | --- |
 | A font resource the page names but the build cannot resolve | `TextWarning::UnknownFont { name }` | emitted by `Page::text()`, deduplicated, naming which resource — absence stays distinguishable from emptiness | ruling 2, [rulings](../rulings.md) |
 | A code with no `/ToUnicode` entry and no encoding that names it | `TextWarning::UnmappedCode { code }` | emitted by `Page::text()` once for each such code a page shows, at most 64, before its glyph is dropped: a glyph that decodes to no text is reported rather than invented, so a page with text this build could not decode is told from a page with less text; `TextOptions::unmapped` keeps it instead as a private-use character standing for its code or its glyph, reported all the same | 9.10.2, ruling 2 |
-| Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
+| Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH`, said to the device as `Device::depth_refused` | recursion is refused rather than allowed to overflow the stack, and told, so a page missing what was nested past the cap is told from one that drew nothing there | 8.10 |
 | A form, a soft mask's group or a Type 3 glyph procedure run again inside itself, directly or through the others | `Device::recursion_refused` | a cycle has no last run: refused at its first repeat, by the stream's identity, it draws once, where the depth cap ended it only after two or more runs to the sixteenth | 8.10 |
 | Nested runs past 4 MiB and 4 096 bytes for every byte of content reached, each run its stream's length and 256 bytes | `NESTED_WORK_FLOOR`, `NESTED_WORK_RATE`, `NESTED_RUN_COST`, said to the device as `Device::nested_budget_spent` | a tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group, and only a budget bounds it; scaled to what the file holds, it lets a page run its content four thousand times over, and a stream's first run always fits, so only further runs of content already drawn are passed over | 8.10, 9.6.5 |
 | More than 2 000 transparency groups and soft masks' groups run in one stream | `MAX_GROUP_RUNS`, said to the device as `Device::group_budget_spent` | a budget, not a depth: a group that draws itself twice is two to the sixteenth runs inside the depth cap, and a device that declines groups still runs each one's content | 11.6.6 |

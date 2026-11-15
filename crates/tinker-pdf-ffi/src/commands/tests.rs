@@ -112,7 +112,7 @@ fn inline_image(at: &str) -> Vec<u8> {
 ///   (`Scope`), a form that draws itself (`RecursionRefused`), and a square
 ///   annotation with an appearance (`Annotation`).
 ///
-/// The three kinds it does not hold are named where they are pushed by hand
+/// The four kinds it does not hold are named where they are pushed by hand
 /// ([`the_command_stream_round_trips_through_the_c_abi`]).
 fn every_kind_page() -> Vec<u8> {
     let widths = vec!["500"; 95].join(" ");
@@ -468,13 +468,14 @@ fn spelled(records: &[(TpdfCommand, Vec<Owned>)]) -> Vec<(c_int, u32, Vec<Owned>
 /// number and field, the reals to the bit — and those commands, pushed back
 /// through the encoder, are the facade's bytes.
 ///
-/// The three kinds no page here writes are pushed by hand after the page's
+/// The four kinds no page here writes are pushed by hand after the page's
 /// own record, and that stream round-trips the same way: `Colorants`, which
 /// a stream holds only where its recording composited colorants, which no
-/// display list does; and the two budgets' notices, `GroupBudgetSpent` and
+/// display list does; the two budgets' notices, `GroupBudgetSpent` and
 /// `NestedBudgetSpent`, which a page reaches only past two thousand groups
-/// or thousands of nested runs. Between the two streams, every kind but the
-/// end, which the cursor reads after each.
+/// or thousands of nested runs; and the depth cap's, `DepthRefused`, which a
+/// page reaches only past sixteen nested streams. Between the two streams,
+/// every kind but the end, which the cursor reads after each.
 #[test]
 fn the_command_stream_round_trips_through_the_c_abi() {
     let bytes = every_kind_page();
@@ -527,6 +528,7 @@ fn the_command_stream_round_trips_through_the_c_abi() {
         TpdfCommandKind::Colorants,
         TpdfCommandKind::GroupBudgetSpent,
         TpdfCommandKind::NestedBudgetSpent,
+        TpdfCommandKind::DepthRefused,
     ];
     for kind in TpdfCommandKind::ALL {
         if *kind != TpdfCommandKind::End && !by_hand.contains(kind) {
@@ -551,6 +553,7 @@ fn the_command_stream_round_trips_through_the_c_abi() {
         of_kind(TpdfCommandKind::Colorants, colorants),
         of_kind(TpdfCommandKind::GroupBudgetSpent, Vec::new()),
         of_kind(TpdfCommandKind::NestedBudgetSpent, Vec::new()),
+        of_kind(TpdfCommandKind::DepthRefused, Vec::new()),
     ];
     let encoded = encode(&hand);
     let facade_records: Vec<CommandRecord> = hand

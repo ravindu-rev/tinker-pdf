@@ -1178,6 +1178,7 @@ impl Exact {
 /// depth 0. A stream asked for by content running at this depth is not run,
 /// so the deepest one that runs is the sixteenth below the page — the bound a
 /// writer of nested content keeps inside for its content to be drawn here.
+/// Past it the device hears [`Device::depth_refused`] once.
 pub const MAX_FORM_DEPTH: u32 = 16;
 
 /// How many transparency groups and soft masks' groups one interpretation
@@ -1819,6 +1820,14 @@ impl<D: Device> Device for Out<'_, D> {
         }
     }
 
+    fn depth_refused(&mut self) {
+        self.device.depth_refused();
+        if self.tape.taping() {
+            self.tape.recorder.depth_refused();
+            self.tape.record();
+        }
+    }
+
     fn is_cancelled(&self) -> bool {
         self.device.is_cancelled()
     }
@@ -1888,6 +1897,8 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     nested_spent: u64,
     /// Whether the device has heard [`Device::nested_budget_spent`].
     nested_budget_told: bool,
+    /// Whether the device has heard [`Device::depth_refused`].
+    depth_told: bool,
     /// What this run has read, nested content included: the counts
     /// [`interpret_counted`] hands to its tally.
     steps: Steps,
@@ -1936,6 +1947,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             reached: u64::try_from(len).unwrap_or(u64::MAX),
             nested_spent: 0,
             nested_budget_told: false,
+            depth_told: false,
             steps: Steps::default(),
             runs: Vec::new(),
             texts_handed: 0,
@@ -3020,9 +3032,14 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
     }
 
     /// A depth past [`MAX_FORM_DEPTH`] refused a nested stream: what a form
-    /// around it drew depends on how deep it was invoked.
+    /// around it drew depends on how deep it was invoked. The device is told
+    /// the first time.
     fn too_deep(&mut self) {
         self.device.tape.spoil();
+        if !self.depth_told {
+            self.depth_told = true;
+            self.device.depth_refused();
+        }
     }
 
     /// Whether `stream` is already running in the ancestry of what runs now —
@@ -5047,6 +5064,95 @@ mod tests {
         assert!(runs < (1 << 16) - 1, "the whole tree is more");
         assert_eq!(device.count(EventKind::NestedBudgetSpent), 1);
         assert!(device.count(EventKind::FillPath) > 0, "the leaf drew");
+    }
+
+    /// The forms `F1` to `F{depth}`, each drawing the next — the one before
+    /// the last drawing it twice — and the last running `leaf`.
+    fn chain(depth: u64, leaf: &str) -> Named {
+        let forms = (1..=depth)
+            .map(|i| {
+                let content = if i == depth {
+                    leaf.to_string()
+                } else if i + 1 == depth {
+                    format!("/F{depth} Do /F{depth} Do")
+                } else {
+                    format!("/F{} Do", i + 1)
+                };
+                (format!("F{i}").into_bytes(), 100 + i, content.into_bytes())
+            })
+            .collect();
+        Named {
+            forms,
+            mask: None,
+            glyphs: Vec::new(),
+        }
+    }
+
+    /// **Content nested past the depth cap is refused, and the device hears
+    /// so once** (8.10, [`MAX_FORM_DEPTH`]): a chain of sixteen forms runs
+    /// whole and says nothing; in a chain of seventeen the last is asked for
+    /// twice by content already sixteen streams below the page, runs neither
+    /// time, and the device hears of it once, in a replay too. A soft mask's
+    /// group and a Type 3 glyph procedure asked for at that depth are refused
+    /// and told the same way.
+    #[test]
+    fn content_nested_past_the_depth_cap_is_refused_and_said_once() {
+        let fill = "0 0 1 1 re f";
+        let mut device = RecordingDevice::new();
+        interpret(b"/F1 Do", Matrix::IDENTITY, &mut device, &chain(16, fill));
+        assert_eq!(
+            device.count(EventKind::FillPath),
+            2,
+            "the sixteenth form drew, both times"
+        );
+        assert_eq!(device.count(EventKind::DepthRefused), 0);
+
+        let mut device = RecordingDevice::new();
+        interpret(b"/F1 Do", Matrix::IDENTITY, &mut device, &chain(17, fill));
+        assert_eq!(
+            device.count(EventKind::BeginForm),
+            16,
+            "the sixteen above it ran"
+        );
+        assert_eq!(
+            device.count(EventKind::FillPath),
+            0,
+            "the seventeenth ran neither time"
+        );
+        assert_eq!(device.count(EventKind::DepthRefused), 1);
+        let mut replayed = RecordingDevice::new();
+        crate::replay::replay(device.events(), &mut replayed);
+        assert_eq!(replayed.count(EventKind::DepthRefused), 1);
+
+        let mut masked = chain(16, "/M gs 0 0 1 1 re f");
+        masked.mask = Some((9, fill.as_bytes().to_vec()));
+        let mut device = RecordingDevice::new().answering(Answers {
+            soft_masks: true,
+            ..Answers::default()
+        });
+        interpret(b"/F1 Do", Matrix::IDENTITY, &mut device, &masked);
+        assert_eq!(
+            device.count(EventKind::BeginSoftMask),
+            0,
+            "the mask's group would be the seventeenth"
+        );
+        assert_eq!(
+            device.count(EventKind::FillPath),
+            2,
+            "what the form fills is drawn"
+        );
+        assert_eq!(device.count(EventKind::DepthRefused), 1);
+
+        let mut shown = chain(16, "BT /T3 10 Tf (a) Tj ET");
+        shown.glyphs = vec![(u32::from(b'a'), b"0 0 1000 1000 re f".to_vec())];
+        let mut device = RecordingDevice::new();
+        interpret(b"/F1 Do", Matrix::IDENTITY, &mut device, &shown);
+        assert_eq!(
+            device.count(EventKind::FillPath),
+            0,
+            "the glyph's procedure would be the seventeenth"
+        );
+        assert_eq!(device.count(EventKind::DepthRefused), 1);
     }
 
     /// A form that is not a transparency group is not offered at all.

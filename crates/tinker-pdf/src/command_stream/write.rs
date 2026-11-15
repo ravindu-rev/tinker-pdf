@@ -790,6 +790,10 @@ impl Device for Interpreting<'_, '_> {
         self.deliver(Event::NestedBudgetSpent);
     }
 
+    fn depth_refused(&mut self) {
+        self.deliver(Event::DepthRefused);
+    }
+
     /// Never: a stream holds the whole page, and cancellation is a replay's.
     fn is_cancelled(&self) -> bool {
         false

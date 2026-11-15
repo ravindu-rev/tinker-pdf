@@ -348,3 +348,104 @@ trailer\n<< /Size 21 /Root 1 0 R >>\n%%EOF\n",
         svg.warnings
     );
 }
+
+/// A page drawing a chain of `depth` forms, objects 5 on, each drawing the
+/// next once and the last filling the page's lower-left point.
+fn form_chain(depth: u32) -> Vec<u8> {
+    let last = 4 + depth;
+    let mut forms = String::new();
+    for object in 5..=last {
+        let (resources, content) = if object < last {
+            (
+                format!("/Resources << /XObject << /N {} 0 R >> >>", object + 1),
+                "/N Do",
+            )
+        } else {
+            (String::new(), "0 0 1 1 re f")
+        };
+        forms.push_str(&format!(
+            "{object} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 40 40] {resources}\n\
+             /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+            content.len()
+        ));
+    }
+    let page_content = "/N Do";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /XObject << /N 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{page_content}\nendstream\nendobj\n\
+{forms}\
+trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        page_content.len(),
+        last + 1
+    )
+    .into_bytes()
+}
+
+/// **Content nested past the depth cap is named in every reading** (8.10,
+/// `MAX_FORM_DEPTH`): a chain of sixteen forms runs whole, its last filling
+/// the page's lower-left point, and says nothing of depth; in a chain of
+/// seventeen the last is asked for by content already sixteen streams below
+/// the page and does not run, so the point stays white — and the render, its
+/// display list's replay, its command stream and the SVG writer each say so.
+#[test]
+fn a_form_nested_past_the_depth_cap_is_named_in_every_reading() {
+    use tinker_pdf::{CommandKind, CommandStream, RenderWarning, SvgWarning};
+
+    let options = RenderOptions::at_dpi(72.0);
+    let doc = Document::open(form_chain(16)).expect("it opens");
+    let bitmap = doc.page(0).expect("a page").render(&options);
+    assert_eq!(
+        pixel(&bitmap, 0, bitmap.height - 1),
+        (0, 0, 0),
+        "the sixteenth form drew its point"
+    );
+    assert!(
+        !bitmap.warnings.contains(&RenderWarning::NestedTooDeep),
+        "and nothing was too deep: {:?}",
+        bitmap.warnings
+    );
+
+    let doc = Document::open(form_chain(17)).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let bitmap = page.render(&options);
+    assert_eq!(
+        pixel(&bitmap, 0, bitmap.height - 1),
+        (255, 255, 255),
+        "the seventeenth form did not run"
+    );
+    assert!(
+        bitmap.warnings.contains(&RenderWarning::NestedTooDeep),
+        "the render says so: {:?}",
+        bitmap.warnings
+    );
+    assert_eq!(
+        page.display_list().render(&options).warnings,
+        bitmap.warnings,
+        "the replay says it as the render does"
+    );
+    let stream = CommandStream::parse(&page.command_stream()).expect("the stream reads");
+    assert!(
+        stream
+            .records()
+            .iter()
+            .any(|record| record.command_kind() == Some(CommandKind::DepthRefused)),
+        "the command stream carries the notice"
+    );
+    assert_eq!(
+        stream.render(&options).warnings,
+        bitmap.warnings,
+        "and its replay says it as the render does"
+    );
+    let svg = page.to_svg(&tinker_pdf::SvgOptions::default());
+    assert!(
+        svg.warnings
+            .iter()
+            .any(|w| matches!(w, SvgWarning::Render(RenderWarning::NestedTooDeep))),
+        "and so does the SVG writer: {:?}",
+        svg.warnings
+    );
+}

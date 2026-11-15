@@ -483,6 +483,7 @@ const (
 	CommandShading            CommandKind = C.TPDF_COMMAND_KIND_SHADING
 	CommandPattern            CommandKind = C.TPDF_COMMAND_KIND_PATTERN
 	CommandCell               CommandKind = C.TPDF_COMMAND_KIND_CELL
+	CommandDepthRefused       CommandKind = C.TPDF_COMMAND_KIND_DEPTH_REFUSED
 )
 
 // commandKindNames are the kinds' names in their order, the facade's
@@ -497,11 +498,12 @@ var commandKindNames = [...]string{
 	"Annotation", "MissingFont", "RepairedSpace", "Scope", "Outline",
 	"FontIdentity", "Profile", "ColorSpace", "Image", "InlineImage",
 	"ImageDecode", "ShadingDefinition", "Shading", "Pattern", "Cell",
+	"DepthRefused",
 }
 
 // A name for every kind and no more: an index past [1] does not compile, so a
 // kind added to the header without its name here fails the build.
-var _ = [1]struct{}{}[len(commandKindNames)-1-int(CommandCell)]
+var _ = [1]struct{}{}[len(commandKindNames)-1-int(CommandDepthRefused)]
 
 // CommandKinds is every kind this build knows, in their order, the end first.
 func CommandKinds() []CommandKind {
@@ -1064,6 +1066,7 @@ type CommandDevice interface {
 	Shading(CommandRecord) error
 	Pattern(CommandRecord) error
 	Cell(CommandRecord) error
+	DepthRefused(CommandRecord) error
 	Unknown(CommandRecord) error
 }
 
@@ -1115,6 +1118,7 @@ func (IgnoreCommands) ShadingDefinition(CommandRecord) error  { return nil }
 func (IgnoreCommands) Shading(CommandRecord) error            { return nil }
 func (IgnoreCommands) Pattern(CommandRecord) error            { return nil }
 func (IgnoreCommands) Cell(CommandRecord) error               { return nil }
+func (IgnoreCommands) DepthRefused(CommandRecord) error       { return nil }
 func (IgnoreCommands) Unknown(CommandRecord) error            { return nil }
 
 // Replay hands every record, in the stream's order, to the method of device
@@ -1228,6 +1232,8 @@ func replayOne(device CommandDevice, record CommandRecord) error {
 		return device.Pattern(record)
 	case CommandCell:
 		return device.Cell(record)
+	case CommandDepthRefused:
+		return device.DepthRefused(record)
 	}
 	return device.Unknown(record)
 }

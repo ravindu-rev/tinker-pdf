@@ -8,8 +8,8 @@ repository's checkout, which holds the face and the profile the page embeds:
 The page holds every kind of record a page's stream is written with -- the
 C ABI's test page (`crates/tinker-pdf-ffi/src/commands/tests.rs`,
 `every_kind_page`), built again here -- and a stream pushed by hand holds the
-three a page reaches only past a budget or through a recording that
-composites colorants. Between the two, every kind but the end.
+four a page reaches only past a budget or the depth cap or through a
+recording that composites colorants. Between the two, every kind but the end.
 
 What is held:
 
@@ -258,7 +258,7 @@ def main():
     )
 
     on_the_page = {record.kind for record in records}
-    by_hand = {"Colorants", "GroupBudgetSpent", "NestedBudgetSpent"}
+    by_hand = {"Colorants", "GroupBudgetSpent", "NestedBudgetSpent", "DepthRefused"}
     kinds = {kind.name: kind for kind in tinker_pdf.CommandKind.all()}
     for name, kind in kinds.items():
         if name != "End" and name not in by_hand:
@@ -281,6 +281,7 @@ def main():
         ),
         tinker_pdf.CommandRecord(kinds["GroupBudgetSpent"].number, []),
         tinker_pdf.CommandRecord(kinds["NestedBudgetSpent"].number, []),
+        tinker_pdf.CommandRecord(kinds["DepthRefused"].number, []),
     ]
     pushed = tinker_pdf.CommandStream.from_records(hand)
     hand_bytes = pushed.to_bytes()

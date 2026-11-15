@@ -10,8 +10,9 @@
 // The page holds every kind of record a page's stream is written with -- the
 // C ABI's test page (`crates/tinker-pdf-ffi/src/commands/tests.rs`,
 // `every_kind_page`), built again here -- and a stream pushed by hand holds the
-// three a page reaches only past a budget or through a recording that
-// composites colorants. Between the two, every kind but the end.
+// four a page reaches only past a budget or the depth cap or through a
+// recording that composites colorants. Between the two, every kind but the
+// end.
 //
 // What is held:
 //
@@ -281,7 +282,7 @@ check(
 );
 
 const onThePage = new Set(records.map((record) => record.kind));
-const byHand = new Set(['Colorants', 'GroupBudgetSpent', 'NestedBudgetSpent']);
+const byHand = new Set(['Colorants', 'GroupBudgetSpent', 'NestedBudgetSpent', 'DepthRefused']);
 const kinds = new Map(PdfCommandKind.all().map((kind) => [kind.name, kind]));
 for (const [name, kind] of kinds) {
   if (name !== 'End' && !byHand.has(name)) {
@@ -306,6 +307,7 @@ const handRecords = () => [
   ]),
   new PdfCommandRecord(kinds.get('GroupBudgetSpent').number, []),
   new PdfCommandRecord(kinds.get('NestedBudgetSpent').number, []),
+  new PdfCommandRecord(kinds.get('DepthRefused').number, []),
 ];
 const handBytes = PdfCommandStream.fromRecords(handRecords()).toBytes();
 const reread = PdfCommandStream.parse(handBytes);

@@ -480,6 +480,7 @@ public final class Smoke {
         @Override public void shading(CommandRecord record) { note(CommandKind.SHADING, record); }
         @Override public void pattern(CommandRecord record) { note(CommandKind.PATTERN, record); }
         @Override public void cell(CommandRecord record) { note(CommandKind.CELL, record); }
+        @Override public void depthRefused(CommandRecord record) { note(CommandKind.DEPTH_REFUSED, record); }
 
         @Override
         public void unknown(CommandRecord record) {
@@ -601,9 +602,9 @@ public final class Smoke {
     /**
      * The command stream through the binding's own types: the every-kind
      * page's stream decoded and written back to the facade's bytes, beside a
-     * stream of the three kinds a page reaches only past a budget or through
-     * a recording that composites colorants, pushed by hand; a recording
-     * device that hears every kind in the stream's order; the tables'
+     * stream of the four kinds a page reaches only past a budget or the depth
+     * cap or through a recording that composites colorants, pushed by hand; a
+     * recording device that hears every kind in the stream's order; the tables'
      * accessors against their records' fields; the replay through the engine
      * against the page's render; the reader's refusals; and a replay to
      * {@code Graphics2D}.
@@ -665,7 +666,8 @@ public final class Smoke {
                 onThePage.add(record.kind());
             }
             Set<CommandKind> byHand =
-                    EnumSet.of(CommandKind.COLORANTS, CommandKind.GROUP_BUDGET_SPENT, CommandKind.NESTED_BUDGET_SPENT);
+                    EnumSet.of(CommandKind.COLORANTS, CommandKind.GROUP_BUDGET_SPENT, CommandKind.NESTED_BUDGET_SPENT,
+                            CommandKind.DEPTH_REFUSED);
             for (CommandKind kind : CommandKind.values()) {
                 if (kind != CommandKind.END && !byHand.contains(kind)) {
                     check(onThePage.contains(kind), "the page's stream holds a " + kind + " record");
@@ -683,6 +685,7 @@ public final class Smoke {
                 encoder.push(CommandKind.COLORANTS, colorants);
                 encoder.push(CommandKind.GROUP_BUDGET_SPENT, List.of());
                 encoder.push(CommandKind.NESTED_BUDGET_SPENT, List.of());
+                encoder.push(CommandKind.DEPTH_REFUSED, List.of());
                 hand = encoder.finish();
                 expectStatus(() -> encoder.push(CommandKind.END, List.of()), TinkerPdf.Status.BAD_ARGUMENT,
                         "the end pushed");
@@ -701,9 +704,11 @@ public final class Smoke {
                     kinds.add(record.kind());
                 }
                 check(kinds.equals(List.of(CommandKind.PAGE, CommandKind.COLORANTS, CommandKind.GROUP_BUDGET_SPENT,
-                        CommandKind.NESTED_BUDGET_SPENT)), "the records pushed by hand read back in order: " + kinds);
+                        CommandKind.NESTED_BUDGET_SPENT, CommandKind.DEPTH_REFUSED)),
+                        "the records pushed by hand read back in order: " + kinds);
                 check(back.get(0).fields().equals(records.get(0).fields()) && back.get(1).fields().equals(colorants)
-                        && back.get(2).fields().isEmpty() && back.get(3).fields().isEmpty(),
+                        && back.get(2).fields().isEmpty() && back.get(3).fields().isEmpty()
+                        && back.get(4).fields().isEmpty(),
                         "the records pushed by hand read back as pushed");
                 check(Arrays.equals(reread.version(), stream.version()),
                         "the page's stream is at the version the encoder writes, this build's");

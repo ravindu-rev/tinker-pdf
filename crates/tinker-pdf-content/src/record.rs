@@ -355,6 +355,9 @@ pub enum Event {
     /// ([`Device::nested_budget_spent`]): no nested stream after it was run
     /// again.
     NestedBudgetSpent,
+    /// A nested stream was asked for past the depth cap and was not run
+    /// ([`Device::depth_refused`]).
+    DepthRefused,
 }
 
 /// Which trait method an [`Event`] came from, with the payload dropped.
@@ -409,6 +412,8 @@ pub enum EventKind {
     RecursionRefused,
     /// [`Event::NestedBudgetSpent`].
     NestedBudgetSpent,
+    /// [`Event::DepthRefused`].
+    DepthRefused,
 }
 
 impl Event {
@@ -438,6 +443,7 @@ impl Event {
             Event::GroupBudgetSpent => EventKind::GroupBudgetSpent,
             Event::RecursionRefused => EventKind::RecursionRefused,
             Event::NestedBudgetSpent => EventKind::NestedBudgetSpent,
+            Event::DepthRefused => EventKind::DepthRefused,
         }
     }
 
@@ -994,6 +1000,12 @@ impl Device for RecordingDevice {
     fn nested_budget_spent(&mut self) {
         if self.capture.structure {
             self.events.push(Event::NestedBudgetSpent);
+        }
+    }
+
+    fn depth_refused(&mut self) {
+        if self.capture.structure {
+            self.events.push(Event::DepthRefused);
         }
     }
 

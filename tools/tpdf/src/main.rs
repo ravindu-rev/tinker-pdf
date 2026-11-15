@@ -3692,6 +3692,7 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
         W::RecursiveContent => "RecursiveContent".to_string(),
         W::DeviceParametersSpent => "DeviceParametersSpent".to_string(),
         W::NestedBudgetSpent => "NestedBudgetSpent".to_string(),
+        W::NestedTooDeep => "NestedTooDeep".to_string(),
         W::ApproximatedGroupBlend => "ApproximatedGroupBlend".to_string(),
         W::Cancelled => "Cancelled".to_string(),
         W::RegionClamped { .. } => "RegionClamped".to_string(),

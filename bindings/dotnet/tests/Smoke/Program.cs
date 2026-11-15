@@ -278,12 +278,12 @@ OnDemand();
 // (crates/tinker-pdf-ffi/src/commands/tests.rs, every_kind_page), built again
 // from the face and the profile the checkout holds -- decoded through the
 // binding's own types and written back to the facade's bytes, beside a stream
-// of the three kinds a page reaches only past a budget or through a recording
-// that composites colorants, pushed by hand. Between the two, every kind but
-// the end. A recording device hears every kind in the stream's order, the
-// tables' accessors are their records' fields, the replay through the engine
-// draws what the page's render draws, and bytes that are no stream are
-// refused with the reader's sentence.
+// of the four kinds a page reaches only past a budget or the depth cap or
+// through a recording that composites colorants, pushed by hand. Between the
+// two, every kind but the end. A recording device hears every kind in the
+// stream's order, the tables' accessors are their records' fields, the replay
+// through the engine draws what the page's render draws, and bytes that are
+// no stream are refused with the reader's sentence.
 
 static void Check(bool ok, string what)
 {
@@ -523,7 +523,10 @@ static void CommandStreams(string root)
     {
         onThePage.Add(record.Kind!.Value);
     }
-    var byHand = new[] { CommandKind.Colorants, CommandKind.GroupBudgetSpent, CommandKind.NestedBudgetSpent };
+    var byHand = new[]
+    {
+        CommandKind.Colorants, CommandKind.GroupBudgetSpent, CommandKind.NestedBudgetSpent, CommandKind.DepthRefused,
+    };
     foreach (var kind in Enum.GetValues<CommandKind>())
     {
         if (kind != CommandKind.End && Array.IndexOf(byHand, kind) < 0)
@@ -549,6 +552,7 @@ static void CommandStreams(string root)
         encoder.Push(CommandKind.Colorants, colorants);
         encoder.Push(CommandKind.GroupBudgetSpent, Array.Empty<CommandField>());
         encoder.Push(CommandKind.NestedBudgetSpent, Array.Empty<CommandField>());
+        encoder.Push(CommandKind.DepthRefused, Array.Empty<CommandField>());
         hand = encoder.Finish();
         Expect(() => encoder.Push(CommandKind.End, Array.Empty<CommandField>()), Status.BadArgument, "the end pushed");
         Expect(
@@ -576,13 +580,15 @@ static void CommandStreams(string root)
             System.Linq.Enumerable.SequenceEqual(kinds, new CommandKind?[]
             {
                 CommandKind.Page, CommandKind.Colorants, CommandKind.GroupBudgetSpent, CommandKind.NestedBudgetSpent,
+                CommandKind.DepthRefused,
             }),
             $"the records pushed by hand read back in order: {string.Join(", ", kinds)}");
         Check(
             System.Linq.Enumerable.SequenceEqual(back[0].Fields, records[0].Fields)
                 && System.Linq.Enumerable.SequenceEqual(back[1].Fields, colorants)
                 && back[2].Fields.Count == 0
-                && back[3].Fields.Count == 0,
+                && back[3].Fields.Count == 0
+                && back[4].Fields.Count == 0,
             "the records pushed by hand read back as pushed");
         Check(reread.Version == stream.Version, "the page's stream is at the version the encoder writes, this build's");
         using (var encoder = new CommandEncoder())
@@ -1817,6 +1823,7 @@ sealed class Recorder : ICommandDevice
     public void Shading(CommandRecord record) => Note(CommandKind.Shading, record);
     public void Pattern(CommandRecord record) => Note(CommandKind.Pattern, record);
     public void Cell(CommandRecord record) => Note(CommandKind.Cell, record);
+    public void DepthRefused(CommandRecord record) => Note(CommandKind.DepthRefused, record);
 
     public void Unknown(CommandRecord record) =>
         throw new Exception($"command stream: a record of kind {record.Number}, which this build does not know");

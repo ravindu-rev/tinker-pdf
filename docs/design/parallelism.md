@@ -357,8 +357,8 @@ order:
 - A render's warnings are deduplicated by value and kept in the order the
   render first met each, then the end-of-render ones (`Renderer::finish`:
   `UnreadableFont`, `GroupBudgetSpent`, `RecursiveContent`,
-  `NestedBudgetSpent`, `Cancelled`) and the facade's (`DamagedImage`,
-  `RepairedColorSpace`, `PageScaledDown`) in a fixed order
+  `NestedBudgetSpent`, `NestedTooDeep`, `Cancelled`) and the facade's
+  (`DamagedImage`, `RepairedColorSpace`, `PageScaledDown`) in a fixed order
   (`Page::render_layer_with` in `crates/tinker-pdf/src/lib.rs`).
 - Every band replays the same list, so the device calls arrive in the same
   order in every band. Each band stamps each warning it records with the

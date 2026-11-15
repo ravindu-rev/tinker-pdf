@@ -668,6 +668,14 @@ impl Device for DisplayRecorder {
         }
     }
 
+    /// Recorded for the same reason as the group budget's notice.
+    fn depth_refused(&mut self) {
+        if !self.overflowed {
+            self.events.depth_refused();
+            self.count();
+        }
+    }
+
     /// Yes once the budget is passed: nothing more would be kept, so nothing
     /// more is worth interpreting. Never otherwise — cancellation is the
     /// replaying renderer's, not the recording's (see the module

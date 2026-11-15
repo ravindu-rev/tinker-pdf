@@ -1066,6 +1066,9 @@ public interface ICommandDevice
     /// <summary>A <see cref="CommandKind.Cell"/> record.</summary>
     void Cell(CommandRecord record) { }
 
+    /// <summary>A <see cref="CommandKind.DepthRefused"/> record.</summary>
+    void DepthRefused(CommandRecord record) { }
+
     /// <summary>A record of a kind this build does not know.</summary>
     void Unknown(CommandRecord record) { }
 }
@@ -1452,6 +1455,7 @@ public sealed class CommandStream : IDisposable
                 case CommandKind.Shading: device.Shading(record); break;
                 case CommandKind.Pattern: device.Pattern(record); break;
                 case CommandKind.Cell: device.Cell(record); break;
+                case CommandKind.DepthRefused: device.DepthRefused(record); break;
             }
         }
     }

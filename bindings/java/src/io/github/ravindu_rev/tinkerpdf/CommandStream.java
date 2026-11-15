@@ -277,6 +277,7 @@ public final class CommandStream implements AutoCloseable {
                 case SHADING -> device.shading(record);
                 case PATTERN -> device.pattern(record);
                 case CELL -> device.cell(record);
+                case DEPTH_REFUSED -> device.depthRefused(record);
             }
         }
     }
@@ -416,6 +417,8 @@ public final class CommandStream implements AutoCloseable {
         default void pattern(CommandRecord record) {}
 
         default void cell(CommandRecord record) {}
+
+        default void depthRefused(CommandRecord record) {}
 
         default void unknown(CommandRecord record) {}
     }

@@ -209,6 +209,11 @@ impl Cursor {
                         device.nested_budget_spent();
                         continue;
                     }
+                    Event::DepthRefused => {
+                        done.delivered += 1;
+                        device.depth_refused();
+                        continue;
+                    }
                     _ => {}
                 }
                 done.skipped += 1;
@@ -313,6 +318,7 @@ impl Cursor {
             Event::GroupBudgetSpent => device.group_budget_spent(),
             Event::RecursionRefused => device.recursion_refused(),
             Event::NestedBudgetSpent => device.nested_budget_spent(),
+            Event::DepthRefused => device.depth_refused(),
         }
     }
 }
@@ -636,6 +642,9 @@ mod tests {
         }
         fn nested_budget_spent(&mut self) {
             self.call().nested_budget_spent();
+        }
+        fn depth_refused(&mut self) {
+            self.call().depth_refused();
         }
         fn is_cancelled(&self) -> bool {
             self.calls >= self.after

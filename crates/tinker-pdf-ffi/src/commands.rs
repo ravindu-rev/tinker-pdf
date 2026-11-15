@@ -140,6 +140,8 @@ pub enum TpdfCommandKind {
     Pattern = 43,
     /// `Cell`, kind 79: a tiling cell, its own stream.
     Cell = 44,
+    /// `DepthRefused`, kind 38: a nested stream past the depth cap, not run.
+    DepthRefused = 45,
 }
 
 raw_enum!(TpdfCommandKind {
@@ -188,6 +190,7 @@ raw_enum!(TpdfCommandKind {
     Shading,
     Pattern,
     Cell,
+    DepthRefused,
 });
 
 impl TpdfCommandKind {
@@ -239,6 +242,7 @@ impl TpdfCommandKind {
             TpdfCommandKind::Shading => CommandKind::Shading,
             TpdfCommandKind::Pattern => CommandKind::Pattern,
             TpdfCommandKind::Cell => CommandKind::Cell,
+            TpdfCommandKind::DepthRefused => CommandKind::DepthRefused,
         }
     }
 

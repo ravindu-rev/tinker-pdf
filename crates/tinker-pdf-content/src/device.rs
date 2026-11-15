@@ -436,6 +436,18 @@ pub trait Device {
     /// [`NESTED_WORK_RATE`]: crate::NESTED_WORK_RATE
     fn nested_budget_spent(&mut self) {}
 
+    /// A form, a soft mask's group or a Type 3 glyph procedure was asked for
+    /// by content running [`MAX_FORM_DEPTH`] streams below the page, and the
+    /// interpreter did not run it (8.10): said once per interpretation,
+    /// before the first stream it passes over.
+    ///
+    /// What the stream would have drawn is missing from the page. A device
+    /// that reports what it could not draw reports this; the default ignores
+    /// it.
+    ///
+    /// [`MAX_FORM_DEPTH`]: crate::MAX_FORM_DEPTH
+    fn depth_refused(&mut self) {}
+
     /// Whether interpretation should stop — a cancellation hook checked
     /// between operators.
     fn is_cancelled(&self) -> bool {

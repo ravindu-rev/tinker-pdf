@@ -331,6 +331,14 @@ pub enum RenderWarning {
     /// content already drawn — a tree of forms each drawing the next many
     /// times, which no depth cap bounds.
     NestedBudgetSpent,
+    /// A form, a soft mask's group or a Type 3 glyph procedure was asked for
+    /// by content already sixteen streams below the page, and was not drawn
+    /// (8.10, `MAX_FORM_DEPTH`).
+    ///
+    /// The depth cap keeps hostile nesting off the stack. What a stream past
+    /// it would have drawn is missing from the page, and named, so a page
+    /// without it is not taken for the page its writer drew.
+    NestedTooDeep,
     /// The render stopped because it was cancelled.
     Cancelled,
     /// More distinct sets of transfer functions than one page keeps per
@@ -1683,6 +1691,9 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// Whether the interpreter spent its nested-content budget, for
     /// [`RenderWarning::NestedBudgetSpent`].
     nested_budget_spent: bool,
+    /// Whether the interpreter refused a nested stream past its depth cap,
+    /// for [`RenderWarning::NestedTooDeep`].
+    depth_refused: bool,
     /// Glyphs shown and outlines painted, for [`Renderer::finish_counted`].
     counts: RenderCounts,
     /// Glyph outlines accumulated by text clipping modes 4–7, applied at `ET`.
@@ -2168,6 +2179,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             missing_fonts: 0,
             recursion_refused: false,
             nested_budget_spent: false,
+            depth_refused: false,
             counts: RenderCounts::default(),
             text_clip: None,
             text_clip_requested: false,
@@ -3293,6 +3305,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
         if self.nested_budget_spent {
             self.warnings.push(RenderWarning::NestedBudgetSpent);
+        }
+        if self.depth_refused {
+            self.warnings.push(RenderWarning::NestedTooDeep);
         }
         // The flag, not the token. Asking the token here reports a page that
         // was drawn in full as cancelled whenever the caller's timeout lost
@@ -7089,6 +7104,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     fn nested_budget_spent(&mut self) {
         self.nested_budget_spent = true;
     }
+
+    /// Said at the end as [`RenderWarning::NestedTooDeep`].
+    fn depth_refused(&mut self) {
+        self.depth_refused = true;
+    }
 }
 
 /// Inverts an affine transform, or `None` when it is degenerate.
@@ -7150,7 +7170,7 @@ pub fn page_transform(page_height: f64, scale: f64) -> Matrix {
 /// it is handed a call of `kind` (`Renderer::flush_run`): every call that
 /// draws anything but an image, a clip, `ET`, and either end of a group or a
 /// soft mask, and `/SMask /None`; never `BT`, a `q`, a marked-content scope,
-/// or what the interpreter reports of its budgets; and not a `Q` or a form's
+/// or what the interpreter reports of its bounds; and not a `Q` or a form's
 /// end, which composite the run only where they put other masks in force
 /// (`Renderer::restore_held`) — a kind this rule counts as no end, so a
 /// sequence it reads may hold two runs, and no run reaches past one. An
@@ -7186,7 +7206,8 @@ pub fn ends_image_run(kind: EventKind) -> bool {
         | EventKind::EndForm
         | EventKind::GroupBudgetSpent
         | EventKind::RecursionRefused
-        | EventKind::NestedBudgetSpent => false,
+        | EventKind::NestedBudgetSpent
+        | EventKind::DepthRefused => false,
     }
 }
 
@@ -9446,7 +9467,7 @@ mod tests {
     }
 
     /// Every kind of recorded call, so a test of each holds them all.
-    const EVERY_KIND: [EventKind; 22] = [
+    const EVERY_KIND: [EventKind; 23] = [
         EventKind::BeginText,
         EventKind::ShowGlyph,
         EventKind::EndText,
@@ -9469,6 +9490,7 @@ mod tests {
         EventKind::GroupBudgetSpent,
         EventKind::RecursionRefused,
         EventKind::NestedBudgetSpent,
+        EventKind::DepthRefused,
     ];
 
     /// `OneImage`'s image drawn ten pixels square at `(x, 10)`: a draw that
@@ -9600,6 +9622,7 @@ mod tests {
             EventKind::GroupBudgetSpent => Event::GroupBudgetSpent,
             EventKind::RecursionRefused => Event::RecursionRefused,
             EventKind::NestedBudgetSpent => Event::NestedBudgetSpent,
+            EventKind::DepthRefused => Event::DepthRefused,
             // The end of a bracket, the run opened inside it.
             EventKind::EndText => return vec![Event::BeginText, image_draw(10.0), Event::EndText],
             EventKind::EndMarkedContent => {

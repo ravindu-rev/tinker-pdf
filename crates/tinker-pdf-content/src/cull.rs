@@ -452,6 +452,10 @@ impl<D: Device + ?Sized> Device for Culled<'_, D> {
         self.inner.nested_budget_spent();
     }
 
+    fn depth_refused(&mut self) {
+        self.inner.depth_refused();
+    }
+
     fn is_cancelled(&self) -> bool {
         self.inner.is_cancelled()
     }

@@ -1700,6 +1700,7 @@ module TinkerPdf
     SHADING = 42
     PATTERN = 43
     CELL = 44
+    DEPTH_REFUSED = 45
   end
 
   # TpdfCommandFieldTag, transcribed: what a field holds, its tag on the wire.
@@ -1731,7 +1732,7 @@ module TinkerPdf
     :begin_soft_mask, :end_soft_mask, :clear_soft_mask, :group_budget_spent, :recursion_refused,
     :nested_budget_spent, :page, :annotation, :missing_font, :repaired_space, :scope, :outline,
     :font_identity, :profile, :color_space, :image, :inline_image, :image_decode, :shading_definition,
-    :shading, :pattern, :cell
+    :shading, :pattern, :cell, :depth_refused
   ].freeze
 
   # A method a kind, and no more: a kind added to CommandKind without its

@@ -1100,8 +1100,9 @@ fn merged(
         RenderWarning::GroupBudgetSpent { .. } => 1,
         RenderWarning::RecursiveContent => 2,
         RenderWarning::NestedBudgetSpent => 3,
-        RenderWarning::Cancelled => 4,
-        _ => 5,
+        RenderWarning::NestedTooDeep => 4,
+        RenderWarning::Cancelled => 5,
+        _ => 6,
     });
     let mut renderer: Vec<RenderWarning> = calls.into_iter().map(|(_, warning)| warning).collect();
     renderer.extend(ending);
@@ -1367,6 +1368,11 @@ impl Device for Stamping<'_, '_> {
 
     fn nested_budget_spent(&mut self) {
         self.renderer.nested_budget_spent();
+        self.after();
+    }
+
+    fn depth_refused(&mut self) {
+        self.renderer.depth_refused();
         self.after();
     }
 

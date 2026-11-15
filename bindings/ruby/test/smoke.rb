@@ -183,12 +183,12 @@ fail!('the engine fits by default') unless TinkerPdf::View.fit.kind == TinkerPdf
 # (crates/tinker-pdf-ffi/src/commands/tests.rs, every_kind_page), built again
 # from the face and the profile the checkout holds -- decoded through the
 # binding's own types and written back to the facade's bytes, beside a stream
-# of the three kinds a page reaches only past a budget or through a recording
-# that composites colorants, pushed by hand. Between the two, every kind but
-# the end. A recording device hears every kind in the stream's order, the
-# tables' accessors are their records' fields, the replay through the engine
-# draws what the page's render draws, and bytes that are no stream are
-# refused with the reader's sentence.
+# of the four kinds a page reaches only past a budget or the depth cap or
+# through a recording that composites colorants, pushed by hand. Between the
+# two, every kind but the end. A recording device hears every kind in the
+# stream's order, the tables' accessors are their records' fields, the replay
+# through the engine draws what the page's render draws, and bytes that are
+# no stream are refused with the reader's sentence.
 
 def check!(ok, message)
   fail!("command stream: #{message}") unless ok
@@ -434,7 +434,7 @@ def command_streams(root)
   encoder.close
 
   on_the_page = records.map(&:kind).uniq
-  by_hand = [kinds::COLORANTS, kinds::GROUP_BUDGET_SPENT, kinds::NESTED_BUDGET_SPENT]
+  by_hand = [kinds::COLORANTS, kinds::GROUP_BUDGET_SPENT, kinds::NESTED_BUDGET_SPENT, kinds::DEPTH_REFUSED]
   (every_kind - [kinds::END_] - by_hand).each do |kind|
     check!(on_the_page.include?(kind), "the page's stream holds a record of kind #{kind}")
   end
@@ -449,6 +449,7 @@ def command_streams(root)
   hands.push(kinds::COLORANTS, colorants)
   hands.push(kinds::GROUP_BUDGET_SPENT, [])
   hands.push(kinds::NESTED_BUDGET_SPENT, [])
+  hands.push(kinds::DEPTH_REFUSED, [])
   hand = hands.finish
   expect_status(TinkerPdf::Status::BAD_ARGUMENT, 'the end pushed') { hands.push(kinds::END_, []) }
   expect_status(TinkerPdf::Status::BAD_ARGUMENT, 'a kind the C ABI does not declare') { hands.push(99, []) }
@@ -465,10 +466,11 @@ def command_streams(root)
   heard = []
   reread = TinkerPdf::CommandStream.parse(hand)
   back = reread.records
-  check!(back.map(&:kind) == [kinds::PAGE, kinds::COLORANTS, kinds::GROUP_BUDGET_SPENT, kinds::NESTED_BUDGET_SPENT],
+  check!(back.map(&:kind) == [kinds::PAGE, kinds::COLORANTS, kinds::GROUP_BUDGET_SPENT, kinds::NESTED_BUDGET_SPENT,
+                              kinds::DEPTH_REFUSED],
          "the records pushed by hand read back in order: #{back.map(&:kind)}")
   check!(back[0].fields == records[0].fields && back[1].fields == colorants && back[2].fields.empty? &&
-         back[3].fields.empty?, 'the records pushed by hand read back as pushed')
+         back[3].fields.empty? && back[4].fields.empty?, 'the records pushed by hand read back as pushed')
   check!(reread.version == stream.version, "the page's stream is at the version the encoder writes, this build's")
   writer = TinkerPdf::CommandEncoder.new
   back.each { |record| writer.push(record.kind, rebuilt(record.fields)) }

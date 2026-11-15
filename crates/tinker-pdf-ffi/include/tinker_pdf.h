@@ -728,6 +728,8 @@ typedef enum TpdfCommandKind {
   TPDF_COMMAND_KIND_PATTERN = 43,
   // `Cell`, kind 79: a tiling cell, its own stream.
   TPDF_COMMAND_KIND_CELL = 44,
+  // `DepthRefused`, kind 38: a nested stream past the depth cap, not run.
+  TPDF_COMMAND_KIND_DEPTH_REFUSED = 45,
 } TpdfCommandKind;
 
 // What a field holds: its tag on the wire, the facade's `CommandField`.

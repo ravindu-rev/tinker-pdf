@@ -394,10 +394,11 @@ JavaScript's README replays a stream to a `CanvasRenderingContext2D`; Python's
 standard library has no canvas that clips, blends or draws a cubic, so its
 surface is the protocol alone. `bindings/python/tests/command_stream.py` and
 `bindings/js/tests/command_stream.mjs` decode and write back the stream of a
-page holding every kind of record, beside a stream of the three a page reaches
-only past a budget or through a recording that composites colorants, to the
-facade's bytes, and drive a recording device that hears every kind in the
-order the facade's decoder gives them; each prints `COMMAND-STREAM: RAN`.
+page holding every kind of record, beside a stream of the four a page reaches
+only past a budget or the depth cap or through a recording that composites
+colorants, to the facade's bytes, and drive a recording device that hears
+every kind in the order the facade's decoder gives them; each prints
+`COMMAND-STREAM: RAN`.
 
 **The command stream in .NET and Java** projects the C ABI's calls one for
 one (`bindings/dotnet/TinkerPdf.Read.cs`,
@@ -435,7 +436,7 @@ header's. A replay to a canvas is a device over the projection: the
 Windows only, and Java's smoke program replays the every-kind page to a
 `Graphics2D` over an image and counts its ink. Each smoke program decodes the
 stream of that page through its own types and writes it back to the
-facade's bytes, beside the stream of the three kinds pushed by hand; drives
+facade's bytes, beside the stream of the four kinds pushed by hand; drives
 a recording device that hears every kind in the stream's order, a device
 naming one method and one that throws; holds each outline and decode
 accessor to its record's fields, the cursor's end and rewind, the replay's
@@ -481,7 +482,7 @@ a Ruby keyword, and the C crate's
 Neither standard library has a 2D vector canvas — Go's `image/draw`
 composites rasters and draws no paths — so each ships the device interface
 alone. Each smoke program runs the leg the .NET and Java ones run, over the
-same page and the same three kinds pushed by hand, and exits non-zero on any
+same page and the same four kinds pushed by hand, and exits non-zero on any
 difference.
 
 **The write surface, and its shape.** What separates it from the read
@@ -1493,14 +1494,14 @@ cargo xtask bindings-coverage
   reads the stream of a page holding every kind a page's stream is written
   with through the cursor and the fields as the facade's records — every
   kind, number and field, the reals to the bit — and pushes them back
-  through the encoder to the facade's bytes, and a stream of the three kinds
-  no page there writes (`Colorants`, `GroupBudgetSpent`,
-  `NestedBudgetSpent`), pushed by hand, round-trips the same way. Around it:
-  the cursor's end and rewind, a field and a record past the end, each
-  accessor against its record's fields and against a record of another kind,
-  the encoder's refusals and a finish twice, bytes the reader refuses, a
-  newer minor's record read as -1, the stream's version, page, size and
-  bytes, its render against the page's, and null on every entry point.
+  through the encoder to the facade's bytes, and a stream of the four kinds no
+  page there writes (`Colorants`, `GroupBudgetSpent`, `NestedBudgetSpent`,
+  `DepthRefused`), pushed by hand, round-trips the same way. Around it: the
+  cursor's end and rewind, a field and a record past the end, each accessor
+  against its record's fields and against a record of another kind, the
+  encoder's refusals and a finish twice, bytes the reader refuses, a newer
+  minor's record read as -1, the stream's version, page, size and bytes, its
+  render against the page's, and null on every entry point.
   `src/raw_enum_tests.rs` pins `TpdfCommandKind`'s arms to the facade's
   kinds by name and its refusal of a number it does not declare, and
   `tests/layout.rs` the five structs' layouts.

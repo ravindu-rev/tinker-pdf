@@ -69,7 +69,9 @@ pub const MAJOR: u16 = 1;
 /// is not the identity — the fill-and-stroke flag before it written then as
 /// well — so a state record that ends before it reads as the page's own
 /// space, which is where a reader of an earlier minor anchored every pattern.
-pub const MINOR: u16 = 3;
+/// Minor 4 adds [`CommandKind::DepthRefused`], the depth cap's notice, which
+/// a reader of an earlier minor steps over.
+pub const MINOR: u16 = 4;
 
 /// The most glyphs one [`CommandKind::GlyphRun`] holds; a longer run of one
 /// font and state is written as several.
@@ -275,6 +277,7 @@ kinds! {
     35 GroupBudgetSpent "GroupBudgetSpent" []
     36 RecursionRefused "RecursionRefused" []
     37 NestedBudgetSpent "NestedBudgetSpent" []
+    38 DepthRefused "DepthRefused" []
     64 Page "Page" ["crop box", "rotation", "group space", "usage", "page index"]
     65 Annotation "Annotation" ["scope", "widget"]
     66 MissingFont "MissingFont" ["name"]
@@ -2182,6 +2185,7 @@ impl EventWriter {
             Event::GroupBudgetSpent => Record::new(CommandKind::GroupBudgetSpent),
             Event::RecursionRefused => Record::new(CommandKind::RecursionRefused),
             Event::NestedBudgetSpent => Record::new(CommandKind::NestedBudgetSpent),
+            Event::DepthRefused => Record::new(CommandKind::DepthRefused),
         };
         self.body.push(record);
     }
@@ -3034,6 +3038,7 @@ impl EventReader {
             CommandKind::GroupBudgetSpent => Event::GroupBudgetSpent,
             CommandKind::RecursionRefused => Event::RecursionRefused,
             CommandKind::NestedBudgetSpent => Event::NestedBudgetSpent,
+            CommandKind::DepthRefused => Event::DepthRefused,
             other => return Err(fields.wrong(format!("{} is no command", other.name()))),
         };
         Self::push(events, event, meter)
@@ -3769,6 +3774,7 @@ mod tests {
             Event::GroupBudgetSpent,
             Event::RecursionRefused,
             Event::NestedBudgetSpent,
+            Event::DepthRefused,
             Event::RestoreState,
         ]
     }
@@ -3819,7 +3825,7 @@ mod tests {
         // Every variant is in the recording, so a variant the codec dropped
         // would fail here and not pass by absence.
         let kinds: std::collections::HashSet<_> = events.iter().map(Event::kind).collect();
-        assert_eq!(kinds.len(), 22, "every Event variant is recorded");
+        assert_eq!(kinds.len(), 23, "every Event variant is recorded");
 
         // The three glyph runs: one font and state, then another font, then
         // the same font in a plain state, and a glyph with no state at all.
@@ -4334,7 +4340,8 @@ mod tests {
                 assert!(kind.is_codec());
             }
         }
-        assert_eq!(CommandKind::from_number(38), None);
+        // Minor 4's DepthRefused is 38, the last command kind.
+        assert_eq!(CommandKind::from_number(39), None);
         assert_eq!(CommandKind::from_number(80), None);
         assert_eq!(CommandKind::GlyphRun.fields().len(), 12);
         // Minor 3's pattern space is the thirty-first.

@@ -16,7 +16,8 @@ read, for roadmap row RC-18, and names the test that holds each part.
   reader can skip.
 - **The commands**: every call a display list records — paths, glyphs
   grouped into runs by font and state, images by reference, `sh`, clips,
-  `q`/`Q`, marked content, forms, groups, soft masks and the budget notices —
+  `q`/`Q`, marked content, forms, groups, soft masks and the interpreter's
+  notices of what it refused —
   and the graphics state each carries, every field of it to the bit.
 - **The tables a byte-identical replay needs**: the outline of every glyph
   drawn, every image decoded at every size a draw can ask for, every shading
@@ -95,7 +96,9 @@ field to `State`, the default space of the stream the state is in, which a
 pattern is placed in (ISO 32000-2 8.7.2), written only where it is not the
 identity, and then with the fill-and-stroke flag before it written too: a
 reader takes a state that ends before it as in the page's own space, where a
-reader of an earlier minor placed every pattern.
+reader of an earlier minor placed every pattern. Minor 4 adds kind 38,
+`DepthRefused`, the depth cap's notice, which a reader of an earlier minor
+steps over.
 
 A reference is a field `Unsigned(i)`, the `i`th record of its table counted
 from zero in stream order, or `Nothing` for none. Every definition precedes
@@ -168,6 +171,7 @@ Lab.
 | 35 | `GroupBudgetSpent` | — |
 | 36 | `RecursionRefused` | — |
 | 37 | `NestedBudgetSpent` | — |
+| 38 | `DepthRefused` | — |
 
 A path is its operators, one byte a segment — 0 move, 1 line, 2 curve, 3
 close — and its numbers, two for a move or a line and six for a curve. **A

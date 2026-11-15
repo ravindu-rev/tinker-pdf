@@ -1565,6 +1565,12 @@ impl Device for Writer<'_> {
         self.warn(SvgWarning::Render(RenderWarning::NestedBudgetSpent));
     }
 
+    /// The interpreter passed a stream over past its depth cap: said as the
+    /// renderer says it.
+    fn depth_refused(&mut self) {
+        self.warn(SvgWarning::Render(RenderWarning::NestedTooDeep));
+    }
+
     /// Yes once the budget is spent: nothing more would be written, so
     /// nothing more is worth replaying or interpreting.
     fn is_cancelled(&self) -> bool {

@@ -349,12 +349,12 @@ func builds(face []byte) {
 // (crates/tinker-pdf-ffi/src/commands/tests.rs, every_kind_page), built again
 // from the face and the profile the checkout holds -- decoded through the
 // binding's own types and written back to the facade's bytes, beside a stream
-// of the three kinds a page reaches only past a budget or through a recording
-// that composites colorants, pushed by hand. Between the two, every kind but
-// the end. A recording device hears every kind in the stream's order, the
-// tables' accessors are their records' fields, the replay through the engine
-// draws what the page's render draws, and bytes that are no stream are
-// refused with the reader's sentence.
+// of the four kinds a page reaches only past a budget or the depth cap or
+// through a recording that composites colorants, pushed by hand. Between the
+// two, every kind but the end. A recording device hears every kind in the
+// stream's order, the tables' accessors are their records' fields, the replay
+// through the engine draws what the page's render draws, and bytes that are
+// no stream are refused with the reader's sentence.
 
 // check fails the leg unless ok.
 func check(ok bool, format string, args ...any) {
@@ -636,7 +636,7 @@ func commandStreams(root string) {
 		onThePage[record.Kind] = true
 	}
 	byHand := map[tp.CommandKind]bool{tp.CommandColorants: true, tp.CommandGroupBudgetSpent: true,
-		tp.CommandNestedBudgetSpent: true}
+		tp.CommandNestedBudgetSpent: true, tp.CommandDepthRefused: true}
 	for _, kind := range tp.CommandKinds() {
 		if kind != tp.CommandEnd && !byHand[kind] {
 			check(onThePage[kind], "the page's stream holds a %v record", kind)
@@ -658,6 +658,7 @@ func commandStreams(root string) {
 	must(hands.Push(tp.CommandColorants, colorants))
 	must(hands.Push(tp.CommandGroupBudgetSpent, nil))
 	must(hands.Push(tp.CommandNestedBudgetSpent, nil))
+	must(hands.Push(tp.CommandDepthRefused, nil))
 	hand, err := hands.Finish()
 	must(err)
 	expectStatus(func() error { return hands.Push(tp.CommandEnd, nil) }, tp.StatusBadArgument, "the end pushed")
@@ -683,10 +684,11 @@ func commandStreams(root string) {
 	readBack, err := reread.Records()
 	must(err)
 	check(sameKinds(kindsOf(readBack), []tp.CommandKind{tp.CommandPage, tp.CommandColorants,
-		tp.CommandGroupBudgetSpent, tp.CommandNestedBudgetSpent}),
+		tp.CommandGroupBudgetSpent, tp.CommandNestedBudgetSpent, tp.CommandDepthRefused}),
 		"the records pushed by hand read back in order: %v", kindsOf(readBack))
 	check(sameFields(readBack[0].Fields, records[0].Fields) && sameFields(readBack[1].Fields, colorants) &&
-		len(readBack[2].Fields) == 0 && len(readBack[3].Fields) == 0, "the records pushed by hand read back as pushed")
+		len(readBack[2].Fields) == 0 && len(readBack[3].Fields) == 0 && len(readBack[4].Fields) == 0,
+		"the records pushed by hand read back as pushed")
 	major, minor, err := reread.Version()
 	must(err)
 	pageMajor, pageMinor, err := stream.Version()
@@ -893,6 +895,9 @@ func (r *recorder) ShadingDefinition(c tp.CommandRecord) error {
 func (r *recorder) Shading(c tp.CommandRecord) error { return r.note(tp.CommandShading, c) }
 func (r *recorder) Pattern(c tp.CommandRecord) error { return r.note(tp.CommandPattern, c) }
 func (r *recorder) Cell(c tp.CommandRecord) error    { return r.note(tp.CommandCell, c) }
+func (r *recorder) DepthRefused(c tp.CommandRecord) error {
+	return r.note(tp.CommandDepthRefused, c)
+}
 func (r *recorder) Unknown(c tp.CommandRecord) error {
 	return fmt.Errorf("a record of kind %d, which this build does not know", c.Number)
 }

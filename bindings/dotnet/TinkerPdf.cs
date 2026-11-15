@@ -479,6 +479,9 @@ public enum CommandKind
 
     /// <summary>A tiling cell, its own stream.</summary>
     Cell = 44,
+
+    /// <summary>A nested stream past the depth cap, not run.</summary>
+    DepthRefused = 45,
 }
 
 /// <summary>What a command-stream field holds (<c>TpdfCommandFieldTag</c>).</summary>
