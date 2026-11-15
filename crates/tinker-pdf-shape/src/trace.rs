@@ -232,23 +232,19 @@ mod tests {
     use crate::unicode::{self, Script};
     use crate::{Layout, LayoutTable, Shaper};
 
-    /// The twenty-six rows, in `TRIAGE`'s order: the fifteen expecting gid311
-    /// where this crate draws gid314, `SHBALI-1/14` and `/15`, the four
-    /// `Advance`, `SHLANA-10/4`, `SHLANA-10/28`, and the three the
-    /// confinement blocks. `SHKNDA-2`'s six are not here; `universal.rs`
-    /// records their cause and its price.
+    /// The twenty-one rows, in `TRIAGE`'s order: the fifteen expecting gid311
+    /// where this crate draws gid314, and the six a mark attachment the
+    /// fixture does not draw leaves — five `Advance`, `SHLANA-10/28` among
+    /// them, which shapes as `SHLANA-10/29` does, and `SHLANA-10/4`'s
+    /// `Offset`. `SHKNDA-2`'s six are not here; `universal.rs` records their
+    /// cause and its price.
     const ROWS: &[&str] = &[
-        "SHBALI-1/14",
-        "SHBALI-1/15",
         "SHLANA-1/35",
         "SHLANA-2/2",
         "SHLANA-2/3",
         "SHLANA-2/4",
         "SHLANA-2/7",
         "SHLANA-2/35",
-        "SHLANA-3/3",
-        "SHLANA-4/2",
-        "SHLANA-7/5",
         "SHLANA-7/17",
         "SHLANA-8/5",
         "SHLANA-8/6",

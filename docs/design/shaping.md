@@ -960,9 +960,8 @@ column names the change that closes each.
 `Shaper::shape` does to a run: the buffer after `cmap`, after each `GSUB`
 stage, after the reordering pause and after `GPOS`, and the buffer either side
 of every lookup the runner runs. Its `#[ignore]`d
-`every_unexplained_triage_row_is_traced` shapes twenty-six rows — the
-twenty-one of `tests/text_rendering.rs`'s `TRIAGE` whose cause the tree did
-not record, and the five the second table below gives as reproduced — and
+`every_unexplained_triage_row_is_traced` shapes the twenty-one rows of
+`tests/text_rendering.rs`'s `TRIAGE` whose cause the tree did not record and
 prints, per row, each stage's glyphs, syllables and categories; for each glyph
 the fixture wants and the run lacks, every lookup of the face that can emit it,
 directly or through a lookup its rules name, replayed over the buffer it saw
@@ -983,7 +982,7 @@ Each row `TRIAGE` holds is attributed to one mechanism:
 | `SHLANA-2/2`, `/3`, `/4`; `SHLANA-7/17`; `SHLANA-8/5`, `/6`; `SHLANA-10/8`, `/30`, `/38`, `/39`, `/40`, `/42`, `/45`, `/46`, `/47` | A glyph the vendored face cannot produce from the text | Each case types U+1A7B and wants gid311 (`uni1A78`) at its place, and the fixture's outline for that glyph is gid311's, a cross, not gid314's, the glyph `cmap` gives U+1A7B. **No sequence of the face's `lana` lookups yields gid311 from U+1A7B**, and none of all its lookups does either: taken over every script, language system and feature, every alternate of an alternate set, and with every context set aside, no substitution of the face puts gid311 in a buffer that starts as any of the fifteen texts' glyphs. The face's only substitutions that make gid311 out of another glyph take gid23, gid23 and gid46, or gid293, and none of those is derivable from these texts. Where the order differs as well (`SHLANA-2/3`), it is the face's `abvs` lookup 68 moving gid314 after the vowel that follows it, a rule gid311 would not match | H-146: nothing is declined; the fifteen stay in `TRIAGE` and `PASSING`'s shortfall (FT-08.9) |
 | `SHLANA-1/35`, `SHLANA-2/7`, `SHLANA-2/35`, `SHLANA-10/28`, `SHLANA-10/29` (`Advance`); `SHLANA-10/4` (`Offset`) | A mark attachment the fixture does not draw | The glyphs and their order are the fixture's. Each mark the fixture places elsewhere is where it is drawn **unattached** — at the pen, with no offset — and each mark stacked on it moves with it. The face's lookup 1 under `mark` is the only lookup that attaches it to its base, it applies as ISO/IEC 14496-22 states (the mark covered, the base the nearest glyph before it that is not a mark and covered, no lookup flag), and no mark lookup of the face attaches the mark where the fixture draws it. Each such syllable has a pre-base character typed after another of its marks, but cases of the same shape attach in their fixtures (`SHLANA-1/26`, `SHLANA-2/36`), so no rule the syllable's shape states separates them. `SHLANA-10/28` is `SHLANA-10/29`'s text with a `CGJ` typed in it, which stays inside its cluster and is removed after `GSUB` (FT-08.5, FT-08.8), so the two are drawn alike | No positioning change: the face's `GPOS`, applied as the standard states, cannot draw the fixture's positions. FT-08.10 lands H-146's ruling on them as FT-08.9 does on the fifteen |
 
-The trace's other five rows reproduce, each by the change that closed its
+Five rows reproduce and are not traced, each by the change that closed its
 mechanism:
 
 | Rows | Mechanism | What reproduces them | Closed by |
