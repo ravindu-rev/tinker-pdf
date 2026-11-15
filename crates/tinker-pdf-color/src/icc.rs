@@ -9113,8 +9113,9 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
     /// two-input tables, and every input of a 17-level lattice over each
     /// four-input model, converted as rows, is the colour `apply` gives the
     /// same components: a fill whose components are `k / 255` and an image
-    /// sample `k` are one colour. A partial pixel after the last whole one
-    /// is passed over.
+    /// sample `k` are one colour. A partial pixel after the last whole one,
+    /// of any length short of a pixel, is passed over; a row of one-byte
+    /// pixels has none.
     #[test]
     fn a_row_of_bytes_converts_as_apply_does() {
         let mut models = priced_models();
@@ -9162,12 +9163,26 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
                     row_is_apply(name, transform, &samples, &row);
                 }
             }
-            // A partial pixel is no pixel: the row ends at the last whole one.
-            let mut samples = vec![128u8; inputs * 2];
-            samples.push(7);
-            let mut row = Vec::new();
-            transform.convert_row(&samples, &mut row);
-            assert_eq!(row.len(), 6, "{name}: two whole pixels");
+            // A partial pixel is no pixel: the row ends at the last whole
+            // one, however many bytes short of a pixel follow it.
+            for partial in 1..inputs {
+                let mut samples = vec![128u8; inputs * 2];
+                samples.extend(std::iter::repeat_n(7, partial));
+                let mut row = Vec::new();
+                transform.convert_row(&samples, &mut row);
+                assert_eq!(
+                    row.len(),
+                    6,
+                    "{name}: two whole pixels and {partial} bytes past them"
+                );
+            }
+            // A pixel of one input is one byte, so its row has no partial
+            // pixel: a byte after two pixels is a third.
+            if inputs == 1 {
+                let mut row = Vec::new();
+                transform.convert_row(&[128, 128, 7], &mut row);
+                assert_eq!(row.len(), 9, "{name}: three whole pixels");
+            }
         }
     }
 
