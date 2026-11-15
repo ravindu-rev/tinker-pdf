@@ -1348,10 +1348,10 @@ pub fn intents_page() -> Vec<u8> {
 
 // ---- the face this repository writes for itself -----------------------------
 //
-// Moved here from `determinism.rs` when the goldens arrived: the text family's
-// golden needs a face for the same reason that file's `text` fixture does, and
-// two synthetic faces in one test directory would be one too many. The bytes
-// are unchanged, which the `text` fingerprint proves rather than asserts.
+// One face for `determinism.rs`'s fixtures, the goldens and every test that
+// wants text drawn: the text family's golden needs a face for the same reason
+// that file's `text` fixture does, and two synthetic faces in one test
+// directory would be one too many.
 
 /// One outline point: its position in font units, and whether it lies on the
 /// curve.
@@ -1362,7 +1362,7 @@ type Contour = &'static [Point];
 type Shape = &'static [Contour];
 
 /// The six outlines of [`curvy_font`], glyph 1 upward; glyph 0 is `.notdef`
-/// and empty.
+/// and empty, and the space follows the six, empty as well ([`SPACE`]).
 ///
 /// Chosen for what they make the rasteriser do, not for looking like letters.
 /// A box outline — four axis-aligned edges — exercises almost nothing: every
@@ -1462,19 +1462,50 @@ const SHAPES: &[Shape] = &[
     ],
 ];
 
-/// How many glyphs the face has, `.notdef` included.
-const GLYPHS: u16 = SHAPES.len() as u16 + 1;
-/// The advance of every shape, in font units, and of the space.
+/// How many outlined shapes the face has.
+const SHAPE_COUNT: u16 = SHAPES.len() as u16;
+/// The space's glyph, after the shapes: a glyph of its own with no outline.
+/// ISO/IEC 14496-22's `cmap` maps a character the face has no glyph for to
+/// glyph 0, `.notdef`, so a space mapped there is a space the face does not
+/// have, and a reader drawing the face for a font that embeds none reports it
+/// missing (`docs/design/fallback-faces.md`).
+const SPACE: u16 = SHAPE_COUNT + 1;
+/// How many glyphs the face has: `.notdef`, the six shapes and the space.
+const GLYPHS: u16 = SPACE + 1;
+/// The advance of every shape, in font units.
 const ADVANCE: u16 = 640;
+/// The advance of the space and of `.notdef`, in font units.
 const SPACE_ADVANCE: u16 = 320;
 
-/// Which glyph a character code selects: the space is empty, and every other
-/// printable code takes the six shapes in turn.
-fn glyph_for(code: u16) -> u16 {
-    if code == 0x20 {
-        return 0;
+/// The characters [`curvy_font`] covers, in order: those of Windows code page
+/// 1252, which are what a simple font under `WinAnsiEncoding` can show (ISO
+/// 32000-1 Annex D, D.2) — printable ASCII, the 27 characters 1252 sets at
+/// `0x80` to `0x9F`, and the Latin-1 supplement from the no-break space up.
+/// A face a host hands the engine in place of one of the standard 14 covers
+/// every character such a font can show, and so does this one.
+fn covered() -> Vec<char> {
+    /// 1252's characters at `0x80` to `0x9F`, the five codes it leaves
+    /// undefined left out.
+    const HIGH: [char; 27] = [
+        '\u{20AC}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+        '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{017D}', '\u{2018}',
+        '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{02DC}',
+        '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{017E}', '\u{0178}',
+    ];
+    let mut chars: Vec<char> = (' '..='~').chain('\u{A0}'..='\u{FF}').chain(HIGH).collect();
+    chars.sort_unstable();
+    chars
+}
+
+/// Which glyph a covered character selects: the space and the no-break space
+/// are the empty [`SPACE`], and every other character takes the six shapes in
+/// turn by its scalar value, `!` the first.
+fn glyph_for(ch: char) -> u16 {
+    if ch == ' ' || ch == '\u{A0}' {
+        return SPACE;
     }
-    1 + (code - 0x21) % (GLYPHS - 1)
+    let turn = (u32::from(ch) - 0x21) % u32::from(SHAPE_COUNT);
+    1 + u16::try_from(turn).expect("fewer than six")
 }
 
 /// A synthetic TrueType face of curves and diagonals.
@@ -1486,13 +1517,14 @@ fn glyph_for(code: u16) -> u16 {
 pub fn curvy_font() -> Vec<u8> {
     // Glyph 0 is `.notdef` and has no outline: an empty `loca` range, which
     // is how a font says "no shape" (a repeated offset, rather than a zero
-    // one).
+    // one). The space, after the six shapes, is empty the same way.
     let mut glyf: Vec<u8> = Vec::new();
     let mut loca: Vec<u32> = vec![0, 0];
     for shape in SHAPES {
         glyf.extend_from_slice(&glyph_data(shape));
         loca.push(glyf.len() as u32);
     }
+    loca.push(glyf.len() as u32);
 
     let mut loca_bytes = Vec::new();
     for offset in &loca {
@@ -1514,7 +1546,11 @@ pub fn curvy_font() -> Vec<u8> {
     // is spaced by the same numbers the outlines are drawn from.
     let mut hmtx = Vec::new();
     for glyph in 0..GLYPHS {
-        let advance = if glyph == 0 { SPACE_ADVANCE } else { ADVANCE };
+        let advance = if glyph == 0 || glyph == SPACE {
+            SPACE_ADVANCE
+        } else {
+            ADVANCE
+        };
         hmtx.extend_from_slice(&advance.to_be_bytes());
         hmtx.extend_from_slice(&0i16.to_be_bytes()); // left side bearing
     }
@@ -1592,38 +1628,75 @@ fn glyph_data(shape: Shape) -> Vec<u8> {
     out
 }
 
-/// A `cmap` covering printable ASCII (9.6.6.4).
+/// A `cmap` covering [`covered`] (9.6.6.4).
 ///
-/// Format 4 through its `idRangeOffset` branch — the one where the segment
+/// Format 4 through its `idRangeOffset` branch — the one where a segment
 /// points into a glyph index array at an offset measured from its own slot,
 /// which is the awkward part of the format and the part a real font uses.
 /// Going through the array rather than a plain delta is what lets every
-/// character in the fixture's text draw, out of a face with six shapes.
+/// covered character draw, out of a face with six shapes: one segment for
+/// each run of consecutive characters, each pointing at its own run of the
+/// one array, and the terminating segment at `0xFFFF` the format requires.
 fn cmap() -> Vec<u8> {
-    const FIRST: u16 = 0x20;
-    const LAST: u16 = 0x7E;
-    // The real segment, and the terminating one at 0xFFFF the format requires.
-    const SEGMENTS: u16 = 2;
+    let covered = covered();
+    // Each run of consecutive characters, as its first and last code.
+    let mut runs: Vec<(u16, u16)> = Vec::new();
+    for ch in &covered {
+        let code = u16::try_from(u32::from(*ch)).expect("the face covers the BMP only");
+        match runs.last_mut() {
+            Some((_, last)) if *last + 1 == code => *last = code,
+            _ => runs.push((code, code)),
+        }
+    }
+    // The runs, and the terminating segment.
+    let segments = runs.len() + 1;
+    let seg_count_x2 = u16::try_from(segments * 2).expect("a few segments");
+    let mut entry_selector = 0u16;
+    while 1usize << (entry_selector + 1) <= segments {
+        entry_selector += 1;
+    }
+    let search_range = 2u16 << entry_selector;
 
     let mut sub = Vec::new();
-    for value in [4u16, 0, 0, SEGMENTS * 2, 0, 0, 0] {
+    // format, length (written below), language
+    for value in [4u16, 0, 0, seg_count_x2, search_range, entry_selector] {
         sub.extend_from_slice(&value.to_be_bytes());
     }
-    sub.extend_from_slice(&LAST.to_be_bytes()); // endCode
+    sub.extend_from_slice(&(seg_count_x2 - search_range).to_be_bytes()); // rangeShift
+    for (_, last) in &runs {
+        sub.extend_from_slice(&last.to_be_bytes()); // endCode
+    }
     sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
     sub.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
-    sub.extend_from_slice(&FIRST.to_be_bytes()); // startCode
+    for (first, _) in &runs {
+        sub.extend_from_slice(&first.to_be_bytes()); // startCode
+    }
     sub.extend_from_slice(&0xFFFFu16.to_be_bytes());
-    sub.extend_from_slice(&0u16.to_be_bytes()); // idDelta: the array is absolute
+    // idDelta: the array is absolute; the terminator's 1 takes 0xFFFF to 0.
+    for _ in &runs {
+        sub.extend_from_slice(&0u16.to_be_bytes());
+    }
     sub.extend_from_slice(&1u16.to_be_bytes());
     // idRangeOffset: the glyph array begins immediately after this array, and
-    // the offset is counted from this slot, so it is the distance to the end
-    // of the array — two bytes for each segment from this one on.
-    sub.extend_from_slice(&(SEGMENTS * 2).to_be_bytes());
-    sub.extend_from_slice(&0u16.to_be_bytes());
-    for code in FIRST..=LAST {
-        sub.extend_from_slice(&glyph_for(code).to_be_bytes());
+    // each offset is counted from its own slot, so it is the distance to the
+    // end of this array — two bytes for each segment from this one on — and
+    // on to its run of the glyph array, two bytes for each entry before it.
+    let mut before = 0usize;
+    for (at, (first, last)) in runs.iter().enumerate() {
+        let offset = 2 * (segments - at) + 2 * before;
+        sub.extend_from_slice(
+            &u16::try_from(offset)
+                .expect("a small subtable")
+                .to_be_bytes(),
+        );
+        before += usize::from(last - first) + 1;
     }
+    sub.extend_from_slice(&0u16.to_be_bytes());
+    for ch in &covered {
+        sub.extend_from_slice(&glyph_for(*ch).to_be_bytes());
+    }
+    let length = u16::try_from(sub.len()).expect("a small subtable");
+    sub[2..4].copy_from_slice(&length.to_be_bytes());
 
     let mut cmap = Vec::new();
     // One (3,1) Windows Unicode BMP subtable, which is the one a reader
