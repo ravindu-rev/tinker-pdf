@@ -1272,7 +1272,7 @@ mod tests {
     fn the_any_part_rule_is_the_sweep_s_spans_and_the_outline_s_extents() {
         use crate::fill::{fill_hard, fill_hard_with, HardEdge};
 
-        let mut s = Stream::new(0x616e_7970_6172_74);
+        let mut s = Stream::new(0x0061_6e79_7061_7274);
         let mut scratch = FillScratch::new();
         let mut by_edges_alone = 0u64;
         for class in CLASSES {

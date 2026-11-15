@@ -2221,7 +2221,9 @@ mod tests {
             tints: &paint,
         };
         let no_light = |_: &[f64]| -> Color { panic!("a draw in tints asked for light") };
-        let greys: Vec<Box<dyn Fn(&[f64]) -> Color>> = (0..3)
+        // The grey of one of the mesh's three inputs, as light.
+        type Light = Box<dyn Fn(&[f64]) -> Color>;
+        let greys: Vec<Light> = (0..3)
             .map(|input| {
                 Box::new(move |inputs: &[f64]| {
                     let grey = level(inputs[input]);
@@ -2231,7 +2233,7 @@ mod tests {
                         b: grey,
                         a: 0xFF,
                     }
-                }) as Box<dyn Fn(&[f64]) -> Color>
+                }) as Light
             })
             .collect();
         let whole = (0, 0, 30, 24);

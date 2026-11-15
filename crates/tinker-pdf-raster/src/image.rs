@@ -5083,7 +5083,9 @@ mod tests {
                 height: 12,
             },
         ];
-        let cases: [((u32, u32), &[(f64, f64)], &[SourceWindow]); 2] = [
+        // An image's size, the scales it is drawn at, and its windows.
+        type Case<'a> = ((u32, u32), &'a [(f64, f64)], &'a [SourceWindow]);
+        let cases: [Case<'_>; 2] = [
             (
                 (61, 47),
                 &[(3.0, 2.5), (1.0, 1.0), (0.59, 0.71), (0.37, 0.43)],

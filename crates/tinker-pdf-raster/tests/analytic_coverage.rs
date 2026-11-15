@@ -885,7 +885,7 @@ fn lines_of(path: &Path, tolerance: f64) -> Vec<Line> {
         let (Some(first), Some(last)) = (poly.first(), poly.last()) else {
             continue;
         };
-        let closing = (first != last).then(|| [*last, *first]);
+        let closing = (first != last).then_some([*last, *first]);
         for pair in poly
             .windows(2)
             .chain(closing.as_ref().map(|pair| &pair[..]))

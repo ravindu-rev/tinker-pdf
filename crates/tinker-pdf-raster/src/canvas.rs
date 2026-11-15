@@ -1192,7 +1192,7 @@ impl Canvas {
         };
         // One instance of the row walk for each pixel size a format of this
         // path has, so that every loop inside it is of a fixed width.
-        let row_of: fn(&mut [u8], &[u8], &[u8; 5], &[u8], PixelFormat) = match format {
+        let row_of: OpaqueRow = match format {
             PixelFormat::Gray8 => opaque_row::<1, false>,
             PixelFormat::GrayA8 => opaque_row::<2, true>,
             PixelFormat::Rgb8 | PixelFormat::Bgr8 => opaque_row::<3, false>,
@@ -2730,6 +2730,10 @@ pub fn rgb_to_cmyk(r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
 
 /// Pixels in a block of [`Canvas::fill_opaque`]'s row walk.
 const BLOCK: usize = 16;
+
+/// An instance of [`opaque_row`] for one pixel size: its pixels, coverage,
+/// encoded colour, solid block and format.
+type OpaqueRow = fn(&mut [u8], &[u8], &[u8; 5], &[u8], PixelFormat);
 
 /// One row of [`Canvas::fill_opaque`]: `coverage` over `pixels`, `N` bytes a
 /// pixel, `ALPHA` whether the last of them is alpha, and `solid` a block's
@@ -4887,7 +4891,9 @@ mod tests {
         for (value, slot) in permute.iter_mut().enumerate() {
             *slot = (value * 167 + 13) as u8;
         }
-        let every: [((i32, i32), MaskKind, Option<&[u8; 256]>); 4] = [
+        // A reading's position, its kind, and its transfer table, if any.
+        type Way<'a> = ((i32, i32), MaskKind, Option<&'a [u8; 256]>);
+        let every: [Way<'_>; 4] = [
             ((0, 0), MaskKind::Luminosity, None),
             ((0, 0), MaskKind::Alpha, None),
             ((-37, 1_000_003), MaskKind::Luminosity, Some(&permute)),
@@ -6560,7 +6566,7 @@ mod tests {
             let whole = canvas.composite_plates_into(format, &spots);
             let n = format.components();
             for (left, top, width, height) in [(0, 0, 1, 1), (1, 0, 2, 2), (2, 1, 1, 1)] {
-                let at = (7 + left as i32, -3 + top as i32);
+                let at = (7 + left, -3 + top);
                 let region = canvas
                     .extract(at, width, height, canvas.format)
                     .composite_plates_into(format, &spots);
@@ -6788,11 +6794,11 @@ mod tests {
                 let mut some = start();
                 some.set_marked(marked);
                 paint(&mut some);
-                for channel in 0..channels {
+                for (channel, &under) in backdrop.iter().enumerate().take(channels) {
                     let want = if marked.contains(channel) {
                         every.data[channel]
                     } else {
-                        backdrop[channel]
+                        under
                     };
                     assert_eq!(
                         some.data[channel], want,

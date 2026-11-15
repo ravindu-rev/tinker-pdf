@@ -1013,9 +1013,7 @@ impl Work {
             // is the sweep's `(y0 + row) × 16` with nothing to saturate.
             let top = (i64::from(y0) + i64::from(row)) * samples;
             let base = (row as usize) * (width as usize);
-            let Some(out) = mask.data.get_mut(base..base + width as usize) else {
-                return None;
-            };
+            let out = mask.data.get_mut(base..base + width as usize)?;
             if measure == Measure::Centre {
                 // The centre rule reads the row's middle sub-scanline alone,
                 // lane `CENTRE_LANE` of the cells, and only it is deposited.
@@ -3302,9 +3300,12 @@ mod tests {
         }
     }
 
+    /// Each sub-scanline of a run and the `x` an edge crosses it at.
+    type Crossings = Vec<(i64, i64)>;
+
     /// The crossings `each_crossing` hands over for `from..to`, beside
     /// `crossing` at each of the same sub-scanlines.
-    fn stepped_and_direct(edge: &Edge, from: i64, to: i64) -> (Vec<(i64, i64)>, Vec<(i64, i64)>) {
+    fn stepped_and_direct(edge: &Edge, from: i64, to: i64) -> (Crossings, Crossings) {
         let mut stepped = Vec::new();
         each_crossing(edge, from, to, |sub, x| stepped.push((sub, x)));
         let direct = (from..to).map(|sub| (sub, crossing(edge, sub))).collect();

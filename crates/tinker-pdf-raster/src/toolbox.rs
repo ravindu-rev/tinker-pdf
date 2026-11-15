@@ -1239,8 +1239,8 @@ mod tests {
         // A half-alpha grey and an opaque white, straight: premultiplied to
         // 50 and 255, averaged to 153 over an alpha of 192, straightened.
         let (_, data) = scale(&straight, &[100, 128, 255, 255], 1, 1).expect("a picture");
-        let alpha = (128u32 + 255 + 1) / 2;
-        let colour = (50u32 + 255 + 1) / 2;
+        let alpha = (128u32 + 255).div_ceil(2);
+        let colour = (50u32 + 255).div_ceil(2);
         assert_eq!(
             data,
             [((colour * 255 + alpha / 2) / alpha) as u8, alpha as u8]
