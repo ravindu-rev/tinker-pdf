@@ -725,13 +725,15 @@ mod tests {
                     space: s1,
                     function: f1,
                     domain: d1,
+                    matrix: m1,
                 },
                 Shading::FunctionBased {
                     space: s2,
                     function: f2,
                     domain: d2,
+                    matrix: m2,
                 },
-            ) => s1 == s2 && f1 == f2 && d1 == d2,
+            ) => s1 == s2 && f1 == f2 && d1 == d2 && m1 == m2,
             (
                 Shading::Axial {
                     space: s1,

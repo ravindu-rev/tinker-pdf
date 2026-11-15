@@ -449,8 +449,14 @@ pub enum Shading {
         space: ColorSpace,
         /// The function.
         function: Function,
-        /// `[x0 x1 y0 y1]`, the domain in shading space.
+        /// `[x0 x1 y0 y1]`, the domain, in the space `matrix` maps from.
         domain: [f64; 4],
+        /// `/Matrix` (8.7.4.5.2, Table 79): the domain's space mapped into
+        /// the shading's target space, the identity where the dictionary has
+        /// none. A painter composes it before the shading's map to the
+        /// device ([`Shading::placed`]), so [`Shading::color_at`] reads the
+        /// domain's own coordinates.
+        matrix: Matrix,
     },
     /// Type 2: a gradient along the line between two points.
     Axial {
@@ -516,8 +522,26 @@ impl Shading {
         }
     }
 
-    /// The colour at a point in shading space, or `None` where the shading
-    /// paints nothing: the clause's expression evaluated at the point.
+    /// The map from the space [`Shading::color_at`] reads to the device,
+    /// given `to_device`, the map from the shading's target space — user
+    /// space under `sh`, a shading pattern's pattern space — to the device:
+    /// a function-based shading's `/Matrix` (Table 79) composed before it,
+    /// and `to_device` itself, to the bit, for every other type and for an
+    /// identity `/Matrix`, whose coordinates are the target space's own.
+    #[must_use]
+    pub fn placed(&self, to_device: Matrix) -> Matrix {
+        match self {
+            Shading::FunctionBased { matrix, .. } if *matrix != Matrix::IDENTITY => {
+                matrix.then(&to_device)
+            }
+            _ => to_device,
+        }
+    }
+
+    /// The colour at a point, or `None` where the shading paints nothing:
+    /// the clause's expression evaluated at the point. The point is in the
+    /// space [`Shading::placed`] maps from — the domain's for a
+    /// function-based shading, the target space for an axial or a radial one.
     /// `scratch` is the sweep's, the same one for every pixel.
     ///
     /// Always `None` for a mesh: a mesh is not a function of position, and
@@ -535,6 +559,7 @@ impl Shading {
                 space,
                 function,
                 domain,
+                ..
             } => {
                 let [x0, x1, y0, y1] = *domain;
                 if x < x0.min(x1) || x > x0.max(x1) || y < y0.min(y1) || y > y0.max(y1) {
@@ -1056,6 +1081,7 @@ mod tests {
                     ),
                 },
                 domain: [0.0, 40.0, 0.0, 40.0],
+                matrix: Matrix::IDENTITY,
             },
             Shading::Axial {
                 space: ColorSpace::DeviceGray,
@@ -1410,6 +1436,7 @@ mod tests {
                 program: tinker_pdf_color::function::parse_postscript(b"{ add 200 div }"),
             },
             domain: [0.0, 100.0, 0.0, 100.0],
+            matrix: Matrix::IDENTITY,
         };
         let pointless = Shading::Axial {
             space: ColorSpace::DeviceRgb,

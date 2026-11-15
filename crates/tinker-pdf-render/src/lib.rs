@@ -4053,7 +4053,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         alpha: f64,
         overprint: Overprint,
     ) -> bool {
-        let to_device = matrix.then(&self.base);
+        // The pattern space is the shading's target space, which a
+        // function-based shading's `/Matrix` maps its domain into (Table 79).
+        let to_device = shading.placed(matrix.then(&self.base));
         let stop = self.stop_predicate();
         let area = self.coverage(shape, Some(&stop));
         let alpha = alpha.clamp(0.0, 1.0);
@@ -6782,8 +6784,10 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         };
 
         // 8.7.4.2: `sh` fills the current clip, so a page without one paints
-        // everywhere — and the shading's own extent decides the rest.
-        let to_device = state.ctm.then(&self.base);
+        // everywhere — and the shading's own extent decides the rest. The
+        // shading's target space is user space here, and a function-based
+        // shading's `/Matrix` maps its domain into it (Table 79).
+        let to_device = shading.placed(state.ctm.then(&self.base));
 
         let alpha = state.fill_alpha.clamp(0.0, 1.0);
         let mode = blend_mode(state.blend);

@@ -60,8 +60,11 @@ pub const MAJOR: u16 = 1;
 /// ink and not zero (`ColorantTint::zero`), a stream of minor 0 holding none,
 /// and to [`CommandKind::State`] whether it paints a path's fill and stroke
 /// as one object (`GraphicsState::fill_and_stroke`), written only where it
-/// does, so a state record that ends before it reads as not.
-pub const MINOR: u16 = 1;
+/// does, so a state record that ends before it reads as not. Minor 2 appends
+/// to [`CommandKind::ShadingDefinition`] a function-based shading's
+/// `/Matrix` (Table 79), written only where it is not the identity, so a
+/// definition that ends before it reads as the identity.
+pub const MINOR: u16 = 2;
 
 /// The most glyphs one [`CommandKind::GlyphRun`] holds; a longer run of one
 /// font and state is written as several.
@@ -279,7 +282,7 @@ kinds! {
     73 Image "Image" ["scope", "name", "intent", "frame", "width", "height", "origin x", "origin y", "levels", "opaque", "interpolate", "room"]
     74 InlineImage "InlineImage" ["scope", "inline image", "intent", "frame", "width", "height", "origin x", "origin y", "levels", "opaque", "interpolate", "room"]
     75 ImageDecode "ImageDecode" ["image", "reduction", "answer", "codec", "width", "height", "rgb", "alpha", "two-colour samples", "two colours", "stencil", "interpolate", "reduced", "family", "soft-masked", "window", "missing fonts", "damaged names", "damaged", "repaired names", "repaired"]
-    76 ShadingDefinition "ShadingDefinition" ["type", "space", "function", "numbers", "extend", "mesh kind", "components", "positions", "values", "triangles", "patch points", "patch corners"]
+    76 ShadingDefinition "ShadingDefinition" ["type", "space", "function", "numbers", "extend", "mesh kind", "components", "positions", "values", "triangles", "patch points", "patch corners", "matrix"]
     77 Shading "Shading" ["scope", "name", "answer", "type", "definition", "missing fonts", "damaged names", "damaged", "repaired names", "repaired"]
     78 Pattern "Pattern" ["scope", "name", "answer", "definition", "matrix", "bbox", "x step", "y step", "uncoloured", "missing fonts", "damaged names", "damaged", "repaired names", "repaired"]
     79 Cell "Cell" ["scope", "name", "own resources", "stream"]
@@ -992,6 +995,17 @@ impl<'a> Fields<'a> {
             return Ok(false);
         }
         self.flag(at)
+    }
+
+    /// A reals field of exactly `len` reals a later minor appended to its
+    /// kind: the reals where the record carries them, and `None` where the
+    /// record ends before it — written by an earlier minor, or by a writer
+    /// that writes the field only where it is not its default.
+    pub fn appended_reals(&self, at: usize, len: usize) -> Result<Option<&'a [f64]>, CommandError> {
+        if at >= self.fields.len() {
+            return Ok(None);
+        }
+        self.exact_reals(at, len).map(Some)
     }
 
     /// A naturals field, or nothing.

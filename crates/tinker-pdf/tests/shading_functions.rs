@@ -128,14 +128,58 @@ fn a_two_input_sampled_function_shades_across_both_inputs() {
         "/FunctionType 0 /Domain [0 100 0 100] /Range [0 1 0 1 0 1] /Size [2 2] /BitsPerSample 8",
         &[0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF],
     );
-    // Over the page's own 100 x 100 rather than through a `/Matrix`, which
-    // this reader's type 1 shading does not read.
+    // Over the page's own 100 x 100, with no `/Matrix`: the domain is the
+    // target space itself.
     let shading = "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 100 0 100] \
                    /Function 6 0 R >>";
     near(
         colour_at(pdf(shading, &function), 0.25),
         [128, 64, 128],
         "a quarter across, halfway up",
+    );
+}
+
+/// **A function-based shading's `/Matrix` maps its domain into the page**
+/// (8.7.4.5.2, Table 79): the same 2 x 2 table over a unit domain, scaled
+/// onto the page by `[100 0 0 100 0 0]`, paints what the table over the
+/// page's own 100 x 100 paints, `(128, 64, 128)` a quarter across and halfway
+/// up; turned a quarter by `[0 100 -100 0 100 0]`, which takes `(u, v)` to
+/// `(100 − 100v, 100u)`, the same point is `(u, v) = (0.5, 0.75)`, so
+/// `(128, 128, 191)`; and squeezed onto the page's left half by
+/// `[50 0 0 100 0 0]`, a quarter across is the domain's middle and three
+/// quarters across is outside it, where the shading paints nothing.
+#[test]
+fn a_function_based_shading_maps_its_domain_through_its_matrix() {
+    let function = stream(
+        "/FunctionType 0 /Domain [0 1 0 1] /Range [0 1 0 1 0 1] /Size [2 2] /BitsPerSample 8",
+        &[0xFF, 0, 0, 0, 0xFF, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF],
+    );
+    let shading = |matrix: &str| {
+        format!(
+            "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 1 0 1] /Matrix [{matrix}] \
+             /Function 6 0 R >>"
+        )
+    };
+    let at = |matrix: &str, x: f64| colour_at(pdf(&shading(matrix), &function), x);
+    near(
+        at("100 0 0 100 0 0", 0.25),
+        [128, 64, 128],
+        "scaled onto the page",
+    );
+    near(
+        at("0 100 -100 0 100 0", 0.25),
+        [128, 128, 191],
+        "turned a quarter",
+    );
+    near(
+        at("50 0 0 100 0 0", 0.25),
+        [128, 128, 128],
+        "the left half's middle",
+    );
+    assert_eq!(
+        at("50 0 0 100 0 0", 0.75),
+        [255, 255, 255],
+        "past the domain, nothing"
     );
 }
 

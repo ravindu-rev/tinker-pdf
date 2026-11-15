@@ -880,6 +880,7 @@ impl Definitions {
                 space,
                 function,
                 domain,
+                matrix,
             } => {
                 let space = self.space(space, events);
                 let function = events.function(function);
@@ -890,6 +891,13 @@ impl Definitions {
                     .with(reals(domain))
                     .with(nothing());
                 record.fields.extend(std::iter::repeat_n(Field::Nothing, 7));
+                // Minor 2's `/Matrix`, only where it is not the identity: a
+                // definition of minor 1's shape is written as minor 1 wrote it.
+                if *matrix != Matrix::IDENTITY {
+                    record.fields.push(Field::Reals(vec![
+                        matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f,
+                    ]));
+                }
                 record
             }
             Shading::Axial {
@@ -1306,10 +1314,23 @@ impl Defined {
                 let (space, _) = self.space_copy(fields, 1, meter)?;
                 let function = self.function_copy(fields, 2, events, meter)?;
                 let domain = fields.exact_reals(3, 4)?;
+                // Minor 2's `/Matrix`; a definition that ends before it, of
+                // minor 1 or of an identity, is the identity.
+                let matrix = fields
+                    .appended_reals(12, 6)?
+                    .map_or(Matrix::IDENTITY, |m| Matrix {
+                        a: m[0],
+                        b: m[1],
+                        c: m[2],
+                        d: m[3],
+                        e: m[4],
+                        f: m[5],
+                    });
                 Shading::FunctionBased {
                     space,
                     function,
                     domain: [domain[0], domain[1], domain[2], domain[3]],
+                    matrix,
                 }
             }
             2 => {

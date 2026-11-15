@@ -3367,7 +3367,9 @@ impl PageResources {
     }
 
     /// A pattern's `/Matrix`, which maps pattern space to the parent content
-    /// stream's default space (8.7.3.1).
+    /// stream's default space (8.7.3.1), and a function-based shading's,
+    /// which maps its domain's space into its target space (Table 79): six
+    /// finite numbers, or the identity.
     fn pattern_matrix(&self, dict: &Dict) -> Matrix {
         self.doc
             .resolve_key(dict, self.name(b"Matrix"))
@@ -4182,10 +4184,14 @@ impl PageResources {
                     })
                     .unwrap_or_default();
                 let d = |i: usize, fallback: f64| domain.get(i).copied().unwrap_or(fallback);
+                // Table 79: `/Matrix` maps the domain's space into the
+                // shading's target space, the identity by default; read as a
+                // pattern's is, six finite numbers or the default.
                 Ok(Some(Shading::FunctionBased {
                     space,
                     function,
                     domain: [d(0, 0.0), d(1, 1.0), d(2, 0.0), d(3, 1.0)],
+                    matrix: self.pattern_matrix(dict),
                 }))
             }
             2 if coords.len() >= 4 => Ok(Some(Shading::Axial {

@@ -55,7 +55,7 @@ read, for roadmap row RC-18, and names the test that holds each part.
 stream  := magic major minor record* end
 magic   := 89 54 50 43 4D 44 0D 0A          ("\x89TPCMD\r\n")
 major   := u16, little-endian                 (1)
-minor   := u16, little-endian                 (1)
+minor   := u16, little-endian                 (2)
 record  := kind:varint length:varint field*   (length counts the fields' bytes)
 end     := the record of kind 0, with no fields, and nothing after it
 field   := tag:u8 value
@@ -88,7 +88,9 @@ not a stream (`NotACommandStream`). Minor 1 appends a field to `Colorants`
 and one to `State`: a reader takes a `Colorants` record of minor 0, which ends
 before it, as listing none, and a `State` record that ends before its field,
 which is written only where it is set, as not painting a fill and stroke as
-one.
+one. Minor 2 appends a field to `ShadingDefinition`, a function-based
+shading's `/Matrix`, written only where it is not the identity: a reader
+takes a definition that ends before it as the identity.
 
 A reference is a field `Unsigned(i)`, the `i`th record of its table counted
 from zero in stream order, or `Nothing` for none. Every definition precedes
@@ -184,7 +186,7 @@ events it stands for, in their order.
 | 73 | `Image` | scope, name, intent, frame (0 none, 1 JPEG, 2 JPEG 2000), width, height, origin, levels, opaque, interpolate |
 | 74 | `InlineImage` | scope, which inline image of the stream's commands, intent, frame and its fields as `Image` |
 | 75 | `ImageDecode` | image, reduction, answer (0 none, 1 an image, 2 refused), codec, width, height, rgb, alpha, two-colour samples, two colours, stencil, interpolate, reduced grid, family, soft-masked, window, notes |
-| 76 | `ShadingDefinition` | type, space, function, coordinates or domain, extend; a mesh: its kind, components, positions, values, triangles, patch points, patch corners |
+| 76 | `ShadingDefinition` | type, space, function, coordinates or domain, extend; a mesh: its kind, components, positions, values, triangles, patch points, patch corners; and, from minor 2 and only where it is not the identity, a function-based shading's `/Matrix` (Table 79), the six numbers that map its domain into its target space |
 | 77 | `Shading` | scope, name, answer (0 none, 1 a type not painted, 2 a shading), type, definition, notes |
 | 78 | `Pattern` | scope, name, answer (0 none, 1 unsupported, 2 shading, 3 tiling), definition, matrix, bbox, x step, y step, uncoloured, notes |
 | 79 | `Cell` | scope, pattern name, own resources, the cell's stream |

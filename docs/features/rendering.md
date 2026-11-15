@@ -410,7 +410,13 @@ distinct colours costs a million evaluations, which is the clause's price, as
 is a calculator's 65 536 tokens a pixel.
 
 **Shadings** (8.7.4.5). Type 1 (function-based) is evaluated at every
-pixel through `Shading::color_at`; the radial parameter is the largest circle
+pixel through `Shading::color_at`, at the point of its domain the pixel maps
+to through its `/Matrix` (Table 79), which `Shading::placed` composes before
+the shading's map to the device, the identity where the dictionary has none
+(`a_function_based_shading_maps_its_domain_through_its_matrix`); the command
+stream carries the matrix from minor 2
+(`a_function_based_shading_s_matrix_travels_in_its_definition`). The radial
+parameter is the largest circle
 in the family containing the point (8.7.4.5.4), which is what paints
 front-to-back correctly. Types 2 (axial) and 3 (radial) are read a device row
 at a time (`Shading::row`): an axial shading's `t` steps from column to column

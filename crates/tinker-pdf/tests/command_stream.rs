@@ -607,6 +607,100 @@ fn a_newer_minor_s_record_is_kept_and_stepped_over() {
     );
 }
 
+/// An 80 x 60 page of two function-based shadings over a unit domain, their
+/// function object 7, a calculator of two inputs and three outputs: `/Sh0`,
+/// object 5, under `/Matrix [matrix]`, painted by `sh` inside the left half
+/// and as a shading pattern over the right; and `/Sh1`, object 6, with no
+/// `/Matrix`, painted by `sh` in the bottom-left corner.
+fn function_based_page(matrix: &str) -> Vec<u8> {
+    let content = "q 0 0 40 60 re W n /Sh0 sh Q q 0 0 3 3 re W n /Sh1 sh Q \
+                   /Pattern cs /P0 scn 40 0 40 60 re f";
+    raw_pdf(&[
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 80 60] /Contents 4 0 R \
+          /Resources << /Shading << /Sh0 5 0 R /Sh1 6 0 R >> \
+          /Pattern << /P0 << /PatternType 2 /Shading 5 0 R /Matrix [1 0 0 1 40 0] >> >> >> >>"
+            .to_vec(),
+        raw_stream("", content.as_bytes()),
+        format!(
+            "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 1 0 1] {matrix} \
+             /Function 7 0 R >>"
+        )
+        .into_bytes(),
+        b"<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 1 0 1] /Function 7 0 R >>".to_vec(),
+        raw_stream(
+            "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1]",
+            b"{ 2 copy add 2 div }",
+        ),
+    ])
+}
+
+/// **A function-based shading's `/Matrix` travels in its definition**
+/// (Table 79; the design's minor 2): on [`function_based_page`] under a
+/// matrix that turns and scales the domain, the stream draws what the page
+/// draws and reads back to its bytes; the turned shading's
+/// `ShadingDefinition` carries the matrix as its appended field, and the one
+/// with none ends before it, as minor 1 wrote it; and those records written
+/// at minor 1 with the field left off draw the page with no `/Matrix` at all,
+/// a definition that ends before the field reading as the identity.
+#[test]
+fn a_function_based_shading_s_matrix_travels_in_its_definition() {
+    let matrix = [24.0, 12.0, -12.0, 24.0, 22.0, 8.0];
+    let written: Vec<String> = matrix.iter().map(f64::to_string).collect();
+    let (document, stream) = page_and_stream(function_based_page(&format!(
+        "/Matrix [{}]",
+        written.join(" ")
+    )));
+    let page = document.page(0).expect("a page");
+    let options = RenderOptions::default();
+    same(
+        &stream.render(&options),
+        &page.render(&options),
+        "the turned shading",
+    );
+    assert_eq!(
+        stream.to_bytes(),
+        page.command_stream(),
+        "read and written back"
+    );
+
+    let definition = CommandKind::ShadingDefinition.number();
+    let function_based: Vec<&CommandRecord> = stream
+        .records()
+        .iter()
+        .filter(|record| {
+            record.kind == definition && record.fields.first() == Some(&CommandField::Unsigned(1))
+        })
+        .collect();
+    let lengths: Vec<usize> = function_based
+        .iter()
+        .map(|record| record.fields.len())
+        .collect();
+    assert_eq!(lengths, [13, 12], "the turned shading's field, and none");
+    assert_eq!(
+        function_based[0].fields[12],
+        CommandField::Reals(matrix.to_vec()),
+        "the matrix as written"
+    );
+    assert_eq!(CommandKind::ShadingDefinition.fields()[12], "matrix");
+
+    let mut records = stream.records().to_vec();
+    for record in &mut records {
+        if record.kind == definition {
+            record.fields.truncate(12);
+        }
+    }
+    let older = tinker_pdf_content::commands::write_stream_at(COMMAND_STREAM_MAJOR, 1, &records);
+    let older = CommandStream::parse(&older).expect("minor 1 reads");
+    let plain = Document::open(function_based_page("")).expect("it opens");
+    same(
+        &older.render(&options),
+        &plain.page(0).expect("a page").render(&options),
+        "minor 1's definitions, the identity",
+    );
+}
+
 /// A 40 x 40 page whose group `/P` is on in `/D` and off in print, under an
 /// `/AS` entry for print: a red square in the group, a blue one outside it.
 fn print_usage_page() -> Vec<u8> {
