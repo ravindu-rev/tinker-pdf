@@ -353,6 +353,13 @@ impl DocumentEditor {
     /// source, the copy, and a reader follows the chain. A rollback forgets
     /// what it recorded, as it forgets the objects. An object recorded as a
     /// copy of itself is no copy, and is not recorded.
+    ///
+    /// **Plumbing, not the surface.** It exists so the save path and the
+    /// helper's readings can attribute copies, and the facade's redactor is
+    /// in another crate, so it cannot be restricted; it is hidden instead,
+    /// which the bindings coverage check reads as no part of the facade
+    /// (`docs/features/bindings.md`).
+    #[doc(hidden)]
     pub fn record_copy(&mut self, copy: ObjRef, source: ObjRef) {
         if copy.num != source.num {
             self.copies.insert(copy.num, source);
@@ -364,6 +371,11 @@ impl DocumentEditor {
     ///
     /// The numbers are this editor's, which every save writes as they are
     /// but a linearized one, which renumbers its objects into its layout.
+    ///
+    /// Plumbing, hidden as [`DocumentEditor::record_copy`] is: what the
+    /// helper's tests hand `rewritten`, in the cos crate's tests and the
+    /// facade's alike.
+    #[doc(hidden)]
     #[must_use]
     pub fn copies(&self) -> Vec<(ObjRef, ObjRef)> {
         self.copies

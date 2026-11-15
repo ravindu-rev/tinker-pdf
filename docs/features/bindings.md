@@ -1193,7 +1193,13 @@ union, named by its path from the facade's root (`Document::open`,
 modules and follows each `pub use` into the facade's own modules and the
 engine crates it re-exports from, to the definition, whose `impl` blocks in
 that crate give its methods; an item reached by two paths is one, under the
-shorter. A variant or a field crosses with its type, and a row below may name
+shorter. Test modules, `#[doc(hidden)]` items and restricted visibility are
+not the surface. Hidden is how plumbing that crosses an engine crate's edge
+stays off it where restricted visibility cannot reach: the editor's record of
+the copies a save writes, `DocumentEditor::record_copy` and
+`DocumentEditor::copies`, which the facade's redactor writes and the
+validate-on-save helper's tests read, so no caller needs them
+([design/validate-on-save.md](../design/validate-on-save.md)). A variant or a field crosses with its type, and a row below may name
 one. The surfaces are read from their sources: the C ABI's `tpdf_*` functions
 and `Tpdf*` types from the header, each function with the types its
 declaration names; the functions each of .NET, Go, Ruby and Java calls —

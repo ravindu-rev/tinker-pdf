@@ -315,7 +315,11 @@ resources reach). Nothing a save writes depends on the records, a rollback
 forgets them, and an object is no copy of itself. They are what lets the
 validate-on-save helper count a defect a copy carries as its source's
 (`docs/design/validate-on-save.md`;
-`copies_are_recorded_with_their_sources_and_rolled_back`).
+`copies_are_recorded_with_their_sources_and_rolled_back`). They are plumbing
+rather than the surface — the redactor that records copies is the facade's
+and the tests that read them are in both crates, so neither can be restricted
+— and both are `#[doc(hidden)]`, which the bindings coverage check reads as no
+part of the facade ([bindings](bindings.md)).
 
 **Annotations** (12.5). Reading and rendering of existing `/AP` appearance
 streams is the [renderer](rendering.md)'s job; the editor adds and removes.
@@ -747,7 +751,7 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 
 `DocumentEditor` (facade re-export of `tinker_pdf_cos::DocumentEditor`):
 `document()`, `is_dirty()`, `has_changed()`, `changed_numbers()`,
-`allocate()`, `record_copy()`, `copies()`, `get()`, `put()`,
+`allocate()`, `get()`, `put()`,
 `put_stream()`, `delete()`, `intern()`, `stream_bytes()`, `catalog()`,
 `update_catalog()`,
 `add_name_tree()`, `add_number_tree()`, `add_named_destination()`,

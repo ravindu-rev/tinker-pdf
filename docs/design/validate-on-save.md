@@ -279,7 +279,9 @@ them as their sources:
   per-placement copies, and `import_page` and `import_page_as_form` when the
   page comes from the document the editor edits, for every object their deep
   copy writes. A rollback forgets what it recorded. Nothing a save writes
-  depends on it.
+  depends on it, and no caller but the save path and the helper reads it:
+  both methods are `#[doc(hidden)]` plumbing, no part of the facade's surface
+  (`docs/features/bindings.md`).
 - **The door.** A test hands the output to `rewritten` as
   `Handed::from(bytes).with_copies(editor.copies())`; bytes handed without
   copies have none, and every door but `rewritten` ignores them.

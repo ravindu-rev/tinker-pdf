@@ -201,9 +201,7 @@ impl DocumentEditor {
     /// guess at sameness silently merges two different fonts.
     ///
     /// `source` may be the document this editor edits: the page is then
-    /// duplicated, and the new page and every object copied with it are
-    /// recorded as copies of the objects they copy
-    /// ([`DocumentEditor::record_copy`]).
+    /// duplicated.
     ///
     /// Returns the new page's reference, or `None` when the source has no such
     /// page.
@@ -244,6 +242,9 @@ impl DocumentEditor {
 
         let reference = self.allocate();
         self.put(reference, copied);
+        // A duplicate of one of the document's own pages, and every object it
+        // reaches, is recorded with what it copies, for the save path's
+        // readers (`DocumentEditor::record_copy`).
         if self.is_own(source) {
             self.record_copy(reference, from.reference);
         }
