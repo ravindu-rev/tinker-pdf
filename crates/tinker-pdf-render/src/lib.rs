@@ -8282,13 +8282,17 @@ mod tests {
             PathSegment::LineTo { x: 12.2, y: 26.4 },
             PathSegment::Close,
         ];
+        // The initial graphics state, opaque black (8.4.1): a derived default
+        // fills at alpha 0, paints nothing, and holds every graphics case
+        // without a pixel to read. So every case paints, and is read.
         let soft = |drive: &dyn Fn(&mut Renderer<'_, NoGlyphs>)| {
             let canvas = Canvas::new(32, 32, PixelFormat::Rgb8, Color::WHITE);
             let mut renderer =
                 Renderer::new(canvas, page_transform(32.0, 1.0), &NoGlyphs).with_levels(0, 8);
             drive(&mut renderer);
-            renderer.fill_path(&triangle, &GraphicsState::default(), false);
+            renderer.fill_path(&triangle, &GraphicsState::new(Matrix::IDENTITY), false);
             let (canvas, _) = renderer.finish();
+            assert!(canvas.data.contains(&0), "the triangle is painted");
             canvas.data.iter().any(|v| *v != 0 && *v != 255)
         };
         assert!(!soft(&|_| {}), "a fill outside a text object is graphics");
