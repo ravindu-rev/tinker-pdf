@@ -1340,6 +1340,13 @@ fn form_resources() -> String {
 /// (`/GN`, 15), [`KNOCKED`] in a non-isolated knockout group (`/GK`, 16)
 /// and an isolated one (`/GJ`, 17), and [`GROUPED_MULTIPLIED`] not isolated
 /// (`/GT`, 18).
+///
+/// The mask group's `/H`, its alpha of 0.5, is written alike in its own
+/// `/Resources` and in the page's: 11.6.5.2's `/G` is a form XObject, whose
+/// names resolve in its own resources (8.10.1), and this engine runs a mask
+/// group in the scope that set the `gs` (`docs/design/icc.md`, "The scope a
+/// default is read in"), so the group paints at 0.5 under either reading and
+/// these cases hold overprint whichever scope the mask's names take.
 fn transparency_extra() -> Extra {
     let form = |group: &str, content: &str| {
         raw_stream(
@@ -1354,7 +1361,8 @@ fn transparency_extra() -> Extra {
     Extra {
         ext_g_states: "/H5 << /ca 0.5 /CA 0.5 >> /HU << /ca 1 /CA 0.5 >> \
                        /BM1 << /BM /Multiply >> /BD << /BM /Darken >> \
-                       /SM << /SMask << /Type /Mask /S /Alpha /G 13 0 R >> >>"
+                       /SM << /SMask << /Type /Mask /S /Alpha /G 13 0 R >> >> \
+                       /H << /ca 0.5 >>"
             .to_string(),
         xobjects: "/GI 14 0 R /GN 15 0 R /GK 16 0 R /GJ 17 0 R /GT 18 0 R".to_string(),
         objects: vec![
