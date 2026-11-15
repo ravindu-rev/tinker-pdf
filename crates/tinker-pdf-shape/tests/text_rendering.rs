@@ -659,14 +659,13 @@ fn the_corpus_is_the_one_that_was_vendored() {
 /// The expected glyph *names* this repository cannot turn into indices, by
 /// name, so that the weakening is a list and not an absence.
 ///
-/// A name here is still position-checked; only the identity of the glyph goes
-/// unchecked for it. There is one, and it is the one name in the corpus that
-/// is a standard Macintosh `post` name outside ISO 32000-1 Annex D's four base
-/// encodings and outside the Adobe Glyph List's algorithmic forms. Resolving it
-/// needs either the 258-entry Macintosh glyph order or Adobe's `glyphlist.txt`,
-/// and vendoring a whole published name list to check one glyph of one case is
-/// out of proportion — so it is recorded instead.
-const UNRESOLVABLE: &[(&str, &str)] = &[("GPOS-1/15", "aacute")];
+/// A name here would still be position-checked; only the identity of the
+/// glyph would go unchecked for it. There is none: every expected name
+/// resolves, `GPOS-1/15`'s `aacute`, a standard Macintosh `post` name outside
+/// ISO 32000-1 Annex D's four base encodings and outside the Adobe Glyph
+/// List's algorithmic forms, through the 258-entry Macintosh glyph order
+/// `Sfnt::glyph_for_name` reads a `post` table with.
+const UNRESOLVABLE: &[(&str, &str)] = &[];
 
 /// Every coordinate in the whole corpus that this crate does not reproduce
 /// **exactly**, by case, glyph and axis, with the amount.
@@ -733,7 +732,7 @@ const MAX_DELTA: i32 = 1;
 ///
 /// The sixteen Brahmic ones do not, and this is where that is said. They are
 /// milestone 5's, whose exit criterion in `docs/design/shaping.md` is *"every
-/// text-rendering-tests USE section, counted"* — and it is **not met**. Two of
+/// text-rendering-tests USE section, counted"* — and it is **not met**. Ten of
 /// the sixteen pass whole; the rest do not. Running them anyway, with the
 /// number pinned, is deliberate and is the alternative to two worse options:
 /// declining them, which would hide that most of their cases already pass, and
@@ -780,17 +779,15 @@ const MAX_DELTA: i32 = 1;
 /// `SHKNDA-3` at 0 of 31 and `SHKNDA-2` at 4 of 16. `SHKNDA-3` was a mark
 /// advance and is now 30 of 31.
 ///
-/// - **`GSUB` accounts for twenty-seven of the thirty-five**, spread over
-///   `SHLANA-10` (nine), `SHKNDA-2` (seven), `SHLANA-2` (three), and one or
-///   two each in `SHBALI-1`, `SHKNDA-3`, `SHLANA-3`, `SHLANA-7` and
-///   `SHLANA-8`. Whether that is a feature not firing, a stage in the wrong
-///   place, or a syllable boundary cut where there is none is per-case and
-///   [`TRIAGE`] does not claim to say which.
-/// - **Reordering accounts for three.** `SHKNDA-2/12`, `SHLANA-4/2` and
-///   `SHLANA-10/28`. That is the whole of what is left of the thing two
-///   milestones of documentation called the largest cause.
-/// - **Positioning accounts for five**, four in `x` and one in `y`, every one
-///   of them a single case in a section whose other failures are `GSUB`.
+/// - **`GSUB` accounts for twenty-one of the twenty-seven**, spread over
+///   `SHLANA-10` (nine), `SHKNDA-2` (six), `SHLANA-2` (three), `SHLANA-8`
+///   (two) and `SHLANA-7` (one). Whether that is a feature not firing, a
+///   stage in the wrong place, or a syllable boundary cut where there is none
+///   is per-case and [`TRIAGE`] does not claim to say which.
+/// - **Reordering accounts for none.** Wherever the glyphs are right, so is
+///   their sequence.
+/// - **Positioning accounts for six**, five in `x` and one in `y`, all of
+///   them in Tai Tham.
 /// - **Canonical ordering.** The decomposition above is not NFD: the
 ///   `Canonical_Combining_Class` sort is not applied. No case here is known to
 ///   need it, which is why it is a gap rather than a cause.
@@ -808,7 +805,7 @@ const PASSING: &[(&str, usize)] = &[
     ("GSUB-1", 1),
     ("GSUB-2", 11),
     ("SHARAN-1", 6),
-    ("SHBALI-1", 20),
+    ("SHBALI-1", 22),
     ("SHBALI-2", 12),
     ("SHBALI-3", 9),
     ("SHKNDA-1", 34),
@@ -816,11 +813,11 @@ const PASSING: &[(&str, usize)] = &[
     ("SHKNDA-3", 31),
     ("SHLANA-1", 51),
     ("SHLANA-2", 32),
-    ("SHLANA-3", 12),
-    ("SHLANA-4", 2),
+    ("SHLANA-3", 13),
+    ("SHLANA-4", 3),
     ("SHLANA-5", 13),
     ("SHLANA-6", 7),
-    ("SHLANA-7", 16),
+    ("SHLANA-7", 17),
     ("SHLANA-8", 11),
     ("SHLANA-9", 6),
     ("SHLANA-10", 35),
@@ -967,14 +964,13 @@ fn verdict(ours: &[(u16, i32, i32)], expected: &[(Option<u16>, i32, i32)]) -> Wr
 /// finding, and a row that vanishes is progress that has to be claimed in the
 /// commit that earned it.
 ///
-/// # What it says as of this commit, measured and not expected
+/// # What it says, measured and not expected
 ///
-/// Thirty-two rows: **25 `set`, 2 `order`, 4 `advance`, 1 `offset`.** It began
-/// at thirty-five, and the three that have left are the three that were worth
-/// a commit each. The shape of what is left is the finding, and it is not the
-/// shape the docs predicted.
+/// Twenty-seven rows: **21 `set`, 5 `advance`, 1 `offset`**, and no `order`.
+/// The shape of what is left is the finding, and it is not the shape the docs
+/// predicted.
 ///
-/// - **The residue is overwhelmingly `GSUB`.** Twenty-five of thirty-two are
+/// - **The residue is overwhelmingly `GSUB`.** Twenty-one of twenty-seven are
 ///   the wrong glyphs, not the wrong places — a feature that did not fire, one
 ///   that fired where it should not have, or one that fired over a span the
 ///   cluster model cut in the wrong place.
@@ -984,21 +980,20 @@ fn verdict(ours: &[(u16, i32, i32)], expected: &[(Option<u16>, i32, i32)]) -> Wr
 ///   across `SHBALI` and `SHLANA`, because Tai Tham wants the opposite order
 ///   and no Unicode property this crate reads separates the two. The
 ///   measurement is in `universal::reorder`; the six stay unclaimed.
-/// - **`Order` is the rarest verdict in the whole corpus — two rows**, both in
-///   Tai Tham. By this measure `universal::reorder` is very nearly finished.
-/// - **Four `advance` and one `offset`** are all in Tai Tham, and each is a
-///   single case in a section whose other failures are `set` — so none of them
-///   is a cause worth a commit on its own.
+/// - **No row is `order`.** Wherever the glyphs are right, so is their
+///   sequence.
+/// - **Five `advance` and one `offset`** are all in Tai Tham, one or two to a
+///   section, so none of them is a cause worth a commit on its own.
 ///
 /// # Tai Tham's residue is one glyph, and it is not a feature that is missing
 ///
-/// **Fifteen of the thirty-two are the same substitution not happening**:
+/// **Fifteen of the twenty-seven are the same substitution not happening**:
 /// `TestShapeLana`'s gid311 (`uni1A78`) is expected where this crate produces
 /// gid314 (`uni1A7B`), the glyph `cmap` gives U+1A7B outright. `SHLANA-2/2`,
 /// `/3`, `/4`; `SHLANA-7/17`; `SHLANA-8/5`, `/6`; and nine of `SHLANA-10`'s
 /// twelve. **Ten of those differ in nothing else at all** — same glyph count,
-/// same order, every position identical — so one substitution would close a
-/// third of what is left.
+/// same order, every position identical — so one substitution would close
+/// more than a third of what is left.
 ///
 /// Two explanations were tested and both are refuted, which is why this is
 /// recorded rather than fixed:
@@ -1020,18 +1015,7 @@ fn verdict(ours: &[(u16, i32, i32)], expected: &[(Option<u16>, i32, i32)]) -> Wr
 /// feature, every alternate taken and every context set aside — puts gid311 in
 /// a buffer that starts as any of the fifteen texts' glyphs, while each
 /// fixture draws gid311's outline and not gid314's.
-///
-/// The same trace says what the per-syllable `GSUB` restriction costs:
-/// **removing it entirely gains three cases and costs none** — `SHLANA-3/3`,
-/// `SHLANA-4/2` and `SHLANA-7/5`, one of which is an `order` verdict that turns
-/// out to be a blocked lookup rather than a reordering. In two a mark typed
-/// between `SAKOT` and its consonant starts a new syllable at the consonant,
-/// which is *this crate's syllable boundary* in the wrong place; in the third
-/// the face's presentation lookups are confined where the specification
-/// applies them to the whole run.
 const TRIAGE: &[(&str, Wrong)] = &[
-    ("SHBALI-1/14", Wrong::Set),
-    ("SHBALI-1/15", Wrong::Set),
     ("SHKNDA-2/1", Wrong::Set),
     ("SHKNDA-2/2", Wrong::Set),
     ("SHKNDA-2/3", Wrong::Set),
@@ -1044,15 +1028,12 @@ const TRIAGE: &[(&str, Wrong)] = &[
     ("SHLANA-2/4", Wrong::Set),
     ("SHLANA-2/7", Wrong::Advance),
     ("SHLANA-2/35", Wrong::Advance),
-    ("SHLANA-3/3", Wrong::Set),
-    ("SHLANA-4/2", Wrong::Order),
-    ("SHLANA-7/5", Wrong::Set),
     ("SHLANA-7/17", Wrong::Set),
     ("SHLANA-8/5", Wrong::Set),
     ("SHLANA-8/6", Wrong::Set),
     ("SHLANA-10/4", Wrong::Offset),
     ("SHLANA-10/8", Wrong::Set),
-    ("SHLANA-10/28", Wrong::Order),
+    ("SHLANA-10/28", Wrong::Advance),
     ("SHLANA-10/29", Wrong::Advance),
     ("SHLANA-10/30", Wrong::Set),
     ("SHLANA-10/38", Wrong::Set),
@@ -1295,7 +1276,7 @@ fn every_section_this_crate_claims_is_whole() {
         })
         .count();
     assert_eq!(
-        whole, 7,
+        whole, 10,
         "the number of Brahmic sections that pass outright moved. \
          `docs/design/shaping.md`'s milestone 5 wants all sixteen."
     );
