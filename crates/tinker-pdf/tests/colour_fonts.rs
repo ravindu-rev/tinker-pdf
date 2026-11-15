@@ -2583,9 +2583,9 @@ fn bitmap_glyphs_draw_their_strike_where_its_metrics_put_it() {
         assert_eq!(colour_images(&bytes), 5, "{choice:?}");
         let (bitmap, _) = rendered(bytes);
         let scale = 1000.0 / f64::from(ppem);
-        for (pen, &(id, x)) in run.iter().enumerate() {
+        // A run's pens are in ems, as `bitmap_document` takes them.
+        for (pen, &(id, pen_ems)) in run.iter().enumerate() {
             let at = ids.iter().position(|g| *g == id).expect("a fixture glyph");
-            let pen_ems = x / RUN_SIZE;
             match at {
                 3 => {
                     // The JPEG, from the largest strike whatever is asked:
@@ -2702,7 +2702,7 @@ fn bitmap_glyphs_draw_their_strike_where_its_metrics_put_it() {
         assert_eq!(colour_images(&bytes), 3, "{choice:?}");
         let (bitmap, _) = rendered(bytes);
         let scale = 1000.0 / f64::from(ppem);
-        for &(id, x) in &run {
+        for &(id, pen_ems) in &run {
             let at = ids.iter().position(|g| *g == id).expect("a fixture glyph");
             let [bx, by] = bearings(at);
             let picture = cbdt_pictures(ppem, at);
@@ -2714,7 +2714,7 @@ fn bitmap_glyphs_draw_their_strike_where_its_metrics_put_it() {
                 ];
                 let [r, g, b, a] = picture[j * 8 + i];
                 let want = over([r, g, b], a, WHITE);
-                let got = pixel(&bitmap, at_units(x / RUN_SIZE, unit), 100.0);
+                let got = pixel(&bitmap, at_units(pen_ems, unit), 100.0);
                 assert!(
                     close(got, want, 2),
                     "{choice:?}: glyph {id} ({i}, {j}) at {unit:?}: {got:?}, not {want:?}"
