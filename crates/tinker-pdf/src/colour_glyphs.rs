@@ -59,6 +59,7 @@
 //! are the same bytes on every target (ruling 4).
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use tinker_pdf_cos::build::{
@@ -344,10 +345,14 @@ pub struct ColourFace<'a> {
     blends: RefCell<BTreeSet<u8>>,
     /// Each distinct bitmap graphic the face's glyphs drew, by its type and
     /// its bytes: the image it was registered as, or why it was not.
-    images: RefCell<BTreeMap<(u8, &'a [u8]), Result<Embedded, Unembedded>>>,
+    images: RefCell<BTreeMap<(u8, &'a [u8]), Registered>>,
     /// What drawing its glyphs met, each once, in the order met.
     warnings: RefCell<Vec<ColourWarning>>,
 }
+
+/// What registering a bitmap graphic came to: the image, or why there is
+/// none.
+type Registered = Result<Embedded, Unembedded>;
 
 /// A bitmap graphic registered as an image XObject: its name and its size in
 /// pixels.
@@ -834,7 +839,7 @@ impl<'a> ColourFace<'a> {
         resource: &[u8],
         graphic: Graphic,
         data: &[u8],
-    ) -> Result<Embedded, Unembedded> {
+    ) -> Registered {
         let limits = Limits::new(MAX_BITMAP_BYTES);
         let mut name = resource.to_vec();
         name.extend_from_slice(format!(".b{}", self.images.borrow().len()).as_bytes());
@@ -2091,7 +2096,7 @@ impl Geometry {
                 // The axis reaches across the whole region, so `/Extend`
                 // decides nothing inside it and the calculator's own extend
                 // decides everything.
-                if !(high > low) || !low.is_finite() || !high.is_finite() {
+                if !low.is_finite() || !high.is_finite() || high <= low {
                     return None;
                 }
                 let at = |s: f64| [p0[0] + s * axis[0], p0[1] + s * axis[1]];
@@ -2129,7 +2134,7 @@ impl Geometry {
                 } else if dr < 0.0 {
                     high = high.min(r0 / -dr);
                 }
-                if !(high > low) {
+                if high.partial_cmp(&low) != Some(Ordering::Greater) {
                     if dr < 0.0 {
                         low = high - 1.0;
                     } else {
@@ -2352,7 +2357,7 @@ fn segment(stops: &[LineStop], at: usize, alphas: bool) -> Vec<CalculatorOp> {
         return Vec::new();
     };
     let width = b.offset - a.offset;
-    if !(width > 0.0) {
+    if width.is_nan() || width <= 0.0 {
         let mut program = vec![Operator("pop")];
         program.extend(value(b, alphas));
         return program;

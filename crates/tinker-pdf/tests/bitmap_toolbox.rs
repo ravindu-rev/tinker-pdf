@@ -370,7 +370,10 @@ fn maps() -> Vec<Map> {
         ("tint", |b| b.tint(DARK, LIGHT), Box::new(tint_pixel)),
         ("grayscale", |b| b.grayscale(), Box::new(grayscale_pixel)),
     ];
-    let gammas: [(&'static str, fn(&mut Bitmap), f64); 3] = [
+    // A gamma's name, what it does to a bitmap through the facade, and its
+    // exponent.
+    type Gamma = (&'static str, fn(&mut Bitmap), f64);
+    let gammas: [Gamma; 3] = [
         ("gamma 1/2", |b| b.gamma(0.5), 0.5),
         ("gamma 1", |b| b.gamma(1.0), 1.0),
         ("gamma 2", |b| b.gamma(2.0), 2.0),

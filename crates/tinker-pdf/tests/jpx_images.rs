@@ -1068,7 +1068,7 @@ fn each_window_of_a_jpx_image_is_cached_apart() {
             stats: true,
             ..RenderOptions::default()
         });
-        let stats = bitmap.stats.clone().expect("counted");
+        let stats = bitmap.stats.expect("counted");
         (bitmap, stats)
     };
     let left = Some(tinker_pdf::PixelRegion::new(0, 0, 40, 40));

@@ -149,11 +149,12 @@ pub fn in_tree(relative: &str) -> PathBuf {
             dir
         }
         None => {
-            assert!(
-                !cfg!(target_family = "wasm"),
-                "{CRATE_DIR} is unset, and a wasm runtime cannot read the crate where cargo \
-                 built it: set it to the path the runtime's directory grant gives the crate"
-            );
+            if cfg!(target_family = "wasm") {
+                panic!(
+                    "{CRATE_DIR} is unset, and a wasm runtime cannot read the crate where cargo \
+                     built it: set it to the path the runtime's directory grant gives the crate"
+                );
+            }
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         }
     };
@@ -2950,7 +2951,7 @@ pub fn column_face() -> Vec<u8> {
             Some(' ') => (250, [0, 0, 0, 0], 1000, 0),
             Some('、' | '。') => (1000, [80, -60, 380, 240], 1000, 600),
             Some(c) if c.is_ascii_alphanumeric() => {
-                let width = 480 + u16::try_from(glyph % 9).expect("under nine") * 15;
+                let width = 480 + (glyph % 9) * 15;
                 let right = i16::try_from(width).expect("under 1000") - 40;
                 (width, [40, 0, right, 700 + step], 1000, 100 + step)
             }

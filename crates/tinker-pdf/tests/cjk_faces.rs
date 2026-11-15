@@ -122,9 +122,12 @@ fn tag_text(tag: [u8; 4]) -> String {
     tag.iter().map(|&byte| char::from(byte)).collect()
 }
 
+/// One table of an sfnt's directory: its tag and its bytes.
+type Tagged<'a> = ([u8; 4], &'a [u8]);
+
 /// An sfnt's version and its tables, each a tag and its bytes, in its
 /// directory's order. `None` where the directory reaches past the font.
-fn tables(font: &[u8]) -> Option<(u32, Vec<([u8; 4], &[u8])>)> {
+fn tables(font: &[u8]) -> Option<(u32, Vec<Tagged<'_>>)> {
     let version = be32(font, 0)?;
     let count = usize::from(be16(font, 4)?);
     let mut out = Vec::with_capacity(count);

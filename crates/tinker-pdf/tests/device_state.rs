@@ -1661,10 +1661,7 @@ fn stroke_adjustment_gives_a_thin_line_one_width() {
     for width in [1.3, 2.4] {
         let whole = whole_pixels(width);
         let page = glyph("/SA true", width, 0.1);
-        assert!(
-            page.data.iter().any(|&byte| byte == 0),
-            "the glyph stroked nothing"
-        );
+        assert!(page.data.contains(&0), "the glyph stroked nothing");
         assert_eq!(
             glyph("/SA true", width, 0.25).data,
             page.data,

@@ -1657,6 +1657,9 @@ fn a_shading_in_none_paints_nothing() {
 
 // ---- meshes on plates (RC-04.14) --------------------------------------------
 
+/// The tint each plate a mesh names takes at a point `(x, y)` of the page.
+type PlateTints = Box<dyn Fn(f64, f64) -> Vec<(&'static str, f64)>>;
+
 /// One mesh case: its shading dictionary's keys — its space a `/DeviceN`'s
 /// tint transform object 6 where it names one — the bytes of its stream, the
 /// plan's uses, and the tint each plate it names takes at a point of the
@@ -1667,7 +1670,7 @@ struct MeshCase {
     keys: String,
     data: Vec<u8>,
     plates: &'static [(&'static str, PlateUse)],
-    tints: Box<dyn Fn(f64, f64) -> Vec<(&'static str, f64)>>,
+    tints: PlateTints,
 }
 
 /// The page's corners `(0, 0)`, `(40, 0)`, `(40, 20)` and `(0, 20)`, as a

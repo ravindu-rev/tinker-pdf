@@ -1093,7 +1093,7 @@ fn merged(
             }
         }
     }
-    calls.sort_by(|a, b| a.0.cmp(&b.0));
+    calls.sort_by_key(|call| call.0);
     // `Renderer::finish`'s order; a sort that keeps the order of the rest.
     ending.sort_by_key(|warning| match warning {
         RenderWarning::UnreadableFont => 0,
@@ -1159,7 +1159,7 @@ fn listed<T: Clone + PartialEq>(
             keep_least(&mut least, stamp, entry.clone());
         }
     }
-    least.sort_by(|a, b| a.0.cmp(&b.0));
+    least.sort_by_key(|entry| entry.0);
     least.truncate(64);
     least.into_iter().map(|(_, entry)| entry).collect()
 }

@@ -895,7 +895,10 @@ fn an_uncoloured_pattern_overprints_as_its_colour_does() {
     let fill = "4 4 16 16 re f";
     let coverage = coverage_of(&format!("/PY cs 0 /P0 scn {fill}"));
     let rgb = ink_of_light([0.2, 0.4, 0.9].map(byte));
-    let cases: [(&str, &str, &str, [u8; 6], [bool; 6]); 4] = [
+    // A case's name, its graphics state, its colour, and the tint and the mark
+    // each channel takes.
+    type Case = (&'static str, &'static str, &'static str, [u8; 6], [bool; 6]);
+    let cases: [Case; 4] = [
         (
             "a spot",
             "G2",
@@ -1500,8 +1503,8 @@ impl GroupPixel {
         }
         let backdrop = BACKDROP_TINTS.map(byte);
         let mut next = self;
-        for channel in 0..6 {
-            next.tints[channel] = times(backdrop[channel], c) + times(self.tints[channel], 255 - c);
+        for ((tint, &under), &own) in next.tints.iter_mut().zip(&backdrop).zip(&self.tints) {
+            *tint = times(under, c) + times(own, 255 - c);
         }
         next.alpha = times(self.alpha, 255 - c);
         next

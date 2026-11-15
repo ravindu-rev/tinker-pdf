@@ -1378,6 +1378,19 @@ pub(crate) struct Laid {
     pub defect: Option<SpineDefect>,
 }
 
+/// Whether an element's text asks `hyphens: auto` of a language this build has
+/// no hyphenation table for — none declared, one with no dictionary, or every
+/// language in a build without the `hyphenation` feature — and so was set as
+/// `manual` and is counted (`docs/design/hyphenation.md`).
+fn hyphenated_without_a_table(style: &ComputedStyle) -> bool {
+    style.hyphens == tinker_pdf_css::property::Hyphens::Auto
+        && style
+            .language
+            .as_ref()
+            .and_then(|language| tinker_pdf_layout::hyphenate::dictionary(language.as_str()))
+            .is_none()
+}
+
 /// One content document, read and laid out as a book whose spine is one item
 /// long, and written into `builder`.
 ///
@@ -1395,20 +1408,11 @@ pub(crate) struct Laid {
 /// supplies, applied ahead of every sheet the document links (see
 /// [`read::Context::author`]); `margin` is the margin inside `layout.page` for
 /// a reflowable document, and ignored for an SVG, which is its own page.
-#[allow(clippy::too_many_arguments)]
-/// Whether an element's text asks `hyphens: auto` of a language this build has
-/// no hyphenation table for — none declared, one with no dictionary, or every
-/// language in a build without the `hyphenation` feature — and so was set as
-/// `manual` and is counted (`docs/design/hyphenation.md`).
-fn hyphenated_without_a_table(style: &ComputedStyle) -> bool {
-    style.hyphens == tinker_pdf_css::property::Hyphens::Auto
-        && style
-            .language
-            .as_ref()
-            .and_then(|language| tinker_pdf_layout::hyphenate::dictionary(language.as_str()))
-            .is_none()
-}
-
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resources and the builder a chapter is read and written with, and the \
+              six inputs each of its callers decides for itself"
+)]
 pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
     resources: &mut R,
     builder: &mut DocumentBuilder,

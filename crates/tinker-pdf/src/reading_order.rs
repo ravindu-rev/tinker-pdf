@@ -193,6 +193,11 @@ pub struct InferenceOptions {
 /// A page's text in the order a caller asked for, labelled by which order it
 /// is.
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one value a request for a page's text, handed to the caller; boxing a variant \
+              would put a box in the public API and save nothing"
+)]
 pub enum OrderedText {
     /// The content stream's order — [`crate::Page::text`].
     Stream(TextPage),

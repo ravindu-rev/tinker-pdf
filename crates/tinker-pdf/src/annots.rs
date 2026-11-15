@@ -893,10 +893,10 @@ trailer\n<< /Root 1 0 R >>\n%%EOF\n";
         for subtype in [Some(b"Square".as_slice()), Some(b"Gizmo"), None] {
             for flags in 0..16i64 {
                 // Bits 1, 2, 3 and 6 from the four bits of `flags`.
-                let f = (flags & 1) * INVISIBLE
-                    | ((flags >> 1) & 1) * HIDDEN
-                    | ((flags >> 2) & 1) * PRINT
-                    | ((flags >> 3) & 1) * NO_VIEW;
+                let f = ((flags & 1) * INVISIBLE)
+                    | (((flags >> 1) & 1) * HIDDEN)
+                    | (((flags >> 2) & 1) * PRINT)
+                    | (((flags >> 3) & 1) * NO_VIEW);
                 let mut dict = Dict::new();
                 if let Some(name) = subtype {
                     dict.insert(doc.intern(b"Subtype"), Object::Name(doc.intern(name)));

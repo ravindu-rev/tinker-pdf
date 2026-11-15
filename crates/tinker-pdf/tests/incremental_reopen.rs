@@ -981,9 +981,7 @@ fn a_source_that_cannot_supply_the_file_is_refused_by_name() {
             ),
         }
     }
-    let refused = append(&streamed, &editor, &AppendOptions::default())
-        .err()
-        .expect("refused");
+    let refused = append(&streamed, &editor, &AppendOptions::default()).expect_err("refused");
     assert!(refused.to_string().contains("did not reopen"), "{refused}");
     assert_eq!(
         streamed.page(0).map(|page| page.rotation()),

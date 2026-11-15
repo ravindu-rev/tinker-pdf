@@ -1231,9 +1231,12 @@ impl<'a> Directory<'a> {
     }
 }
 
+/// A `cmap` subtable's platform and encoding.
+type Encoding = (u16, u16);
+
 /// The `cmap` subtable a face's characters are looked up in, and every
 /// scalar it maps to a glyph below `glyph_count` other than glyph 0.
-fn read_cmap(label: &str, cmap: &[u8], glyph_count: u16) -> (Vec<(char, u16)>, Option<(u16, u16)>) {
+fn read_cmap(label: &str, cmap: &[u8], glyph_count: u16) -> (Vec<(char, u16)>, Option<Encoding>) {
     let records = usize::from(be16(cmap, 2).unwrap_or(0));
     let mut best: Option<(u32, u16, u16, usize)> = None;
     for i in 0..records.min(64) {
@@ -2513,6 +2516,9 @@ impl Type1Font {
     }
 }
 
+/// A flex under way: where it began, and the points its `rmoveto`s place.
+type Flex = ((f64, f64), Vec<(f64, f64)>);
+
 /// The Type 1 book's chapter 6 charstring machine, with chapter 8's
 /// othersubrs and TN #5015's blends, as far as a box and a width need.
 struct Type1Run<'f> {
@@ -2526,7 +2532,7 @@ struct Type1Run<'f> {
     shape: Shape,
     /// Where a flex began, and the points its `rmoveto`s place, between
     /// othersubrs 1 and 0.
-    flex: Option<((f64, f64), Vec<(f64, f64)>)>,
+    flex: Option<Flex>,
     ended: bool,
     steps: u32,
 }
@@ -2642,7 +2648,7 @@ impl Type1Run<'_> {
                     let op = code[i];
                     i += 1;
                     match op {
-                        0 | 1 | 2 => self.stack.clear(),
+                        0..=2 => self.stack.clear(),
                         7 => {
                             self.x = a[0];
                             self.y = a[1];

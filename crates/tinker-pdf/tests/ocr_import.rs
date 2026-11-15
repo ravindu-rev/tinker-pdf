@@ -224,7 +224,10 @@ fn read(file: &str) -> Imported {
     import(file.as_bytes()).unwrap_or_else(|e| panic!("the file imports: {e}"))
 }
 
-fn rect(quad: &Quad) -> (f64, f64, f64, f64) {
+/// A box, as `(x0, y0, x1, y1)`.
+type Bounds = (f64, f64, f64, f64);
+
+fn rect(quad: &Quad) -> Bounds {
     quad.bounds()
 }
 
@@ -1172,7 +1175,7 @@ fn an_alto_hyphen_is_joined_where_it_can_be() {
     ));
     assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
     let line = &imported.pages[0].page.blocks[0].paragraphs[0].lines[0];
-    let read: Vec<(&str, (f64, f64, f64, f64))> = line
+    let read: Vec<(&str, Bounds)> = line
         .words
         .iter()
         .map(|w| (w.text.as_str(), rect(&w.quad)))
@@ -1479,7 +1482,7 @@ impl Back {
 
     /// A box in the render's frame at 72 dpi — points, `y` down from the
     /// displayed page's top — as the file's.
-    fn file_box(&self, (x0, y0, x1, y1): (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    fn file_box(&self, (x0, y0, x1, y1): Bounds) -> Bounds {
         let x = |x: f64| self.from.left + (x - self.left) / self.sx;
         let y = |y: f64| self.from.top + (self.top - (self.displayed_height - y)) / self.sy;
         (x(x0), y(y0), x(x1), y(y1))
@@ -1495,7 +1498,7 @@ impl Back {
 #[test]
 fn every_word_s_box_equals_the_file_s() {
     let page = read(ALTO).pages.remove(0);
-    let expected: Vec<(String, (f64, f64, f64, f64))> = page
+    let expected: Vec<(String, Bounds)> = page
         .page
         .blocks
         .iter()
@@ -1527,7 +1530,7 @@ fn every_word_s_box_equals_the_file_s() {
         let shown = layered.page(0).expect("page one");
         let back = Back::new(&page, onto, shown.size());
         let boxes = shown.word_boxes(&WordBoxOptions::default());
-        let found: Vec<(String, (f64, f64, f64, f64))> = boxes
+        let found: Vec<(String, Bounds)> = boxes
             .blocks
             .iter()
             .flat_map(|b| &b.paragraphs)

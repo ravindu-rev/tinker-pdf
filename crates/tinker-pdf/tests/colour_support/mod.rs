@@ -20,9 +20,7 @@ use tinker_pdf_shape::bidi::BaseDirection;
 use tinker_pdf_shape::Shaper;
 
 use crate::epub_support::typeface::{Colour, Face};
-
-#[path = "../written_support/mod.rs"]
-mod written_support;
+use crate::written_support;
 
 /// A version 0 `COLR` (*COLR header*, *BaseGlyph and Layer records*): each
 /// base glyph with its layers, bottom first, as glyph ids and palette

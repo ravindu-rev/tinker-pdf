@@ -573,7 +573,7 @@ fn name_table(name: &str) -> Vec<u8> {
 /// A table directory over `tables`, sorted by tag as the format asks, each
 /// table padded to four bytes; no checksums.
 fn sfnt(version: u32, mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
-    tables.sort_by(|a, b| a.0.cmp(&b.0));
+    tables.sort_by_key(|table| table.0);
     let mut out = version.to_be_bytes().to_vec();
     out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
     out.extend_from_slice(&[0; 6]);

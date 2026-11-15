@@ -941,15 +941,12 @@ fn every_scope_page(d: &str) -> Vec<u8> {
     let shown = "1 0 0 rg 0 0 10 10 re f";
     let objects = format!(
         "6 0 obj\n{}\nendobj\n\
-         7 0 obj\n{}\nendobj\n\
+         7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /OC 5 0 R /Length {} >>\nstream\n{shown}\nendstream\nendobj\n\
          8 0 obj\n{cell}\nendobj\n\
          9 0 obj\n<< /Type /Annot /Subtype /Square /F 4 /Rect [30 12 40 22] /AP << /N 10 0 R >> >>\nendobj\n\
          10 0 obj\n{}\nendobj\n",
         form(""),
-        format!(
-            "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /OC 5 0 R /Length {} >>\nstream\n{shown}\nendstream",
-            shown.len()
-        ),
+        shown.len(),
         form(""),
     );
     let mut bytes = with_usage(

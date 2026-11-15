@@ -367,7 +367,9 @@ pub struct Group<'c> {
 
 enum Mode<'c> {
     Measure {
-        group: BenchmarkGroup<'c, WallTime>,
+        /// Boxed, as criterion's group is many times the size of the count
+        /// mode's fields.
+        group: Box<BenchmarkGroup<'c, WallTime>>,
         listed: Vec<list::Listed>,
         /// The ids this build leaves out: on a wasm target the operations
         /// `wasm.json` excludes, and none elsewhere.
@@ -405,7 +407,7 @@ impl<'c> Group<'c> {
                 let mut group = c.benchmark_group(id);
                 group.sampling_mode(SamplingMode::Flat);
                 Mode::Measure {
-                    group,
+                    group: Box::new(group),
                     listed: list::committed(id),
                     excluded: excluded_here(),
                 }

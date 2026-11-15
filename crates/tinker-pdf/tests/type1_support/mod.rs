@@ -78,8 +78,8 @@ fn exact(v: f64, out: &mut Vec<u8>) {
 /// `pop` a quantity.
 fn blended(masters: &[Vec<i32>], out: &mut Vec<u8>) {
     let quantities = masters[0].len();
-    for q in 0..quantities {
-        number(masters[0][q], out);
+    for &value in &masters[0] {
+        number(value, out);
     }
     for q in 0..quantities {
         for master in &masters[1..] {

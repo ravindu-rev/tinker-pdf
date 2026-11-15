@@ -2596,14 +2596,9 @@ fn font_variation_settings_reach_the_instance() {
 fn the_instance_follows_css_fonts_4s_precedence() {
     let heavy = format!("<span class=\"heavy\">{VARIABLE_TEXT}</span>");
     let none = "p { font-optical-sizing: none; }";
-    let cases: Vec<(
-        &str,
-        &str,
-        &str,
-        String,
-        Vec<(&[u8; 4], f64)>,
-        Vec<(&[u8; 4], f64)>,
-    )> = vec![
+    // An instance: each axis's tag and its value.
+    type Coordinates = Vec<(&'static [u8; 4], f64)>;
+    let cases: Vec<(&str, &str, &str, String, Coordinates, Coordinates)> = vec![
         (
             "the weight is held to the rule's range",
             "font-weight: 300 600;",

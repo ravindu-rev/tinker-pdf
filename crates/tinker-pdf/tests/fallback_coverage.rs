@@ -1212,7 +1212,7 @@ fn the_designs_outcomes_are_the_records() {
             (covered, region)
         })
         .collect();
-    han.sort_by(|a, b| b.0.cmp(&a.0));
+    han.sort_by_key(|face| std::cmp::Reverse(face.0));
     assert!(
         han.windows(2).all(|pair| pair[0].0 > pair[1].0),
         "no two region faces cover as many Han characters: {han:?}"
