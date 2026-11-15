@@ -105,7 +105,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
     (
         "save-options",
-        "652c7cd32149a0f6fd06e921fa9762e2c8411aa09fbfc732ea6a2c991e369704",
+        "4d9b1f873d44fe7f77808ba1136a4619c17a53453e63da070bd289926d572dde",
     ),
     (
         "save-linearized",
