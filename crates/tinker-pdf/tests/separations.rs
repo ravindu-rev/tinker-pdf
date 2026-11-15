@@ -1992,6 +1992,99 @@ fn a_mesh_in_none_paints_nothing() {
     }
 }
 
+// ---- a colour's operands (7.8.2, 8.6.8) -------------------------------------
+
+/// The resources the operand tests paint in: `/S`, a `/Separation` of Gold
+/// onto cyan by a type 2 function; `/DN`, a `/DeviceN` of Gold and Silver
+/// onto cyan and magenta through the type 4 `{ 0 0 }`, object 5; `/IN`, an
+/// `/Indexed` of two entries over it; and `/PN`, `[/Pattern /DN]`, under
+/// `/P`, an uncoloured tiling pattern whose cell fills itself, object 6.
+const OPERAND_SPACES: &str = "/ColorSpace << \
+    /S [/Separation /Gold /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] \
+        /C1 [1 0 0 0] /N 1 >>] \
+    /DN [/DeviceN [/Gold /Silver] /DeviceCMYK 5 0 R] \
+    /IN [/Indexed [/DeviceN [/Gold /Silver] /DeviceCMYK 5 0 R] 1 <3399CC66>] \
+    /PN [/Pattern [/DeviceN [/Gold /Silver] /DeviceCMYK 5 0 R]] >> \
+    /Pattern << /P 6 0 R >>";
+
+/// A 20 by 10 point page over a process backdrop filling its left half after
+/// `colour`, its objects 5 and 6 [`OPERAND_SPACES`]'s.
+fn operand_page(colour: &str) -> Document {
+    document(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_string(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 10] \
+             /Resources << {OPERAND_SPACES} >> /Contents 4 0 R >>"
+        ),
+        stream(
+            "",
+            &format!("0.1 0.2 0.3 0.4 k 0 0 20 10 re f {colour} 0 0 10 10 re f"),
+        ),
+        stream(
+            "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+            "{ 0 0 }",
+        ),
+        stream(
+            "/PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 2 2] /XStep 2 /YStep 2 \
+             /Resources << >>",
+            "0 0 2 2 re f",
+        ),
+    ])
+}
+
+/// Everything a page's colours reach: its light, its ink and its plates.
+fn every_reading(document: &Document) -> (Vec<u8>, Vec<u8>, Vec<tinker_pdf::Plate>) {
+    let page = document.page(0).expect("a page");
+    let light = page.render(&whole_pixels()).data;
+    let ink = page
+        .render(&RenderOptions {
+            format: tinker_pdf::PixelFormat::CmykA8,
+            allow_cmyk: true,
+            ..whole_pixels()
+        })
+        .data;
+    (light, ink, separations(&page, &whole_pixels(), &[]).plates)
+}
+
+/// **A colour's operands are the ones immediately before `scn`, as many as
+/// its space has components** (7.8.2, 8.6.8): in a `/Separation`, a
+/// `/DeviceN` whose type 4 tint transform starts its stack from every
+/// operand it is handed, an `/Indexed` over it and an uncoloured pattern in
+/// `[/Pattern /DeviceN]`, a fill given operands too many draws as light, as
+/// ink and on plates as the fill given only the last of them, so every
+/// reading takes the same components; and one given too few is skipped, as
+/// any operator short of its operands is, leaving the colour `cs` set.
+#[test]
+fn a_colour_reads_the_operands_its_space_takes_everywhere() {
+    for (space, excess, exact) in [
+        ("/S cs", "0.9 0.7 0.4 scn", "0.4 scn"),
+        ("/DN cs", "0.9 0.1 0.3 0.6 scn", "0.3 0.6 scn"),
+        ("/IN cs", "0 1 scn", "1 scn"),
+        ("/PN cs", "0.9 0.1 0.3 0.6 /P scn", "0.3 0.6 /P scn"),
+    ] {
+        let over = every_reading(&operand_page(&format!("{space} {excess}")));
+        let right = every_reading(&operand_page(&format!("{space} {exact}")));
+        assert!(
+            over == right,
+            "{space}: {excess} is read as its last operands, {exact}"
+        );
+    }
+    for (space, short) in [
+        ("/S cs", "scn"),
+        ("/DN cs", "0.3 scn"),
+        ("/PN cs", "0.3 /P scn"),
+    ] {
+        let skipped = every_reading(&operand_page(&format!("{space} {short}")));
+        let unset = every_reading(&operand_page(space));
+        assert!(skipped == unset, "{space}: {short} is skipped");
+    }
+    // The pattern case paints a pattern, not the colour `cs` left: the
+    // excess and the exact operands select it and colour it.
+    let pattern = every_reading(&operand_page("/PN cs 0.3 0.6 /P scn"));
+    assert!(pattern != every_reading(&operand_page("/PN cs")));
+}
+
 // ---- the plate cap (RC-04.15) -----------------------------------------------
 
 /// What each plate of a spots page holds over `region` — `[x, y, width,

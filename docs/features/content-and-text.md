@@ -64,7 +64,15 @@ effect at the painting operator that ends the path (8.5.4). `sh` forwards as
 a shading event (8.7.4.2). Colour operators (8.6.8) resolve device spaces
 immediately and named spaces through the resource seam, including `scn`'s
 trailing pattern name and the components a `PaintType 2` pattern paints with
-(8.7.3.2).
+(8.7.3.2). `sc` and `scn` in a space the seam counts take as many operands as
+it has components — an uncoloured pattern's underlying space's — the ones
+immediately before the operator, below a pattern name (7.8.2): its light, its
+ink, its colorants and the components kept for a later intent all read those
+alone, any written before them left over, and an `sc` or `scn` short of them
+is skipped as every operator short of its operands is, a pattern named with
+no components excepted
+(`a_colour_reads_the_operands_its_space_takes_everywhere`). In a space the
+seam cannot count, every number the operator is handed is the colour.
 
 **A colour carries its colorants, for a device that asks.** Beside a colour's
 light and its DeviceCMYK ink (`GraphicsState::fill_ink`), the state keeps

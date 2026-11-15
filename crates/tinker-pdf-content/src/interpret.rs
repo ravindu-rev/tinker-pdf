@@ -2649,18 +2649,51 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             }
             b"sc" | b"SC" | b"scn" | b"SCN" => {
                 let fill = op == b"sc" || op == b"scn";
-                let components: Vec<f64> = self
-                    .stack
-                    .iter()
-                    .filter_map(|t| match t {
-                        Token::Number(v) if v.is_finite() => Some(*v),
-                        _ => None,
-                    })
-                    .collect();
                 let space = if fill {
                     self.gs.fill_space.clone()
                 } else {
                     self.gs.stroke_space.clone()
+                };
+                // 7.8.2: the operands an operator needs immediately precede
+                // it and none is left over, and 8.6.8 has `sc` and `scn` need
+                // one a component of the space in force — below `scn`'s
+                // trailing pattern name, the underlying space's. So the
+                // colour is the last that many numbers, and every reading of
+                // it — its light, its ink, its colorants, the components kept
+                // for a later intent — reads those alone; with fewer the
+                // operator is skipped, as every operator short of its operands
+                // is. A space the seam cannot count is read as before, every
+                // number the operator was handed.
+                let named = matches!(self.stack.last(), Some(Token::Name(_)));
+                let operands = &self.stack[..self.stack.len() - usize::from(named)];
+                let wanted = space
+                    .as_ref()
+                    .and_then(|space| self.fonts.color_components(space));
+                let components: Vec<f64> = match wanted {
+                    Some(wanted) => {
+                        let mut taken = Vec::with_capacity(wanted);
+                        for token in operands.iter().rev().take(wanted) {
+                            match token {
+                                Token::Number(v) if v.is_finite() => taken.push(*v),
+                                _ => break,
+                            }
+                        }
+                        // A pattern named alone takes no colour, which is
+                        // how a coloured pattern is selected.
+                        if taken.len() < wanted && !(named && taken.is_empty()) {
+                            return;
+                        }
+                        taken.reverse();
+                        taken
+                    }
+                    None => self
+                        .stack
+                        .iter()
+                        .filter_map(|t| match t {
+                            Token::Number(v) if v.is_finite() => Some(*v),
+                            _ => None,
+                        })
+                        .collect(),
                 };
 
                 // 8.6.8.2: `scn` may end with a pattern name, with or without
