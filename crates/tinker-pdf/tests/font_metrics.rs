@@ -3189,7 +3189,10 @@ fn a_collections_faces_answer_by_index() {
 
 /// A one-page document embedding `face` as a TrueType font's `/FontFile2`,
 /// its stream's `/Length` stated as `length`, with a Helvetica beside it that
-/// embeds nothing and a third font whose program will not decode.
+/// embeds nothing and a third font whose program will not decode: its
+/// `/Predictor 5` is none of ISO 32000-2 Table 10's values, nor one of the
+/// values from 10 up that 7.4.4.4 reads as a PNG predictor, so no filter
+/// can undo it.
 fn document_embedding(face: &[u8], length: usize) -> Vec<u8> {
     let mut out = b"%PDF-1.7\n".to_vec();
     out.extend_from_slice(
@@ -3211,7 +3214,7 @@ fn document_embedding(face: &[u8], length: usize) -> Vec<u8> {
 8 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
 9 0 obj\n<< /Type /Font /Subtype /TrueType /BaseFont /Broken /FontDescriptor 10 0 R >>\nendobj\n\
 10 0 obj\n<< /Type /FontDescriptor /FontName /Broken /Flags 32 /FontFile2 11 0 R >>\nendobj\n\
-11 0 obj\n<< /Length 4 /Filter /FlateDecode /DecodeParms << /Predictor 99 >> >>\n\
+11 0 obj\n<< /Length 4 /Filter /FlateDecode /DecodeParms << /Predictor 5 >> >>\n\
 stream\nabcd\nendstream\nendobj\n\
 trailer\n<< /Size 12 /Root 1 0 R >>\n%%EOF\n",
     );
