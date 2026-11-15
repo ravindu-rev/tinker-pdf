@@ -2348,7 +2348,11 @@ and `chad`, by rows, `00010C42h 000005DEh FFFFF325h`,
 `00000793h 0000FD90h FFFFFBA1h`, `FFFFFDA2h 000003DCh 0000C06Eh`
 (1.047 886, 0.022 919, −0.050 216; 0.029 582, 0.990 484, −0.017 079;
 −0.009 252, 0.015 073, 0.751 678). The columns sum to the PCS white before
-rounding, since `A` takes `W` to it exactly.
+rounding, since `A` takes `W` to it exactly. After it each sum is within three
+half steps of the white, each component having been rounded on its own:
+neither 5.3.3 nor the colorant tags (6.4.4, 6.4.20, 6.4.40) ask the stored
+colorants to sum to the white's encoding, and the `Z` components sum to
+`0000D32Ch`, a step under it.
 
 **The tone curve.** Entry `i` of 1 024 is the transfer function at
 `c = i / 1023`, as a `uInt16Number` scaled so that 65 535 is 1.0 (6.5.3) and

@@ -150,9 +150,18 @@ fn columns() -> [[f64; 3]; 3] {
 /// step, within what two computations in floating point can disagree by.
 #[track_caller]
 fn is_step_of(raw: i32, value: f64, what: &str) {
+    is_within_roundings(raw, value, 1, what);
+}
+
+/// Asserts `raw`, the sum of `roundings` numbers each stored as its nearest
+/// `s15Fixed16Number`, is within their roundings of `value`, the sum of what
+/// they store: half a step each, within what two computations in floating
+/// point can disagree by.
+#[track_caller]
+fn is_within_roundings(raw: i32, value: f64, roundings: u32, what: &str) {
     let exact = value * 65536.0;
     assert!(
-        (f64::from(raw) - exact).abs() <= 0.5 + 1e-6,
+        (f64::from(raw) - exact).abs() <= 0.5 * f64::from(roundings) + 1e-6,
         "{what}: {raw} stored, {exact} computed"
     );
 }
@@ -185,13 +194,16 @@ fn the_colorants_are_iec_61966_2_1s_primaries_adapted_to_d50() {
         "RC-19.1's table"
     );
     // Before rounding the columns sum to the PCS white, since the adaptation
-    // takes D65 to it exactly; after it, each sum rounds to the white's own
-    // step.
+    // takes D65 to it exactly. Each component is stored as its own nearest
+    // step, and neither ICC.1:2001-04 nor IEC 61966-2-1 asks the stored
+    // colorants to sum to the white's step: three roundings of half a step
+    // each put a sum within three half steps of the white, and on Z the
+    // stored columns sum to a step under the white's own.
     for axis in 0..3 {
         let exact: f64 = want.iter().map(|column| column[axis]).sum();
         assert!((exact - D50[axis]).abs() < 1e-12, "axis {axis}: {exact}");
         let sum: i32 = stored.iter().map(|column| column[axis]).sum();
-        is_step_of(sum, D50[axis], &format!("the sum on axis {axis}"));
+        is_within_roundings(sum, D50[axis], 3, &format!("the sum on axis {axis}"));
     }
 
     let chad = element(b"chad");
