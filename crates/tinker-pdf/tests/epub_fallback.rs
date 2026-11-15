@@ -202,6 +202,289 @@ fn a_fallback_character_is_measured_in_the_face_it_is_drawn_in() {
     }
 }
 
+/// The families a run may name, each with the standard family it is set in:
+/// the three generic families this build has faces for, the two it sets in
+/// serif, and a name of each of the three standard families.
+fn families() -> Vec<(
+    tinker_pdf_css::property::FontFamily,
+    tinker_pdf::epub::paint::Generic,
+)> {
+    use tinker_pdf::epub::paint::Generic;
+    use tinker_pdf_css::property::FontFamily;
+    vec![
+        (FontFamily::Serif, Generic::Serif),
+        (FontFamily::SansSerif, Generic::SansSerif),
+        (FontFamily::Monospace, Generic::Monospace),
+        (FontFamily::Cursive, Generic::Serif),
+        (FontFamily::Fantasy, Generic::Serif),
+        (FontFamily::Named("Times".to_owned()), Generic::Serif),
+        (
+            FontFamily::Named("Helvetica".to_owned()),
+            Generic::SansSerif,
+        ),
+        (FontFamily::Named("Courier".to_owned()), Generic::Monospace),
+    ]
+}
+
+/// A character of each script the Liberation stand-ins cover, every one in
+/// all twelve of them and none in `WinAnsiEncoding`: Latin past the
+/// encoding, IPA and Vietnamese among it, Greek with its polytonic letters
+/// and the Coptic ones its block carries, Cyrillic, Hebrew and its points, a
+/// combining mark, and the common symbols — box drawing, an arrow, an
+/// operator, a currency sign, a modifier letter and a ligature.
+const SCRIPTS: [(&str, char); 20] = [
+    ("Latin Extended-A", '\u{151}'),
+    ("Latin Extended-B", '\u{219}'),
+    ("IPA", '\u{259}'),
+    ("Latin Extended Additional", '\u{1e9e}'),
+    ("Vietnamese", '\u{1ea0}'),
+    ("Greek", '\u{3bb}'),
+    ("Greek, polytonic", '\u{1f00}'),
+    ("Coptic, in the Greek block", '\u{3e2}'),
+    ("Cyrillic", '\u{436}'),
+    ("Cyrillic, Ukrainian", '\u{491}'),
+    ("Cyrillic, Azerbaijani", '\u{4d9}'),
+    ("Hebrew", '\u{5d0}'),
+    ("a Hebrew point", '\u{5b0}'),
+    ("a combining mark", '\u{301}'),
+    ("box drawing", '\u{2500}'),
+    ("an arrow", '\u{2190}'),
+    ("an operator", '\u{2206}'),
+    ("a currency sign", '\u{20b4}'),
+    ("a modifier letter", '\u{2bc}'),
+    ("a ligature", '\u{fb01}'),
+];
+
+/// A ten-point request for `families` at a weight and slope.
+fn asking(
+    families: &[tinker_pdf_css::property::FontFamily],
+    bold: bool,
+    italic: bool,
+) -> tinker_pdf_layout::metrics::FontRequest<'_> {
+    use tinker_pdf_css::property::FontStyle;
+    tinker_pdf_layout::metrics::FontRequest {
+        families,
+        weight: if bold { 700 } else { 400 },
+        style: if italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        },
+        size: 10.0,
+        kerning: tinker_pdf_css::property::FontKerning::Auto,
+        features: &[],
+        variations: &[],
+        optical_sizing: tinker_pdf_css::property::FontOpticalSizing::Auto,
+    }
+}
+
+/// **A family is set in its own stand-in wherever the stand-in covers the
+/// character** (`css-fonts-4` §5: per character, the first family of the
+/// list whose face covers it): every family, at every weight and slope,
+/// draws each script the twelve Liberation faces cover in its own face's
+/// stand-in — a `monospace` line's Cyrillic in Liberation Mono, a
+/// `sans-serif` line's Greek in Liberation Sans, `cursive`'s in Liberation
+/// Serif — and measures it at that stand-in's own `hmtx` advance, read here
+/// out of the bundled face's bytes. The mismatch is the build that asked
+/// the encoding alone, which set every such character in the last resort,
+/// serif.
+#[cfg(feature = "bundled-fonts")]
+#[test]
+fn each_family_draws_what_its_own_stand_in_covers() {
+    use tinker_pdf::epub::paint::{choose, BookMetrics, Chosen, Face, Generic};
+    use tinker_pdf::epub::typeface::FaceSet;
+    use tinker_pdf_font::bundled::{face, Family};
+    use tinker_pdf_font::Sfnt;
+    use tinker_pdf_layout::metrics::Metrics;
+
+    let mut wrong = Vec::new();
+    for (family, generic) in families() {
+        let list = vec![family.clone()];
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let request = asking(&list, bold, italic);
+            let expected = Face {
+                generic,
+                bold,
+                italic,
+            };
+            let program = face(
+                match generic {
+                    Generic::Serif => Family::Serif,
+                    Generic::SansSerif => Family::Sans,
+                    Generic::Monospace => Family::Mono,
+                },
+                bold,
+                italic,
+            );
+            let sfnt = Sfnt::parse(program).expect("the bundled face parses");
+            for (script, ch) in SCRIPTS {
+                let chosen = choose(&FaceSet::new(), &request, Some(ch));
+                if chosen != Chosen::Standard(expected) {
+                    wrong.push(format!("{family:?} {bold} {italic}, {script}: {chosen:?}"));
+                    continue;
+                }
+                let glyph = sfnt.glyph_for_char(ch).expect("every stand-in covers it");
+                let advance = f64::from(sfnt.advance(glyph).expect("an advance"))
+                    / f64::from(sfnt.units_per_em)
+                    * 10.0;
+                let measured = BookMetrics::STANDARD.advance(ch, &request);
+                if measured != advance {
+                    wrong.push(format!(
+                        "{family:?} {bold} {italic}, {script}: measured {measured}, its face's {advance}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// **Without a stand-in every family leaves those scripts to the last
+/// resort**: in a build without `bundled-fonts` no standard face covers a
+/// character outside `WinAnsiEncoding`, so each falls past every family to
+/// the initial `serif` face at the run's weight and slope, and is measured
+/// as that face's AFM measures it — a mark at nothing, a letter at its base
+/// letter's advance or a space's.
+#[cfg(not(feature = "bundled-fonts"))]
+#[test]
+fn without_a_stand_in_every_family_leaves_those_scripts_to_the_last_resort() {
+    use tinker_pdf::epub::paint::{choose, BookMetrics, Chosen, Face, Generic};
+    use tinker_pdf::epub::typeface::FaceSet;
+    use tinker_pdf_layout::metrics::Metrics;
+
+    let mut wrong = Vec::new();
+    for (family, _) in families() {
+        let list = vec![family.clone()];
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let request = asking(&list, bold, italic);
+            let last_resort = Face {
+                generic: Generic::Serif,
+                bold,
+                italic,
+            };
+            for (script, ch) in SCRIPTS {
+                let chosen = choose(&FaceSet::new(), &request, Some(ch));
+                if chosen != Chosen::Standard(last_resort) {
+                    wrong.push(format!("{family:?} {bold} {italic}, {script}: {chosen:?}"));
+                }
+                let afm = if bidi_class(ch) == BidiClass::NSM {
+                    0.0
+                } else {
+                    f64::from(last_resort.standard().advance(ch).0) / 1000.0 * 10.0
+                };
+                let measured = BookMetrics::STANDARD.advance(ch, &request);
+                if measured != afm {
+                    wrong.push(format!(
+                        "{family:?} {bold} {italic}, {script}: measured {measured}, the AFM's {afm}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// **A character no family of the list covers takes the first stand-in that
+/// has it** (§5's system fallback, past the book's own faces): serif's, then
+/// sans-serif's, then monospace's. A thin space Liberation Mono lacks is set
+/// in Liberation Serif from a `monospace` line; the Earth symbol only
+/// Liberation Sans has is set in it from a `serif` line and a `monospace`
+/// one; Cyrillic under a family this build has no face for is set in
+/// serif's; and hiragana, which no stand-in has, reaches the initial serif
+/// face uncovered and is measured at an em.
+#[cfg(feature = "bundled-fonts")]
+#[test]
+fn a_character_no_family_covers_takes_the_first_stand_in_that_has_it() {
+    use tinker_pdf::epub::paint::{choose, BookMetrics, Chosen, Face, Generic};
+    use tinker_pdf::epub::typeface::FaceSet;
+    use tinker_pdf_css::property::FontFamily;
+    use tinker_pdf_layout::metrics::Metrics;
+
+    let set = |family: FontFamily, ch: char| {
+        let list = vec![family];
+        choose(&FaceSet::new(), &asking(&list, false, false), Some(ch))
+    };
+    let regular = |generic| {
+        Chosen::Standard(Face {
+            generic,
+            bold: false,
+            italic: false,
+        })
+    };
+    assert_eq!(
+        set(FontFamily::Monospace, '\u{2009}'),
+        regular(Generic::Serif)
+    );
+    assert_eq!(
+        set(FontFamily::Serif, '\u{2641}'),
+        regular(Generic::SansSerif)
+    );
+    assert_eq!(
+        set(FontFamily::Monospace, '\u{2641}'),
+        regular(Generic::SansSerif)
+    );
+    assert_eq!(
+        set(FontFamily::Named("No Such Face".to_owned()), '\u{436}'),
+        regular(Generic::Serif)
+    );
+    assert_eq!(
+        set(FontFamily::SansSerif, '\u{3042}'),
+        regular(Generic::Serif)
+    );
+    let list = vec![FontFamily::SansSerif];
+    assert_eq!(
+        BookMetrics::STANDARD.advance('\u{3042}', &asking(&list, false, false)),
+        10.0
+    );
+}
+
+/// **A `monospace` and a `sans-serif` line keep their families past the
+/// encoding**, through the whole book: with `bundled-fonts` their Cyrillic,
+/// Greek and Hebrew are drawn in Liberation Mono and Liberation Sans, each
+/// embedded as a composite font and Liberation Serif not at all, nothing is
+/// a notdef and the text reads back as written. Without it the standard-14
+/// limit stays and every one of those characters is counted.
+#[test]
+fn a_monospace_and_a_sans_serif_line_keep_their_families_past_the_encoding() {
+    let words = "\u{436}\u{3bb}\u{5d0}";
+    let book = epub_support::book::styled_book(
+        "en",
+        "p.m { font-family: monospace } p.s { font-family: sans-serif }",
+        &format!(r#"<p class="m">{words}</p><p class="s">{words}</p>"#),
+    );
+    let doc = converted(
+        "a monospace and a sans-serif line keep their families past the encoding",
+        Document::open(book).expect("the book opens"),
+    );
+    let fonts: Vec<(String, tinker_pdf::FontKind)> = doc
+        .fonts()
+        .into_iter()
+        .map(|font| (font.base_font, font.kind))
+        .collect();
+    let composite = |name: &str| {
+        fonts
+            .iter()
+            .any(|(base, kind)| base.ends_with(name) && *kind == tinker_pdf::FontKind::Type0)
+    };
+    if cfg!(feature = "bundled-fonts") {
+        assert_eq!(uncovered(&doc), 0, "a character was drawn as a notdef");
+        assert!(
+            composite("LiberationMono") && composite("LiberationSans"),
+            "each line's own stand-in was not embedded: {fonts:?}"
+        );
+        assert!(
+            !fonts
+                .iter()
+                .any(|(base, _)| base.contains("LiberationSerif")),
+            "a line was set in serif's stand-in: {fonts:?}"
+        );
+        let read: String = text(&doc).chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(read, format!("{words}{words}"));
+    } else {
+        assert_eq!(uncovered(&doc), 6, "each of the six characters is counted");
+    }
+}
+
 /// **A nonspacing mark set in the standard 14 is measured at no advance**, in
 /// either build, and the overflow font's `/Widths` agree — which is what lets
 /// the painter draw it on its letter rather than after it.

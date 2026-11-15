@@ -64,20 +64,26 @@
 //!
 //! # The CID-keyed fallback, where this build carries a face
 //!
-//! With `bundled-fonts` on, a character outside `WinAnsiEncoding` that the
-//! standard face's Liberation stand-in covers is drawn in **that** face,
-//! embedded as a composite font under `/Identity-H` ([`Fonts::register`]):
-//! the code is the glyph index, so there are as many codes as the face has
-//! glyphs rather than 224, the page shows the real glyph rather than a notdef,
-//! and `/ToUnicode` carries the character. Liberation is what every reader
+//! With `bundled-fonts` on, each standard face has a Liberation stand-in, and
+//! a standard family covers what its face's stand-in covers as well as what
+//! the encoding does ([`Face::covers`]): a character outside
+//! `WinAnsiEncoding` is drawn in the stand-in of the first family of its
+//! run's list whose stand-in has it — a `monospace` line's Cyrillic in
+//! Liberation Mono, a `sans-serif` line's Greek in Liberation Sans — embedded
+//! as a composite font under `/Identity-H` ([`Fonts::register`]): the code is
+//! the glyph index, so there are as many codes as the face has glyphs rather
+//! than 224, the page shows the real glyph rather than a notdef, and
+//! `/ToUnicode` carries the character. Liberation is what every reader
 //! substitutes for Times, Helvetica and Courier anyway, metric-compatible with
 //! them over the Latin set, so the line a book was set in does not change face
 //! where it leaves the encoding. Its advance is the face's own `hmtx`, in
-//! [`BookMetrics`] as on the page — one path owns the run. A character the
-//! stand-in does not cover either (the Japanese line above) still goes to the
-//! overflow font and is still counted. Without the feature nothing changes:
-//! the standard-14 limit stays, and [`Fonts::unrepresented`] counts what it
-//! costs.
+//! [`BookMetrics`] as on the page — one path owns the run. A character no
+//! family of the list covers is drawn, after the book's own faces, in the
+//! first stand-in that has it, serif's, then sans-serif's, then monospace's
+//! (§5's system fallback); one no stand-in covers either (the Japanese line
+//! above) still goes to the overflow font and is still counted. Without the
+//! feature nothing changes: the standard-14 limit stays, and
+//! [`Fonts::unrepresented`] counts what it costs.
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
@@ -202,11 +208,18 @@ pub fn standard_covers(ch: char) -> bool {
 /// would give a paragraph a different line height depending on where its
 /// accented characters happened to fall.
 ///
+/// A standard face covers `ch` where `WinAnsiEncoding` has it or, in a build
+/// that carries the face's Liberation stand-in, where the stand-in does
+/// ([`Face::covers`]), so a family is passed over only where neither draws it.
+///
 /// When the list is exhausted, §5.3's system fallback is the book's own faces —
-/// the only ones a reading system with no installed fonts has — and after those
-/// the initial `serif` face, which may not cover `ch` at all. The caller is
-/// what says so: [`Fonts::note`] counts a character that arrives here
-/// uncovered, and the reader warns by name rather than leaving a blank.
+/// the only ones a reading system with no installed fonts has — then the
+/// stand-ins this build carries, at the run's weight and slope, serif's first
+/// as the initial family's, then sans-serif's and monospace's
+/// ([`Face::system_fallback`]), and after those the initial `serif` face,
+/// which may not cover `ch` at all. The caller is what says so:
+/// [`Fonts::note`] counts a character that arrives here uncovered, and the
+/// reader warns by name rather than leaving a blank.
 ///
 /// The question for one character, through a [`FamilyPlan`] of the list; a
 /// caller asking about a run's characters makes the plan once and asks it.
@@ -396,22 +409,27 @@ impl<'f> FamilyPlan<'f> {
                 }
             }
             if let Some(generic) = family.standard {
-                if ch.is_none_or(standard_covers) {
-                    return Chosen::Standard(Face {
-                        generic,
-                        bold: self.bold,
-                        italic: self.italic,
-                    });
+                let face = Face {
+                    generic,
+                    bold: self.bold,
+                    italic: self.italic,
+                };
+                if ch.is_none_or(|ch| face.covers(ch)) {
+                    return Chosen::Standard(face);
                 }
             }
         }
         // §5.3's last resort. The book's own faces are tried before giving
         // up, because they are the only faces this reading system has that the
         // standard 14 are not — a book that ships a CJK face under a family
-        // its `body` rule never mentions still gets its Japanese line drawn.
+        // its `body` rule never mentions still gets its Japanese line drawn —
+        // and then the stand-ins this build carries.
         if let Some(ch) = ch {
             if let Some(index) = (0..self.programs.len()).find(|&index| self.covers(index, ch)) {
                 return Chosen::Embedded(self.drawn(index));
+            }
+            if let Some(face) = Face::system_fallback(ch, self.bold, self.italic) {
+                return Chosen::Standard(face);
             }
         }
         Chosen::Standard(Face {
@@ -456,21 +474,33 @@ pub(crate) fn choose_by_walk(faces: &FaceSet, font: &FontRequest<'_>, ch: Option
                 _ => continue,
             },
         };
-        if ch.is_none_or(standard_covers) {
-            return Chosen::Standard(Face {
-                generic,
-                bold,
-                italic,
-            });
+        let face = Face {
+            generic,
+            bold,
+            italic,
+        };
+        if ch.is_none_or(|ch| standard_covers(ch) || fallback_glyph(face, ch).is_some()) {
+            return Chosen::Standard(face);
         }
     }
     // §5.3's last resort. The book's own faces are tried before giving up,
     // because they are the only faces this reading system has that the standard
     // 14 are not — a book that ships a CJK face under a family its `body` rule
-    // never mentions still gets its Japanese line drawn.
+    // never mentions still gets its Japanese line drawn — and then the
+    // stand-ins, the initial family's first.
     if let Some(ch) = ch {
         if let Some(index) = faces.any_covering(ch) {
             return Chosen::Embedded(index);
+        }
+        for generic in [Generic::Serif, Generic::SansSerif, Generic::Monospace] {
+            let face = Face {
+                generic,
+                bold,
+                italic,
+            };
+            if fallback_glyph(face, ch).is_some() {
+                return Chosen::Standard(face);
+            }
         }
     }
     Chosen::Standard(Face {
@@ -535,6 +565,33 @@ impl Face {
                 italic: font.style != FontStyle::Normal,
             },
         }
+    }
+
+    /// Whether this face draws `ch`: through `WinAnsiEncoding`
+    /// ([`standard_covers`]), or in its Liberation stand-in, in a build that
+    /// carries one, where the stand-in's `cmap` maps `ch` to a glyph
+    /// ([`fallback_glyph`]). The second is the face's own repertoire as much
+    /// as the first: the line is drawn and measured in it.
+    #[must_use]
+    pub fn covers(self, ch: char) -> bool {
+        standard_covers(ch) || fallback_glyph(self, ch).is_some()
+    }
+
+    /// §5.3's system fallback past the book's own faces: the first stand-in
+    /// that has `ch`, at the run's weight and slope, serif's first as the
+    /// initial family's, then sans-serif's and monospace's — which is where a
+    /// character no family of the run's list covers is drawn in a build that
+    /// carries them. `None` where none does, and in a build that carries none.
+    #[must_use]
+    pub fn system_fallback(ch: char, bold: bool, italic: bool) -> Option<Face> {
+        [Generic::Serif, Generic::SansSerif, Generic::Monospace]
+            .into_iter()
+            .map(|generic| Face {
+                generic,
+                bold,
+                italic,
+            })
+            .find(|face| fallback_glyph(*face, ch).is_some())
     }
 
     /// Every face, in a stable order, so the resource names a document uses do
@@ -711,10 +768,34 @@ fn fallback_glyph(face: Face, ch: char) -> Option<(u16, f64)> {
     if winansi_code(ch).is_some() {
         return None;
     }
-    let sfnt = Sfnt::parse(fallback_program(face)?)?;
+    let sfnt = stand_in(face)?;
     let glyph = sfnt.glyph_for_char(ch).filter(|g| *g != 0)?;
     let advance = f64::from(sfnt.advance(glyph)?) / f64::from(sfnt.units_per_em.max(1));
     Some((glyph, advance))
+}
+
+/// `face`'s bundled stand-in, parsed: once a process for each of the twelve,
+/// on the first question about any of them, and shared after, so a
+/// character's coverage, glyph and advance are each one `cmap` lookup in a
+/// table chosen once rather than a parse of the face for every question.
+#[cfg(feature = "bundled-fonts")]
+fn stand_in(face: Face) -> Option<&'static Sfnt<'static>> {
+    static STAND_INS: std::sync::OnceLock<Vec<Option<Sfnt<'static>>>> = std::sync::OnceLock::new();
+    STAND_INS
+        .get_or_init(|| {
+            Face::all()
+                .into_iter()
+                .map(|face| fallback_program(face).and_then(Sfnt::parse))
+                .collect()
+        })
+        .get(face.index())?
+        .as_ref()
+}
+
+/// No stand-in, in a build without `bundled-fonts`.
+#[cfg(not(feature = "bundled-fonts"))]
+fn stand_in(_face: Face) -> Option<&'static Sfnt<'static>> {
+    None
 }
 
 /// How wide `face` sets `ch` where no stand-in draws it — through the simple

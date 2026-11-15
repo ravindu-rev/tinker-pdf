@@ -3369,9 +3369,10 @@ fn a_run_folds_each_family_once_whatever_its_length() {
 /// **The plan chooses what `choose` chose** (P-18.1): over generated family
 /// lists, weights, slopes and characters — covered by one face of a family
 /// and not another, by the kana face alone, by the standard 14 alone, by
+/// every Liberation stand-in but not the encoding, by one stand-in alone, by
 /// nothing, and the coverage-blind question a line height asks — a run's
 /// plan answers every character as the walk of the list at every character
-/// did, embedded face, standard face and last resort alike.
+/// did, embedded face, standard face, stand-in and last resort alike.
 #[test]
 fn the_plan_chooses_what_choose_chose() {
     use super::paint::{choose_by_walk, Chosen, FamilyPlan};
@@ -3389,6 +3390,10 @@ fn the_plan_chooses_what_choose_chose() {
         Some('\u{3042}'),
         Some('\u{4e2d}'),
         Some('\u{301}'),
+        Some('\u{436}'),
+        Some('\u{3bb}'),
+        Some('\u{2009}'),
+        Some('\u{2641}'),
         Some(' '),
         None,
     ];
