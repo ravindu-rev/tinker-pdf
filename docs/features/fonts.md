@@ -2546,8 +2546,11 @@ corpora already vendored here. So every name stays on the list.
   gradient stop in the text's colour, an unbounded
   graph and a missing palette entry falling to the outline, named; a cycle
   named and the rest drawn; a
-  million-path fan-out of one shared table written in kilobytes, and one no
-  outline of its own bounds named past the walk budget.
+  million-path fan-out of one shared table written in kilobytes and drawn
+  whole, its forms within the depth this engine draws, and one no outline
+  of its own bounds named past the walk budget; composites nested to that
+  depth drawn and one past it named. Every document the file writes is held
+  to the validate-on-save helper as authored.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it
