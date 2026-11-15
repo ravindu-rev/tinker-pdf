@@ -224,7 +224,7 @@ impl Output {
     pub fn compile(profile: &Profile, intent: Intent) -> Result<Output, IccError> {
         let before = profile
             .tables
-            .from_standard()?
+            .standard_to_custom()?
             .map(|pipeline| (pipeline, &profile.pcs == b"Lab "));
         // What a media-relative source divides the value by: the media
         // white under absolute colorimetric. A tag numbered 3 is

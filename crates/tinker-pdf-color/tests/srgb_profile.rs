@@ -102,11 +102,12 @@ fn solve(a: [[f64; 3]; 3], b: [f64; 3]) -> [f64; 3] {
             .max_by(|&p, &q| rows[p][column].abs().total_cmp(&rows[q][column].abs()))
             .expect("a row");
         rows.swap(column, pivot);
-        for row in 0..3 {
+        let pivot_row = rows[column];
+        for (row, values) in rows.iter_mut().enumerate() {
             if row != column {
-                let factor = rows[row][column] / rows[column][column];
-                for k in column..4 {
-                    rows[row][k] -= factor * rows[column][k];
+                let factor = values[column] / pivot_row[column];
+                for (value, &above) in values.iter_mut().zip(&pivot_row).skip(column) {
+                    *value -= factor * above;
                 }
             }
         }

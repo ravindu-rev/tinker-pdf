@@ -351,7 +351,7 @@ impl Proof {
     /// output direction at `intent` to the device's components.
     #[must_use]
     pub fn device(&self, rgb: [u8; 3], intent: Intent) -> ProofColour {
-        self.into_device(self.connection(srgb_to_xyz(rgb)), intent)
+        self.device_from_fixed(self.connection(srgb_to_xyz(rgb)), intent)
     }
 
     /// **The device leg of a colour's own connection-space value**: `pcs`,
@@ -369,7 +369,7 @@ impl Proof {
             (true, false) => lab_to_xyz_fixed(fixed).map(|component| round_shift(component, 16)),
             _ => fixed,
         };
-        self.into_device(own, intent)
+        self.device_from_fixed(own, intent)
     }
 
     /// XYZ in s15.16 in the profile's own connection space: as it stands, or
@@ -384,7 +384,7 @@ impl Proof {
 
     /// `pcs`, s15.16 in the profile's connection space, through the output
     /// direction at `intent`, each component rounded to a byte.
-    fn into_device(&self, pcs: [i64; 3], intent: Intent) -> ProofColour {
+    fn device_from_fixed(&self, pcs: [i64; 3], intent: Intent) -> ProofColour {
         // An s15.16 number is a float exactly: the output direction takes the
         // value as `Output::apply` does and quantises it once again, exactly.
         let value = pcs.map(|component| component as f64 / ONE as f64);

@@ -1250,6 +1250,11 @@ fn calculated(
     })
 }
 
+/// What reads a sampled calculator curve's calculator out of its bytes,
+/// spending its runs from the budget: [`read_curve`]'s `calculator`.
+pub(super) type CalculatorReader<'a> =
+    dyn FnMut(&[u8], &mut Budget) -> Result<Calculator, IccError> + 'a;
+
 /// One curve of a curve set read from `data`: a segmented curve, a single
 /// sampled curve, or a sampled calculator curve (`clcf`, ICC.2 11.2.2.3),
 /// whose calculator `calculator` reads and which is sampled at once into a
@@ -1260,7 +1265,7 @@ fn calculated(
 pub(super) fn read_curve(
     data: &[u8],
     budget: &mut Budget,
-    calculator: &mut dyn FnMut(&[u8], &mut Budget) -> Result<Calculator, IccError>,
+    calculator: &mut CalculatorReader<'_>,
 ) -> Result<Curve, IccError> {
     let reader = Reader { bytes: data };
     match reader.sig(0).as_ref() {
@@ -2023,7 +2028,7 @@ mod tests {
     #[test]
     fn a_tag_out_of_the_connection_space_takes_its_range() {
         let curves = curves_of(3, &formula_curve(0, &[1.0, 1.0, 0.0, 0.0]));
-        let xyz = read_output(&tag(3, 3, &[curves.clone()]), false, 3).expect("XYZ in");
+        let xyz = read_output(&tag(3, 3, std::slice::from_ref(&curves)), false, 3).expect("XYZ in");
         assert_eq!(xyz.domain, vec![(0, 131_070); 3]);
         let got = xyz.evaluate_all(&[1.5, -1.0, 9.0]);
         assert!((got[0] - 1.5).abs() < 1e-3, "{got:?}");
@@ -2032,7 +2037,7 @@ mod tests {
             (got[2] - 65535.0 / 32768.0).abs() < 1e-3,
             "held to u1Fixed15's top: {got:?}"
         );
-        let lab = read_output(&tag(3, 3, &[curves.clone()]), true, 3).expect("Lab in");
+        let lab = read_output(&tag(3, 3, std::slice::from_ref(&curves)), true, 3).expect("Lab in");
         assert_eq!(
             lab.domain,
             vec![
@@ -2051,7 +2056,7 @@ mod tests {
             Err(IccError::TooLarge)
         );
         assert_eq!(
-            read_output(&tag(3, 3, &[curves.clone()]), false, 4),
+            read_output(&tag(3, 3, std::slice::from_ref(&curves)), false, 4),
             Err(IccError::UnsupportedSpace)
         );
         assert_eq!(

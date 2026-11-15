@@ -2736,7 +2736,7 @@ mod tests {
             tag_of(&element(3, 3, &ops, &[], None))
         };
         assert_eq!(35_937 * 1_868, 67_130_316);
-        assert!(67_130_316 > MAX_CALC_WORK);
+        const { assert!(67_130_316 > MAX_CALC_WORK) };
         assert_eq!(mpe::read(&stage(1_867), false).map(|_| ()), Err(past));
         assert_eq!(mpe::read(&stage(8), false).map(|_| ()), Ok(()));
     }

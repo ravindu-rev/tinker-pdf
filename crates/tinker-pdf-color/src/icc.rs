@@ -1130,7 +1130,7 @@ impl Tables {
     ///
     /// [`SpectralRefusal::NoCustomToStandard`] for a profile that carries
     /// none, and the tag's own refusal where it does not read.
-    fn to_standard(&self) -> Result<Option<Arc<mpe::Pipeline>>, IccError> {
+    fn custom_to_standard(&self) -> Result<Option<Arc<mpe::Pipeline>>, IccError> {
         let Some(custom) = &self.custom else {
             return Ok(None);
         };
@@ -1149,7 +1149,7 @@ impl Tables {
     ///
     /// [`SpectralRefusal::NoStandardToCustom`] for a profile that carries
     /// none, and the tag's own refusal where it does not read.
-    fn from_standard(&self) -> Result<Option<Arc<mpe::Pipeline>>, IccError> {
+    fn standard_to_custom(&self) -> Result<Option<Arc<mpe::Pipeline>>, IccError> {
         let Some(custom) = &self.custom else {
             return Ok(None);
         };
@@ -1198,6 +1198,10 @@ struct Element<T> {
     read: OnceLock<Result<Arc<T>, IccError>>,
 }
 
+/// For each of `N` tags, which of the distinct elements it names, or `None`
+/// where the profile does not carry it: what [`Element::locate`] gives.
+type Slots<const N: usize> = [Option<usize>; N];
+
 impl<T> Element<T> {
     /// For each of `places` — a tag's offset and size, where the profile
     /// carries the tag — which of the distinct elements it names, and those
@@ -1205,7 +1209,7 @@ impl<T> Element<T> {
     fn locate<const N: usize>(
         places: [Option<(usize, usize)>; N],
         bytes: &[u8],
-    ) -> Result<([Option<usize>; N], Vec<Element<T>>), IccError> {
+    ) -> Result<(Slots<N>, Vec<Element<T>>), IccError> {
         let mut distinct: Vec<(usize, usize)> = Vec::new();
         let mut slots = [None; N];
         for (slot, place) in slots.iter_mut().zip(places) {
@@ -1351,7 +1355,7 @@ impl Profile {
             }
             Source::Model(model) => (model.connection(components), own),
         };
-        let then = self.tables.to_standard().ok().flatten();
+        let then = self.tables.custom_to_standard().ok().flatten();
         let (pcs, lab) = standardised(pcs, lab, then.as_deref());
         let pcs = encoded(pcs, lab, own);
         Some(match self.scale_for(intent, source.absolute()) {
@@ -1382,7 +1386,7 @@ impl Profile {
     /// model's transform takes no stage after it — and its spectral `D2B*`
     /// tags last, in [`Intent::spectral_order`].
     fn walk(&self, intent: Intent) -> Option<Source<'_>> {
-        self.tables.to_standard().ok()?;
+        self.tables.custom_to_standard().ok()?;
         let custom = self.tables.custom.is_some();
         let colorimetric = intent.order().into_iter().find_map(|step| match step {
             Step::Pipeline(tag) => {
@@ -2711,7 +2715,7 @@ impl Profile {
             });
             // Every transform into the connection space connects through
             // the `c2sp`, so a profile with none that reads converts nothing.
-            tables.to_standard()?;
+            tables.custom_to_standard()?;
         }
 
         // Relative colorimetric's source, found now: 8.6.5.8 makes it the
@@ -3582,7 +3586,7 @@ impl Transform {
     pub fn compile(profile: &Profile, intent: Intent) -> Option<Transform> {
         let source = profile.source(intent)?;
         let media = profile.scale_for(intent, source.absolute());
-        let then = profile.tables.to_standard().ok().flatten();
+        let then = profile.tables.custom_to_standard().ok().flatten();
         Some(Transform::of_source(source, media, then))
     }
 
@@ -4046,7 +4050,7 @@ impl Transforms {
         let source = profile.source(Intent::RelativeColorimetric)?;
         let relative_source = source.id();
         let media = profile.scale_for(Intent::RelativeColorimetric, source.absolute());
-        let then = profile.tables.to_standard().ok().flatten();
+        let then = profile.tables.custom_to_standard().ok().flatten();
         let relative = Arc::new(Transform::of_source(source, media, then));
         Some(Transforms {
             profile,
@@ -4124,7 +4128,7 @@ impl Transforms {
                     }
                 }
             }
-            let then = self.profile.tables.to_standard().ok().flatten();
+            let then = self.profile.tables.custom_to_standard().ok().flatten();
             Arc::new(Transform::of_source(source, media, then))
         })
     }
@@ -4603,19 +4607,17 @@ pub(crate) mod tests {
         )
     }
 
+    /// One tag a test profile carries: its signature and its bytes.
+    type TagBytes = ([u8; 4], Vec<u8>);
+
     /// A minimal monitor profile: a header, a tag count, and the tags asked
     /// for.
-    fn build(space: &[u8; 4], pcs: &[u8; 4], tags: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    fn build(space: &[u8; 4], pcs: &[u8; 4], tags: &[TagBytes]) -> Vec<u8> {
         build_as(b"mntr", space, pcs, tags)
     }
 
     /// [`build`], of the device class `class`.
-    fn build_as(
-        class: &[u8; 4],
-        space: &[u8; 4],
-        pcs: &[u8; 4],
-        tags: &[([u8; 4], Vec<u8>)],
-    ) -> Vec<u8> {
+    fn build_as(class: &[u8; 4], space: &[u8; 4], pcs: &[u8; 4], tags: &[TagBytes]) -> Vec<u8> {
         let mut header = vec![0u8; 128];
         header[12..16].copy_from_slice(class);
         header[16..20].copy_from_slice(space);
@@ -6578,7 +6580,7 @@ pub(crate) mod tests {
     fn model_and_tables(
         space: &[u8; 4],
         pcs: &[u8; 4],
-        model: &[([u8; 4], Vec<u8>)],
+        model: &[TagBytes],
         inputs: usize,
         present: [bool; 3],
         broken: [bool; 3],
@@ -6840,7 +6842,7 @@ pub(crate) mod tests {
 
     /// The matrix/TRC tags of [`matrix_profile`], its white point left out:
     /// a model to carry beside tables.
-    fn matrix_tags() -> Vec<([u8; 4], Vec<u8>)> {
+    fn matrix_tags() -> Vec<TagBytes> {
         vec![
             (*b"rXYZ", xyz(0.4360, 0.2225, 0.0139)),
             (*b"gXYZ", xyz(0.3851, 0.7169, 0.0971)),
@@ -6853,7 +6855,7 @@ pub(crate) mod tests {
 
     /// A grey model's tags: a `kTRC` of gamma 1.8 and the white point the
     /// grey branch reads.
-    fn grey_tags() -> Vec<([u8; 4], Vec<u8>)> {
+    fn grey_tags() -> Vec<TagBytes> {
         vec![(*b"kTRC", gamma(1.8)), (*b"wtpt", xyz(0.9642, 1.0, 0.8249))]
     }
 
@@ -7049,7 +7051,16 @@ pub(crate) mod tests {
                 (*b"bXYZ", xyz(0.1431, 0.0606, 0.7141)),
             ]
         };
-        let shapes: [(&[u8; 4], &[u8; 4], &[u8; 4], Vec<([u8; 4], Vec<u8>)>, usize); 3] = [
+        // A shape's class, data space and connection space, its model's tags
+        // and its inputs.
+        type Shape = (
+            &'static [u8; 4],
+            &'static [u8; 4],
+            &'static [u8; 4],
+            Vec<TagBytes>,
+            usize,
+        );
+        let shapes: [Shape; 3] = [
             (b"mntr", b"LAB ", b"XYZ ", columns(), 3),
             (b"mntr", b"YYY ", b"XYZ ", columns(), 3),
             (b"prtr", b"CMYK", b"Lab ", vec![(*b"kTRC", gamma(1.0))], 4),
@@ -7236,7 +7247,7 @@ pub(crate) mod tests {
     /// D50 XYZ of linear sRGB's corners, under XYZ and, in v2's legacy
     /// 16-bit Lab, under Lab.
     fn media_profiles(white: Option<Vec<u8>>) -> Vec<(&'static str, Vec<u8>)> {
-        let with = |space: &[u8; 4], pcs: &[u8; 4], mut tags: Vec<([u8; 4], Vec<u8>)>| {
+        let with = |space: &[u8; 4], pcs: &[u8; 4], mut tags: Vec<TagBytes>| {
             if let Some(white) = &white {
                 tags.push((*b"wtpt", white.clone()));
             }
@@ -7824,7 +7835,7 @@ pub(crate) mod tests {
 
         // With no `D2B3`, absolute colorimetric's row goes on to `A2B1`,
         // scaled by the media white; `D2B1` is not in it.
-        let without: Vec<([u8; 4], Vec<u8>)> = tags
+        let without: Vec<TagBytes> = tags
             .iter()
             .filter(|(signature, _)| signature != b"D2B3")
             .cloned()
@@ -8197,8 +8208,8 @@ pub(crate) mod tests {
                     let on = (0..inputs).all(|axis| {
                         let high = (node >> (inputs - 1 - axis)) & 1 == 1;
                         match x[axis] {
-                            v if v == 0.0 => !high,
-                            v if v == 1.0 => high,
+                            0.0 => !high,
+                            1.0 => high,
                             _ => true,
                         }
                     });
@@ -9380,7 +9391,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
     fn sixteen_bit_inputs(inputs: usize) -> Vec<Vec<f64>> {
         let axis: Vec<f64> = match inputs {
             1 => (0..=255u32).map(|v| f64::from(v) / 255.0).collect(),
-            2 | 3 | 4 => {
+            2..=4 => {
                 let step = [15, 17, 51][inputs - 2];
                 (0..=255u32)
                     .step_by(step)
@@ -10288,7 +10299,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
 
         // No `B2D3`: absolute colorimetric through `B2A1`, divided by the
         // media white over the PCS white first.
-        let without: Vec<([u8; 4], Vec<u8>)> = tags
+        let without: Vec<TagBytes> = tags
             .iter()
             .filter(|(signature, _)| signature != b"B2D3")
             .cloned()
@@ -10334,7 +10345,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
 
     /// The bytes of a version 5 profile of `tags`, its header's fields past
     /// byte 100 zero.
-    fn version5(space: &[u8; 4], tags: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    fn version5(space: &[u8; 4], tags: &[TagBytes]) -> Vec<u8> {
         let mut out = build(space, b"XYZ ", tags);
         out[8..12].copy_from_slice(&0x0500_0000u32.to_be_bytes());
         out

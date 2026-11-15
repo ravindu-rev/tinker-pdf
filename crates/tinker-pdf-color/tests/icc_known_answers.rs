@@ -2809,15 +2809,15 @@ fn encoding_bytes(value: f64, encoding: u16) -> Vec<u8> {
         0 => f32_bytes(value).to_vec(),
         1 => {
             let half: u16 = match value {
-                v if v == 0.0 => 0x0000,
-                v if v == 0.125 => 0x3000,
-                v if v == 0.25 => 0x3400,
-                v if v == 0.375 => 0x3600,
-                v if v == 0.5 => 0x3800,
-                v if v == 0.625 => 0x3900,
-                v if v == 0.75 => 0x3A00,
-                v if v == 0.875 => 0x3B00,
-                v if v == 1.0 => 0x3C00,
+                0.0 => 0x0000,
+                0.125 => 0x3000,
+                0.25 => 0x3400,
+                0.375 => 0x3600,
+                0.5 => 0x3800,
+                0.625 => 0x3900,
+                0.75 => 0x3A00,
+                0.875 => 0x3B00,
+                1.0 => 0x3C00,
                 v => panic!("{v} is not one of the half floats the tests here use"),
             };
             half.to_be_bytes().to_vec()
