@@ -31,7 +31,8 @@
 //! FNV-1a, integer arithmetic over a canonical byte stream, which is what a
 //! cross-target check needs.
 
-use tinker_pdf_font::hint::{Face, Hinted, Program, Unhinted};
+use tinker_pdf_font::glyf;
+use tinker_pdf_font::hint::{Error, Face, Hinted, Program, Unhinted};
 use tinker_pdf_font::{Outline, Segment, Sfnt};
 
 /// The twelve committed faces, by name.
@@ -92,7 +93,8 @@ const SIZES: [i32; 13] = [8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 32, 48, 72];
 /// Each face's committed record: its digest, then how many of its glyphs at
 /// all the sizes ran a program, then how many failed. Every value is a run's
 /// output, recorded with the targets agreeing; a mismatch prints the lines to
-/// paste.
+/// paste. Each Liberation Mono face's failures are [`REFUSED`]'s glyph at the
+/// twelve of these sizes its `gasp` hints.
 const HINTED: [(&str, &str); 12] = [
     ("LiberationMono-Bold", "2b143d26f8945b04 28668 12"),
     ("LiberationMono-BoldItalic", "31d2277cef7bc5ae 28644 12"),
@@ -106,6 +108,31 @@ const HINTED: [(&str, &str); 12] = [
     ("LiberationSerif-BoldItalic", "591cf8e328c583d2 30744 0"),
     ("LiberationSerif-Italic", "fb235872e05b0c4e 30744 0"),
     ("LiberationSerif-Regular", "f006b41fda311e68 25650 0"),
+];
+
+/// The programs of the committed faces this interpreter refuses, each its
+/// face, its glyph and what the program broke: refused at every size the face
+/// is hinted at, and nothing else refused at any.
+///
+/// One program, `uni266B`'s in each Liberation Mono face, and it is malformed
+/// for its glyph. The glyph has 28 contour points, and "if the entire set of
+/// contours for a glyph requires “n” points (i.e., contour points numbered from
+/// 0 to n-1), then the scaler will add points n, n+1, n+2, and n+3"
+/// (*Instructing TrueType Glyphs*, "Phantom points"; Apple's manual adds two),
+/// so its zone is points 0 to 31. Its program sets rp1 to 33 and rp2 to 32 and
+/// then interpolates between them, and `IP` "uses zp0 with rp1, zp1 with rp2",
+/// both the glyph's zone here: neither point exists. The references fit an
+/// outline of 32 points, on which 32 and 33 are the left sidebearing point and
+/// the advance width point an interpolation across the glyph reads, and on
+/// this one the program shifts the four phantom points as it would contour
+/// points before it gets there.
+/// Named rather than counted, so a refusal that stopped, or one that started,
+/// fails here by name.
+const REFUSED: [(&str, u16, Error); 4] = [
+    ("LiberationMono-Bold", 2215, Error::PointIndex(33)),
+    ("LiberationMono-BoldItalic", 2215, Error::PointIndex(33)),
+    ("LiberationMono-Italic", 2215, Error::PointIndex(33)),
+    ("LiberationMono-Regular", 2215, Error::PointIndex(33)),
 ];
 
 /// FNV-1a, 64 bits: `u64` multiplication and exclusive-or, the same on every
@@ -258,23 +285,69 @@ fn hint_face(bytes: &[u8]) -> (String, u64) {
     (format!("{:016x} {ran} {failed}", digest.0), ran)
 }
 
-/// Each face's record, a face to a thread where the target starts threads —
-/// the faces are independent, so the order they finish in moves nothing —
-/// and one after another on a wasm target, which starts none.
-fn records() -> Vec<(String, u64)> {
+/// `each` over every face, in [`FACES`]' order: a face to a thread where the
+/// target starts threads — the faces are independent, so the order they
+/// finish in moves nothing — and one after another on a wasm target, which
+/// starts none.
+fn per_face<T: Send>(each: fn(&[u8]) -> T) -> Vec<T> {
     if cfg!(target_family = "wasm") {
-        return FACES.iter().map(|(_, bytes)| hint_face(bytes)).collect();
+        return FACES.iter().map(|(_, bytes)| each(bytes)).collect();
     }
     std::thread::scope(|scope| {
         let handles: Vec<_> = FACES
             .iter()
-            .map(|(_, bytes)| scope.spawn(move || hint_face(bytes)))
+            .map(|(_, bytes)| scope.spawn(move || each(bytes)))
             .collect();
         handles
             .into_iter()
             .map(|handle| handle.join().expect("a face hints without a panic"))
             .collect()
     })
+}
+
+/// Each face's record.
+fn records() -> Vec<(String, u64)> {
+    per_face(hint_face)
+}
+
+/// One face's refused glyph programs, as [`refusals`] finds them.
+struct Refusals {
+    /// How many of [`SIZES`] the face is hinted at.
+    sizes: usize,
+    /// Each glyph whose program failed, what it broke, and at how many of
+    /// those sizes.
+    failed: Vec<(u16, Error, usize)>,
+}
+
+/// One face's refused glyph programs at every size. A face whose `fpgm`
+/// fails, or a size whose `prep` does, answers why instead.
+fn refusals(bytes: &[u8]) -> Result<Refusals, Unhinted> {
+    let sfnt = Sfnt::parse(bytes).expect("a committed face");
+    let glyphs = sfnt.glyph_count().expect("a glyph count");
+    let face = Face::new(&sfnt, None)?;
+    let mut sizes = 0usize;
+    let mut failed: Vec<(u16, Error, usize)> = Vec::new();
+    for pixels in SIZES {
+        let ppem = pixels * 64;
+        let at = match face.at_size(ppem, ppem, false, None) {
+            Ok(at) => at,
+            Err(Unhinted::NotAtThisSize) => continue,
+            Err(why) => return Err(why),
+        };
+        sizes += 1;
+        for glyph in 0..glyphs {
+            if let Err(Unhinted::Failed { error, .. }) = at.glyph(&sfnt, glyph, None) {
+                match failed
+                    .iter_mut()
+                    .find(|(g, e, _)| (*g, *e) == (glyph, error))
+                {
+                    Some((_, _, at_sizes)) => *at_sizes += 1,
+                    None => failed.push((glyph, error, 1)),
+                }
+            }
+        }
+    }
+    Ok(Refusals { sizes, failed })
 }
 
 #[test]
@@ -304,4 +377,44 @@ fn hinted_outlines_of_the_committed_faces_are_stable_across_targets() {
          these in:\n\n{}\n",
         wrong.join("\n")
     );
+}
+
+/// Every program of the committed faces runs at every size each face is
+/// hinted at, its `fpgm`, its `prep` and each glyph's, but for [`REFUSED`]'s,
+/// which are refused at every one of those sizes by the rule named there.
+#[test]
+fn the_committed_faces_refuse_the_programs_named_and_no_others() {
+    let mut refused: Vec<(&str, u16, Error)> = Vec::new();
+    for ((name, _), found) in FACES.iter().zip(per_face(refusals)) {
+        let Refusals { sizes, failed } = found.unwrap_or_else(|why| panic!("{name}: {why}"));
+        for (glyph, error, at_sizes) in failed {
+            assert_eq!(
+                at_sizes, sizes,
+                "{name}'s glyph {glyph} is refused at some of the face's {sizes} hinted sizes and \
+                 not others: {error:?}"
+            );
+            refused.push((*name, glyph, error));
+        }
+    }
+    assert_eq!(
+        refused, REFUSED,
+        "these are the committed faces' refused programs, and no others"
+    );
+
+    // And why, for each: its glyph's zone ends at point 31, its fourth phantom
+    // point, short of the point the program names.
+    for (name, glyph, error) in REFUSED {
+        let (_, bytes) = FACES
+            .iter()
+            .find(|(face, _)| *face == name)
+            .expect("a committed face");
+        let sfnt = Sfnt::parse(bytes).expect("a committed face");
+        let simple = glyf::simple_glyph(&sfnt, glyph).expect("a simple glyph");
+        assert_eq!(
+            (simple.contour_points(), error),
+            (28, Error::PointIndex(33)),
+            "{name}'s glyph {glyph}: 28 contour points and four phantom points are points 0 \
+             to 31"
+        );
+    }
 }

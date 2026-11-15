@@ -572,6 +572,11 @@ steps the run took, and the facade reports a `RenderWarning` naming the
 font, once a render, so a page drawn partly unhinted says so (ruling 10).
 Nothing is retried leniently: a program that breaks a rule another engine
 forgives is drawn as its font states, which is never wrong, only unhinted.
+The committed faces carry one program it refuses, `uni266B`'s in each
+Liberation Mono face: the glyph has 28 contour points, so its zone ends at
+its fourth phantom point, 31, and its program's `IP` reads rp1 at point 33
+and rp2 at 32. It is refused at every size those faces are hinted at, and
+`hinting_fingerprints.rs` names it (`REFUSED`) beside the records.
 
 ### Monochrome dropout control
 
