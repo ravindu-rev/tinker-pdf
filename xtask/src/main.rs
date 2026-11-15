@@ -88,10 +88,10 @@ release options:
                                  root, cargo's home and the toolchain's
                                  sources, from this machine's `rustc`
   cargo xtask remap-paths --check FILE...
-                                 fail if an artefact carries the checkout, the
-                                 user's or cargo's home or the toolchain, with
-                                 either separator; a ZIP (a wheel) is read
-                                 entry by entry
+                                 fail if an artefact carries the checkout,
+                                 cargo's home or the toolchain, with either
+                                 separator; a ZIP (a wheel) is read entry by
+                                 entry
 
   cargo xtask bindings-parity [options]
                   run the thirteen parity scripts -- nine that write a

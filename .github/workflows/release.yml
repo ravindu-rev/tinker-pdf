@@ -29,14 +29,14 @@
 # So every artefact job ends by asserting the artefact is there and is the
 # right shape -- an abi3 tag in the wheel's filename, a `.wasm` in the npm
 # tarball, a `runtimes/<rid>/native/` entry in the `.nupkg` -- and a final job
-# collects all four and fails unless it can count them.
+# collects all four and fails unless it can count them. `if-no-files-found:
+# error` on every upload, because the default is `warn`, which is a green tick.
 #
 # Every build that ships remaps the paths it would write into the binary --
 # the checkout's, cargo's home and the toolchain's, which a panic message
 # names -- with the flags `cargo xtask remap-paths` prints for the machine it
-# runs on, and the job asserts the binary carries none of that machine's
-# paths (`cargo xtask remap-paths --check`), so an artefact names no runner. `if-no-files-found:
-# error` on every upload, because the default is `warn`, which is a green tick.
+# runs on, and the job asserts the binary carries none of those paths
+# (`cargo xtask remap-paths --check`), so an artefact names no runner.
 name: Release
 
 on:
@@ -209,8 +209,8 @@ jobs:
             *) echo "::error::$name is not an abi3 wheel, so it covers one interpreter"; exit 1 ;;
           esac
       # Read entry by entry, since the module inside is deflated. On Linux the
-      # container's own home is not the runner's and this cannot name it; the
-      # checkout, which the container shares, it can.
+      # container's cargo and toolchain are not the runner's and this cannot
+      # name them; the checkout, which the container shares, it can.
       - name: The wheel carries no path of this machine
         shell: bash
         run: cargo run -q -p xtask -- remap-paths --check dist/*.whl

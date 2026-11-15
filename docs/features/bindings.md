@@ -732,7 +732,11 @@ lines, both directions, to the rule that the string is the arm's own name
   header rather than transcribing it, so cgo lays out every struct and
   every enum constant is the header's own.
   `bindings/go/tinkerpdf.go` links `target/release` with that directory as
-  its run path. On Windows it links `tinker_pdf_ffi.dll` by name, because
+  its run path, which is where the library's install name on Apple's
+  platforms, `@rpath/libtinker_pdf_ffi.dylib`, sends the loader: the C ABI's
+  build script sets it, so the library names no path of the machine that
+  built it, and the hosts that open it by its path never read it. On
+  Windows it links `tinker_pdf_ffi.dll` by name, because
   the directory also holds `tinker_pdf_ffi.lib`, the MSVC static library,
   which MinGW's ld takes for `-ltinker_pdf_ffi` before the DLL and cannot
   link; a Windows program has no run path, so `target/release` goes on

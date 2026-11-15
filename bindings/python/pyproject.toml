@@ -1,5 +1,7 @@
 [build-system]
-requires = ["maturin>=1.7,<2"]
+# 1.12 is the first maturin to write an SBOM into a wheel, and so the first
+# that reads `[tool.maturin.sbom]` below.
+requires = ["maturin>=1.12,<2"]
 build-backend = "maturin"
 
 [project]
@@ -17,3 +19,11 @@ dynamic = ["version"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+
+# The wheel carries no SBOM of maturin's: the one it writes names every path
+# dependency, the whole engine, by its absolute path in the builder's
+# checkout, beside the moment it was written and a random serial number, so
+# the wheel would name the machine that built it and differ from every other
+# build of the same commit.
+[tool.maturin.sbom]
+rust = false

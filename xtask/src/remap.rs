@@ -180,21 +180,20 @@ pub fn joined(
     }
 }
 
-/// The paths of this machine an artefact must not carry: the checkout, the
-/// user's home, cargo's home and the toolchain.
+/// The paths of this machine an artefact must not carry: the three a build
+/// writes, the checkout, cargo's home and the toolchain, the toolchain's
+/// whole sysroot rather than its sources alone.
+///
+/// Not the user's home: the standard library a toolchain ships was built on
+/// a hosted runner too, with that runner's home, and C code compiled into it
+/// can name its own sources there.
 ///
 /// # Errors
 ///
-/// When the user's or cargo's home cannot be found, or `rustc` does not
-/// answer.
+/// When cargo's home cannot be found or `rustc` does not answer.
 pub fn machine_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
     let machine = machine()?;
-    let mut paths = vec![
-        root.to_path_buf(),
-        user_home()?,
-        machine.cargo_home,
-        machine.sysroot,
-    ];
+    let mut paths = vec![root.to_path_buf(), machine.cargo_home, machine.sysroot];
     paths.sort();
     paths.dedup();
     Ok(paths)
