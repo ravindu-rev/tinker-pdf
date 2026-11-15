@@ -34,7 +34,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use tinker_pdf_font::encoding::{base_char, BaseEncoding};
+use tinker_pdf_font::encoding::mac_os_roman_char;
 use tinker_pdf_font::{substitute_glyph, BuiltInEncoding, Sfnt, SymbolRoute};
 
 /// Printed when the census ran: a skipped census exits 0 and reads like a
@@ -230,7 +230,7 @@ fn name_record(program: &[u8], id: u16) -> Option<String> {
         let text: String = if platform == 1 {
             bytes
                 .iter()
-                .filter_map(|byte| base_char(BaseEncoding::MacRoman, *byte))
+                .filter_map(|byte| mac_os_roman_char(*byte))
                 .collect()
         } else {
             let units: Vec<u16> = bytes

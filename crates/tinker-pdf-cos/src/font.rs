@@ -17,7 +17,8 @@ use std::sync::{Arc, OnceLock};
 
 use tinker_pdf_font::cmap::CMap;
 use tinker_pdf_font::{
-    base_char, base_glyph_name, glyph_name_to_char, BaseEncoding, BuiltInEncoding, Standard14,
+    base_char, base_glyph_name, glyph_name_to_char, mac_os_roman_char, BaseEncoding,
+    BuiltInEncoding, Standard14,
 };
 
 use crate::doc::CosDocument;
@@ -586,12 +587,21 @@ impl Font {
     }
 
     /// The character a code stands for, before `/ToUnicode` is consulted.
+    ///
+    /// A code MacRomanEncoding does not encode — Mac OS Roman's fifteen
+    /// characters outside the standard Latin set (ISO 32000-2 Table 113) —
+    /// reads as Mac OS Roman reads it: the mapping of its own choosing
+    /// 9.6.5.4 leaves a reader for a code no table maps.
     fn char_of(&self, code: u32) -> Option<char> {
         let byte = u8::try_from(code).ok()?;
         if let Some(name) = self.differences.get(&code) {
             return glyph_name_to_char(name);
         }
-        base_char(self.base_encoding, byte)
+        base_char(self.base_encoding, byte).or_else(|| {
+            (self.base_encoding == BaseEncoding::MacRoman)
+                .then(|| mac_os_roman_char(byte))
+                .flatten()
+        })
     }
 
     /// The character a simple font's code draws, for a writer choosing the

@@ -48,8 +48,8 @@ pub use cmap::CMap;
 pub use colr::{ColourIndex, Colr, Layer, LayerColour};
 pub use cpal::{Cpal, PaletteChoice, PaletteType, Rgba};
 pub use encoding::{
-    base_char, base_glyph_name, glyph_name_for_char, glyph_name_to_char, BaseEncoding, BuiltInCode,
-    BuiltInEncoding,
+    base_char, base_glyph_name, glyph_name_for_char, glyph_name_to_char, mac_os_roman_char,
+    BaseEncoding, BuiltInCode, BuiltInEncoding,
 };
 pub use facts::{face_facts, FaceFacts};
 pub use instance::{instantiate, InstanceError};

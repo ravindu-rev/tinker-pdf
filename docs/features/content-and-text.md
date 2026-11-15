@@ -265,6 +265,14 @@ widens or narrows a gap against it: the EPUB writer, which reads each line it
 draws back through this device, reads it under the matrix the page draws it
 under ([epub](epub.md)).
 
+A simple font's code that its `/ToUnicode` maps to nothing reads as its
+encoding gives it (9.10.2): a `/Differences` name's character, else the
+character Annex D.2 gives the code in the base encoding — MacRomanEncoding's
+`currency` at 0xDB and `space` at 0xCA among them — and a code
+MacRomanEncoding does not encode, one of the fifteen ISO 32000-2 Table 113
+adds to it, as Mac OS Roman reads it, the mapping of its own choosing 9.6.5.4
+leaves a reader.
+
 A glyph whose code no `/ToUnicode` entry and no encoding names stands for no
 text, and is dropped; the device says so first, as
 `TextWarning::UnmappedCode { code }`, once for each such code a page shows,

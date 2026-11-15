@@ -99,16 +99,44 @@ const WIN_ANSI_80_9F: [char; 32] = [
     '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{FFFD}', '\u{017E}', '\u{0178}',
 ];
 
-/// MacRomanEncoding above 0x7F (Annex D.2).
+/// MacRomanEncoding above 0x7F, as Annex D.2's MAC column gives it, U+FFFD
+/// at a code it does not encode: `space` at 0xCA (note 6), `currency` at
+/// 0xDB (note 1), and none of Mac OS Roman's fifteen characters outside the
+/// standard Latin set, which ISO 32000-2 Table 113 lists as not in
+/// MacRomanEncoding ([`mac_os_roman_char`] reads them).
 const MAC_ROMAN_HIGH: [char; 128] = [
     'Ä', 'Å', 'Ç', 'É', 'Ñ', 'Ö', 'Ü', 'á', 'à', 'â', 'ä', 'ã', 'å', 'ç', 'é', 'è', //
     'ê', 'ë', 'í', 'ì', 'î', 'ï', 'ñ', 'ó', 'ò', 'ô', 'ö', 'õ', 'ú', 'ù', 'û', 'ü', //
-    '†', '°', '¢', '£', '§', '•', '¶', 'ß', '®', '©', '™', '´', '¨', '≠', 'Æ', 'Ø', //
-    '∞', '±', '≤', '≥', '¥', 'µ', '∂', '∑', '∏', 'π', '∫', 'ª', 'º', 'Ω', 'æ', 'ø', //
-    '¿', '¡', '¬', '√', 'ƒ', '≈', '∆', '«', '»', '…', '\u{00A0}', 'À', 'Ã', 'Õ', 'Œ', 'œ', //
-    '–', '—', '“', '”', '‘', '’', '÷', '◊', 'ÿ', 'Ÿ', '⁄', '€', '‹', '›', 'ﬁ', 'ﬂ', //
+    '†', '°', '¢', '£', '§', '•', '¶', 'ß', '®', '©', '™', '´', '¨', '\u{FFFD}', 'Æ', 'Ø', //
+    '\u{FFFD}', '±', '\u{FFFD}', '\u{FFFD}', '¥', 'µ', '\u{FFFD}', '\u{FFFD}', //
+    '\u{FFFD}', '\u{FFFD}', '\u{FFFD}', 'ª', 'º', '\u{FFFD}', 'æ', 'ø', //
+    '¿', '¡', '¬', '\u{FFFD}', 'ƒ', '\u{FFFD}', '\u{FFFD}', '«', //
+    '»', '…', ' ', 'À', 'Ã', 'Õ', 'Œ', 'œ', //
+    '–', '—', '“', '”', '‘', '’', '÷', '\u{FFFD}', 'ÿ', 'Ÿ', '⁄', '¤', '‹', '›', 'ﬁ', 'ﬂ', //
     '‡', '·', '‚', '„', '‰', 'Â', 'Ê', 'Á', 'Ë', 'È', 'Í', 'Î', 'Ï', 'Ì', 'Ó', 'Ô', //
-    '\u{F8FF}', 'Ò', 'Ú', 'Û', 'Ù', 'ı', 'ˆ', '˜', '¯', '˘', '˙', '˚', '¸', '˝', '˛', 'ˇ',
+    '\u{FFFD}', 'Ò', 'Ú', 'Û', 'Ù', 'ı', 'ˆ', '˜', '¯', '˘', '˙', '˚', '¸', '˝', '˛', 'ˇ',
+];
+
+/// The entries ISO 32000-2 Table 113 lists in Mac OS Roman and not in
+/// MacRomanEncoding (9.6.5.4): fifteen characters outside the standard Latin
+/// set, and the euro where MacRomanEncoding keeps `currency`.
+const MAC_OS_ROMAN_ONLY: [(u8, char); 16] = [
+    (0xAD, '\u{2260}'), // notequal
+    (0xB0, '\u{221E}'), // infinity
+    (0xB2, '\u{2264}'), // lessequal
+    (0xB3, '\u{2265}'), // greaterequal
+    (0xB6, '\u{2202}'), // partialdiff
+    (0xB7, '\u{2211}'), // summation
+    (0xB8, '\u{220F}'), // product
+    (0xB9, '\u{03C0}'), // pi
+    (0xBA, '\u{222B}'), // integral
+    (0xBD, '\u{03A9}'), // Omega
+    (0xC3, '\u{221A}'), // radical
+    (0xC5, '\u{2248}'), // approxequal
+    (0xC6, '\u{2206}'), // Delta
+    (0xD7, '\u{25CA}'), // lozenge
+    (0xDB, '\u{20AC}'), // Euro
+    (0xF0, '\u{F8FF}'), // apple
 ];
 
 /// WinAnsiEncoding's glyph names, by code, wherever they are not the ones
@@ -387,7 +415,10 @@ pub fn base_char(encoding: BaseEncoding, code: u8) -> Option<char> {
         },
         BaseEncoding::MacRoman => match code {
             0x00..=0x7F => Some(char::from(code)),
-            _ => MAC_ROMAN_HIGH.get(usize::from(code - 0x80)).copied(),
+            _ => MAC_ROMAN_HIGH
+                .get(usize::from(code - 0x80))
+                .copied()
+                .filter(|c| *c != '\u{FFFD}'),
         },
         BaseEncoding::PdfDoc => Some(char::from(code)),
         BaseEncoding::Standard => match code {
@@ -401,6 +432,23 @@ pub fn base_char(encoding: BaseEncoding, code: u8) -> Option<char> {
                 .and_then(|(_, name)| glyph_name_to_char(name)),
         },
     }
+}
+
+/// The character a byte stands for in Mac OS Roman, the standard Roman
+/// encoding Mac OS uses (ISO 32000-2 9.6.5.4): MacRomanEncoding as
+/// [`base_char`] reads it, with Table 113's fifteen entries more and the euro
+/// in place of `currency` at 0xDB.
+///
+/// A reading of a font's code where MacRomanEncoding encodes nothing — the
+/// mapping of its own choosing 9.6.5.4 leaves a reader there — and of the
+/// strings a Macintosh `name` record holds.
+#[must_use]
+pub fn mac_os_roman_char(code: u8) -> Option<char> {
+    MAC_OS_ROMAN_ONLY
+        .iter()
+        .find(|(c, _)| *c == code)
+        .map(|(_, ch)| *ch)
+        .or_else(|| base_char(BaseEncoding::MacRoman, code))
 }
 
 /// The glyph name a code stands for in a base encoding, where one is defined:
@@ -1237,25 +1285,16 @@ mod tests {
     }
 
     /// The names and [`base_char`]'s characters are two transcriptions of
-    /// D.2: WinAnsiEncoding names every code from 0x20 that `base_char`
-    /// reads but 0x7F, and MacRomanEncoding every one but 0x7F and the Mac OS
-    /// characters outside the standard Latin set, which D.2 does not encode.
-    /// Each names a glyph at one code, but for `hyphen` and `space`.
+    /// D.2: WinAnsiEncoding and MacRomanEncoding each name every code from
+    /// 0x20 that `base_char` reads but 0x7F, and no other. Each names a glyph
+    /// at one code, but for `hyphen` and `space`.
     #[test]
     fn the_base_encodings_name_the_codes_they_read() {
-        let mac_os_only: [u8; 15] = [
-            0xAD, 0xB0, 0xB2, 0xB3, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBD, 0xC3, 0xC5, 0xC6, 0xD7,
-            0xF0,
-        ];
-        for (encoding, unnamed) in [
-            (BaseEncoding::WinAnsi, &[][..]),
-            (BaseEncoding::MacRoman, &mac_os_only[..]),
-        ] {
+        for encoding in [BaseEncoding::WinAnsi, BaseEncoding::MacRoman] {
             let mut seen: Vec<&str> = Vec::new();
             for code in 0x20..=u8::MAX {
                 let name = base_glyph_name(encoding, code);
-                let read =
-                    base_char(encoding, code).is_some() && code != 0x7F && !unnamed.contains(&code);
+                let read = base_char(encoding, code).is_some() && code != 0x7F;
                 assert_eq!(name.is_some(), read, "{encoding:?} {code:#04X}");
                 if let Some(name) = name {
                     assert!(
@@ -1272,6 +1311,51 @@ mod tests {
     fn mac_roman_high_range() {
         assert_eq!(base_char(BaseEncoding::MacRoman, 0x80), Some('Ä'));
         assert_eq!(base_char(BaseEncoding::MacRoman, 0xA5), Some('•'));
+    }
+
+    /// MacRomanEncoding is D.2's: `currency` at 0xDB (note 1), `space` at
+    /// 0xCA (note 6), and none of Table 113's fifteen characters; Mac OS
+    /// Roman (9.6.5.4) is MacRomanEncoding with those fifteen and the euro at
+    /// 0xDB, and agrees with it at every other code.
+    #[test]
+    fn mac_roman_is_d2s_and_mac_os_roman_adds_table_113() {
+        use BaseEncoding::MacRoman;
+        assert_eq!(base_char(MacRoman, 0xDB), Some('\u{A4}'));
+        assert_eq!(base_char(MacRoman, 0xCA), Some(' '));
+        // Table 113's names, each as the character Mac OS Roman gives it.
+        let table_113: [(u8, char); 16] = [
+            (0xAD, '\u{2260}'), // notequal
+            (0xB0, '\u{221E}'), // infinity
+            (0xB2, '\u{2264}'), // lessequal
+            (0xB3, '\u{2265}'), // greaterequal
+            (0xB6, '\u{2202}'), // partialdiff
+            (0xB7, '\u{2211}'), // summation
+            (0xB8, '\u{220F}'), // product
+            (0xB9, '\u{03C0}'), // pi
+            (0xBA, '\u{222B}'), // integral
+            (0xBD, '\u{03A9}'), // Omega
+            (0xC3, '\u{221A}'), // radical
+            (0xC5, '\u{2248}'), // approxequal
+            (0xC6, '\u{2206}'), // Delta
+            (0xD7, '\u{25CA}'), // lozenge
+            (0xDB, '\u{20AC}'), // Euro
+            (0xF0, '\u{F8FF}'), // apple
+        ];
+        for code in 0..=u8::MAX {
+            match table_113.iter().find(|(c, _)| *c == code) {
+                Some((_, ch)) => {
+                    assert_eq!(mac_os_roman_char(code), Some(*ch), "{code:#04X}");
+                    if code != 0xDB {
+                        assert_eq!(base_char(MacRoman, code), None, "{code:#04X}");
+                    }
+                }
+                None => assert_eq!(
+                    mac_os_roman_char(code),
+                    base_char(MacRoman, code),
+                    "{code:#04X}"
+                ),
+            }
+        }
     }
 
     #[test]
