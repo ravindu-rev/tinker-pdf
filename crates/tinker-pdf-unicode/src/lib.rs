@@ -27,7 +27,8 @@
 //!   `text-transform` and the facade's Markdown reader read from the same
 //!   files — the full case mappings, `Cased`, `Case_Ignorable`, `Lowercase`,
 //!   and the general categories they ask about — compiled by `build.rs` into
-//!   static range tables, so nothing under `data/` is opened at run time.
+//!   runs, the smallest form after gzip, and decoded once a process at first
+//!   use, so nothing under `data/` is opened at run time.
 //!
 //! # Using it
 //!

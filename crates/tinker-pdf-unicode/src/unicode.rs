@@ -1,4 +1,5 @@
-//! The vendored UCD, compiled into static ranges by `build.rs`.
+//! The vendored UCD, compiled by `build.rs` into runs and decoded into range
+//! tables at first use.
 //!
 //! Nothing here decides anything: it answers *what property does this
 //! character have*, and [`crate::uax14`] is where the answers turn into break
@@ -6,9 +7,22 @@
 //! published facts and the algorithm is ours, and the two are wrong in
 //! completely different ways.
 //!
+//! # The form, and why it is runs
+//!
+//! Each property is written as the runs it makes over every code point in
+//! order — an enumerated one's value index and length, a binary one's lengths
+//! alone, alternately without and with — as bytes, two to a run for most
+//! runs, and decoded once a process into each run's start and value, which
+//! one bisection answers from (`Tables`). Of the forms measured — ranges of
+//! twelve bytes a row, run starts packed with their values in four, and runs
+//! — the runs are the smallest after gzip, and gzipped is how every wasm
+//! build ships them. `tests/properties.rs` holds every table, at every code
+//! point, to the file it came from.
+//!
 //! # Why the generated table names variants rather than indices
 //!
-//! `build.rs` writes `Class::AL` into every row rather than a number, so a
+//! `build.rs` writes each table's values as `Class::AL` and the rest, in the
+//! list the runs index, rather than as numbers, so a
 //! Line_Break class this crate has never heard of **fails to build**. That is
 //! not hypothetical: Unicode 16.0 added `HH` and Unicode 15.1 added `AK`,
 //! `AP`, `AS`, `VF` and `VI`, and a build that mapped an unknown class name
@@ -203,41 +217,142 @@ pub enum Incb {
 
 include!(concat!(env!("OUT_DIR"), "/ucd.rs"));
 
-/// A code point's value in a sorted `(first, last, value)` table.
-fn lookup<T: Copy>(table: &[(u32, u32, T)], code: u32, default: T) -> T {
-    let mut low = 0usize;
-    let mut high = table.len();
-    while low < high {
-        let middle = (low + high) / 2;
-        let (first, last, value) = table[middle];
-        if code < first {
-            high = middle;
-        } else if code > last {
-            low = middle + 1;
-        } else {
-            return value;
-        }
-    }
-    default
+/// An enumerated property, decoded at first use from the runs `build.rs`
+/// wrote: each run's first code point, in order, and its value, so a code
+/// point's value is the last run's that starts at or before it, found by one
+/// bisection.
+#[derive(Debug)]
+struct Runs<T> {
+    starts: Vec<u32>,
+    values: Vec<T>,
+    /// The property's value where no row names one: `{NAME}_VALUES`' first.
+    default: T,
 }
 
-/// Whether a code point is in a sorted `(first, last)` table.
-fn member(table: &[(u32, u32)], code: u32) -> bool {
-    let mut low = 0usize;
-    let mut high = table.len();
-    while low < high {
-        let middle = (low + high) / 2;
-        let (first, last) = table[middle];
-        if code < first {
-            high = middle;
-        } else if code > last {
-            low = middle + 1;
-        } else {
-            return true;
+impl<T: Copy> Runs<T> {
+    /// The runs of `bytes` — each a value's index into `values`, a byte, and
+    /// its length in code points as LEB128 — every code point in order.
+    fn decode(bytes: &[u8], values: &[T], default: T) -> Runs<T> {
+        let mut starts = Vec::new();
+        let mut out = Vec::new();
+        let mut at = 0u32;
+        let mut rest = bytes;
+        while let Some((&index, tail)) = rest.split_first() {
+            let (length, tail) = leb128(tail);
+            starts.push(at);
+            out.push(values.get(usize::from(index)).copied().unwrap_or(default));
+            at = at.saturating_add(length);
+            rest = tail;
+        }
+        Runs {
+            starts,
+            values: out,
+            default,
         }
     }
-    false
+
+    fn get(&self, code: u32) -> T {
+        let run = self.starts.partition_point(|&start| start <= code);
+        run.checked_sub(1)
+            .and_then(|run| self.values.get(run))
+            .copied()
+            .unwrap_or(self.default)
+    }
 }
+
+/// A binary property, decoded at first use from its runs' lengths: each
+/// run's first code point, in order, the runs alternately without the
+/// property and with it from U+0000.
+#[derive(Debug)]
+struct Set {
+    starts: Vec<u32>,
+}
+
+impl Set {
+    fn decode(bytes: &[u8]) -> Set {
+        let mut starts = vec![0];
+        let mut at = 0u32;
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let (length, tail) = leb128(rest);
+            at = at.saturating_add(length);
+            starts.push(at);
+            rest = tail;
+        }
+        Set { starts }
+    }
+
+    /// Whether `code` is in a run with the property: the run that holds it is
+    /// the last of the runs starting at or before it, and those are counted
+    /// from the first, without.
+    fn contains(&self, code: u32) -> bool {
+        self.starts.partition_point(|&start| start <= code) % 2 == 0
+    }
+}
+
+/// The LEB128 number `bytes` starts with — seven bits a byte, the low ones
+/// first, each byte but the last with its top bit set — and the bytes after.
+fn leb128(bytes: &[u8]) -> (u32, &[u8]) {
+    let mut value = 0u32;
+    let mut shift = 0u32;
+    for (at, &byte) in bytes.iter().enumerate() {
+        value |= u32::from(byte & 0x7f).checked_shl(shift).unwrap_or(0);
+        if byte & 0x80 == 0 {
+            return (value, bytes.get(at + 1..).unwrap_or(&[]));
+        }
+        shift += 7;
+    }
+    (value, &[])
+}
+
+/// Every property this module answers from a table, decoded together at its
+/// first question (P-19.1: a derived table is built at first use, never
+/// evaluated at compile time).
+///
+/// `build.rs` writes each as runs, the smallest form after gzip of the ones
+/// measured — a range's twelve bytes a row against a run's two — because the
+/// wasm builds ship it gzipped, and each answers by one bisection of its
+/// runs' starts, as the ranges did.
+#[derive(Debug)]
+struct Tables {
+    line_break: Runs<Class>,
+    east_asian: Runs<Eaw>,
+    grapheme_break: Runs<Gcb>,
+    indic_conjunct_break: Runs<Option<Incb>>,
+    extended_pictographic: Set,
+    unassigned: Set,
+    combining: Set,
+    mark: Set,
+    initial_punctuation: Set,
+    final_punctuation: Set,
+    punctuation_or_symbol: Set,
+    letter_or_number: Set,
+    cased: Set,
+    case_ignorable: Set,
+    lowercase: Set,
+}
+
+static TABLES: std::sync::LazyLock<Tables> = std::sync::LazyLock::new(|| Tables {
+    line_break: Runs::decode(LINE_BREAK_RUNS, LINE_BREAK_VALUES, Class::XX),
+    east_asian: Runs::decode(EAST_ASIAN_RUNS, EAST_ASIAN_VALUES, Eaw::N),
+    grapheme_break: Runs::decode(GRAPHEME_BREAK_RUNS, GRAPHEME_BREAK_VALUES, Gcb::Other),
+    indic_conjunct_break: Runs::decode(
+        INDIC_CONJUNCT_BREAK_RUNS,
+        INDIC_CONJUNCT_BREAK_VALUES,
+        None,
+    ),
+    extended_pictographic: Set::decode(EXTENDED_PICTOGRAPHIC_RUNS),
+    unassigned: Set::decode(UNASSIGNED_RUNS),
+    combining: Set::decode(COMBINING_RUNS),
+    mark: Set::decode(MARK_RUNS),
+    initial_punctuation: Set::decode(INITIAL_PUNCTUATION_RUNS),
+    final_punctuation: Set::decode(FINAL_PUNCTUATION_RUNS),
+    punctuation_or_symbol: Set::decode(PUNCTUATION_OR_SYMBOL_RUNS),
+    letter_or_number: Set::decode(LETTER_OR_NUMBER_RUNS),
+    cased: Set::decode(CASED_RUNS),
+    case_ignorable: Set::decode(CASE_IGNORABLE_RUNS),
+    lowercase: Set::decode(LOWERCASE_RUNS),
+});
 
 /// The character's Line_Break property, **unresolved**.
 ///
@@ -247,13 +362,13 @@ fn member(table: &[(u32, u32)], code: u32) -> bool {
 /// table that had already decided could not be tailored at all.
 #[must_use]
 pub fn line_break_class(c: char) -> Class {
-    lookup(LINE_BREAK, c as u32, Class::XX)
+    TABLES.line_break.get(c as u32)
 }
 
 /// The character's East_Asian_Width.
 #[must_use]
 pub fn east_asian_width(c: char) -> Eaw {
-    lookup(EAST_ASIAN, c as u32, Eaw::N)
+    TABLES.east_asian.get(c as u32)
 }
 
 /// Wide, Full-width or Half-width — the set UAX #14's own rules call
@@ -266,31 +381,31 @@ pub fn is_east_asian(c: char) -> bool {
 /// `Extended_Pictographic`, LB30b's half.
 #[must_use]
 pub fn is_extended_pictographic(c: char) -> bool {
-    member(EXTENDED_PICTOGRAPHIC, c as u32)
+    TABLES.extended_pictographic.contains(c as u32)
 }
 
 /// General_Category `Cn` — a code point Unicode has not assigned.
 #[must_use]
 pub fn is_unassigned(c: char) -> bool {
-    member(UNASSIGNED, c as u32)
+    TABLES.unassigned.contains(c as u32)
 }
 
 /// General_Category `Mn` or `Mc`, which is LB1's test for an `SA` character.
 #[must_use]
 pub fn is_combining(c: char) -> bool {
-    member(COMBINING, c as u32)
+    TABLES.combining.contains(c as u32)
 }
 
 /// General_Category `Pi`, which LB15a's `QU ∩ Pi` is.
 #[must_use]
 pub fn is_initial_punctuation(c: char) -> bool {
-    member(INITIAL_PUNCTUATION, c as u32)
+    TABLES.initial_punctuation.contains(c as u32)
 }
 
 /// General_Category `Pf`, which LB15b's `QU ∩ Pf` is.
 #[must_use]
 pub fn is_final_punctuation(c: char) -> bool {
-    member(FINAL_PUNCTUATION, c as u32)
+    TABLES.final_punctuation.contains(c as u32)
 }
 
 /// General_Category `P*` or `S*`: CommonMark 0.31 §2.1's *Unicode punctuation
@@ -299,7 +414,7 @@ pub fn is_final_punctuation(c: char) -> bool {
 /// `DerivedGeneralCategory.txt` as every other category here.
 #[must_use]
 pub fn is_punctuation_or_symbol(c: char) -> bool {
-    member(PUNCTUATION_OR_SYMBOL, c as u32)
+    TABLES.punctuation_or_symbol.contains(c as u32)
 }
 
 /// A code point's entry in a sorted `(code, mapped)` case table.
@@ -336,47 +451,42 @@ pub fn to_title(c: char) -> Option<&'static str> {
 /// `Cased`, Unicode §3.13 D135.
 #[must_use]
 pub fn is_cased(c: char) -> bool {
-    member(CASED, c as u32)
+    TABLES.cased.contains(c as u32)
 }
 
 /// `Case_Ignorable`, §3.13 D136.
 #[must_use]
 pub fn is_case_ignorable(c: char) -> bool {
-    member(CASE_IGNORABLE, c as u32)
+    TABLES.case_ignorable.contains(c as u32)
 }
 
 /// `Lowercase`, from `DerivedCoreProperties.txt` — `Ll` and
 /// `Other_Lowercase`, so `ª` is lowercase and `ʰ` is too.
 #[must_use]
 pub fn is_lowercase(c: char) -> bool {
-    member(LOWERCASE, c as u32)
+    TABLES.lowercase.contains(c as u32)
 }
 
 /// General_Category `L*` or `N*`.
 #[must_use]
 pub fn is_letter_or_number(c: char) -> bool {
-    member(LETTER_OR_NUMBER, c as u32)
+    TABLES.letter_or_number.contains(c as u32)
 }
 
 /// The character's Grapheme_Cluster_Break, UAX #29 Table 2.
 #[must_use]
 pub fn grapheme_break(c: char) -> Gcb {
-    lookup(GRAPHEME_BREAK, c as u32, Gcb::Other)
+    TABLES.grapheme_break.get(c as u32)
 }
 
 /// The character's `Indic_Conjunct_Break`, or `None` where it has none.
 #[must_use]
 pub fn indic_conjunct_break(c: char) -> Option<Incb> {
-    let code = c as u32;
-    let at = INDIC_CONJUNCT_BREAK.partition_point(|&(_, last, _)| last < code);
-    INDIC_CONJUNCT_BREAK
-        .get(at)
-        .filter(|&&(first, _, _)| first <= code)
-        .map(|&(_, _, value)| value)
+    TABLES.indic_conjunct_break.get(c as u32)
 }
 
 /// General_Category `M`: `Mn`, `Mc` or `Me`.
 #[must_use]
 pub fn is_mark(c: char) -> bool {
-    member(MARK, c as u32)
+    TABLES.mark.contains(c as u32)
 }

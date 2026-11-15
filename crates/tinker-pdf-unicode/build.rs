@@ -1,4 +1,5 @@
-//! Compiles the vendored UCD into static range tables.
+//! Compiles the vendored UCD into run-length tables, which `unicode.rs`
+//! decodes at first use.
 //!
 //! THIRDPARTY.md's promise about vendored data is that *"the raw files never
 //! reach a released binary"*, and this is the half of it that keeps the
@@ -8,10 +9,10 @@
 //!
 //! # The classes are emitted as enum variants, not as indices
 //!
-//! Every row of the generated table names `Class::AL` rather than the number
-//! `2`. That costs a few bytes of generated source and buys the thing an index
-//! cannot: **a Line_Break class this crate does not know about fails to
-//! build.** Unicode 17.0 added `AP`, `AK`, `AS`, `VF` and `VI` after 15.0, and
+//! The runs index each table's values, and the values are written as
+//! `Class::AL` rather than the number `2`. That costs a few bytes of generated
+//! source and buys the thing an index alone cannot: **a Line_Break class this
+//! crate does not know about fails to build.** Unicode 17.0 added `AP`, `AK`, `AS`, `VF` and `VI` after 15.0, and
 //! a build that mapped an unknown name onto a default would have laid out
 //! Brahmi-family scripts as though the additions had never happened — which is
 //! the shape of failure this whole gap is organised around. Re-vendoring a
@@ -218,7 +219,14 @@ fn line_break(data: &Path, out: &mut String) {
             map.insert(code, value.clone());
         }
     }
-    emit(out, "LINE_BREAK", "Class", &ranges(&map));
+    emit_runs(
+        out,
+        "LINE_BREAK",
+        "Class",
+        &ranges(&map),
+        ("XX", "Class::XX"),
+        |value| format!("Class::{value}"),
+    );
 }
 
 fn east_asian_width(data: &Path, out: &mut String) {
@@ -230,10 +238,17 @@ fn east_asian_width(data: &Path, out: &mut String) {
     }
     // No block defaults here either, for the reason above: the file writes its
     // own out, and a second pass over them disagrees with the conformance data.
-    emit(out, "EAST_ASIAN", "Eaw", &ranges(&map));
+    emit_runs(
+        out,
+        "EAST_ASIAN",
+        "Eaw",
+        &ranges(&map),
+        ("N", "Eaw::N"),
+        |value| format!("Eaw::{value}"),
+    );
 }
 
-/// A file's rows whose value is one particular name, as bare ranges.
+/// A file's rows whose value is one particular name, as a set.
 fn binary_property(path: &Path, wanted: Option<&str>, name: &str, out: &mut String) {
     let mut map: BTreeMap<u32, String> = BTreeMap::new();
     for (first, last, value) in rows(path) {
@@ -244,16 +259,14 @@ fn binary_property(path: &Path, wanted: Option<&str>, name: &str, out: &mut Stri
             map.insert(code, String::new());
         }
     }
-    let merged = ranges(&map);
-    let mut body = String::new();
-    for (first, last, _) in &merged {
-        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
-    }
-    let _ = writeln!(
-        out,
-        "/// {} ranges, from the vendored UCD.\npub static {name}: &[(u32, u32)] = &[\n{body}];",
-        merged.len()
+    let file = path
+        .file_name()
+        .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+    let doc = format!(
+        "the rows of {file} that name {}",
+        wanted.unwrap_or("anything")
     );
+    emit_set(out, name, &doc, &ranges(&map));
 }
 
 /// `Mn` and `Mc` together, which is LB1's test for whether an `SA` character
@@ -268,15 +281,11 @@ fn combining(data: &Path, out: &mut String) {
             map.insert(code, String::new());
         }
     }
-    let merged = ranges(&map);
-    let mut body = String::new();
-    for (first, last, _) in &merged {
-        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
-    }
-    let _ = writeln!(
+    emit_set(
         out,
-        "/// General_Category Mn or Mc, for LB1's SA resolution.\n\
-         pub static COMBINING: &[(u32, u32)] = &[\n{body}];",
+        "COMBINING",
+        "General_Category Mn or Mc, for LB1's SA resolution",
+        &ranges(&map),
     );
 }
 
@@ -295,15 +304,11 @@ fn punctuation_or_symbol(data: &Path, out: &mut String) {
             map.insert(code, String::new());
         }
     }
-    let merged = ranges(&map);
-    let mut body = String::new();
-    for (first, last, _) in &merged {
-        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
-    }
-    let _ = writeln!(
+    emit_set(
         out,
-        "/// General_Category P* or S*, for CommonMark's punctuation.\n\
-         pub static PUNCTUATION_OR_SYMBOL: &[(u32, u32)] = &[\n{body}];",
+        "PUNCTUATION_OR_SYMBOL",
+        "General_Category P* or S*, for CommonMark's punctuation",
+        &ranges(&map),
     );
 }
 
@@ -320,15 +325,11 @@ fn letter_or_number(data: &Path, out: &mut String) {
             map.insert(code, String::new());
         }
     }
-    let merged = ranges(&map);
-    let mut body = String::new();
-    for (first, last, _) in &merged {
-        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
-    }
-    let _ = writeln!(
+    emit_set(
         out,
-        "/// General_Category L* or N*, for capitalize's first letter unit.\n\
-         pub static LETTER_OR_NUMBER: &[(u32, u32)] = &[\n{body}];",
+        "LETTER_OR_NUMBER",
+        "General_Category L* or N*, for capitalize's first letter unit",
+        &ranges(&map),
     );
 }
 
@@ -354,7 +355,14 @@ fn grapheme_break(data: &Path, out: &mut String) {
             map.insert(code, variant.clone());
         }
     }
-    emit(out, "GRAPHEME_BREAK", "Gcb", &ranges(&map));
+    emit_runs(
+        out,
+        "GRAPHEME_BREAK",
+        "Gcb",
+        &ranges(&map),
+        ("Other", "Gcb::Other"),
+        |value| format!("Gcb::{value}"),
+    );
 }
 
 /// `Indic_Conjunct_Break`, the property UAX #29's GB9c is written in:
@@ -389,7 +397,14 @@ fn indic_conjunct_break(data: &Path, out: &mut String) {
         !map.is_empty(),
         "DerivedCoreProperties.txt has no InCB rows"
     );
-    emit(out, "INDIC_CONJUNCT_BREAK", "Incb", &ranges(&map));
+    emit_runs(
+        out,
+        "INDIC_CONJUNCT_BREAK",
+        "Option<Incb>",
+        &ranges(&map),
+        ("None", "None"),
+        |value| format!("Some(Incb::{value})"),
+    );
 }
 
 /// General_Category `M` — `Mn`, `Mc` and `Me` — which never starts a
@@ -404,15 +419,11 @@ fn mark(data: &Path, out: &mut String) {
             map.insert(code, String::new());
         }
     }
-    let merged = ranges(&map);
-    let mut body = String::new();
-    for (first, last, _) in &merged {
-        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
-    }
-    let _ = writeln!(
+    emit_set(
         out,
-        "/// General_Category Mn, Mc or Me, which never starts a typographic \
-         character unit.\npub static MARK: &[(u32, u32)] = &[\n{body}];",
+        "MARK",
+        "General_Category Mn, Mc or Me, which never starts a typographic character unit",
+        &ranges(&map),
     );
 }
 
@@ -543,16 +554,137 @@ fn case_mappings(data: &Path, out: &mut String) {
     );
 }
 
-fn emit(out: &mut String, name: &str, kind: &str, merged: &[(u32, u32, String)]) {
+/// Every code point past the last a property can describe.
+const CODE_POINTS: u32 = 0x11_0000;
+
+/// `length` as LEB128: seven bits a byte, the low ones first, each byte but
+/// the last with its top bit set.
+fn leb128(bytes: &mut Vec<u8>, mut length: u32) {
+    loop {
+        let low = (length & 0x7f) as u8;
+        length >>= 7;
+        if length == 0 {
+            bytes.push(low);
+            return;
+        }
+        bytes.push(low | 0x80);
+    }
+}
+
+/// `bytes` as the items of a Rust `&[u8]` literal, sixteen a line.
+fn byte_list(bytes: &[u8]) -> String {
     let mut body = String::new();
+    for line in bytes.chunks(16) {
+        body.push_str("   ");
+        for byte in line {
+            let _ = write!(body, " {byte:#04x},");
+        }
+        body.push('\n');
+    }
+    body
+}
+
+/// An enumerated property, as runs over every code point in order: each the
+/// index of its value in `{name}_VALUES`, one byte, then its length in code
+/// points as LEB128 (`unicode.rs`'s `Runs` reads it back at first use).
+///
+/// The form is the smallest of the ones measured after gzip, which is what a
+/// wasm build ships: a range is twelve bytes a row, where a run is two for
+/// every run shorter than 128 code points. A code point no row names takes
+/// `default`, `(name, expression)`; a
+/// row naming the default is merged into the runs either side of it. Each
+/// value is written by `variant` as the enum expression it is, so a value this
+/// crate does not know still **does not build**.
+fn emit_runs(
+    out: &mut String,
+    name: &str,
+    kind: &str,
+    merged: &[(u32, u32, String)],
+    (default, default_expression): (&str, &str),
+    variant: impl Fn(&str) -> String,
+) {
+    let mut values: Vec<String> = vec![default.to_owned()];
+    let mut runs: Vec<(usize, u32)> = Vec::new();
+    let push = |runs: &mut Vec<(usize, u32)>, value: usize, length: u32| {
+        if length == 0 {
+            return;
+        }
+        match runs.last_mut() {
+            Some((last, run)) if *last == value => *run += length,
+            _ => runs.push((value, length)),
+        }
+    };
+    let mut at = 0u32;
     for (first, last, value) in merged {
-        let _ = writeln!(body, "    ({first:#x}, {last:#x}, {kind}::{value}),");
+        push(&mut runs, 0, first - at);
+        let index = match values.iter().position(|known| known == value) {
+            Some(index) => index,
+            None => {
+                values.push(value.clone());
+                values.len() - 1
+            }
+        };
+        push(&mut runs, index, last - first + 1);
+        at = last + 1;
+    }
+    push(&mut runs, 0, CODE_POINTS - at);
+    assert!(
+        values.len() <= 256,
+        "{name} has more values than a byte indexes"
+    );
+    let mut bytes = Vec::new();
+    for (value, length) in &runs {
+        bytes.push(u8::try_from(*value).expect("asserted above"));
+        leb128(&mut bytes, *length);
+    }
+    let expressions: Vec<String> = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if index == 0 {
+                default_expression.to_owned()
+            } else {
+                variant(value)
+            }
+        })
+        .collect();
+    let _ = writeln!(
+        out,
+        "/// `{name}`'s {} runs, from the vendored UCD: each its value's index in \
+         `{name}_VALUES`, a byte, and its length in code points as LEB128, every \
+         code point in order.\npub static {name}_RUNS: &[u8] = &[\n{}];\n\
+         /// The values `{name}_RUNS` indexes, the default first, each an enum \
+         variant, so a value this crate does not know **does not build**.\n\
+         pub static {name}_VALUES: &[{kind}] = &[{}];",
+        runs.len(),
+        byte_list(&bytes),
+        expressions.join(", ")
+    );
+}
+
+/// A binary property, as the lengths of its runs as LEB128, every code point
+/// in order from U+0000, alternately without the property and with it — the
+/// first run, without, empty where U+0000 has it (`unicode.rs`'s `Set` reads
+/// it back at first use). `emit_runs`' form with the value implied.
+fn emit_set(out: &mut String, name: &str, doc: &str, merged: &[(u32, u32, String)]) {
+    let mut bytes = Vec::new();
+    let mut at = 0u32;
+    let mut runs = 0usize;
+    for (first, last, _) in merged {
+        leb128(&mut bytes, first - at);
+        leb128(&mut bytes, last - first + 1);
+        runs += 2;
+        at = last + 1;
+    }
+    if at < CODE_POINTS {
+        leb128(&mut bytes, CODE_POINTS - at);
+        runs += 1;
     }
     let _ = writeln!(
         out,
-        "/// {} ranges, from the vendored UCD. The value is an enum variant \
-         rather than an index, so a class this crate does not know **does not \
-         build**.\npub static {name}: &[(u32, u32, {kind})] = &[\n{body}];",
-        merged.len()
+        "/// `{name}`, {doc}: {runs} runs from the vendored UCD, their lengths as \
+         LEB128, alternately without the property and with it from U+0000.\n\
+         pub static {name}_RUNS: &[u8] = &[\n{}];",
+        byte_list(&bytes)
     );
 }

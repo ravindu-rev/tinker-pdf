@@ -429,8 +429,9 @@ clusters, inside which no line breaks (`css-text-3` §5.5), and three more for `
 ASCII heuristic that breaks at spaces *"works on Project Gutenberg's entire
 catalogue, and is catastrophically wrong on CJK"* — and CONTRIBUTING rule 1 has
 no exception for a line breaker, so the third route is the one taken: published
-facts about text, vendored verbatim and compiled into static tables by
-`build.rs`, exactly as Adobe's CMap registry is in `tinker-pdf-font`. The tree
+facts about text, vendored verbatim and compiled by `build.rs` into
+run-length tables decoded at first use, as Adobe's CMap registry is compiled
+in `tinker-pdf-font`. The tree
 is `tinker-pdf-unicode`'s, the leaf both `tinker-pdf-layout` and
 `tinker-pdf-cos` break text by.
 
