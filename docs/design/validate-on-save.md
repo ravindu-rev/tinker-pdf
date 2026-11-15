@@ -231,8 +231,14 @@ own key.
   Owned items are then held to no more of each class than the input's, and
   to none at or past the input's length: the appended section, its objects
   and its trailer are the writer's. The trailer rules read the newest
-  section and carry no offset (`validate.rs:1347-1402`), so a trailer
+  section and carry no offset (`validate.rs:1346-1406`), so a trailer
   defect the input did not have is a class it did not have, and fails.
+- An input with no section has no trailer of its own for those rules, and
+  one of them reads it all the same: whether the root its document reads,
+  through the trailer the repair scanner found, is a catalog — the
+  document's question (semantics) whatever the file's structure — so a save
+  that copies a root that is not one through is held to the input's own
+  count of it.
 - A profile the output claims is held to no more findings of each class
   than the input's under the same claim. The claim is part of the class, so
   an output claiming what the input did not is held to none.

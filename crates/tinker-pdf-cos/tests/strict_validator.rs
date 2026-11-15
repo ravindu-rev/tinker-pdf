@@ -480,6 +480,25 @@ fn a_trailer_whose_root_is_not_a_catalog_is_refused() {
     );
 }
 
+/// A file no `startxref` leads into has no section, so no trailer of its own
+/// for Table 15, and the ladder refuses it. What the object its root names
+/// says about itself is the document's whatever the file's structure
+/// (7.7.2), so the root the document reads, through the trailer the repair
+/// scanner found, is held to being a catalog all the same: refused when its
+/// `/Type` is not `/Catalog`, and not when it is.
+#[test]
+fn a_root_that_is_not_a_catalog_is_refused_with_no_section_to_name_it() {
+    let unsectioned = patch(&rewritten(), b"startxref", b"startxrXf");
+    let damaged = patch(&unsectioned, b"/Type /Catalog", b"/Type /Catalop");
+    let doc = CosDocument::open(damaged.clone()).expect("it opens");
+    assert_eq!(doc.ladder_level(), LadderLevel::Rescan);
+    refused(damaged, "root-not-a-catalog");
+    assert!(
+        !labels(&verdict(unsectioned)).contains(&"root-not-a-catalog"),
+        "a catalog with no section to name it is still a catalog"
+    );
+}
+
 /// Encryption moves every length in the file and the hint tables measure the
 /// ciphertext, so the sealed linearized layout is held to the same rules.
 #[test]

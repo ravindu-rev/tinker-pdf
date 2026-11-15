@@ -1345,20 +1345,25 @@ impl Validator<'_> {
 
     /// The newest section's trailer is the one a reader reads first, so it is
     /// the one held to Table 15.
+    ///
+    /// A file with no section has no trailer of its own to hold, and the
+    /// ladder has already said its structure failed. What the object its
+    /// root names says about itself is the document's whatever the file's
+    /// structure (7.7.2), and a rewrite copies it through, so the root the
+    /// document reads — its trailer as the repair scanner found it — is held
+    /// to being a catalog all the same.
     fn trailer(&mut self, sections: &[Section]) {
         let Some(section) = sections.first() else {
+            let doc = self.doc;
+            if doc.trailer().contains_key(Name::ROOT) && !self.names_a_catalog(doc.trailer()) {
+                self.report(None, None, DefectKind::RootNotACatalog);
+            }
             return;
         };
         let trailer = &section.trailer;
 
         if trailer.contains_key(Name::ROOT) {
-            let root = self.doc.resolve_key(trailer, Name::ROOT);
-            let catalog = self.doc.intern(b"Catalog");
-            let is_catalog = root
-                .as_dict()
-                .and_then(|d| d.get_name(Name::TYPE))
-                .is_some_and(|kind| kind == catalog);
-            if !is_catalog {
+            if !self.names_a_catalog(trailer) {
                 self.report(None, None, DefectKind::RootNotACatalog);
             }
         } else {
@@ -1398,6 +1403,16 @@ impl Validator<'_> {
             }
             None => self.report(None, None, DefectKind::TrailerSizeMissing),
         }
+    }
+
+    /// Whether `trailer`'s `/Root` names a dictionary of `/Type /Catalog`
+    /// (7.7.2), as this document resolves it.
+    fn names_a_catalog(&self, trailer: &Dict) -> bool {
+        let root = self.doc.resolve_key(trailer, Name::ROOT);
+        let catalog = self.doc.intern(b"Catalog");
+        root.as_dict()
+            .and_then(|d| d.get_name(Name::TYPE))
+            .is_some_and(|kind| kind == catalog)
     }
 
     // ---- the entries, one object at a time ---------------------------------
