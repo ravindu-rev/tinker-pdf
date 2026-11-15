@@ -136,7 +136,8 @@ pub struct PageImage {
     pub refused: Option<String>,
     /// What the decoder tolerated to produce [`Self::samples`] — a fax row
     /// that did not decode and was replicated from the one above, a JBIG2
-    /// segment skipped, a JPEG 2000 codestream cut short — each named as
+    /// segment skipped, a JPEG 2000 codestream cut short, a Flate stream
+    /// cut short before the samples or the codec — each named as
     /// [`crate::RenderWarning::DamagedImage`]'s `reason` names it when the
     /// page is rendered, and each once. Empty for a clean decode (ruling 10):
     /// an image decoded with a leniency is listed with its samples, and this

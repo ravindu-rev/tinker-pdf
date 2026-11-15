@@ -228,7 +228,8 @@ family is reported as `Unreadable`. An image that will not decode is still
 listed, with no samples and `refused` naming why; a stream longer than its
 geometry is cut to it and a shorter one is reported short. What a decoder
 tolerated for an image — a fax row replicated from the one above, a JBIG2
-segment skipped, a JPEG 2000 codestream cut short — is on that image's
+segment skipped, a JPEG 2000 codestream cut short, a Flate stream before its
+samples or its codec cut short — is on that image's
 `warnings`, named as the render's `RenderWarning::DamagedImage` names it
 (ruling 10), so a damaged image is not listed as a clean one. What is not
 walked: images inside a tiling pattern's cell, a soft-mask group or an

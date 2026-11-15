@@ -505,7 +505,10 @@ magnification; minification averages every sample a pixel covers, through a
 box pyramid that bounds the footprint ([rasterizer](rasterizer.md)). A codec this build
 does not decode draws a placeholder and is named; an image that decoded with
 damage tolerated is drawn *and* reported, so a half-decoded fax stays
-distinguishable from a blank one.
+distinguishable from a blank one. What an image's own filters tolerated — a
+Flate stream cut short, a checksum that did not match — is its damage too,
+named by the filter's warning for an image XObject as for an inline image
+(`a_flate_stream_cut_short_is_named_damaged_on_both_paths`).
 
 An image XObject and an inline image are read by one sample loop. An 8-bit
 DeviceGray or DeviceRGB image whose `/Decode` pairs are each `[0 1]` or

@@ -3070,16 +3070,33 @@ impl PageResources {
     /// An image's samples through its filter chain, read at each decode of
     /// the image and never kept beside it: the scope's image cache keeps the
     /// decoded image, and holding its samples too would hold the image twice.
-    /// The run counted as [`PageResources::decoded`] counts one.
-    fn samples(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
-        self.doc.stream_decoded_counted(r, self.op.work.as_deref())
+    /// The run counted as [`PageResources::decoded`] counts one. What the
+    /// chain tolerated — a stream that ended short, a checksum that did not
+    /// match — is named as the damage of the image `name` names (ruling 10),
+    /// as an inline image's chain's is.
+    fn samples(&self, r: ObjRef, name: &[u8]) -> Result<Vec<u8>, CosError> {
+        let mut tolerated = Vec::new();
+        let samples = self
+            .doc
+            .stream_decoded_noting(r, self.op.work.as_deref(), &mut tolerated);
+        for warning in tolerated {
+            self.report_damaged_image(name, warning);
+        }
+        samples
     }
 
     /// `r`'s bytes as an image codec takes them, an image's samples too, and
-    /// counted as [`PageResources::samples`] counts.
-    fn image_input(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
-        self.doc
-            .stream_image_input_counted(r, self.op.work.as_deref())
+    /// counted as [`PageResources::samples`] counts, what the filters before
+    /// the codec tolerated named as the image's damage as it names a chain's.
+    fn image_input(&self, r: ObjRef, name: &[u8]) -> Result<Vec<u8>, CosError> {
+        let mut tolerated = Vec::new();
+        let input = self
+            .doc
+            .stream_image_input_noting(r, self.op.work.as_deref(), &mut tolerated);
+        for warning in tolerated {
+            self.report_damaged_image(name, warning);
+        }
+        input
     }
 
     /// How many damaged images, repaired spaces and reduced images these
@@ -8075,7 +8092,7 @@ impl PageResources {
         let jbig2 = matches!(last_filter, Some(b"JBIG2Decode"));
         let data = if jbig2 {
             let raw = self
-                .image_input(reference)
+                .image_input(reference, name)
                 .map_err(|_| "JBIG2Decode".to_string())?;
             // The refusal. A stream whose regions this build cannot decode —
             // the symbol-dictionary lineage an OCR pipeline emits — comes back
@@ -8086,12 +8103,12 @@ impl PageResources {
                 .ok_or_else(|| "JBIG2Decode".to_string())?
         } else if fax {
             let raw = self
-                .image_input(reference)
+                .image_input(reference, name)
                 .map_err(|_| "CCITTFaxDecode".to_string())?;
             self.ccitt_samples(dict, &raw, width, height, name)
         } else {
             // Everything else decodes to raw samples.
-            self.samples(reference)
+            self.samples(reference, name)
                 .map_err(|_| "undecodable".to_string())?
         };
         // 7.4.6 and 7.4.7: both bilevel codecs produce one bit per pixel,
@@ -8201,7 +8218,7 @@ impl PageResources {
             // and handing the undecoded stream to the JPEG decoder made it
             // refuse a perfectly good image.
             let raw = self
-                .image_input(reference)
+                .image_input(reference, name)
                 .map_err(|_| "DCTDecode".to_string())?;
             let named = self.image_space(&dict, name);
             return self.jpeg_image(&raw, &decode, interpolate, named, name, ask);
@@ -8212,7 +8229,7 @@ impl PageResources {
             // sample loop below -- 8.9.5.4 is explicit that the dictionary's
             // `/BitsPerComponent` and `/Decode` do not apply to it.
             let raw = self
-                .image_input(reference)
+                .image_input(reference, name)
                 .map_err(|_| "JPXDecode".to_string())?;
             let named = self.image_space(&dict, name);
             return self.jpx_image(&raw, &dict, interpolate, named, name, ask);
@@ -8754,7 +8771,7 @@ impl PageResources {
             Some(b"DCTDecode" | b"DCT") => {
                 image.codec = crate::SampleCodec::Dct;
                 let decoded = self
-                    .image_input(reference)
+                    .image_input(reference, name)
                     .map_err(|_| "DCTDecode".to_string())
                     .and_then(|raw| jpeg_samples(&raw));
                 match decoded {
@@ -8766,7 +8783,7 @@ impl PageResources {
                 image.codec = crate::SampleCodec::Jpx;
                 let mut warnings = Vec::new();
                 let decoded = self
-                    .image_input(reference)
+                    .image_input(reference, name)
                     .map_err(|_| "JPXDecode".to_string())
                     .and_then(|raw| {
                         Self::jpx_samples(

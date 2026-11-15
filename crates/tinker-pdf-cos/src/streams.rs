@@ -304,15 +304,25 @@ impl CosDocument {
         r: ObjRef,
         work: Option<&Work>,
     ) -> Result<Vec<u8>, CosError> {
-        let object = self.get(r)?;
-        let stream = object.as_stream().ok_or(CosError::NotAStream(r))?;
-        let mut sink = WarningSink::new();
-        sink.set_context(Some(r));
-        let data = self.decrypted_bytes(r, stream);
-        let out = self.decode_with(&data, &stream.dict, r.num, &mut sink);
-        self.absorb(sink);
-        count_run(work, r, &out);
-        out
+        self.chain_read(r, work, true, None)
+    }
+
+    /// [`CosDocument::stream_decoded_counted`], handing back beside the
+    /// bytes what the stream's filter chain tolerated to produce them — each
+    /// [`WarningKind::Filter`] the read recorded, in order — which is still
+    /// recorded in the document's warnings as that read records it. For a
+    /// caller that names the leniency on what it makes of the bytes: an image
+    /// drawn from them names it as its damage (ruling 10).
+    ///
+    /// # Errors
+    /// As [`CosDocument::stream_decoded`].
+    pub fn stream_decoded_noting(
+        &self,
+        r: ObjRef,
+        work: Option<&Work>,
+        tolerated: &mut Vec<filters::Warning>,
+    ) -> Result<Vec<u8>, CosError> {
+        self.chain_read(r, work, true, Some(tolerated))
     }
 
     /// [`CosDocument::stream_decoded`], recording nothing: what the filter
@@ -372,12 +382,52 @@ impl CosDocument {
         r: ObjRef,
         work: Option<&Work>,
     ) -> Result<Vec<u8>, CosError> {
+        self.chain_read(r, work, false, None)
+    }
+
+    /// [`CosDocument::stream_image_input_counted`], handing back what the
+    /// filters before the codec tolerated, as
+    /// [`CosDocument::stream_decoded_noting`] hands back what a whole chain
+    /// tolerated.
+    ///
+    /// # Errors
+    /// As [`CosDocument::stream_decoded`].
+    pub fn stream_image_input_noting(
+        &self,
+        r: ObjRef,
+        work: Option<&Work>,
+        tolerated: &mut Vec<filters::Warning>,
+    ) -> Result<Vec<u8>, CosError> {
+        self.chain_read(r, work, false, Some(tolerated))
+    }
+
+    /// The stream `r` read through its chain — to its end, or with
+    /// `warn_undecoded` false to the codec that ends it — recorded in the
+    /// document's warnings and counted into `work`, and what the chain
+    /// tolerated appended to `tolerated` where the caller asks for it.
+    fn chain_read(
+        &self,
+        r: ObjRef,
+        work: Option<&Work>,
+        warn_undecoded: bool,
+        tolerated: Option<&mut Vec<filters::Warning>>,
+    ) -> Result<Vec<u8>, CosError> {
         let object = self.get(r)?;
         let stream = object.as_stream().ok_or(CosError::NotAStream(r))?;
         let mut sink = WarningSink::new();
         sink.set_context(Some(r));
         let data = self.decrypted_bytes(r, stream);
-        let out = self.decode_chain(&data, &stream.dict, r.num, &mut sink, false);
+        let out = self.decode_chain(&data, &stream.dict, r.num, &mut sink, warn_undecoded);
+        if let Some(tolerated) = tolerated {
+            tolerated.extend(
+                sink.warnings()
+                    .iter()
+                    .filter_map(|warning| match warning.kind {
+                        WarningKind::Filter(filter) => Some(filter),
+                        _ => None,
+                    }),
+            );
+        }
         self.absorb(sink);
         count_run(work, r, &out);
         out
@@ -806,5 +856,93 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n"
             quietly.stream_decoded_unrecorded(ObjRef::new(1, 0)),
             Err(CosError::NotAStream(_))
         ));
+    }
+
+    /// A document whose object 3 is a Flate stream cut short, object 4 the
+    /// same bytes as a codec's input, `[/FlateDecode /DCTDecode]`, and object
+    /// 5 a whole Flate stream.
+    fn cut_streams() -> Vec<u8> {
+        let whole: Vec<u8> = (0..4000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let mut cut = filters::zlib_compress(&whole);
+        cut.truncate(cut.len() * 2 / 3);
+        let clean = filters::zlib_compress(b"whole and clean");
+        let mut pdf = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n"
+            .to_vec();
+        for (num, filter, data) in [
+            (3, "/FlateDecode", &cut),
+            (4, "[/FlateDecode /DCTDecode]", &cut),
+            (5, "/FlateDecode", &clean),
+        ] {
+            pdf.extend_from_slice(
+                format!(
+                    "{num} 0 obj\n<< /Length {} /Filter {filter} >>\nstream\n",
+                    data.len()
+                )
+                .as_bytes(),
+            );
+            pdf.extend_from_slice(data);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        pdf.extend_from_slice(b"trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+        pdf
+    }
+
+    /// **A noting read hands back what its chain tolerated**, and is the
+    /// plain read otherwise: a Flate stream cut short hands back what the
+    /// inflate tolerated, a codec's input what its filters before the codec
+    /// tolerated, and a clean stream nothing; the bytes are the plain read's,
+    /// and the document records what the plain reads record.
+    #[test]
+    fn a_noting_read_hands_back_what_its_chain_tolerated() {
+        let (cut, input, clean) = (ObjRef::new(3, 0), ObjRef::new(4, 0), ObjRef::new(5, 0));
+        let filtered = |doc: &CosDocument, object: ObjRef| -> Vec<filters::Warning> {
+            doc.warnings()
+                .iter()
+                .filter(|warning| warning.object == Some(object))
+                .filter_map(|warning| match warning.kind {
+                    WarningKind::Filter(filter) => Some(filter),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let plain = CosDocument::open(cut_streams()).expect("it opens");
+        let plain_cut = plain.stream_decoded(cut).ok();
+        let plain_input = plain.stream_image_input(input).ok();
+        let plain_clean = plain.stream_decoded(clean).ok();
+
+        let noted = CosDocument::open(cut_streams()).expect("it opens");
+        let mut tolerated = Vec::new();
+        assert_eq!(
+            noted.stream_decoded_noting(cut, None, &mut tolerated).ok(),
+            plain_cut
+        );
+        assert!(!tolerated.is_empty(), "a stream cut short is tolerated");
+        assert_eq!(tolerated, filtered(&plain, cut));
+
+        let mut before_codec = Vec::new();
+        assert_eq!(
+            noted
+                .stream_image_input_noting(input, None, &mut before_codec)
+                .ok(),
+            plain_input
+        );
+        assert!(!before_codec.is_empty(), "so is a codec's input cut short");
+        assert_eq!(before_codec, filtered(&plain, input));
+
+        let mut none = Vec::new();
+        assert_eq!(
+            noted.stream_decoded_noting(clean, None, &mut none).ok(),
+            plain_clean
+        );
+        assert!(
+            none.is_empty(),
+            "a clean stream tolerated nothing: {none:?}"
+        );
+        assert_eq!(kinds(&noted), kinds(&plain), "recorded as the plain reads");
     }
 }

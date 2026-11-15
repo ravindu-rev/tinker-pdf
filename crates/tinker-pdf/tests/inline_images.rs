@@ -530,3 +530,73 @@ fn an_inline_image_with_an_unknown_filter_is_reported() {
         bitmap.warnings
     );
 }
+
+/// **A Flate stream cut short is named as damage on both paths** (ruling 10;
+/// `RenderWarning::DamagedImage`, "a stream that ended short padded"). The
+/// same deflate bytes, cut a third short, inline and as an XObject, draw the
+/// same pixels, and each render names the image's damage by the same reasons
+/// — under the XObject's resource name for the one — which the XObject's
+/// listing in `Page::images` names as its render does.
+#[test]
+fn a_flate_stream_cut_short_is_named_damaged_on_both_paths() {
+    let samples: Vec<u8> = (0..16u32 * 16 * 3)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    let mut cut = tinker_pdf_filters::zlib_compress(&samples);
+    cut.truncate(cut.len() * 2 / 3);
+    let coded = hex(&cut);
+    let damage = |bitmap: &tinker_pdf::Bitmap| -> Vec<(String, String)> {
+        bitmap
+            .warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                tinker_pdf::RenderWarning::DamagedImage { name, reason } => {
+                    Some((name.clone(), reason.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let reasons = |named: &[(String, String)]| -> Vec<String> {
+        named.iter().map(|(_, reason)| reason.clone()).collect()
+    };
+
+    let inline = render(page_with_inline(
+        "/W 16 /H 16 /CS /RGB /BPC 8 /F [/AHx /Fl]",
+        &coded,
+    ));
+    let bytes = page_with_xobject(
+        "/Width 16 /Height 16 /ColorSpace /DeviceRGB /BitsPerComponent 8\n\
+         /Filter [/ASCIIHexDecode /FlateDecode]",
+        &coded,
+    );
+    let xobject = render(bytes.clone());
+    assert_eq!(
+        inline.data, xobject.data,
+        "the same bytes through both paths must produce the same pixels"
+    );
+    let named = damage(&xobject);
+    assert!(
+        !named.is_empty(),
+        "the XObject's stream cut short is named: {:?}",
+        xobject.warnings
+    );
+    assert!(named.iter().all(|(name, _)| name == "Im0"), "{named:?}");
+    assert_eq!(
+        reasons(&named),
+        reasons(&damage(&inline)),
+        "by the reasons the inline image is named by"
+    );
+
+    let listed = Document::open(bytes)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .images();
+    assert_eq!(listed.len(), 1, "one image");
+    assert_eq!(
+        listed[0].warnings,
+        reasons(&named),
+        "and its listing names them as its render does"
+    );
+}

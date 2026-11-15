@@ -1078,7 +1078,12 @@ counted sibling, `stream_decoded_counted` and `stream_image_input_counted`,
 that counts the run into an operation's tally when the operation is counting:
 the run, whatever the chain returned — a refusal with no bytes, while a
 reference that names no stream runs no chain and counts nothing — the stream it
-ran on, and the bytes it returned. A `Counting` view over any `Resolve` counts
+ran on, and the bytes it returned. Each counted read has a noting twin,
+`stream_decoded_noting` and `stream_image_input_noting`, that hands back
+beside the bytes every filter warning the chain recorded, which the document
+records all the same: the facade reads an image's stream through them and
+names what the chain tolerated as the image's damage, as it names an inline
+image's (ruling 10). A `Counting` view over any `Resolve` counts
 the same for code written against the trait, which is how a font's CMaps and
 its `/CIDToGIDMap` are counted while a scope reads the font. An editor asked to count
 counts its own decodes (`DocumentEditor::stream_bytes`, and the serializer's

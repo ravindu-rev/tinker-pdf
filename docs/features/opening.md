@@ -363,7 +363,9 @@ On `CosDocument`: `get`, `resolve`, `trailer`,
 image codec, and `stream_decoded_unrecorded`, `stream_decoded`'s bytes with
 what its filters and the recovery of its extent tolerate dropped rather
 than recorded, and an extent it recovers not kept, so a read after it
-reports what it would have); `open_appended(original, update)`, the open over an original
+reports what it would have, and `stream_decoded_noting` and
+`stream_image_input_noting`, the counted reads handing back beside the bytes
+what the chain tolerated, recorded as ever); `open_appended(original, update)`, the open over an original
 and its update section; `reopen(base, update)` and `reopen_counted(base,
 update, &Work)`, the reopen over an update section, which hand back
 `Reopened` — the document, and the `FullOpen` reason when it opened whole;
