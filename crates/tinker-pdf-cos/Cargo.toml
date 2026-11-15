@@ -40,4 +40,7 @@ tinker-pdf-pki = { workspace = true }
 tinker-pdf-pool = { workspace = true }
 
 [dev-dependencies]
-proptest = "1.11.0"
+# Its default `fork` and `timeout` features, which no test uses, pull in
+# `wait-timeout`, which does not build for wasm32-wasip1; `std` is what
+# the tests use.
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }

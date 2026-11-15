@@ -123,9 +123,9 @@ deny = [
   # That route is therefore closed by policy rather than by a crate name, and
   # deliberately so: the binding a contributor would reach for is `windows` or
   # `windows-sys`, and `windows-sys` is already in the graph honestly, pulled
-  # in by `tempfile` under `proptest`. Denying it would fail this check over a
-  # dev dependency that implements nothing. What is denied below is every
-  # crate that would supply the *codec itself*.
+  # in by `is-terminal` and `walkdir` under `criterion`. Denying it would fail
+  # this check over a dev dependency that implements nothing. What is denied
+  # below is every crate that would supply the *codec itself*.
   #
   # `image` is deliberately NOT repeated here: it is already denied nine lines
   # above, for this same reason, and a second row for one crate would make the

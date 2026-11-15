@@ -28,7 +28,7 @@ recorded in the roadmap row it closes:
 | The gates — fmt, clippy, the tests, the determinism and shaping fingerprints, the examples, `cargo xtask check` | `python3 -I tools/gates.py` |
 | Fuzzing, on Linux | `cargo fuzz build`, then each target's binary under its `fuzz/limits.tsv` row, `-max_total_time=20 -timeout=20`, as *Never panic, fuzz-enforced* gives it |
 | The fuzzing service's build, on Linux | `fuzz/service/Dockerfile`'s image built over `git archive HEAD`, its `compile` run, then `cargo xtask fuzz --service-out DIR` (`fuzz/README.md`) |
-| The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner, and `determinism.rs` again with `--features hyphenation` |
+| The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, each by name, wasmtime as the runner granted the test's manifest directory and, for the facade's, the JPX decoder's fixtures beside it, under the paths the build spells them ([CONTRIBUTING.md](../CONTRIBUTING.md)), and `determinism.rs` again with `--features hyphenation` |
 | Native against wasm, over fuzz corpora | `wasm_parity.rs` natively, then on `wasm32-wasip1` under wasmtime granted the same documents and held to the native list ("Native against wasm") |
 | The corpora | `cargo xtask corpus-fetch`, then `cargo xtask corpus-run --check` |
 | The benches | `cargo build --release -p tpdf --features cjk-fonts`, `cargo bench -p tinker-pdf --features hyphenation,cjk-fonts`, then `cargo xtask bench-check --machine NAME` |

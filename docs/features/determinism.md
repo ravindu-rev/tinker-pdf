@@ -365,11 +365,12 @@ reflowable book, whose pagination is a function of the open options.
 
 CI's tests measure the two native targets on every pull request. The
 `wasm32-wasip1` run is local proof, made by whoever changes what a fingerprint
-covers: each fingerprint test built with `--target wasm32-wasip1` and run with
-wasmtime as the runner, and `determinism.rs` once more with `--features
-hyphenation`, as the gates' `determinism` gate runs it natively. CI's tests
-build no `hyphenation`, so the `hyphenation` page is held on every target by
-those local runs. `aarch64-apple-darwin` is run nowhere, so on it the
+covers: each fingerprint test built with `--target wasm32-wasip1` and run by
+name with wasmtime as the runner, granted the files the test reads under the
+paths the build spells them ([CONTRIBUTING.md](../../CONTRIBUTING.md)), and
+`determinism.rs` once more with `--features hyphenation`, as the gates'
+`determinism` gate runs it natively. CI's tests build no `hyphenation`, so
+the `hyphenation` page is held on every target by those local runs. `aarch64-apple-darwin` is run nowhere, so on it the
 contract is claimed. Between them the three measured targets vary everything
 below the arithmetic — a different `std`, allocator and linker — and
 `wasm32-wasip1` varies width as well: 64-bit against 32-bit, where a `usize`

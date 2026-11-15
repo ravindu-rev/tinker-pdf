@@ -73,14 +73,22 @@ code generation with a `main` a runner can execute:
 ```bash
 rustup target add wasm32-wasip1
 # and a wasmtime from https://wasmtime.dev
-CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime \
+m=$(pwd)/crates/tinker-pdf   # on Windows, m=$(cygpath -w "$(pwd)/crates/tinker-pdf")
+CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run --dir $m::$m \
+    --dir $m/../tinker-pdf-filters/tests/jpx::$m/../tinker-pdf-filters/tests/jpx" \
   cargo test -p tinker-pdf --test determinism --target wasm32-wasip1
 ```
 
-The runner is resolved through the `PATH` of the process cargo spawns, so if a
-fresh install has not reached your shell yet, give the absolute path rather
-than the bare name — the symptom otherwise is cargo trying to execute a
-`.wasm` directly, which does not say "wasmtime is missing".
+The tests read their committed files by their manifest's path as the build
+host spells it, so the runner grants that very path, and the JPX decoder's
+fixtures the facade's tests read beside it; a crate's own tests need only its
+own manifest's. A wasm test binary aborts at its first panic, so a file with a
+failing test runs no test after it: run each by name, with `--exact
+--nocapture`, to see every one. The runner is resolved through the `PATH` of
+the process cargo spawns, so if a fresh install has not reached your shell
+yet, give the absolute path rather than the bare name — the symptom otherwise
+is cargo trying to execute a `.wasm` directly, which does not say "wasmtime is
+missing".
 
 On a Windows host the *linux* leg is a `wsl` away and worth running, because
 it covers a different axis from wasm: wasm is the width test, and linux is a

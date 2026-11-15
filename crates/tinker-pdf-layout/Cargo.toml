@@ -40,4 +40,7 @@ tinker-pdf-css = { workspace = true }
 [dev-dependencies]
 # Property tests, the exempt dev tooling CONTRIBUTING rule 1 names: arbitrary
 # pattern files and words against `hyphenate`'s reader and walk.
-proptest = "1"
+# Its default `fork` and `timeout` features, which no test uses, pull in
+# `wait-timeout`, which does not build for wasm32-wasip1; `std` is what
+# the tests use.
+proptest = { version = "1", default-features = false, features = ["std"] }
