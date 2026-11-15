@@ -2715,7 +2715,11 @@ corpora already vendored here. So every name stays on the list.
   up (`the_committed_census_is_whole`), the design's mathematics face and Han
   order its counts' (`the_designs_outcomes_are_the_records`), and each
   group's gzipped wasm in `fallback_sizes.tsv`, past the default profile's by
-  the group's faces (`the_committed_wasm_sizes_are_whole`).
+  at least what `gzip -9` makes of the group's WOFF2 forms
+  (`the_committed_wasm_sizes_are_whole`), a build short of any one face
+  falling under that floor but for the faces the test names as lighter than
+  their group's build adds beyond its forms
+  (`a_build_missing_one_face_falls_under_its_floor`).
 - `crates/tinker-pdf-font/src/type1_subset/tests.rs` — programs built byte by
   byte through the crate's own cipher, whose `type1.rs` tests hold it to
   chapter 7.3's worked example: every kept glyph outlining and advancing as

@@ -32,8 +32,10 @@
 //! Its rows are committed as `fallback_coverage.tsv` beside this file, which
 //! [`the_committed_census_is_whole`] holds whole and adding up (ruling 16);
 //! each group's gzipped wasm, which a wasm build measures and the census
-//! cannot, is `fallback_sizes.tsv`'s, which
-//! [`the_committed_wasm_sizes_are_whole`] holds; and
+//! cannot, is `fallback_sizes.tsv`'s beside what `gzip -9` makes of the
+//! group's forms, which [`the_committed_wasm_sizes_are_whole`] holds and
+//! [`a_build_missing_one_face_falls_under_its_floor`] holds to seeing a lost
+//! face; and
 //! [`the_designs_outcomes_are_the_records`] holds the outcomes the design
 //! states to the counts. Each run's revision, machine and day go in the
 //! message of the commit that records it.
@@ -71,9 +73,15 @@ const STORAGE_HEAD: &str =
 /// The head of the census's `group` table: a row for each feature group.
 const GROUP_HEAD: &str = "group\tname\tfaces\tbytes\twoff2_bytes";
 
-/// The head of `fallback_sizes.tsv`'s one table: a row for the default
-/// profile and for each of FT-02's groups.
-const WASM_HEAD: &str = "wasm\tprofile\tgzip_bytes";
+/// The head of `fallback_sizes.tsv`'s `wasm` table: a row for the default
+/// profile and for each of FT-02's groups, its gzipped wasm and what `gzip -9`
+/// makes of the WOFF2 forms it carries, joined.
+const WASM_HEAD: &str = "wasm\tprofile\tgzip_bytes\tforms_gzip_bytes";
+
+/// The head of `fallback_sizes.tsv`'s `form` table: a row for each WOFF2 form
+/// a group carries, by the census's file name, and what `gzip -9` makes of it
+/// alone.
+const FORM_HEAD: &str = "form\tgroup\tfile\tgzip_bytes";
 
 /// The most bytes a WOFF2 form is unpacked to.
 const MAX_FACE: usize = 64 << 20;
@@ -1227,18 +1235,34 @@ fn the_designs_outcomes_are_the_records() {
     );
 }
 
-/// **The committed wasm sizes are whole and carry their faces**:
-/// `fallback_sizes.tsv` beside this file, its head and then a row for the
-/// default profile and for each of FT-02's groups, in the census's order,
-/// each the gzipped bytes of `bindings/js`'s release wasm as `release.yml`
-/// builds the default profile, a group's with a feature carrying the WOFF2
-/// forms the census's `group` row counts, all of one revision; FT-01's
-/// faces are `footprint.json`'s `cjk-fonts` profile instead. Gzip cannot
-/// shrink a WOFF2 form, already Brotli's, by a hundredth, so each group's
-/// figure passes the default's by at least 99 in 100 of those WOFF2 bytes:
-/// a build whose linker dropped the faces fails.
-#[test]
-fn the_committed_wasm_sizes_are_whole() {
+/// The WOFF2 forms a group carries, by the census's file names and in its
+/// order: the group's candidates, but of the mathematics ones the one the
+/// record's own counts choose.
+fn carried(rows: &[Vec<String>], group: Group) -> Vec<String> {
+    let math = recorded_math_choice(rows);
+    rows.iter()
+        .filter(|row| row[0] == "storage" && row.get(3).is_some_and(|cell| cell == group.name()))
+        .filter(|row| group != Group::Math || math.as_deref() == Some(row[1].as_str()))
+        .map(|row| row[1].clone())
+        .collect()
+}
+
+/// `fallback_sizes.tsv` read: the default profile's gzipped wasm; each of
+/// FT-02's groups, its gzipped wasm and what `gzip -9` makes of its forms
+/// joined; and each form a group carries, by its file, through `gzip -9`
+/// alone.
+struct Sizes {
+    default: usize,
+    groups: Vec<(Group, usize, usize)>,
+    forms: Vec<(Group, String, usize)>,
+}
+
+/// `fallback_sizes.tsv` beside this file, held to its shape: its `wasm` head
+/// and a row for the default profile, which carries no form, and for each of
+/// FT-02's groups, in the census's order, every figure a count and a group's
+/// forms more than none; then its `form` head and a row for each form a group
+/// carries, the census's forms in its order, each a count.
+fn committed_sizes() -> Sizes {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fallback_sizes.tsv");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
@@ -1252,48 +1276,183 @@ fn the_committed_wasm_sizes_are_whole() {
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .map(|line| line.split('\t').collect())
         .collect();
+    let split = rows
+        .iter()
+        .position(|row| row.join("\t") == FORM_HEAD)
+        .expect("its form head");
+    let (wasm, form) = (&rows[..split], &rows[split + 1..]);
     assert_eq!(
-        rows.first().map(|row| row.join("\t")).as_deref(),
+        wasm.first().map(|row| row.join("\t")).as_deref(),
         Some(WASM_HEAD),
         "its head"
     );
-    let profiles: Vec<&str> = rows[1..]
+    let count = |row: &[&str], at: usize| -> usize {
+        row.get(at)
+            .and_then(|cell| cell.parse().ok())
+            .unwrap_or_else(|| panic!("{row:?}: a count in its column {at}"))
+    };
+    let groups: Vec<Group> = Group::ALL
+        .into_iter()
+        .filter(|group| *group != Group::Cjk)
+        .collect();
+    let profiles: Vec<&str> = wasm[1..]
         .iter()
         .map(|row| row.get(1).copied().unwrap_or(""))
         .collect();
     let mut expected = vec!["default"];
-    expected.extend(
-        Group::ALL
-            .into_iter()
-            .filter(|group| *group != Group::Cjk)
-            .map(Group::name),
-    );
+    expected.extend(groups.iter().map(|group| group.name()));
     assert_eq!(
         profiles, expected,
         "a row for the default profile and for each group, in order"
     );
-    let figure = |row: &[&str]| -> usize {
-        assert_eq!(row.len(), 3, "{row:?}");
+    for row in &wasm[1..] {
+        assert_eq!(row.len(), 4, "{row:?}");
         assert_eq!(row[0], "wasm", "{row:?}");
-        row[2]
-            .parse()
-            .ok()
-            .filter(|bytes| *bytes > 0)
-            .unwrap_or_else(|| panic!("{}: a figure", row[1]))
-    };
-    let default = figure(&rows[1]);
+        assert!(count(row, 2) > 0, "{}: a figure", row[1]);
+    }
+    assert_eq!(count(&wasm[1], 3), 0, "the default profile carries no form");
     let census = record();
-    for row in &rows[2..] {
-        let bytes = figure(row);
-        let woff2: usize = census
+    let mut forms = Vec::new();
+    for group in &groups {
+        let rows: Vec<&Vec<&str>> = form
             .iter()
-            .find(|group| group[0] == "group" && group.get(1).is_some_and(|name| name == row[1]))
-            .and_then(|group| group.get(4)?.parse().ok())
-            .unwrap_or_else(|| panic!("{}: the census's group row", row[1]));
-        assert!(
-            bytes > default && bytes - default >= woff2 - woff2 / 100,
-            "{}: {bytes} gzipped, the default {default}, for {woff2} WOFF2 bytes",
-            row[1]
+            .filter(|row| row.get(1) == Some(&group.name()))
+            .collect();
+        for row in &rows {
+            assert_eq!(row.len(), 4, "{row:?}");
+            assert_eq!(row[0], "form", "{row:?}");
+            assert!(count(row, 3) > 0, "{}: a figure", row[2]);
+            forms.push((*group, row[2].to_string(), count(row, 3)));
+        }
+        assert_eq!(
+            rows.iter().map(|row| row[2]).collect::<Vec<_>>(),
+            carried(&census, *group),
+            "{}: a row for each form the census's group carries, in its order",
+            group.name()
         );
     }
+    assert_eq!(forms.len(), form.len(), "every form row is a group's");
+    Sizes {
+        default: count(&wasm[1], 2),
+        groups: groups
+            .iter()
+            .zip(&wasm[2..])
+            .map(|(group, row)| {
+                assert!(count(row, 3) > 0, "{}: its forms' figure", row[1]);
+                (*group, count(row, 2), count(row, 3))
+            })
+            .collect(),
+        forms,
+    }
+}
+
+/// Whether a group's figure carries its forms: the wasm grew past the
+/// default profile's by at least what `gzip -9` makes of the group's forms
+/// joined, which is what a gzipped wasm holding them gains at the least.
+fn carries_its_forms(
+    group: &str,
+    bytes: usize,
+    default: usize,
+    forms: usize,
+) -> Result<(), String> {
+    if bytes > default && bytes - default >= forms {
+        Ok(())
+    } else {
+        Err(format!(
+            "{group}: {bytes} gzipped, the default {default}, for forms gzip -9 makes {forms} \
+             bytes of"
+        ))
+    }
+}
+
+/// **The committed wasm sizes are whole and carry their faces**:
+/// `fallback_sizes.tsv` beside this file ([`committed_sizes`]), a row for the
+/// default profile and for each of FT-02's groups, each the gzipped bytes of
+/// `bindings/js`'s release wasm as `release.yml` builds the default profile,
+/// a group's with a feature carrying the WOFF2 forms the census's `group` row
+/// counts, all of one revision; FT-01's faces are `footprint.json`'s
+/// `cjk-fonts` profile instead. Gzip shrinks a WOFF2 form, Brotli's already,
+/// by a little, and a group of many small forms — the historic scripts' —
+/// by more than a hundredth, so each group's figure is held to pass the
+/// default's by at least what `gzip -9` makes of its forms joined, the table's
+/// `forms_gzip_bytes` ([`carries_its_forms`]): a build whose linker dropped the
+/// faces fails.
+#[test]
+fn the_committed_wasm_sizes_are_whole() {
+    let sizes = committed_sizes();
+    let problems: Vec<String> = sizes
+        .groups
+        .iter()
+        .filter_map(|(group, bytes, forms)| {
+            carries_its_forms(group.name(), *bytes, sizes.default, *forms).err()
+        })
+        .collect();
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The faces whose group's figure would still pass without them: each lighter,
+/// through `gzip -9` alone, than what its group's build adds to the wasm beyond
+/// its forms — its own code, the table of its forms and the data its forms
+/// move — so that no size can see it lost. By group and the census's file,
+/// in the census's order.
+const FACES_UNDER_THE_OVERHEAD: &[(&str, &str)] = &[
+    ("fallback-scripts-historic", "NotoSansBuhid-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSansCarian-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSansGothic-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSansHatran-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSansLycian-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSansLydian-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSerifMakasar-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSansOgham-Regular.ttf"),
+    (
+        "fallback-scripts-historic",
+        "NotoSansInscriptionalPahlavi-Regular.ttf",
+    ),
+    (
+        "fallback-scripts-historic",
+        "NotoSansPhoenician-Regular.ttf",
+    ),
+    ("fallback-scripts-historic", "NotoSansRejang-Regular.ttf"),
+    (
+        "fallback-scripts-historic",
+        "NotoSansOldSouthArabian-Regular.ttf",
+    ),
+    ("fallback-scripts-historic", "NotoSansShavian-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSansTagbanwa-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSerifToto-Regular.ttf"),
+    ("fallback-scripts-historic", "NotoSansUgaritic-Regular.ttf"),
+    ("fallback-symbols", "NotoSansMayanNumerals-Regular.ttf"),
+];
+
+/// **A build missing one face falls under its floor**, over the committed
+/// figures' arithmetic: [`carries_its_forms`] is met at the default's figure
+/// plus the forms' and missed a byte under it, and for each group and each
+/// form it carries, a build that lost that one face — the group's figure less
+/// what `gzip -9` makes of the face alone — fails it. Except the faces
+/// lighter than what their group's build adds beyond its forms, which a size
+/// cannot see: those are [`FACES_UNDER_THE_OVERHEAD`], pinned exactly, so a
+/// measurement that moves the overhead either way says so.
+#[test]
+fn a_build_missing_one_face_falls_under_its_floor() {
+    assert!(carries_its_forms("a group", 1_300, 1_000, 300).is_ok());
+    assert!(carries_its_forms("a group", 1_299, 1_000, 300).is_err());
+    assert!(
+        carries_its_forms("a group", 1_000, 1_000, 0).is_err(),
+        "a figure no larger than the default's carries nothing"
+    );
+
+    let sizes = committed_sizes();
+    let mut unseen = Vec::new();
+    for (group, bytes, forms) in &sizes.groups {
+        for (_, file, alone) in sizes.forms.iter().filter(|(of, _, _)| of == group) {
+            let without = bytes - alone;
+            if carries_its_forms(group.name(), without, sizes.default, *forms).is_ok() {
+                unseen.push((group.name(), file.as_str()));
+            }
+        }
+    }
+    assert_eq!(
+        unseen, FACES_UNDER_THE_OVERHEAD,
+        "the faces a build could lose and still pass its group's floor"
+    );
 }

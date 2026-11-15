@@ -772,10 +772,18 @@ order above to its counts. Each group's gzipped wasm, `bindings/js` built as
 `release.yml` builds the default profile with a scratch feature that carries
 the WOFF2 forms its `group` row counts, goes in `fallback_sizes.tsv` beside
 it, after the default profile's of the same revision: the census builds no
-wasm. `the_committed_wasm_sizes_are_whole` holds a row for each group, past
-the default's by at least 99 in 100 of the group's WOFF2 bytes, which gzip
-does not shrink, so a build whose linker dropped the faces fails. Each run's
-revision, machine and day go in its commit's message.
+wasm. Beside each group's figure the table holds what the same `gzip -9`
+makes of its WOFF2 forms joined, and its `form` table each form's alone:
+gzip shrinks a WOFF2 form, Brotli's already, by a little, and a group of many
+small forms, the historic scripts', by more than a hundredth, so a fraction of
+the forms' bytes is no floor. `the_committed_wasm_sizes_are_whole` holds a row
+for each group, past the default's by at least what gzip makes of its forms,
+so a build whose linker dropped the faces fails; and
+`a_build_missing_one_face_falls_under_its_floor` holds that a build that lost
+any one face would fall under it, but for the faces lighter than what their
+group's build adds to the wasm beyond its forms — its code, the table of its
+forms, the data they move — which no size can see and which the test names.
+Each run's revision, machine and day go in its commit's message.
 
 **The page-per-script proof, and what "no `.notdef`" is measured by.** For
 every script the tables give a face, and for each class group, FT-02.5

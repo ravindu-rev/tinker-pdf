@@ -1,17 +1,184 @@
-# Each FT-02 group's gzipped wasm beside the default profile's
-# (fallback_coverage.rs, docs/design/fallback-faces.md): bindings/js built as
-# release.yml's npm job builds the default profile, `wasm-pack build --release
-# --target web --out-dir pkg bindings/js` under `RUSTFLAGS=-D warnings`, a
-# group's with a scratch feature carrying the WOFF2 forms its census `group`
-# row counts, each counted by `gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm
-# | wc -c`, all of one revision; the run's revision, machine and day are in the
-# message of the commit that wrote it.
-wasm	profile	gzip_bytes
-wasm	default	3923839
-wasm	fallback-scripts	4832838
-wasm	fallback-scripts-limited	4519743
-wasm	fallback-scripts-historic	8090266
-wasm	fallback-emoji	4976884
-wasm	fallback-math	4171327
-wasm	fallback-music	3973921
-wasm	fallback-symbols	4229489
+# Each FT-02 group's gzipped wasm beside the default profile's, and what
+# gzip -9 makes of the group's WOFF2 forms (fallback_coverage.rs,
+# docs/design/fallback-faces.md). `wasm`: bindings/js built as release.yml's
+# npm job builds the default profile, `wasm-pack build --release --target web
+# --out-dir pkg bindings/js` under `RUSTFLAGS=-D warnings`, a group's with a
+# scratch feature carrying the WOFF2 forms its census `group` row counts, each
+# counted by `gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm | wc -c`, all of
+# one revision; `forms_gzip_bytes` is the same gzip -9 over the group's forms
+# joined in the census's order, `cat FORMS | gzip -9 -c | wc -c`, none for the
+# default. `form`: each form alone through it. The run's revision, machine
+# and day are in the message of the commit that wrote it.
+wasm	profile	gzip_bytes	forms_gzip_bytes
+wasm	default	3923839	0
+wasm	fallback-scripts	4832838	906228
+wasm	fallback-scripts-limited	4519743	593591
+wasm	fallback-scripts-historic	8090266	4163022
+wasm	fallback-emoji	4976884	1051978
+wasm	fallback-math	4171327	244322
+wasm	fallback-music	3973921	46286
+wasm	fallback-symbols	4229489	302990
+form	group	file	gzip_bytes
+form	fallback-scripts	NotoSansArabic-Regular.ttf	49280
+form	fallback-scripts	NotoSansArmenian-Regular.ttf	7935
+form	fallback-scripts	NotoSansBengali-Regular.ttf	43104
+form	fallback-scripts	NotoSans-Regular.ttf	150251
+form	fallback-scripts	NotoSansDevanagari-Regular.ttf	54259
+form	fallback-scripts	NotoSansEthiopic-Regular.ttf	72371
+form	fallback-scripts	NotoSansGeorgian-Regular.ttf	15867
+form	fallback-scripts	NotoSansGujarati-Regular.ttf	38584
+form	fallback-scripts	NotoSansGurmukhi-Regular.ttf	14724
+form	fallback-scripts	NotoSansHebrew-Regular.ttf	6947
+form	fallback-scripts	NotoSansKannada-Regular.ttf	36018
+form	fallback-scripts	NotoSansKhmer-Regular.ttf	17926
+form	fallback-scripts	NotoSansLao-Regular.ttf	8991
+form	fallback-scripts	NotoSansMalayalam-Regular.ttf	26953
+form	fallback-scripts	NotoSansMyanmar-Regular.ttf	48902
+form	fallback-scripts	NotoSansOriya-Regular.ttf	40891
+form	fallback-scripts	NotoSansSinhala-Regular.ttf	28867
+form	fallback-scripts	NotoSansTamil-Regular.ttf	17619
+form	fallback-scripts	NotoSansTelugu-Regular.ttf	44356
+form	fallback-scripts	NotoSansThaana-Regular.ttf	12955
+form	fallback-scripts	NotoSansThai-Regular.ttf	9227
+form	fallback-scripts	NotoSerifTibetan-Regular.ttf	161258
+form	fallback-scripts-limited	NotoSansAdlam-Regular.ttf	17295
+form	fallback-scripts-limited	NotoSansBalinese-Regular.ttf	30562
+form	fallback-scripts-limited	NotoSansBamum-Regular.ttf	76424
+form	fallback-scripts-limited	NotoSansBatak-Regular.ttf	9295
+form	fallback-scripts-limited	NotoSansChakma-Regular.ttf	23191
+form	fallback-scripts-limited	NotoSansCanadianAboriginal-Regular.ttf	21620
+form	fallback-scripts-limited	NotoSansCham-Regular.ttf	12555
+form	fallback-scripts-limited	NotoSansCherokee-Regular.ttf	28164
+form	fallback-scripts-limited	NotoSerifNPHmong-Regular.ttf	6975
+form	fallback-scripts-limited	NotoSansJavanese-Regular.ttf	34492
+form	fallback-scripts-limited	NotoSansKayahLi-Regular.ttf	4203
+form	fallback-scripts-limited	NotoSansTaiTham-Regular.ttf	41663
+form	fallback-scripts-limited	NotoSansLepcha-Regular.ttf	11263
+form	fallback-scripts-limited	NotoSansLimbu-Regular.ttf	6923
+form	fallback-scripts-limited	NotoSansLisu-Regular.ttf	2899
+form	fallback-scripts-limited	NotoSansMandaic-Regular.ttf	6819
+form	fallback-scripts-limited	NotoSansMeeteiMayek-Regular.ttf	8583
+form	fallback-scripts-limited	NotoSansNewa-Regular.ttf	51144
+form	fallback-scripts-limited	NotoSansNKo-Regular.ttf	8211
+form	fallback-scripts-limited	NotoSansOlChiki-Regular.ttf	4675
+form	fallback-scripts-limited	NotoSansOsage-Regular.ttf	5503
+form	fallback-scripts-limited	NotoSansMiao-Regular.ttf	11928
+form	fallback-scripts-limited	NotoSansHanifiRohingya-Regular.ttf	6807
+form	fallback-scripts-limited	NotoSansSaurashtra-Regular.ttf	10719
+form	fallback-scripts-limited	NotoSansSundanese-Regular.ttf	5131
+form	fallback-scripts-limited	NotoSansSylotiNagri-Regular.ttf	8455
+form	fallback-scripts-limited	NotoSansSyriac-Regular.ttf	16915
+form	fallback-scripts-limited	NotoSansTaiLe-Regular.ttf	5707
+form	fallback-scripts-limited	NotoSansNewTaiLue-Regular.ttf	7487
+form	fallback-scripts-limited	NotoSansTaiViet-Regular.ttf	8631
+form	fallback-scripts-limited	NotoSansTifinagh-Regular.ttf	19468
+form	fallback-scripts-limited	NotoSansVai-Regular.ttf	16013
+form	fallback-scripts-limited	NotoSansWancho-Regular.ttf	8539
+form	fallback-scripts-limited	NotoSansYi-Regular.ttf	56992
+form	fallback-scripts-historic	NotoSansCaucasianAlbanian-Regular.ttf	7223
+form	fallback-scripts-historic	NotoSerifAhom-Regular.ttf	9755
+form	fallback-scripts-historic	NotoSansImperialAramaic-Regular.ttf	3467
+form	fallback-scripts-historic	NotoSansAvestan-Regular.ttf	5855
+form	fallback-scripts-historic	NotoSansBassaVah-Regular.ttf	3811
+form	fallback-scripts-historic	NotoSansBhaiksuki-Regular.ttf	60674
+form	fallback-scripts-historic	NotoSansBrahmi-Regular.ttf	18367
+form	fallback-scripts-historic	NotoSansBuginese-Regular.ttf	3471
+form	fallback-scripts-historic	NotoSansBuhid-Regular.ttf	2175
+form	fallback-scripts-historic	NotoSansCarian-Regular.ttf	3087
+form	fallback-scripts-historic	NotoSansChorasmian-Regular.ttf	6443
+form	fallback-scripts-historic	NotoSansCoptic-Regular.ttf	13897
+form	fallback-scripts-historic	NotoSansCyproMinoan-Regular.ttf	5183
+form	fallback-scripts-historic	NotoSansCypriot-Regular.ttf	4035
+form	fallback-scripts-historic	NotoSerifDivesAkuru-Regular.ttf	79320
+form	fallback-scripts-historic	NotoSerifDogra-Regular.ttf	12375
+form	fallback-scripts-historic	NotoSansDeseret-Regular.ttf	5370
+form	fallback-scripts-historic	NotoSansDuployan-Regular.ttf	360990
+form	fallback-scripts-historic	NotoSansEgyptianHieroglyphs-Regular.ttf	269483
+form	fallback-scripts-historic	NotoSansElbasan-Regular.ttf	5391
+form	fallback-scripts-historic	NotoSansElymaic-Regular.ttf	4683
+form	fallback-scripts-historic	NotoSansGlagolitic-Regular.ttf	10899
+form	fallback-scripts-historic	NotoSansGunjalaGondi-Regular.ttf	17761
+form	fallback-scripts-historic	NotoSansMasaramGondi-Regular.ttf	11283
+form	fallback-scripts-historic	NotoSansGothic-Regular.ttf	2999
+form	fallback-scripts-historic	NotoSansGrantha-Regular.ttf	75919
+form	fallback-scripts-historic	NotoSansHanunoo-Regular.ttf	3615
+form	fallback-scripts-historic	NotoSansHatran-Regular.ttf	2111
+form	fallback-scripts-historic	NotoSansAnatolianHieroglyphs-Regular.ttf	110491
+form	fallback-scripts-historic	NotoSansPahawhHmong-Regular.ttf	8179
+form	fallback-scripts-historic	NotoSansOldHungarian-Regular.ttf	17846
+form	fallback-scripts-historic	NotoSansOldItalic-Regular.ttf	3635
+form	fallback-scripts-historic	NotoSansKawi-Regular.ttf	15680
+form	fallback-scripts-historic	NotoSansKharoshthi-Regular.ttf	16827
+form	fallback-scripts-historic	NotoSansKhojki-Regular.ttf	18071
+form	fallback-scripts-historic	NotoSerifKhitanSmallScript-Regular.ttf	122972
+form	fallback-scripts-historic	NotoSansKaithi-Regular.ttf	23697
+form	fallback-scripts-historic	NotoSansLinearA-Regular.ttf	23604
+form	fallback-scripts-historic	NotoSansLinearB-Regular.ttf	27685
+form	fallback-scripts-historic	NotoSansLycian-Regular.ttf	2091
+form	fallback-scripts-historic	NotoSansLydian-Regular.ttf	2315
+form	fallback-scripts-historic	NotoSerifMakasar-Regular.ttf	3387
+form	fallback-scripts-historic	NotoSansMahajani-Regular.ttf	6891
+form	fallback-scripts-historic	NotoSansManichaean-Regular.ttf	9819
+form	fallback-scripts-historic	NotoSansMarchen-Regular.ttf	26294
+form	fallback-scripts-historic	NotoSansMedefaidrin-Regular.ttf	13415
+form	fallback-scripts-historic	NotoSansMendeKikakui-Regular.ttf	13397
+form	fallback-scripts-historic	NotoSansMeroitic-Regular.ttf	13251
+form	fallback-scripts-historic	NotoSansModi-Regular.ttf	20175
+form	fallback-scripts-historic	NotoSansMongolian-Regular.ttf	71097
+form	fallback-scripts-historic	NotoSansMro-Regular.ttf	3535
+form	fallback-scripts-historic	NotoSansMultani-Regular.ttf	5467
+form	fallback-scripts-historic	NotoSansNagMundari-Regular.ttf	5891
+form	fallback-scripts-historic	NotoSansOldNorthArabian-Regular.ttf	3411
+form	fallback-scripts-historic	NotoSansNandinagari-Regular.ttf	41792
+form	fallback-scripts-historic	NotoSansNabataean-Regular.ttf	4155
+form	fallback-scripts-historic	NotoSansNushu-Regular.ttf	51285
+form	fallback-scripts-historic	NotoSansOgham-Regular.ttf	1483
+form	fallback-scripts-historic	NotoSansOldTurkic-Regular.ttf	3983
+form	fallback-scripts-historic	NotoSansOsmanya-Regular.ttf	4343
+form	fallback-scripts-historic	NotoSerifOldUyghur-Regular.ttf	8903
+form	fallback-scripts-historic	NotoSansPalmyrene-Regular.ttf	5383
+form	fallback-scripts-historic	NotoSansPauCinHau-Regular.ttf	4147
+form	fallback-scripts-historic	NotoSansOldPermic-Regular.ttf	4283
+form	fallback-scripts-historic	NotoSansPhagsPa-Regular.ttf	11911
+form	fallback-scripts-historic	NotoSansInscriptionalPahlavi-Regular.ttf	2935
+form	fallback-scripts-historic	NotoSansPsalterPahlavi-Regular.ttf	7171
+form	fallback-scripts-historic	NotoSansPhoenician-Regular.ttf	3399
+form	fallback-scripts-historic	NotoSansInscriptionalParthian-Regular.ttf	3827
+form	fallback-scripts-historic	NotoSansRejang-Regular.ttf	3399
+form	fallback-scripts-historic	NotoSansRunic-Regular.ttf	4159
+form	fallback-scripts-historic	NotoSansSamaritan-Regular.ttf	5591
+form	fallback-scripts-historic	NotoSansOldSouthArabian-Regular.ttf	2227
+form	fallback-scripts-historic	NotoSansSignWriting-Regular.ttf	832111
+form	fallback-scripts-historic	NotoSansShavian-Regular.ttf	3263
+form	fallback-scripts-historic	NotoSansSharada-Regular.ttf	22283
+form	fallback-scripts-historic	NotoSansSiddham-Regular.ttf	47568
+form	fallback-scripts-historic	NotoSansKhudawadi-Regular.ttf	9059
+form	fallback-scripts-historic	NotoSansSoraSompeng-Regular.ttf	4051
+form	fallback-scripts-historic	NotoSansSogdian-Regular.ttf	22717
+form	fallback-scripts-historic	NotoSansOldSogdian-Regular.ttf	6831
+form	fallback-scripts-historic	NotoSansSoyombo-Regular.ttf	21255
+form	fallback-scripts-historic	NotoSansSunuwar-Regular.ttf	7183
+form	fallback-scripts-historic	NotoSansTagbanwa-Regular.ttf	3075
+form	fallback-scripts-historic	NotoSansTakri-Regular.ttf	8775
+form	fallback-scripts-historic	NotoSerifTangut-Regular.ttf	1013721
+form	fallback-scripts-historic	NotoSansTagalog-Regular.ttf	3623
+form	fallback-scripts-historic	NotoSansTirhuta-Regular.ttf	30671
+form	fallback-scripts-historic	NotoSansTangsa-Regular.ttf	10939
+form	fallback-scripts-historic	NotoSerifTodhri-Regular.ttf	5767
+form	fallback-scripts-historic	NotoSerifToto-Regular.ttf	3203
+form	fallback-scripts-historic	NotoSansUgaritic-Regular.ttf	2775
+form	fallback-scripts-historic	NotoSansVithkuqi-Regular.ttf	9439
+form	fallback-scripts-historic	NotoSansWarangCiti-Regular.ttf	11967
+form	fallback-scripts-historic	NotoSansOldPersian-Regular.ttf	4891
+form	fallback-scripts-historic	NotoSansCuneiform-Regular.ttf	298774
+form	fallback-scripts-historic	NotoSerifYezidi-Regular.ttf	4599
+form	fallback-scripts-historic	NotoSansZanabazarSquare-Regular.ttf	6679
+form	fallback-emoji	NotoEmoji[wght].ttf	1051978
+form	fallback-math	NotoSansMath-Regular.ttf	244322
+form	fallback-music	NotoMusic-Regular.ttf	35273
+form	fallback-music	NotoZnamennyMusicalNotation-Regular.ttf	11098
+form	fallback-symbols	NotoSansSymbols-Regular.ttf	54888
+form	fallback-symbols	NotoSansSymbols2-Regular.ttf	231884
+form	fallback-symbols	NotoSansMayanNumerals-Regular.ttf	1303
+form	fallback-symbols	NotoSansIndicSiyaqNumbers-Regular.ttf	9527
+form	fallback-symbols	NotoSerifOttomanSiyaq-Regular.ttf	5555
