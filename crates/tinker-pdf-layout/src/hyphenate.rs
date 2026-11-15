@@ -495,6 +495,10 @@ mod tests {
     /// and `i`. That is `hy3phe2n5a4t2ion`, the publication's, and its odd
     /// levels make `hy-phen-ation`.
     ///
+    /// A word whose letters a dictionary does not all know gets no points, so
+    /// the two dictionaries below also hold the word's other letters as
+    /// level-free patterns, which change no gap.
+    ///
     /// `computer` under `4m1p pu2t 5pute put3er`: `4m1p` gives 4 between `o`
     /// and `m` and 1 between `m` and `p`, which `5pute` raises to 5; `pu2t`
     /// 2 between `u` and `t`; `put3er` 3 between `t` and `e` —
@@ -513,11 +517,11 @@ mod tests {
         );
         assert_eq!(hyphenated(&liang, "hyphenation"), "hy-phen-ation");
 
-        let computer = dictionary("4m1p pu2t 5pute put3er", "", (1, 1));
+        let computer = dictionary("4m1p pu2t 5pute put3er c o", "", (1, 1));
         assert_eq!(levels(&computer, "computer"), vec![0, 4, 5, 0, 2, 3, 0]);
         assert_eq!(hyphenated(&computer, "computer"), "com-put-er");
 
-        let algorithm = dictionary("l1g4 lgo3 1go 2ith 4hm", "", (1, 1));
+        let algorithm = dictionary("l1g4 lgo3 1go 2ith 4hm a r", "", (1, 1));
         assert_eq!(
             levels(&algorithm, "algorithm"),
             vec![0, 1, 4, 3, 2, 0, 4, 0]
