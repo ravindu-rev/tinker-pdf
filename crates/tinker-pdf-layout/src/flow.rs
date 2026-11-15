@@ -74,6 +74,7 @@ use tinker_pdf_css::property::{
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
+use crate::grapheme;
 use crate::hyphenate::{self, Dictionary};
 use crate::limits::MAX_EMBEDDING_DEPTH;
 use crate::metrics::{
@@ -4735,8 +4736,27 @@ impl<M: Metrics> Builder<'_, M> {
         if content.is_empty() {
             return Ok(());
         }
+        // One charge a character for deciding where the context may break:
+        // UAX #14's decision at each and the typographic character unit's
+        // below, each a constant step a character.
         self.budget.spend_breaks(content.chars().count())?;
+        // `css-text-3` §5.5: *"CSS never allows soft wrap opportunities
+        // within typographic character units"* — UAX #29's extended grapheme
+        // clusters (§1.4, `grapheme`). Every opportunity below is held to
+        // these boundaries: UAX #14's under every `line-break` and
+        // `word-break`, which break between its LB9 units and not between
+        // clusters (`anywhere` and `break-all` would part a Hangul syllable,
+        // an emoji's modifier or a flag's pair), `hyphens: auto`'s points,
+        // and `overflow-wrap`'s break inside a word ([`Builder::break_inside`]).
+        let units = grapheme::units(&content);
         let mut opportunities = uax14::opportunities(&content, container.tailoring);
+        let mut unit = 0usize;
+        opportunities.retain(|opportunity| {
+            while units.get(unit).is_some_and(|&at| at < opportunity.at) {
+                unit += 1;
+            }
+            units.get(unit) == Some(&opportunity.at)
+        });
         // `css-text-3` §5.3: under `hyphens: none` a soft hyphen is no place
         // to break a word, though UAX #14 makes it one (class `BA`).
         opportunities.retain(|opportunity| {
@@ -4746,7 +4766,7 @@ impl<M: Metrics> Builder<'_, M> {
         // §5.3's `auto`: the words of the pieces set in it whose language has
         // a table, each looked up once for this context, their points joining
         // the opportunities as breaks that end a line in a hyphen.
-        let automatic = self.automatic_points(&content, &spans, pieces, &opportunities)?;
+        let automatic = self.automatic_points(&content, &spans, pieces, &opportunities, &units)?;
         if !automatic.is_empty() {
             opportunities.extend(automatic.iter().map(|&at| uax14::Opportunity {
                 at,
@@ -4819,8 +4839,7 @@ impl<M: Metrics> Builder<'_, M> {
                 &content,
                 &spans,
                 pieces,
-                &opportunities[cursor..],
-                &automatic,
+                (&opportunities[cursor..], &automatic, &units),
                 start,
                 available,
             );
@@ -5019,14 +5038,17 @@ impl<M: Metrics> Builder<'_, M> {
     /// its letters charged to the break budget beside the characters UAX #14
     /// was charged for. A point is kept where the character before it is in a
     /// piece of the word's own table — a word that runs on into a piece in
-    /// another setting breaks only in the first — and where UAX #14 has no
-    /// opportunity of its own, which stays a break that draws no hyphen.
+    /// another setting breaks only in the first — where UAX #14 has no
+    /// opportunity of its own, which stays a break that draws no hyphen, and
+    /// where a typographic character unit of the context's ends (`units`,
+    /// `css-text-3` §5.5), as each point the table gives does within its word.
     fn automatic_points(
         &mut self,
         content: &str,
         spans: &[(usize, usize, usize)],
         pieces: &[Piece],
         opportunities: &[uax14::Opportunity],
+        units: &[usize],
     ) -> Result<Vec<usize>, Refusal> {
         if !pieces
             .iter()
@@ -5082,7 +5104,8 @@ impl<M: Metrics> Builder<'_, M> {
                 let taken = opportunities
                     .binary_search_by_key(&at, |opportunity| opportunity.at)
                     .is_ok();
-                if own && !taken {
+                let whole = units.binary_search(&at).is_ok();
+                if own && !taken && whole {
                     points.push(at);
                 }
             }
@@ -5104,14 +5127,16 @@ impl<M: Metrics> Builder<'_, M> {
     /// the first iteration and sets every paragraph as one line — which is a
     /// book with no line breaking at all, and every English fixture that
     /// happens to be shorter than a line still passes.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// `breaks` is the context's opportunities from the line's, its sorted
+    /// automatic points, and its typographic character units' boundaries,
+    /// which a break inside a word keeps to.
     fn fit(
         &mut self,
         content: &str,
         spans: &[(usize, usize, usize)],
         pieces: &[Piece],
-        opportunities: &[uax14::Opportunity],
-        automatic: &[usize],
+        (opportunities, automatic, units): (&[uax14::Opportunity], &[usize], &[usize]),
         start: usize,
         available: f64,
     ) -> (usize, bool) {
@@ -5150,9 +5175,14 @@ impl<M: Metrics> Builder<'_, M> {
                 self.overflow_wrap(spans, pieces, start),
                 OverflowWrap::BreakWord | OverflowWrap::Anywhere
             ) {
-                if let Some(at) =
-                    self.break_inside(content, spans, pieces, start, opportunity.at, available)
-                {
+                if let Some(at) = self.break_inside(
+                    content,
+                    spans,
+                    pieces,
+                    units,
+                    (start, opportunity.at),
+                    available,
+                ) {
                     return (at, false);
                 }
             }
@@ -5163,26 +5193,37 @@ impl<M: Metrics> Builder<'_, M> {
     }
 
     /// `overflow-wrap`'s last resort: the largest prefix of one unbreakable
-    /// word that fits, at least one character.
+    /// word, from `start` to `limit`, that fits, at least one typographic
+    /// character unit — `units` are the context's unit boundaries — and
+    /// never part of one: *"grapheme clusters must stay together as one
+    /// unit"* (`css-text-3` §5.4), so a letter keeps its marks and a Hangul
+    /// syllable, a conjunct, an emoji sequence or a flag stays whole however
+    /// narrow the line. Each unit is measured as one slice, as it is shaped.
     fn break_inside(
         &mut self,
         content: &str,
         spans: &[(usize, usize, usize)],
         pieces: &[Piece],
-        start: usize,
-        limit: usize,
+        units: &[usize],
+        (start, limit): (usize, usize),
         available: f64,
     ) -> Option<usize> {
         let mut width = 0.0;
         let mut last = None;
-        for (offset, ch) in content[start..limit].char_indices() {
-            let at = start + offset;
-            let next = at + ch.len_utf8();
+        let mut at = start;
+        let first = units.partition_point(|&boundary| boundary <= start);
+        for &next in units
+            .get(first..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|&&boundary| boundary <= limit)
+        {
             width += self.measure(content, spans, pieces, at, next, start);
             if width > available && last.is_some() {
                 return last;
             }
             last = Some(next);
+            at = next;
         }
         None
     }

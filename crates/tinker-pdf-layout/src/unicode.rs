@@ -149,6 +149,58 @@ pub enum Eaw {
     W,
 }
 
+/// UAX #29's Grapheme_Cluster_Break, at Unicode 17.0's thirteen values and
+/// `Other`, the value of every code point the file does not list.
+///
+/// The names are the file's own, `RI` for `Regional_Indicator` as the rules
+/// write it, so [`crate::grapheme`]'s rules read as the specification's.
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gcb {
+    /// U+000D.
+    CR,
+    /// U+000A.
+    LF,
+    /// A control, format or separator character, the line and paragraph
+    /// separators among them.
+    Control,
+    /// `Grapheme_Extend` or `Emoji_Modifier`: the nonspacing and enclosing
+    /// marks, ZWNJ, and the few spacing marks canonical equivalence needs.
+    Extend,
+    /// U+200D ZERO WIDTH JOINER.
+    ZWJ,
+    /// A regional indicator, half of a flag.
+    RI,
+    /// A prepended concatenation mark or a consonant written before its
+    /// syllable's base.
+    Prepend,
+    /// A spacing mark that extends a cluster.
+    SpacingMark,
+    /// A Hangul leading consonant jamo.
+    L,
+    /// A Hangul vowel jamo.
+    V,
+    /// A Hangul trailing consonant jamo.
+    T,
+    /// A Hangul LV syllable.
+    LV,
+    /// A Hangul LVT syllable.
+    LVT,
+    /// Anything else (`XX`).
+    Other,
+}
+
+/// UAX #29's `Indic_Conjunct_Break`, which GB9c is written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Incb {
+    /// A consonant a conjunct joins.
+    Consonant,
+    /// A mark that may sit inside a conjunct.
+    Extend,
+    /// A virama that links two consonants into one cluster.
+    Linker,
+}
+
 include!(concat!(env!("OUT_DIR"), "/ucd.rs"));
 
 /// A code point's value in a sorted `(first, last, value)` table.
@@ -304,4 +356,27 @@ pub fn is_lowercase(c: char) -> bool {
 #[must_use]
 pub fn is_letter_or_number(c: char) -> bool {
     member(LETTER_OR_NUMBER, c as u32)
+}
+
+/// The character's Grapheme_Cluster_Break, UAX #29 Table 2.
+#[must_use]
+pub fn grapheme_break(c: char) -> Gcb {
+    lookup(GRAPHEME_BREAK, c as u32, Gcb::Other)
+}
+
+/// The character's `Indic_Conjunct_Break`, or `None` where it has none.
+#[must_use]
+pub fn indic_conjunct_break(c: char) -> Option<Incb> {
+    let code = c as u32;
+    let at = INDIC_CONJUNCT_BREAK.partition_point(|&(_, last, _)| last < code);
+    INDIC_CONJUNCT_BREAK
+        .get(at)
+        .filter(|&&(first, _, _)| first <= code)
+        .map(|&(_, _, value)| value)
+}
+
+/// General_Category `M`: `Mn`, `Mc` or `Me`.
+#[must_use]
+pub fn is_mark(c: char) -> bool {
+    member(MARK, c as u32)
 }

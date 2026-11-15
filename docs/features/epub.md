@@ -125,7 +125,19 @@ a word either side of an inline block or a picture keeps its space
 (`Collapser::passed_atomic`).
 Line breaking is **UAX #14** over vendored Unicode 17.0.0 data, checked
 against every case of Unicode's own `LineBreakTest.txt`
-(`tinker-pdf-layout/tests/uax14_conformance.rs`). Advances come from the face
+(`tinker-pdf-layout/tests/uax14_conformance.rs`). **No line breaks inside a
+typographic character unit** (`css-text-3` §5.5), UAX #29's extended grapheme
+cluster (§1.4) with one tailoring — a mark never starts one, so the spacing
+marks UAX #29 leaves out of `SpacingMark`, Myanmar's vowel sign AA among
+them, stay on their letter as UAX #14 keeps them — whatever offers the break:
+UAX #14 under every `line-break` and `word-break`, whose `anywhere` and
+`break-all` break between its LB9 units, `hyphens`, or `overflow-wrap`, which
+breaks a word between units. A letter keeps its marks, a Hangul syllable its
+jamo, a conjunct its consonants, an emoji its modifier and its ZWJ sequence,
+and a flag its pair, however narrow the line (`tinker_pdf_layout::grapheme`,
+held to every case of Unicode's own `GraphemeBreakTest.txt` by
+`tests/grapheme_conformance.rs`;
+`no_break_parts_a_typographic_character_unit`). Advances come from the face
 (embedded, host-provided, or the standard-14 metrics for an unembedded
 family), one per character. Which face a character is drawn in is
 `css-fonts-4` §5's per-character walk of its run's `font-family` list — the
@@ -226,8 +238,8 @@ element's content language ([design/hyphenation.md](../design/hyphenation.md)).
 The hyphenator is `tinker_pdf_layout::hyphenate`: Liang's patterns and
 exception list compiled into one trie, each gap taking the highest level any
 matching pattern gives it and its odd levels the word's points, none inside
-the dictionary's minimums and none before a combining mark, a word with a
-letter the dictionary does not know, or longer than
+the dictionary's minimums and none inside a typographic character unit, a
+word with a letter the dictionary does not know, or longer than
 `tinker_pdf_layout::limits::MAX_HYPHENATED_WORD`, getting none. The
 `hyphenation` feature, off by default, compiles eight vendored dictionaries
 into it — Afrikaans, Church Slavonic, British English, Irish, Dutch, Polish,

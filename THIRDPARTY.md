@@ -424,7 +424,8 @@ four.
 ### `crates/tinker-pdf-layout/data/ucd`
 
 The Unicode Character Database, at the five files [UAX #14](https://www.unicode.org/reports/tr14/)'s
-line breaking algorithm needs, and three more for `text-transform`. Gap 31's plan calls the alternative by name — an
+line breaking algorithm needs, two more for [UAX #29](https://www.unicode.org/reports/tr29/)'s extended grapheme
+clusters, inside which no line breaks (`css-text-3` §5.5), and three more for `text-transform`. Gap 31's plan calls the alternative by name — an
 ASCII heuristic that breaks at spaces *"works on Project Gutenberg's entire
 catalogue, and is catastrophically wrong on CJK"* — and CONTRIBUTING rule 1 has
 no exception for a line breaker, so the third route is the one taken: published
@@ -435,12 +436,18 @@ facts about text, vendored verbatim and compiled into static tables by
 | --- | --- |
 | `LineBreak.txt` | The `Line_Break` property, which **is** the algorithm |
 | `EastAsianWidth.txt` | UAX #11, needed by LB19a and LB30 rather than by measurement: `a(` is one word and `a（` is two |
-| `extracted/DerivedGeneralCategory.txt`, here as `DerivedGeneralCategory.txt` | `Mn`/`Mc` for LB1's `SA` resolution, `Cn` for LB30b's unassigned pictographs, and `Pi`/`Pf` for LB15a and LB15b |
-| `emoji/emoji-data.txt`, here as `emoji-data.txt` | `Extended_Pictographic`, LB30b's other half |
+| `extracted/DerivedGeneralCategory.txt`, here as `DerivedGeneralCategory.txt` | `Mn`/`Mc` for LB1's `SA` resolution, `Cn` for LB30b's unassigned pictographs, `Pi`/`Pf` for LB15a and LB15b, and `Mn`/`Mc`/`Me` for the one tailoring of the grapheme clusters: a mark never starts one |
+| `emoji/emoji-data.txt`, here as `emoji-data.txt` | `Extended_Pictographic`, LB30b's other half and UAX #29's GB11 |
 | `auxiliary/LineBreakTest.txt`, here as `LineBreakTest.txt` | **The conformance oracle.** 19 338 cases, run by `tests/uax14_conformance.rs` against the same entry point a book goes through |
+| `auxiliary/GraphemeBreakProperty.txt`, here as `GraphemeBreakProperty.txt` | UAX #29's `Grapheme_Cluster_Break`, the property its extended grapheme clusters are written in: every line break opportunity is held to their boundaries (`src/grapheme.rs`). SHA-256 `d6b51d1d2ae5c33b451b7ed994b48f1f4dc62b2272a5831e7fd418514a6bae89` |
+| `auxiliary/GraphemeBreakTest.txt`, here as `GraphemeBreakTest.txt` | **The clusters' conformance oracle.** 766 cases, run by `tests/grapheme_conformance.rs` against the algorithm line breaking calls. SHA-256 `e2d134d2c52919bace503ebb6a551c1855fe1a1faec18478c78fff254a1793ec` |
 | `UnicodeData.txt` | Fields 12 to 14, the simple case mappings, for `css-text-3` §2.1's `text-transform`. Byte for byte the copy the shaping and content trees carry (SHA-256 `2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c`), which `tinker-pdf-shape/tests/ucd_version.rs` asserts |
 | `SpecialCasing.txt` | The full case mappings longer than one character — `ß` to `SS` — and the one language-independent conditional, Final_Sigma. SHA-256 `efc25faf19de21b92c1194c111c932e03d2a5eaf18194e33f1156e96de4c9588` |
-| `DerivedCoreProperties.txt` | `Cased` and `Case_Ignorable`, which are Final_Sigma's definition in Unicode §3.13, and `Lowercase`, which is `capitalize`'s *"if lowercase"*. SHA-256 `24c7fed1195c482faaefd5c1e7eb821c5ee1fb6de07ecdbaa64b56a99da22c08` |
+| `DerivedCoreProperties.txt` | `Cased` and `Case_Ignorable`, which are Final_Sigma's definition in Unicode §3.13, `Lowercase`, which is `capitalize`'s *"if lowercase"*, and `Indic_Conjunct_Break`, which UAX #29's GB9c is written in. SHA-256 `24c7fed1195c482faaefd5c1e7eb821c5ee1fb6de07ecdbaa64b56a99da22c08` |
+
+The two grapheme files are `https://www.unicode.org/Public/17.0.0/ucd/auxiliary/<file>`,
+byte for byte the copies the tools repository below carries at the commit it
+is pinned to, and each states `17.0.0` on its first line.
 
 The last three arrived on 3 October 2026 with `text-transform`, fetched from
 the Unicode Consortium's own tools repository at the commit the content tree
@@ -461,6 +468,8 @@ by the people who wrote the algorithm, and it is the only assertion available
 that a space-scanner cannot satisfy. It is a test input rather than a
 redistributed table, and it is here rather than fetched because gap 20's finding
 holds a third time: **a skipped oracle exits 0 and reads exactly like a pass.**
+`GraphemeBreakTest.txt` is here for the same reasons, beside the property file
+it tests, and is not compiled into anything either.
 
 `LICENSE.txt` is upstream's own, kept beside the data. The Unicode License v3 is
 `Unicode-3.0` in SPDX terms, which `deny.toml`'s allowlist **already permitted**

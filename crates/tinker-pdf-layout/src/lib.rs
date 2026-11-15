@@ -22,7 +22,9 @@
 //!
 //! **Line breaking is UAX #14 over the vendored UCD, checked against Unicode's
 //! own 19 338-case conformance file.** A breaker that splits at spaces passes
-//! every English test ever written. See [`uax14`].
+//! every English test ever written. See [`uax14`]. And no line breaks inside a
+//! typographic character unit, UAX #29's extended grapheme cluster, checked
+//! against its own 766-case file: see [`grapheme`].
 //!
 //! **White-space processing is `css-text-3` §4.1.1 *and* §4.1.2**, and the two
 //! run at different times over different things. See [`text`].
@@ -114,6 +116,7 @@ pub mod flex;
 pub mod floats;
 pub mod flow;
 pub mod fragment;
+pub mod grapheme;
 pub mod hyphenate;
 pub mod limits;
 pub mod metrics;

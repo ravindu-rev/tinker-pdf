@@ -28,8 +28,9 @@
 //! word holding anything else — a soft hyphen, a letter of another alphabet, a
 //! letter written decomposed where the dictionary has it composed — gets no
 //! points rather than guessed ones, and so does a word longer than
-//! [`MAX_HYPHENATED_WORD`]. No point is put before a combining mark, so none
-//! parts a letter from its mark.
+//! [`MAX_HYPHENATED_WORD`]. No point falls inside a typographic character unit
+//! ([`grapheme::units`], `css-text-3` §5.5), so none parts a letter from its
+//! mark, a Hangul syllable from its jamo or a conjunct from its consonants.
 //!
 //! # The table, and its walk
 //!
@@ -43,6 +44,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
+use crate::grapheme;
 use crate::limits::MAX_HYPHENATED_WORD;
 use crate::unicode;
 
@@ -266,7 +268,9 @@ impl Dictionary {
     ///
     /// Nothing is appended for a word with a character the dictionary does
     /// not know after folding, a word longer than [`MAX_HYPHENATED_WORD`],
-    /// or a word too short for the minimums to leave a point in.
+    /// or a word too short for the minimums to leave a point in; and no point
+    /// is appended inside one of the word's typographic character units
+    /// ([`grapheme::units`]), whatever the levels say there.
     pub fn points(&self, word: &str, out: &mut Vec<usize>) {
         looked_up();
         // `.word.`, as symbols, and where each letter starts in `word`.
@@ -310,15 +314,19 @@ impl Dictionary {
             }
             None => self.walk(padded, &mut levels),
         }
+        // The word's unit boundaries, found at its first odd level: a word
+        // with no point never needs them.
+        let mut units: Option<Vec<usize>> = None;
         for (letters_before, &start) in starts.iter().enumerate().take(n + 1 - right).skip(left) {
             let odd = levels
                 .get(letters_before + 1)
                 .is_some_and(|level| level % 2 == 1);
-            let before_a_mark = word
-                .get(start..)
-                .and_then(|rest| rest.chars().next())
-                .is_some_and(unicode::is_combining);
-            if odd && !before_a_mark {
+            if odd
+                && units
+                    .get_or_insert_with(|| grapheme::units(word))
+                    .binary_search(&start)
+                    .is_ok()
+            {
                 out.push(start);
             }
         }
@@ -637,6 +645,53 @@ mod tests {
     fn no_point_falls_before_a_combining_mark() {
         let marks = dictionary("a1\u{301} \u{301}1b", "", (1, 1));
         assert_eq!(hyphenated(&marks, "a\u{301}b"), "a\u{301}-b");
+    }
+
+    /// **No point falls inside a typographic character unit, of any kind**
+    /// (`css-text-3` §5.5, `grapheme::units`): each word below is read by a
+    /// dictionary that gives every gap of it an odd level, so its points are
+    /// exactly the boundaries between its units — after a letter's spacing
+    /// or enclosing mark and not before it, after a ZWJ, between Hangul
+    /// syllables and not between their jamo, round a conjunct and not inside
+    /// it, round an emoji's modifier, a flag's pair, and Myanmar's vowel sign
+    /// AA, which stays on its letter.
+    #[test]
+    fn no_point_falls_inside_a_typographic_character_unit() {
+        let everywhere = |word: &str| {
+            let mut letters: Vec<char> = word.chars().collect();
+            letters.sort_unstable();
+            letters.dedup();
+            let patterns: String = letters.iter().map(|c| format!("1{c}1 ")).collect();
+            dictionary(&patterns, "", (1, 1))
+        };
+        for (word, expected) in [
+            (
+                "\u{915}\u{93f}\u{915}\u{93f}",
+                "\u{915}\u{93f}-\u{915}\u{93f}",
+            ),
+            ("a\u{20dd}b\u{20dd}", "a\u{20dd}-b\u{20dd}"),
+            ("a\u{200d}b", "a\u{200d}-b"),
+            (
+                "\u{1100}\u{1161}\u{11a8}\u{1100}\u{1161}",
+                "\u{1100}\u{1161}\u{11a8}-\u{1100}\u{1161}",
+            ),
+            (
+                "\u{915}\u{94d}\u{924}\u{915}",
+                "\u{915}\u{94d}\u{924}-\u{915}",
+            ),
+            (
+                "\u{1f44d}\u{1f3fd}\u{1f44d}",
+                "\u{1f44d}\u{1f3fd}-\u{1f44d}",
+            ),
+            (
+                "\u{1f1ec}\u{1f1e7}\u{1f1eb}\u{1f1f7}",
+                "\u{1f1ec}\u{1f1e7}-\u{1f1eb}\u{1f1f7}",
+            ),
+            ("\u{1019}\u{102c}\u{1019}", "\u{1019}\u{102c}-\u{1019}"),
+            ("abc", "a-b-c"),
+        ] {
+            assert_eq!(hyphenated(&everywhere(word), word), expected, "{word:?}");
+        }
     }
 
     /// **The pattern file is read as the collection writes it**: comments,

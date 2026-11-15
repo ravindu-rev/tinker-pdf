@@ -227,6 +227,8 @@ fn each_tree_holds_the_files_its_algorithms_need() {
             "DerivedCoreProperties.txt",
             "DerivedGeneralCategory.txt",
             "EastAsianWidth.txt",
+            "GraphemeBreakProperty.txt",
+            "GraphemeBreakTest.txt",
             "LICENSE.txt",
             "LineBreak.txt",
             "LineBreakTest.txt",

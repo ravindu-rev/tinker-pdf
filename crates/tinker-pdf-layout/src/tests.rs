@@ -525,6 +525,79 @@ fn overflow_wrap_decides_what_happens_to_a_word_longer_than_the_line() {
     assert_eq!(page_text(&laid, 0), "aaaaaaaaaa");
 }
 
+/// One kind of typographic character unit each, as UAX #29 and its one
+/// tailoring make them (`grapheme`): every character ten points wide here,
+/// a mark included, so each is wider than a ten-point line.
+const UNITS: [(&str, &str); 10] = [
+    ("a nonspacing mark", "e\u{301}"),
+    ("a spacing mark", "\u{915}\u{93f}"),
+    ("an enclosing mark", "a\u{20dd}"),
+    ("a letter and a ZWJ", "a\u{200d}"),
+    ("a Hangul syllable in jamo", "\u{1100}\u{1161}\u{11a8}"),
+    ("a conjunct", "\u{915}\u{94d}\u{924}"),
+    ("an emoji and its modifier", "\u{1f44d}\u{1f3fd}"),
+    ("an emoji ZWJ sequence", "\u{1f469}\u{200d}\u{1f4bb}"),
+    ("a flag", "\u{1f1ec}\u{1f1e7}"),
+    ("Myanmar's vowel sign AA on its letter", "\u{1019}\u{102c}"),
+];
+
+/// Each line's text of three of `unit` in a row, at ten points, the
+/// paragraph and its text both set as `set` sets them.
+fn unit_lines(unit: &str, set: impl Fn(&mut ComputedStyle)) -> Vec<String> {
+    let mut paragraph = block();
+    set(&mut paragraph);
+    let mut words = base();
+    set(&mut words);
+    let laid = run(
+        &BoxNode::element(paragraph, vec![BoxNode::text(words, unit.repeat(3))]),
+        10.0,
+        400.0,
+    );
+    laid.pages[0]
+        .runs
+        .iter()
+        .map(|run| run.text.clone())
+        .collect()
+}
+
+/// **No break parts a typographic character unit, whatever offers it**
+/// (`css-text-3` §5.5: *"CSS never allows soft wrap opportunities within
+/// typographic character units"*; §1.4: the extended grapheme cluster). Three
+/// of each kind of unit in a line one character wide: `overflow-wrap:
+/// anywhere` and `break-word` break the word between units and not between
+/// the characters of one (§5.4: *"grapheme clusters must stay together as one
+/// unit"*), and `line-break: anywhere` and `word-break: break-all`, whose
+/// opportunities UAX #14 places between its LB9 units, break between
+/// clusters — so each line is one whole unit, overflowing. The one exception
+/// is §5.5's own: `break-all` keeps the ZWJ's glue (LB8a), so three letters
+/// joined by it stay one word.
+#[test]
+fn no_break_parts_a_typographic_character_unit() {
+    for (what, unit) in UNITS {
+        let whole = vec![unit.to_owned(); 3];
+        let anywhere = unit_lines(unit, |style| style.overflow_wrap = OverflowWrap::Anywhere);
+        assert_eq!(anywhere, whole, "{what}, overflow-wrap: anywhere");
+        let break_word = unit_lines(unit, |style| style.overflow_wrap = OverflowWrap::BreakWord);
+        assert_eq!(break_word, whole, "{what}, overflow-wrap: break-word");
+        let line_break = unit_lines(unit, |style| {
+            style.line_break = tinker_pdf_css::property::LineBreakStrictness::Anywhere;
+        });
+        assert_eq!(line_break, whole, "{what}, line-break: anywhere");
+        let break_all = unit_lines(unit, |style| {
+            style.word_break = tinker_pdf_css::property::WordBreak::BreakAll;
+        });
+        if unit == "a\u{200d}" {
+            assert_eq!(
+                break_all,
+                vec![unit.repeat(3)],
+                "{what}, word-break: break-all"
+            );
+        } else {
+            assert_eq!(break_all, whole, "{what}, word-break: break-all");
+        }
+    }
+}
+
 // ---- css-text-3 section 6, alignment and justification ----------------------
 
 /// The three alignments that move a line, and the one that stretches it.

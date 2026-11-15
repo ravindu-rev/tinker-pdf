@@ -31,7 +31,11 @@ from XHTML and the cascade, and paints the fragments into a PDF — and
   that is one page however tall it comes to — EPUB RS 3.3 §8.1's one page per
   spine itemref.
 - **Line breaking by UAX #14** over vendored Unicode 17.0.0, checked against
-  every case of Unicode's own `LineBreakTest.txt`.
+  every case of Unicode's own `LineBreakTest.txt`, and **never inside a
+  typographic character unit** (`css-text-3` §5.5): UAX #29's extended
+  grapheme clusters, a mark never starting one, checked against every case of
+  `GraphemeBreakTest.txt`, hold every opportunity — UAX #14's under each
+  `line-break` and `word-break`, `hyphens`' and `overflow-wrap`'s.
 - **Bounds**: every recursion and every collection has a cap in `Limits` with a
   `Refusal` that names it.
 

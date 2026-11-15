@@ -2,7 +2,7 @@
 //!
 //! THIRDPARTY.md's promise about vendored data is that *"the raw files never
 //! reach a released binary"*, and this is the half of it that keeps the
-//! promise: seven text files in, one `.rs` out, and nothing under `data/` is
+//! promise: eight text files in, one `.rs` out, and nothing under `data/` is
 //! opened at run time. `tinker-pdf-font/build.rs` does the same thing for
 //! Adobe's CMap registry and this file is deliberately in its register.
 //!
@@ -18,7 +18,7 @@
 //! later UCD therefore breaks the build until somebody reads the new class,
 //! which is the correct outcome.
 //!
-//! # What the seven property files are each for
+//! # What the eight property files are each for
 //!
 //! - `LineBreak.txt` is the Line_Break property, which is the algorithm.
 //! - `EastAsianWidth.txt` is needed by UAX #14 itself, not by measurement:
@@ -31,6 +31,15 @@
 //!   needed to know which those are.
 //! - `emoji-data.txt` is `Extended_Pictographic`, LB30b's other half.
 //!
+//! And one more that line breaking keeps to, for `css-text-3` §5.5's *"CSS
+//! never allows soft wrap opportunities within typographic character units"*:
+//!
+//! - `GraphemeBreakProperty.txt` is UAX #29's Grapheme_Cluster_Break, the
+//!   property its extended grapheme clusters are written in (`grapheme.rs`).
+//!   The same clusters need `Extended_Pictographic` (GB11), General_Category
+//!   `M` (the one tailoring) and `DerivedCoreProperties.txt`'s
+//!   `Indic_Conjunct_Break` (GB9c), from the files above.
+//!
 //! And three that are not about line breaking at all, for `css-text-3` §2.1's
 //! `text-transform`, which is laid out here because a transformed run is
 //! measured as the characters it becomes:
@@ -42,9 +51,9 @@
 //!   are Final_Sigma's definition in Unicode §3.13, and `Lowercase`, which is
 //!   `capitalize`'s *"if lowercase"*.
 //!
-//! `LineBreakTest.txt` is not read here. It is the conformance oracle and it
-//! is read by a test, because a table compiled from its own test data would
-//! prove nothing.
+//! `LineBreakTest.txt` and `GraphemeBreakTest.txt` are not read here. They
+//! are the conformance oracles and they are read by tests, because a table
+//! compiled from its own test data would prove nothing.
 //!
 //! # The hyphenation dictionaries, under the `hyphenation` feature
 //!
@@ -92,6 +101,7 @@ fn main() {
         "UnicodeData.txt",
         "SpecialCasing.txt",
         "DerivedCoreProperties.txt",
+        "GraphemeBreakProperty.txt",
     ] {
         println!("cargo:rerun-if-changed=data/ucd/{file}");
     }
@@ -149,6 +159,11 @@ fn main() {
         );
     }
     letter_or_number(&data, &mut out);
+    // UAX #29's extended grapheme clusters, which `css-text-3` §1.4 makes
+    // the typographic character units no line breaks inside (§5.5).
+    grapheme_break(&data, &mut out);
+    indic_conjunct_break(&data, &mut out);
+    mark(&data, &mut out);
 
     println!("cargo:rerun-if-changed=src/hyphenate/compile.rs");
     if std::env::var_os("CARGO_FEATURE_HYPHENATION").is_some() {
@@ -347,6 +362,90 @@ fn letter_or_number(data: &Path, out: &mut String) {
         out,
         "/// General_Category L* or N*, for capitalize's first letter unit.\n\
          pub static LETTER_OR_NUMBER: &[(u32, u32)] = &[\n{body}];",
+    );
+}
+
+/// UAX #29's Grapheme_Cluster_Break, as the file states it.
+///
+/// Each value is written as the `Gcb` variant it is, and a value this crate
+/// does not know fails the build by name, for the reason a Line_Break class
+/// does: a later UCD that added one would otherwise lay its text out as
+/// though it had not. Every code point the file does not list is `Other`
+/// (its `@missing` line, `XX`), which is the lookup's default and no row.
+fn grapheme_break(data: &Path, out: &mut String) {
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    for (first, last, value) in rows(&data.join("GraphemeBreakProperty.txt")) {
+        let variant = match value.as_str() {
+            "CR" | "LF" | "Control" | "Extend" | "ZWJ" | "Prepend" | "SpacingMark" | "L" | "V"
+            | "T" | "LV" | "LVT" => value.clone(),
+            "Regional_Indicator" => "RI".to_owned(),
+            other => {
+                panic!("GraphemeBreakProperty.txt names a value this build does not know: {other}")
+            }
+        };
+        for code in first..=last {
+            map.insert(code, variant.clone());
+        }
+    }
+    emit(out, "GRAPHEME_BREAK", "Gcb", &ranges(&map));
+}
+
+/// `Indic_Conjunct_Break`, the property UAX #29's GB9c is written in:
+/// `DerivedCoreProperties.txt`'s three-field rows `code ; InCB; value`, which
+/// [`rows`] does not read. `None`, the file's `@missing` default, has no row.
+fn indic_conjunct_break(data: &Path, out: &mut String) {
+    let path = data.join("DerivedCoreProperties.txt");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("the vendored UCD is missing: {} ({e})", path.display()));
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    for line in text.lines() {
+        let body = line.split('#').next().unwrap_or("");
+        let fields: Vec<&str> = body.split(';').map(str::trim).collect();
+        let [codes, "InCB", value] = fields.as_slice() else {
+            continue;
+        };
+        let variant = match *value {
+            "Consonant" | "Extend" | "Linker" => *value,
+            other => panic!(
+                "DerivedCoreProperties.txt names an InCB value this build does not know: {other}"
+            ),
+        };
+        let (first, last) = match codes.split_once("..") {
+            Some((a, b)) => (hex(a), hex(b)),
+            None => (hex(codes), hex(codes)),
+        };
+        for code in first..=last {
+            map.insert(code, variant.to_owned());
+        }
+    }
+    assert!(
+        !map.is_empty(),
+        "DerivedCoreProperties.txt has no InCB rows"
+    );
+    emit(out, "INDIC_CONJUNCT_BREAK", "Incb", &ranges(&map));
+}
+
+/// General_Category `M` — `Mn`, `Mc` and `Me` — which never starts a
+/// typographic character unit (`grapheme.rs`'s one tailoring).
+fn mark(data: &Path, out: &mut String) {
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    for (first, last, value) in rows(&data.join("DerivedGeneralCategory.txt")) {
+        if !matches!(value.as_str(), "Mn" | "Mc" | "Me") {
+            continue;
+        }
+        for code in first..=last {
+            map.insert(code, String::new());
+        }
+    }
+    let merged = ranges(&map);
+    let mut body = String::new();
+    for (first, last, _) in &merged {
+        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
+    }
+    let _ = writeln!(
+        out,
+        "/// General_Category Mn, Mc or Me, which never starts a typographic \
+         character unit.\npub static MARK: &[(u32, u32)] = &[\n{body}];",
     );
 }
 
