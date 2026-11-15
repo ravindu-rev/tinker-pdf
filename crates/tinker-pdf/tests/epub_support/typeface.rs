@@ -559,21 +559,13 @@ fn build(face: &Face) -> Vec<u8> {
     //
     // Every covered character gets its own copy of the outline, because
     // `loca` gives each glyph its own slice and offsets that merely repeat
-    // make every glyph empty. A face with a colour description is laid out
-    // whole: `loca` an entry a glyph and one more, glyph 0, `.notdef`,
-    // **empty** — its entry equal to the next, which a reader draws as
-    // nothing — and each glyph after it its own outline, since its tests name
-    // each rectangle by its id. A face without one keeps the layout the
-    // render fingerprints over such faces were taken with (`epub_shaped.rs`):
-    // `loca` an entry short, so that each glyph reads the outline written
-    // after its own, `.notdef` the first box and the last glyph none.
+    // make every glyph empty. `loca` holds an offset a glyph and one more:
+    // glyph 0, `.notdef`, is **empty** — its entry equal to the next, which a
+    // reader draws as nothing — and each glyph after it reads its own
+    // outline, the box or, in a colour face, the rectangle its id names.
     let outline = box_glyph(i16::try_from(face.units_per_em * 7 / 10).unwrap_or(700));
     let mut glyf = Vec::with_capacity(outline.len() * glyph_count);
-    let mut loca = if face.colour.is_some() {
-        vec![0u32, 0]
-    } else {
-        vec![0u32]
-    };
+    let mut loca = vec![0u32, 0];
     for _ in 1..base_count {
         glyf.extend_from_slice(&outline);
         loca.push(u32::try_from(glyf.len()).unwrap_or(0));
@@ -1532,4 +1524,128 @@ fn woff_checksum(tag: u32, data: &[u8]) -> u32 {
         sum = sum.wrapping_add(u32::from_be_bytes(word));
     }
     sum
+}
+
+#[cfg(test)]
+mod tests {
+    /// One table of an sfnt, read from its table directory by tag: the
+    /// record's offset and length, as the directory states them.
+    fn table<'a>(font: &'a [u8], tag: &[u8; 4]) -> &'a [u8] {
+        let word = |at: usize| {
+            usize::try_from(u32::from_be_bytes([
+                font[at],
+                font[at + 1],
+                font[at + 2],
+                font[at + 3],
+            ]))
+            .expect("a small font")
+        };
+        let count = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        let record = (0..count)
+            .map(|i| 12 + i * 16)
+            .find(|&at| &font[at..at + 4] == tag)
+            .unwrap_or_else(|| panic!("the face has no {}", String::from_utf8_lossy(tag)));
+        let (offset, length) = (word(record + 8), word(record + 12));
+        &font[offset..offset + length]
+    }
+
+    /// Every face `build` writes, with and without colour, and with each
+    /// block of glyphs a face can add — a ligature's and the joining forms' —
+    /// reads back as ISO/IEC 14496-22's `loca` lays a face out: an offset a
+    /// glyph and one more, so `.notdef`'s slice of `glyf` is empty and each
+    /// glyph after it is the outline written for it, the face's box or the
+    /// colour rectangle its id names, the last offset the end of `glyf`.
+    #[test]
+    fn every_face_reads_back_with_an_offset_a_glyph_and_one_more() {
+        // Imported here, not by the module: the benches take this file by
+        // path into binaries that compile no `#[test]`.
+        use super::{box_glyph, rectangle_glyph, Colour, Face, Joining, Ligature};
+
+        let rectangles = vec![[100, 0, 300, 500], [0, 200, 600, 400]];
+        let ligature = Ligature {
+            first: 'a',
+            second: 'b',
+            script: *b"latn",
+            feature: *b"liga",
+        };
+        let joining = Joining { script: *b"arab" };
+        for (ligated, joined, coloured) in (0..8).map(|n| (n & 1 != 0, n & 2 != 0, n & 4 != 0)) {
+            let mut face = Face::new("Fixture", "abc");
+            if ligated {
+                face = face.with_ligature(ligature);
+            }
+            if joined {
+                face = face.with_joining(joining);
+            }
+            let drawn: &[[i16; 4]] = if coloured { &rectangles } else { &[] };
+            if coloured {
+                face = face.with_colour(Colour {
+                    rectangles: rectangles.clone(),
+                    ..Colour::default()
+                });
+            }
+            let what = format!("ligature {ligated}, joining {joined}, colour {coloured}");
+            let font = face.build();
+
+            let glyphs = usize::from(u16::from_be_bytes([
+                table(&font, b"maxp")[4],
+                table(&font, b"maxp")[5],
+            ]));
+            assert_eq!(
+                glyphs,
+                usize::from(face.glyph_count(drawn.len())),
+                "{what}: maxp counts the glyphs the face says it has"
+            );
+            assert_eq!(
+                &table(&font, b"head")[50..52],
+                &[0, 1],
+                "{what}: long offsets"
+            );
+            let loca: Vec<usize> = table(&font, b"loca")
+                .chunks_exact(4)
+                .map(|w| {
+                    usize::try_from(u32::from_be_bytes([w[0], w[1], w[2], w[3]]))
+                        .expect("a small font")
+                })
+                .collect();
+            assert_eq!(
+                loca.len(),
+                glyphs + 1,
+                "{what}: an offset a glyph and one more"
+            );
+            let glyf = table(&font, b"glyf");
+            assert_eq!(
+                loca[glyphs],
+                glyf.len(),
+                "{what}: the last offset ends glyf"
+            );
+            let outline = |glyph: usize| &glyf[loca[glyph]..loca[glyph + 1]];
+
+            assert!(outline(0).is_empty(), "{what}: .notdef is empty");
+            let boxed = box_glyph(700);
+            let first_rectangle = usize::from(face.colour_glyph(0));
+            for glyph in 1..first_rectangle {
+                assert_eq!(
+                    outline(glyph),
+                    boxed.as_slice(),
+                    "{what}: glyph {glyph} is the box written for it"
+                );
+            }
+            for (n, rect) in drawn.iter().enumerate() {
+                let glyph = usize::from(face.colour_glyph(n));
+                assert_eq!(
+                    outline(glyph),
+                    rectangle_glyph(*rect).as_slice(),
+                    "{what}: glyph {glyph} is rectangle {n}"
+                );
+            }
+            for ch in ['a', 'b', 'c'] {
+                let glyph = usize::from(face.glyph_of(ch).expect("a covered character"));
+                assert!(
+                    (1..first_rectangle).contains(&glyph),
+                    "{what}: {ch:?} reaches a box"
+                );
+            }
+        }
+    }
 }
