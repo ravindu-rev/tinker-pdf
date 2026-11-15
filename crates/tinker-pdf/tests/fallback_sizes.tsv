@@ -1,0 +1,17 @@
+# Each FT-02 group's gzipped wasm beside the default profile's
+# (fallback_coverage.rs, docs/design/fallback-faces.md): bindings/js built as
+# release.yml's npm job builds the default profile, `wasm-pack build --release
+# --target web --out-dir pkg bindings/js` under `RUSTFLAGS=-D warnings`, a
+# group's with a scratch feature carrying the WOFF2 forms its census `group`
+# row counts, each counted by `gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm
+# | wc -c`, all of one revision; the run's revision, machine and day are in the
+# message of the commit that wrote it.
+wasm	profile	gzip_bytes
+wasm	default	3923839
+wasm	fallback-scripts	4832838
+wasm	fallback-scripts-limited	4519743
+wasm	fallback-scripts-historic	8090266
+wasm	fallback-emoji	4976884
+wasm	fallback-math	4171327
+wasm	fallback-music	3973921
+wasm	fallback-symbols	4229489
