@@ -881,8 +881,9 @@ draws its top. Every fragment the element's subtree draws is wrapped in it:
 boxes, pictures, text and its shadows, outlines, and the clips of the
 clipping elements inside it, written outermost first so a nested transform
 composes without a matrix being inverted. A repeating background's pattern
-carries the transform in its own `/Matrix`, since 8.7.3.1 maps a pattern
-onto the page's default space and no `cm` reaches it. The rotations and
+carries the transform in its own `/Matrix`, since 8.7.2 maps a pattern
+onto the default space of the stream it is painted in — the page's here —
+and no `cm` reaches it. The rotations and
 skews go through the SVG crate's sine (ruling 4). A matrix with no inverse —
 `scale(0)` — draws nothing. A transformed box is the containing block of its
 absolutely positioned descendants (§2), in the layout and in the clips.

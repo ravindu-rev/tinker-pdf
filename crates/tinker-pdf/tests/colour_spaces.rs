@@ -25,7 +25,16 @@ fn page(resources: &str, content: &str) -> tinker_pdf::Bitmap {
 /// stream's bytes — so unlike a shading pattern it cannot be written inline in
 /// the resource dictionary. Objects here start at 5.
 fn page_with_objects(resources: &str, content: &str, objects: &str) -> tinker_pdf::Bitmap {
-    let bytes = format!(
+    Document::open(page_bytes(resources, content, objects))
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default())
+}
+
+/// The bytes of [`page_with_objects`]'s document.
+fn page_bytes(resources: &str, content: &str, objects: &str) -> Vec<u8> {
+    format!(
         "%PDF-1.7\n\
 1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
 2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
@@ -35,13 +44,8 @@ fn page_with_objects(resources: &str, content: &str, objects: &str) -> tinker_pd
 {objects}\
 trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n",
         content.len() + 1
-    );
-
-    Document::open(bytes.into_bytes())
-        .expect("it opens")
-        .page(0)
-        .expect("a page")
-        .render(&RenderOptions::default())
+    )
+    .into_bytes()
 }
 
 /// A tiling pattern as object 5: the keys that vary, and the cell's content.
@@ -386,9 +390,10 @@ fn a_shading_pattern_paints_its_shading() {
     );
 }
 
-/// 8.7.3.1: a tiling pattern's matrix maps pattern space to the *default*
-/// space of the page, so the CTM in force when the fill happens is not part of
-/// it and the cell does not move with it.
+/// 8.7.2: a tiling pattern's matrix maps pattern space to the *default* space
+/// of the content stream it is painted in — here the page's — so the CTM in
+/// force when the fill happens is not part of it and the cell does not move
+/// with it.
 ///
 /// *Rewritten August 2026, with gap 09.* This assertion used to be
 /// `a_tiling_pattern_is_reported_rather_than_blacked_out`, and it was pinning
@@ -1040,8 +1045,9 @@ fn a_pattern_stroke_takes_the_stroking_alpha() {
     );
 }
 
-/// 8.7.3.1: a pattern's matrix maps pattern space to the *default* space of
-/// the page, so the CTM in force when the stroke happens is not part of it.
+/// 8.7.2: a pattern's matrix maps pattern space to the *default* space of the
+/// content stream it is painted in — here the page's — so the CTM in force
+/// when the stroke happens is not part of it.
 ///
 /// Both pages draw the same 8 pt rule across the same pixels; the second gets
 /// there through a doubled CTM and halved coordinates. Anchoring the pattern
@@ -1074,6 +1080,206 @@ fn a_stroked_pattern_does_not_move_with_the_transform() {
         "the gradient sits in the same place under both transforms — \
          a difference here is the pattern following the CTM"
     );
+}
+
+/// A shading pattern of [`GRADIENT`]'s ramp — red at x = 0, blue at x = 40 of
+/// its pattern space — under `/Matrix` `matrix`, as a direct dictionary.
+fn ramp(matrix: &str) -> String {
+    format!(
+        "<< /PatternType 2 /Matrix [{matrix}] /Shading \
+           << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 40 0] \
+              /Extend [true true] \
+              /Function << /FunctionType 2 /Domain [0 1] \
+                           /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >>"
+    )
+}
+
+/// A form XObject as object `number`: its `/Matrix`, its `/Resources` and its
+/// content, a box of the 40 pt square.
+fn form(number: u32, matrix: &str, resources: &str, content: &str) -> String {
+    format!(
+        "{number} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 40 40] \
+         /Matrix [{matrix}] /Resources << {resources} >> /Length {} >>\n\
+         stream\n{content}\nendstream\nendobj\n",
+        content.len() + 1
+    )
+}
+
+/// The page twin of a pattern painted in another stream: the same square
+/// filled in the page's content by the same ramp, its `/Matrix` the space
+/// 8.7.2 places the other in, composed by hand.
+fn twin(matrix: &str, square: &str) -> tinker_pdf::Bitmap {
+    page(
+        &format!("/Pattern << /P1 {} >>", ramp(matrix)),
+        &format!("/Pattern cs /P1 scn {square} re f"),
+    )
+}
+
+/// Asserts `drawn` is `twin`'s pixels, its ramp running red to blue across
+/// the square from `x0` to `x1` (page points, on the pixel row through its
+/// middle, `row`), and not the picture of the page-anchored reading,
+/// `page_anchored`.
+#[track_caller]
+fn placed_as(
+    drawn: &tinker_pdf::Bitmap,
+    twin: &tinker_pdf::Bitmap,
+    page_anchored: &tinker_pdf::Bitmap,
+    (x0, x1): (u32, u32),
+    row: u32,
+) {
+    let (left, right) = (pixel(drawn, x0 + 1, row), pixel(drawn, x1 - 2, row));
+    assert!(
+        left.0 > 180 && left.2 < 80 && right.2 > 180 && right.0 < 80,
+        "the ramp runs red to blue across the square: {left:?} to {right:?}"
+    );
+    assert_eq!(
+        first_difference(drawn, twin),
+        None,
+        "the pattern is where 8.7.2 places it"
+    );
+    assert!(
+        first_difference(drawn, page_anchored).is_some(),
+        "and a pattern anchored at the page's space would draw otherwise"
+    );
+}
+
+/// **A pattern in a form is placed in the form's space at its `Do`** (8.7.2
+/// NOTE 1, "the form coordinate space at the time the form is painted with
+/// the Do operator"): a form scaled by half through its `/Matrix`, drawn ten
+/// points up and over by a `cm`, fills its box with a ramp across its own 40
+/// units — the page's square from 10 to 30 — and draws what the page draws
+/// filling that square with the ramp under the composed `/Matrix`, where the
+/// page's space would put only the ramp's middle half there.
+#[test]
+fn a_pattern_in_a_form_is_placed_in_the_forms_space_at_its_do() {
+    let drawn = page_with_objects(
+        "/XObject << /Fm0 6 0 R >>",
+        "q 1 0 0 1 10 10 cm /Fm0 Do Q",
+        &form(
+            6,
+            "0.5 0 0 0.5 0 0",
+            &format!("/Pattern << /P0 {} >>", ramp("1 0 0 1 0 0")),
+            "/Pattern cs /P0 scn 0 0 40 40 re f",
+        ),
+    );
+    let anchored = twin("1 0 0 1 0 0", "10 10 20 20");
+    placed_as(
+        &drawn,
+        &twin("0.5 0 0 0.5 10 10", "10 10 20 20"),
+        &anchored,
+        (10, 30),
+        20,
+    );
+}
+
+/// **A form inside a form places its pattern in its own space**: each `Do`
+/// composes its `cm` and its form's `/Matrix` onto the space it is made in,
+/// so the inner form's ramp runs across its own box — x = 0.25 u + 8, the
+/// page's square from 8 to 18 — whatever the outer form's space was.
+#[test]
+fn a_pattern_in_a_nested_form_is_placed_in_the_inner_forms_space() {
+    let objects = form(
+        6,
+        "0.5 0 0 0.5 0 0",
+        "/XObject << /Fm1 7 0 R >>",
+        "q 1 0 0 1 8 8 cm /Fm1 Do Q",
+    ) + &form(
+        7,
+        "0.5 0 0 0.5 0 0",
+        &format!("/Pattern << /P0 {} >>", ramp("1 0 0 1 0 0")),
+        "/Pattern cs /P0 scn 0 0 40 40 re f",
+    );
+    let drawn = page_with_objects(
+        "/XObject << /Fm0 6 0 R >>",
+        "q 1 0 0 1 4 4 cm /Fm0 Do Q",
+        &objects,
+    );
+    let anchored = twin("1 0 0 1 0 0", "8 8 10 10");
+    placed_as(
+        &drawn,
+        &twin("0.25 0 0 0.25 8 8", "8 8 10 10"),
+        &anchored,
+        (8, 18),
+        27,
+    );
+}
+
+/// **A pattern in a Type 3 glyph is placed in the glyph's space as it is
+/// shown** (9.6.5: the description runs under "the concatenation of the font
+/// matrix ... and the text space that was in effect at the time the
+/// text-showing operator was invoked", and its patterns are its font's
+/// resources): a sixteenth-unit font matrix at 8 points is half a point a
+/// unit, so the glyph's 40-unit square, shown at (10, 10), is the page's
+/// square from 10 to 30 with the ramp across it. The pattern is in the
+/// font's `/Resources`, where Table 112 puts a description's names, and in
+/// the page's, where this engine resolves them: placed in the glyph's space
+/// from either.
+#[test]
+fn a_pattern_in_a_type3_glyph_is_placed_in_the_glyphs_space() {
+    let glyph = "40 0 d0 /Pattern cs /P0 scn 0 0 40 40 re f";
+    let objects = format!(
+        "8 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 40 40] \
+         /FontMatrix [0.0625 0 0 0.0625 0 0] /CharProcs << /g 9 0 R >> \
+         /Encoding << /Type /Encoding /Differences [65 /g] >> \
+         /FirstChar 65 /LastChar 65 /Widths [40] \
+         /Resources << /Pattern << /P0 {} >> >> >>\nendobj\n\
+         9 0 obj\n<< /Length {} >>\nstream\n{glyph}\nendstream\nendobj\n",
+        ramp("1 0 0 1 0 0"),
+        glyph.len() + 1
+    );
+    let drawn = page_with_objects(
+        &format!(
+            "/Font << /F0 8 0 R >> /Pattern << /P0 {} >>",
+            ramp("1 0 0 1 0 0")
+        ),
+        "BT /F0 8 Tf 10 10 Td (A) Tj ET",
+        &objects,
+    );
+    let anchored = twin("1 0 0 1 0 0", "10 10 20 20");
+    placed_as(
+        &drawn,
+        &twin("0.5 0 0 0.5 10 10", "10 10 20 20"),
+        &anchored,
+        (10, 30),
+        20,
+    );
+}
+
+/// **The SVG writer places a form's gradient as the renderer does**: the
+/// form page's gradient is its twin's, the same `<linearGradient>` written
+/// for the ramp the composed `/Matrix` places.
+#[test]
+fn the_svg_writer_places_a_forms_gradient_in_the_forms_space() {
+    let gradient = |bytes: Vec<u8>| -> String {
+        let svg = Document::open(bytes)
+            .expect("it opens")
+            .page(0)
+            .expect("a page")
+            .to_svg(&tinker_pdf::SvgOptions::default())
+            .markup;
+        let start = svg.find("<linearGradient").expect("a gradient is written");
+        let end = svg[start..].find('>').expect("its tag ends") + start;
+        // Past its id, which counts what the page wrote before it.
+        let tag = &svg[start..=end];
+        let id = tag.find(" gradientUnits").expect("its units follow its id");
+        tag[id..].to_owned()
+    };
+    let in_form = gradient(page_bytes(
+        "/XObject << /Fm0 6 0 R >>",
+        "q 1 0 0 1 10 10 cm /Fm0 Do Q",
+        &form(
+            6,
+            "0.5 0 0 0.5 0 0",
+            &format!("/Pattern << /P0 {} >>", ramp("1 0 0 1 0 0")),
+            "/Pattern cs /P0 scn 0 0 40 40 re f",
+        ),
+    ));
+    let on_page = gradient(page_bytes(
+        &format!("/Pattern << /P1 {} >>", ramp("0.5 0 0 0.5 10 10")),
+        "/Pattern cs /P1 scn 10 10 20 20 re f",
+        "",
+    ));
+    assert_eq!(in_form, on_page);
 }
 
 /// Choosing an ordinary colour after a pattern has to clear it, or every

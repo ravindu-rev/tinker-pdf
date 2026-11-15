@@ -466,10 +466,25 @@ counting allocator). A row's inverse-map products `c·y` and `d·y` are taken
 once a row and each pixel maps to the bits `Matrix::apply` gives it
 (`a_row_map_is_the_matrix_s_map_to_the_bit`).
 
-**Patterns** (8.7.3). Tiling patterns paint in both paint types, anchored to
-the *parent content stream's default space* as 8.7.3.1 requires — not the
-CTM in force at paint time, which is the whole correctness question in a
-tiling pattern. The cell is rasterised once into a `/BBox`-sized offscreen
+**Patterns** (8.7.3). A pattern's `/Matrix` maps its space into "the
+default coordinate system of the pattern's parent content stream" (8.7.2)
+— not into the CTM in force at paint time, which is the whole correctness
+question in a tiling pattern — and the interpreter carries that space in
+the state, `GraphicsState::pattern_space`, the CTM each stream begins with:
+for the page's content the page's default (initial) space; for a form
+XObject "the form coordinate space at the time the form is painted with
+the Do operator" (8.7.2 NOTE 1), the CTM at the `Do` with the form's
+`/Matrix` composed onto it — a transparency group's form, and an
+annotation's appearance stream, a form XObject that 12.5.5's `AA` places,
+among them; for a soft mask's group its `/Matrix` with the CTM at the `gs`
+that sets the mask (11.6.5.1); for a Type 3 glyph description the font
+matrix with the text space of the showing operator (9.6.5), the stream its
+patterns belong to; and for a tiling cell the outer pattern's space, which
+"the inner pattern's matrix" relates its own to (8.7.2 NOTE 1). Every fill,
+stroke and glyph a pattern paints, shading or tiling, takes it, as do the
+display list, which records each call's state, the command stream, whose
+`State` carries it from minor 3, and the SVG writer's gradients. Tiling
+patterns paint in both paint types. The cell is rasterised once into a `/BBox`-sized offscreen
 canvas, with the pattern's own `/Resources`, and blitted across the lattice.
 A `PaintType 2` cell is a shape (8.7.3.3): it is asked for with no colour
 and drawn as its content stream draws it, and the blit composites its

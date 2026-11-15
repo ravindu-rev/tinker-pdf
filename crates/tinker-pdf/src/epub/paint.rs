@@ -3048,9 +3048,9 @@ pub fn gradient_paint(
 /// cell, or the cell filled with one colour.
 ///
 /// A pattern even where the gradient does not repeat, for the raster path's
-/// tiled reason: 8.7.3.1 maps a pattern onto the page's default space, so the
-/// box's transform is in its matrix, and one path is one place for a
-/// gradient to be placed wrong.
+/// tiled reason: 8.7.2 maps a pattern onto the default space of the stream
+/// it is painted in, here the page's, so the box's transform is in its
+/// matrix, and one path is one place for a gradient to be placed wrong.
 ///
 /// `None` where the gradient's geometry is not finite or the writer refuses
 /// its shading or its pattern; [`Effects::plan_backgrounds`] counts each
@@ -3400,10 +3400,11 @@ impl Effects {
                         ));
                         continue;
                     }
-                    // 8.7.3.1 maps a pattern onto the page's **default**
-                    // space, which no `cm` reaches: a transformed box's
-                    // pattern carries its transform itself. One that flattens
-                    // the plane draws nothing, and needs no pattern.
+                    // 8.7.2 maps a pattern onto the **default** space of the
+                    // stream it is painted in, here the page's, which no `cm`
+                    // reaches: a transformed box's pattern carries its
+                    // transform itself. One that flattens the plane draws
+                    // nothing, and needs no pattern.
                     let Some(turned) = self.composed(&locals, fragment.anchor) else {
                         continue;
                     };
@@ -3412,9 +3413,10 @@ impl Effects {
                     let mut content = format!("{width} 0 0 {height} 0 0 cm /").into_bytes();
                     content.extend_from_slice(name);
                     content.extend_from_slice(b" Do");
-                    // 8.7.3.1: the pattern's matrix maps its cell, whose origin
-                    // is the image's bottom-left corner, onto the page's default
-                    // space, which is the space this painter draws in.
+                    // 8.7.2: the pattern's matrix maps its cell, whose origin
+                    // is the image's bottom-left corner, onto the default space
+                    // of the stream it is painted in, the page's, which is the
+                    // space this painter draws in.
                     let registered = builder.add_tiling_pattern(
                         &pattern,
                         &TilingPattern {

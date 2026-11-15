@@ -997,6 +997,10 @@ impl Exact {
     fn state(&mut self, state: &GraphicsState) -> Option<()> {
         let GraphicsState {
             ctm,
+            // Not written: a form's content runs with the pattern space made
+            // its own at the `Do` from the CTM and the form's `/Matrix`, both
+            // in the key, so the one it inherits is no part of its drawing.
+            pattern_space: _,
             text,
             fill_alpha,
             stroke_alpha,
@@ -3404,6 +3408,10 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
         if combined.is_finite() {
             self.gs.ctm = combined;
         }
+        // 8.7.2 NOTE 1: a pattern the form paints with is placed in "the form
+        // coordinate space at the time the form is painted with the Do
+        // operator", which is the CTM just made.
+        self.gs.pattern_space = self.gs.ctm;
 
         // 8.10.2: the form is clipped to its bounding box, which is expressed
         // in form space — so with `/Matrix` already folded into the CTM, the
@@ -3814,6 +3822,9 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
         if combined.is_finite() {
             self.gs.ctm = combined;
         }
+        // 11.6.5.1: "the mask's coordinate system" is that `/Matrix` and the
+        // CTM at the `gs`, and the group's patterns are placed in it (8.7.2).
+        self.gs.pattern_space = self.gs.ctm;
         let bbox = self.bbox_quad(mask.form.bbox);
 
         let accepted = self.device.begin_soft_mask(
@@ -4019,6 +4030,10 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     let saved_stack = std::mem::take(&mut self.saved);
 
                     self.gs.ctm = font_matrix.then(&transform);
+                    // 9.6.5: the description runs under the font matrix and
+                    // the text space of the showing operator, and it is the
+                    // content stream its patterns are resources of (8.7.2).
+                    self.gs.pattern_space = self.gs.ctm;
                     self.depth += 1;
                     self.device.save_state();
                     self.run(&glyph.content);
@@ -4761,6 +4776,106 @@ mod tests {
                 stream: 0x100 + u64::from(code),
             })
         }
+    }
+
+    /// The pattern spaces of the fills `events` holds, in order.
+    fn fill_pattern_spaces(events: &[crate::record::Event]) -> Vec<Matrix> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                crate::record::Event::FillPath {
+                    state: Some(state), ..
+                } => Some(state.pattern_space),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Each stream's pattern space is the CTM it began with** (8.7.2): a
+    /// `cm` in the page's content leaves the page's space; a form drawn
+    /// under one begins its own, and a form inside it another; a soft
+    /// mask's group begins at the CTM of its `gs` (11.6.5.1); a Type 3 glyph
+    /// description at the font matrix composed onto the text space of the
+    /// showing operator (9.6.5); and each is the stream's again after the
+    /// nested one ends.
+    #[test]
+    fn each_streams_pattern_space_is_the_ctm_it_began_with() {
+        let translate = |e: f64, f: f64| Matrix {
+            e,
+            f,
+            ..Matrix::IDENTITY
+        };
+        let scaled = |k: f64, e: f64, f: f64| Matrix {
+            a: k,
+            d: k,
+            e,
+            f,
+            ..Matrix::IDENTITY
+        };
+        let fonts = Named::forms(&[
+            ("F", 7, "0 0 1 1 re f q 1 0 0 1 5 5 cm /G Do Q 0 0 1 1 re f"),
+            ("G", 8, "q 3 0 0 3 0 0 cm 0 0 1 1 re f Q"),
+        ]);
+        let mut device = RecordingDevice::new();
+        interpret(
+            b"2 0 0 2 10 20 cm 0 0 1 1 re f /F Do 0 0 1 1 re f",
+            translate(1.0, 2.0),
+            &mut device,
+            &fonts,
+        );
+        assert_eq!(
+            fill_pattern_spaces(device.events()),
+            vec![
+                translate(1.0, 2.0),
+                scaled(2.0, 11.0, 22.0),
+                scaled(2.0, 21.0, 32.0),
+                scaled(2.0, 11.0, 22.0),
+                translate(1.0, 2.0),
+            ],
+            "the page's own space under its cm, the form's at its Do, the \
+             inner form's at its own, each the stream's again after"
+        );
+
+        let mut masked = Named::forms(&[]);
+        masked.mask = Some((9, b"0 0 1 1 re f".to_vec()));
+        let mut device = RecordingDevice::new().answering(Answers {
+            soft_masks: true,
+            ..Answers::default()
+        });
+        interpret(
+            b"4 0 0 4 1 1 cm /M gs 0 0 1 1 re f",
+            Matrix::IDENTITY,
+            &mut device,
+            &masked,
+        );
+        assert_eq!(
+            fill_pattern_spaces(device.events()),
+            vec![scaled(4.0, 1.0, 1.0), Matrix::IDENTITY],
+            "the mask's group at its gs, the page's own fill in the page's"
+        );
+
+        let glyphs = Named::glyphs(vec![(0x41, b"1000 0 d0 0 0 1 1 re f".to_vec())]);
+        let mut device = RecordingDevice::new();
+        interpret(
+            b"BT /T3 10 Tf 3 4 Td <41> Tj ET 0 0 1 1 re f",
+            Matrix::IDENTITY,
+            &mut device,
+            &glyphs,
+        );
+        let spaces = fill_pattern_spaces(device.events());
+        assert_eq!(spaces.len(), 2, "{spaces:?}");
+        let glyph = spaces[0];
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(
+            near(glyph.a, 0.01)
+                && near(glyph.d, 0.01)
+                && glyph.b == 0.0
+                && glyph.c == 0.0
+                && near(glyph.e, 3.0)
+                && near(glyph.f, 4.0),
+            "the glyph's: the font matrix onto the text space, {glyph:?}"
+        );
+        assert_eq!(spaces[1], Matrix::IDENTITY, "and the page's after it");
     }
 
     /// 8.10: a form that draws itself has no last run, and one that draws

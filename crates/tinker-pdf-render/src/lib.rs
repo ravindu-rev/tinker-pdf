@@ -404,8 +404,9 @@ pub enum RenderWarning {
 /// What a pattern name paints with (8.7.3).
 #[derive(Clone, Debug)]
 pub enum PatternPaint {
-    /// A shading pattern, and the matrix mapping pattern space to the page's
-    /// default space.
+    /// A shading pattern, and its `/Matrix`, mapping pattern space to the
+    /// default space of the content stream it is painted in (8.7.2,
+    /// `GraphicsState::pattern_space`).
     Shading(Box<Shading>, Matrix),
     /// A tiling pattern's geometry (8.7.3.2). The cell's *pixels* come
     /// separately, from [`GlyphSource::tile`], because rasterizing them means
@@ -429,7 +430,8 @@ pub enum PatternPaint {
 #[derive(Clone, Copy, Debug)]
 pub struct TilingPattern {
     /// `/Matrix`: pattern space to the *default* space of the pattern's parent
-    /// content stream (8.7.3.1) — not to the CTM in force when it is used.
+    /// content stream (8.7.2, `GraphicsState::pattern_space`) — not to the
+    /// CTM in force when it is used.
     pub matrix: Matrix,
     /// `/BBox` in pattern space, as `[x0, y0, x1, y1]` with `x0 < x1`.
     pub bbox: [f64; 4],
@@ -452,11 +454,12 @@ pub struct TilingPattern {
 #[derive(Clone, Debug)]
 pub struct TileRequest {
     /// Pattern space to the tile buffer's own pixels: `/Matrix`, then the
-    /// page's `base`, then the translation that puts the cell's device
-    /// rectangle at the buffer's origin.
+    /// default space of the stream the fill is in
+    /// (`GraphicsState::pattern_space`), then `base`, then the translation
+    /// that puts the cell's device rectangle at the buffer's origin.
     ///
-    /// `base` and not the paint-time CTM, which is 8.7.3.1 and the whole
-    /// correctness question in a tiling pattern.
+    /// The stream's default space and not the paint-time CTM, which is 8.7.2
+    /// and the whole correctness question in a tiling pattern.
     pub to_pixels: Matrix,
     /// `/BBox` in pattern space, so the cell can be clipped to it by the same
     /// numbers the buffer was sized from. Passed rather than re-read: two
@@ -3990,12 +3993,18 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 
     /// Fills a shape with a pattern, or reports one that cannot be.
     ///
-    /// 8.7.3.1: a pattern's matrix maps pattern space to the *default* space
-    /// of the page, not to the space in force when it is used. The CTM at fill
-    /// time is therefore not part of it, which is why `base` appears in both
-    /// branches below and `state.ctm` appears in neither. A stroke reaches
-    /// this through its outline ([`Shape::Stroke`]), so that guarantee covers
-    /// strokes too — the stroker's transform never enters the pattern.
+    /// 8.7.2: a pattern's matrix maps pattern space to "the default
+    /// coordinate system of the pattern's parent content stream", not to the
+    /// space in force when it is used: the page's default space for the
+    /// page's content, the form's coordinate space at its `Do` for a form,
+    /// and what the standard gives a soft mask's group, a Type 3 glyph
+    /// description and a tiling cell, each the CTM the interpreter began the
+    /// stream with (`GraphicsState::pattern_space`). The CTM at fill time is
+    /// therefore not part of it, which is why `state.pattern_space` and
+    /// `base` appear in both branches below and `state.ctm` in neither. A
+    /// stroke reaches this through its outline ([`Shape::Stroke`]), and a
+    /// glyph through its own, so that guarantee covers strokes and text too
+    /// — the stroker's transform never enters the pattern.
     ///
     /// `alpha` is a parameter rather than a field of `state` because 8.4.5
     /// gives painting two of them: a fill uses `ca`, a stroke uses `CA`, and
@@ -4061,8 +4070,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         overprint: Overprint,
     ) -> bool {
         // The pattern space is the shading's target space, which a
-        // function-based shading's `/Matrix` maps its domain into (Table 79).
-        let to_device = shading.placed(matrix.then(&self.base));
+        // function-based shading's `/Matrix` maps its domain into (Table 79),
+        // placed in the default space of the stream the fill is in (8.7.2).
+        let to_device = shading.placed(matrix.then(&state.pattern_space).then(&self.base));
         let stop = self.stop_predicate();
         let area = self.coverage(shape, Some(&stop));
         let alpha = alpha.clamp(0.0, 1.0);
@@ -4476,12 +4486,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             return true;
         }
 
-        // 8.7.3.1, and the whole of this function's correctness: `base`, the
-        // parent stream's default space, and not `state.ctm`. Anchoring to the
-        // paint-time CTM makes the lattice slide under every transform, which
-        // reads as a small offset rather than as a defect and is therefore
-        // never reported.
-        let to_device = tiling.matrix.then(&self.base);
+        // 8.7.2, and the whole of this function's correctness: the parent
+        // stream's default space, `state.pattern_space`, and not `state.ctm`.
+        // Anchoring to the paint-time CTM makes the lattice slide under every
+        // transform, which reads as a small offset rather than as a defect
+        // and is therefore never reported.
+        let to_device = tiling.matrix.then(&state.pattern_space).then(&self.base);
         if !to_device.is_finite() {
             return false;
         }

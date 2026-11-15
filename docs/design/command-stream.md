@@ -90,7 +90,12 @@ before it, as listing none, and a `State` record that ends before its field,
 which is written only where it is set, as not painting a fill and stroke as
 one. Minor 2 appends a field to `ShadingDefinition`, a function-based
 shading's `/Matrix`, written only where it is not the identity: a reader
-takes a definition that ends before it as the identity.
+takes a definition that ends before it as the identity. Minor 3 appends a
+field to `State`, the default space of the stream the state is in, which a
+pattern is placed in (ISO 32000-2 8.7.2), written only where it is not the
+identity, and then with the fill-and-stroke flag before it written too: a
+reader takes a state that ends before it as in the page's own space, where a
+reader of an earlier minor placed every pattern.
 
 A reference is a field `Unsigned(i)`, the `i`th record of its table counted
 from zero in stream order, or `Nothing` for none. Every definition precedes
@@ -121,7 +126,7 @@ fields, so a binding names a field without knowing the format.
 | 3 | `Stored` | rendering intent, black-point compensation, stroke overprint, fill overprint, overprint mode, alpha is shape, text knockout, flatness, smoothness, stroke adjustment, black generation, undercolour removal, transfer, halftone, halftone origin |
 | 4 | `Colorants` | kind, names, tints, which have their own ink, those inks, alternate, process; and, from minor 1, which tints are no ink and not zero — a tint of 0 a file gave as more than 0, which 8.6.7's non-zero overprint mode reads as not zero (`ColorantTint::zero`); every other byte 0 is zero, and a tint of ink listed there is malformed |
 | 5 | `Source` | the device space the components were read in, by name, or nothing for the slot's own; the components |
-| 6 | `State` | ctm; the text numbers — size, character spacing, word spacing, horizontal scale, leading, rise; render mode; font; fill alpha; stroke alpha; fill colour; stroke colour; both at sixteen bits, fill then stroke; fill ink; stroke ink; fill family; stroke family; fill colorants; stroke colorants; line width; line cap; line join; miter limit; dashes; dash phase; fill space; stroke space; fill pattern; blend; stroke pattern; stored; fill source; stroke source; and, from minor 1 and only where it is set, whether the state paints a path's fill and stroke as one object, `B`'s (11.7.4.4, `GraphicsState::fill_and_stroke`) |
+| 6 | `State` | ctm; the text numbers — size, character spacing, word spacing, horizontal scale, leading, rise; render mode; font; fill alpha; stroke alpha; fill colour; stroke colour; both at sixteen bits, fill then stroke; fill ink; stroke ink; fill family; stroke family; fill colorants; stroke colorants; line width; line cap; line join; miter limit; dashes; dash phase; fill space; stroke space; fill pattern; blend; stroke pattern; stored; fill source; stroke source; and, from minor 1 and only where it is set or the field after it is written, whether the state paints a path's fill and stroke as one object, `B`'s (11.7.4.4, `GraphicsState::fill_and_stroke`); and, from minor 3 and only where it is not the identity, the default space of the stream the state is in, the six numbers a pattern's `/Matrix` is composed onto (8.7.2, `GraphicsState::pattern_space`) |
 
 A calculator's program is a flat code — 0 a number, the next of `numbers`; 1
 an operator, the next of `operators` by its name in 7.10.5; 2 a block opening

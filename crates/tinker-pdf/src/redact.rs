@@ -120,8 +120,9 @@
 //! [`cut_cells`]): every tile of its lattice whose `/BBox` meets a rectangle
 //! is a placement of the cell — its translation, then the pattern's
 //! `/Matrix`, then the space the lattice is anchored to, which is measured
-//! twice where 8.7.2 (the painting stream's default space) and this engine's
-//! renderer (the page's) disagree — and the cell is cut at all of them, in
+//! twice where 8.7.2 (the painting stream's default space, which this
+//! engine's renderer follows) and a reader anchoring every lattice to the
+//! page's space disagree — and the cell is cut at all of them, in
 //! its own stream, since every tile runs that one stream, and named
 //! [`RedactionWarning::RepeatedForm`]. A tile the fill does not reach is
 //! measured too, because this module does not follow paths: more removed,
@@ -547,7 +548,7 @@
 //! | Injected | Caught by |
 //! | --- | ---: |
 //! | the page's cells never read, which is how it used to be | 3 |
-//! | a cell anchored only where the renderer anchors it | **1** |
+//! | a cell anchored only at the page's space, as a page-anchored reader anchors it | **1** |
 //! | every tile measured at the lattice's origin | **1** |
 //! | the lattice's last index rounded up | **1** |
 //! | a cut cell named without its pattern's name | 2 |
@@ -1827,11 +1828,11 @@ impl Cells {
     ///
     /// Anchored twice when the two readings differ. 8.7.2 puts a pattern's
     /// space in the default space of the stream that paints with it, which
-    /// for a form is the form's at the `Do`: `initial`. This engine's
-    /// renderer anchors every lattice to the page's own space
-    /// (`tinker-pdf-render`'s `base`, "never translated after
-    /// construction"). A reader either way draws the cell, so it is measured
-    /// at both, as a glyph procedure is measured in both of its scopes.
+    /// for a form is the form's at the `Do`: `initial`, where this engine's
+    /// renderer anchors it (`GraphicsState::pattern_space`). A reader that
+    /// anchors every lattice to the page's own space draws the cell there
+    /// instead. A reader either way draws the cell, so it is measured at
+    /// both, as a glyph procedure is measured in both of its scopes.
     fn read(
         &mut self,
         editor: &DocumentEditor,
@@ -11332,8 +11333,9 @@ mod patterns_and_masks {
     }
 
     /// A pattern a form paints with is measured where 8.7.2 anchors it —
-    /// the form's space at its `Do` — as well as where this engine's renderer
-    /// does, the page's. The form is drawn ten points up, so its lattice's
+    /// the form's space at its `Do`, where this engine's renderer does — as
+    /// well as where a page-anchored reader does, the page's. The form is
+    /// drawn ten points up, so its lattice's
     /// rows of text stand at y = 15 to 27 and 35 to 47 where the page's stand
     /// at 5 to 17 and 25 to 37: the band from 18 to 24 meets only the
     /// form's.

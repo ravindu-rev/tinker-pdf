@@ -950,7 +950,9 @@ impl<'a> Writer<'a> {
         }
         match self.glyphs.pattern(name) {
             Some(PatternPaint::Shading(shading, matrix)) => {
-                let to_page = matrix.then(&self.base);
+                // 8.7.2: placed in the default space of the stream the fill
+                // is in, as the renderer places it.
+                let to_page = matrix.then(&state.pattern_space).then(&self.base);
                 if let Some(gradient) = self.gradient(&shading, &to_page) {
                     let mut element = format!("<path d=\"{d}\" fill=\"url(#g{gradient})\"");
                     if even_odd {

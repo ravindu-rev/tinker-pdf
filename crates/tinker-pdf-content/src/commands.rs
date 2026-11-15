@@ -63,8 +63,13 @@ pub const MAJOR: u16 = 1;
 /// does, so a state record that ends before it reads as not. Minor 2 appends
 /// to [`CommandKind::ShadingDefinition`] a function-based shading's
 /// `/Matrix` (Table 79), written only where it is not the identity, so a
-/// definition that ends before it reads as the identity.
-pub const MINOR: u16 = 2;
+/// definition that ends before it reads as the identity. Minor 3 appends to
+/// [`CommandKind::State`] the default space of the stream the state is in
+/// (`GraphicsState::pattern_space`, ISO 32000-2 8.7.2), written only where it
+/// is not the identity — the fill-and-stroke flag before it written then as
+/// well — so a state record that ends before it reads as the page's own
+/// space, which is where a reader of an earlier minor anchored every pattern.
+pub const MINOR: u16 = 3;
 
 /// The most glyphs one [`CommandKind::GlyphRun`] holds; a longer run of one
 /// font and state is written as several.
@@ -247,7 +252,7 @@ kinds! {
     3 Stored "Stored" ["rendering intent", "black-point compensation", "stroke overprint", "fill overprint", "overprint mode", "alpha is shape", "text knockout", "flatness", "smoothness", "stroke adjustment", "black generation", "undercolour removal", "transfer", "halftone", "halftone origin"]
     4 Colorants "Colorants" ["kind", "names", "tints", "own inks", "inks", "alternate", "process", "no ink and not zero"]
     5 Source "Source" ["family", "components"]
-    6 State "State" ["ctm", "text numbers", "render mode", "font", "fill alpha", "stroke alpha", "fill colour", "stroke colour", "sixteen bits", "fill ink", "stroke ink", "fill family", "stroke family", "fill colorants", "stroke colorants", "line width", "line cap", "line join", "miter limit", "dashes", "dash phase", "fill space", "stroke space", "fill pattern", "blend", "stroke pattern", "stored", "fill source", "stroke source", "fill and stroke"]
+    6 State "State" ["ctm", "text numbers", "render mode", "font", "fill alpha", "stroke alpha", "fill colour", "stroke colour", "sixteen bits", "fill ink", "stroke ink", "fill family", "stroke family", "fill colorants", "stroke colorants", "line width", "line cap", "line join", "miter limit", "dashes", "dash phase", "fill space", "stroke space", "fill pattern", "blend", "stroke pattern", "stored", "fill source", "stroke source", "fill and stroke", "pattern space"]
     16 BeginText "BeginText" []
     17 GlyphRun "GlyphRun" ["state", "font id", "font name", "size", "vertical", "codes", "text lengths", "text", "transforms", "advances", "baseline glyphs", "baselines"]
     18 EndText "EndText" []
@@ -1937,10 +1942,16 @@ impl EventWriter {
             .with(reference(stored))
             .with(reference(fill_source))
             .with(reference(stroke_source));
-        // Minor 1, written only where it is set: every other state's record
-        // is the bytes it was.
-        if state.fill_and_stroke {
-            record = record.with(flag(true));
+        // Minor 1, written only where it is set, and minor 3 only where it is
+        // not the identity: every other state's record is the bytes it was.
+        // By the bits, so a negative zero is carried as it was.
+        let bits = |m: &Matrix| [m.a, m.b, m.c, m.d, m.e, m.f].map(f64::to_bits);
+        let placed = bits(&state.pattern_space) != bits(&Matrix::IDENTITY);
+        if state.fill_and_stroke || placed {
+            record = record.with(flag(state.fill_and_stroke));
+        }
+        if placed {
+            record = record.with(matrix_field(&state.pattern_space));
         }
         self.states.index(record, &mut self.head)
     }
@@ -2841,6 +2852,16 @@ impl EventReader {
             fill_source: source(27)?,
             stroke_source: source(28)?,
             fill_and_stroke: fields.appended_flag(29)?,
+            pattern_space: fields
+                .appended_reals(30, 6)?
+                .map_or(Matrix::IDENTITY, |v| Matrix {
+                    a: v[0],
+                    b: v[1],
+                    c: v[2],
+                    d: v[3],
+                    e: v[4],
+                    f: v[5],
+                }),
         };
         let weight = state_weight(&state);
         meter.spend(weight)?;
@@ -3999,6 +4020,76 @@ mod tests {
         }
     }
 
+    /// **A state's pattern space reads back by its bits** (minor 3, 8.7.2): a
+    /// state inside a form, its space neither the identity nor painting a
+    /// fill and stroke as one, carries the flag before the field and the
+    /// six numbers, a negative zero among them, and reads back with both; a
+    /// state in the page's own space carries neither, so its record ends
+    /// where it did before the field existed, and such a record — as an
+    /// earlier minor wrote every state — reads back in the page's space.
+    #[test]
+    fn a_states_pattern_space_reads_back() {
+        let plain = GraphicsState::new(Matrix::IDENTITY);
+        let placed = Matrix {
+            a: 0.5,
+            b: -0.0,
+            c: 0.0,
+            d: 0.5,
+            e: 10.0,
+            f: 6.25,
+        };
+        let inside = GraphicsState {
+            pattern_space: placed,
+            ..plain.clone()
+        };
+        let events = vec![
+            Event::FillPath {
+                path: every_path(),
+                even_odd: false,
+                state: Some(Box::new(inside.clone())),
+            },
+            Event::FillPath {
+                path: every_path(),
+                even_odd: false,
+                state: Some(Box::new(plain.clone())),
+            },
+        ];
+        let read = decode_events(&encode_events(&events), &Budgets::DEFAULT).expect("it reads");
+        let spaces: Vec<(Matrix, bool)> = read
+            .iter()
+            .filter_map(|event| match event {
+                Event::FillPath {
+                    state: Some(state), ..
+                } => Some((state.pattern_space, state.fill_and_stroke)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spaces, vec![(placed, false), (Matrix::IDENTITY, false)]);
+        assert_eq!(
+            spaces[0].0.b.to_bits(),
+            (-0.0f64).to_bits(),
+            "the negative zero is kept"
+        );
+
+        let mut writer = EventWriter::new();
+        for event in &events {
+            writer.event(event);
+        }
+        let (head, body) = writer.finish();
+        let state = CommandKind::State.number();
+        let lengths: Vec<usize> = head
+            .iter()
+            .chain(body.iter())
+            .filter(|record| record.kind == state)
+            .map(|record| record.fields.len())
+            .collect();
+        assert_eq!(
+            lengths,
+            vec![31, 29],
+            "the flag and the space only where the space is not the identity"
+        );
+    }
+
     /// **A newer minor's unknown record is skipped**, wherever it stands, and
     /// a field a newer minor appends to a known kind is ignored; the same
     /// record in a stream of this minor is refused.
@@ -4246,7 +4337,8 @@ mod tests {
         assert_eq!(CommandKind::from_number(38), None);
         assert_eq!(CommandKind::from_number(80), None);
         assert_eq!(CommandKind::GlyphRun.fields().len(), 12);
-        assert_eq!(CommandKind::State.fields().len(), 30);
+        // Minor 3's pattern space is the thirty-first.
+        assert_eq!(CommandKind::State.fields().len(), 31);
     }
 
     /// The xorshift a seeded campaign draws from: the same choices on every

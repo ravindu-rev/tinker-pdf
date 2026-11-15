@@ -828,6 +828,38 @@ static INITIAL_STORED: StoredParameters = StoredParameters::INITIAL;
 pub struct GraphicsState {
     /// The current transformation matrix.
     pub ctm: Matrix,
+    /// The default coordinate space of the content stream running, as the
+    /// CTM it began with: what a pattern it paints with maps its pattern
+    /// space into (ISO 32000-2 8.7.2, "the default coordinate system of the
+    /// pattern's parent content stream"), so the CTM at the paint is no part
+    /// of a pattern's place and every `cm` the stream makes leaves it.
+    ///
+    /// The interpreter sets it where a stream begins, by what the standard
+    /// gives each:
+    ///
+    /// - a page's content: the page's default (initial) coordinate space
+    ///   (8.7.2 NOTE 1), the CTM an interpretation is begun with;
+    /// - a form XObject: "the form coordinate space at the time the form is
+    ///   painted with the Do operator" (8.7.2 NOTE 1), the CTM at the `Do`
+    ///   with the form's `/Matrix` composed onto it (8.10.2) — a
+    ///   transparency group's form and an annotation's appearance stream,
+    ///   which "is a form XObject" whose `/Matrix` and 12.5.5's `A` place it
+    ///   (12.5.5's `AA`), among them;
+    /// - a soft mask's group: "the transformation matrix specified by the
+    ///   Matrix entry ... concatenated with the current transformation matrix
+    ///   at the moment the soft mask is established" by `gs` (11.6.5.1);
+    /// - a Type 3 glyph description: the CTM it is executed with, "the
+    ///   concatenation of the font matrix ... and the text space that was in
+    ///   effect at the time the text-showing operator was invoked" (9.6.5) —
+    ///   the description is the content stream its patterns are resources
+    ///   of;
+    /// - a tiling pattern's cell: its own pattern space, so a pattern it
+    ///   paints with is placed in the outer pattern's ("the inner pattern's
+    ///   matrix defines its relationship to the pattern space of the outer
+    ///   pattern", 8.7.2 NOTE 1), the CTM the cell is interpreted with.
+    ///
+    /// Restored with the rest of the state where the stream ends.
+    pub pattern_space: Matrix,
     /// Text parameters.
     pub text: TextState,
     /// `ca`, the non-stroking alpha.
@@ -939,11 +971,13 @@ pub struct ColorSource {
 }
 
 impl GraphicsState {
-    /// The initial state for a page.
+    /// The initial state for a stream begun under `ctm`, which is then the
+    /// stream's default coordinate space ([`GraphicsState::pattern_space`]).
     #[must_use]
     pub fn new(ctm: Matrix) -> GraphicsState {
         GraphicsState {
             ctm,
+            pattern_space: ctm,
             text: TextState::default(),
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
