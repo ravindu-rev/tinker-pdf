@@ -10,6 +10,7 @@
 use tinker_pdf::{Bitmap, Document, PixelFormat, PixelRegion, RenderOptions};
 
 mod render_support;
+mod written_support;
 
 /// A one-page document `width` by `height` points, its resources `resources`
 /// (object 4) and its content `content` (object 5), with `extra` as objects 6
@@ -873,7 +874,12 @@ fn flatness_sets_the_tolerance_a_curve_is_flattened_to() {
                 page.raw(b"0.9 0.1 0.1 rg 0 0 96 48 re f");
             }
         });
-        render(builder.finish(), &options).data
+        let bytes = builder.finish();
+        written_support::authored(
+            &format!("the glyph under {flatness:?} in mode {mode}"),
+            &bytes,
+        );
+        render(bytes, &options).data
     };
     for mode in [0, 7] {
         assert_eq!(glyph("0.2 i", mode), glyph("", mode), "mode {mode}: 0.2 i");
@@ -907,7 +913,9 @@ fn a_text_clip_flattens_each_glyph_at_its_own_flatness() {
             page.raw(format!("BT /F0 30 Tf 7 Tr 4 10 Td (01) Tj {between} (23) Tj ET").as_bytes());
             page.raw(b"0 Tr 0.9 0.1 0.1 rg 0 0 96 48 re f");
         });
-        render(builder.finish(), &options).data
+        let bytes = builder.finish();
+        written_support::authored(&format!("the clip under {before:?}, {between:?}"), &bytes);
+        render(bytes, &options).data
     };
     let coarse = clip("30 i", "");
     assert_eq!(clip("30 i", "30 i"), coarse, "one flatness, set twice");
@@ -943,7 +951,9 @@ fn a_glyph_mask_is_kept_per_flatness() {
                 }
             }
         });
-        render(builder.finish(), &options)
+        let bytes = builder.finish();
+        written_support::authored(&format!("the runs {left:?} and {right:?}"), &bytes);
+        render(bytes, &options)
     };
     // The left or the right 96 columns, row after row.
     let half = |bitmap: &Bitmap, right: bool| -> Vec<u8> {
