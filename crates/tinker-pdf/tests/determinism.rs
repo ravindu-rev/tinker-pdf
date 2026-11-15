@@ -3125,44 +3125,71 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     // reading the lookup table through a grid (P-22.4) shows as a move of the
     // CMYK picture's pixels and of nothing else; `default_spaces`, whose
     // `/DefaultCMYK` is an `mft2` table too, is the other page it may move.
-    ("icc", ""),
+    (
+        "icc",
+        "79955adcd06da0f4bca98631d0cc9675cd4abc8ee9e0775b07baf9b2fc7e02b6",
+    ),
     // The reduced JPEG decodes: every scale a draw asks for — a half, a
     // quarter and an eighth — over a baseline and a progressive 4:2:0 frame
     // whose last block column and row are partly past the image, and the
     // reduced grid placed flipped, turned and clipped.
-    ("jpeg_minified", ""),
+    (
+        "jpeg_minified",
+        "5ce875da5707e6071af772e4f259973ff72dad4a05b0d83f428cc5dbfe2f7c0a",
+    ),
     // The reduced JPEG 2000 decodes: one level dropped and two, of the 5/3
     // and the 9/7, over images whose reduced grid's last sample stands for
     // less than a whole one and over subsampled components, placed flipped,
     // turned, sheared and clipped, and a draw whose size would drop a level
     // its codestream does not have.
-    ("jpx_minified", ""),
+    (
+        "jpx_minified",
+        "4a178afd772cccf04cbe99c026869bb1ab4c47c8c5b254eaee90e4b6bbcd069d",
+    ),
     // A fill, an image and an axial shading through one table profile under
     // each of the four intents: each intent's table, and absolute
     // colorimetric's scaling by the media white, on every target.
-    ("intents", ""),
+    (
+        "intents",
+        "663a7abb023beb4db0f6c6296a7f7f076003fd12fefa08e4176f69cfaa1877f9",
+    ),
     // A substituted face drawing unembedded Adobe-Japan1 text by character:
     // the inverted `Uni*-UTF32` tables, the face's `cmap` and its `vert`, on
     // every target, in a build with the predefined CMaps.
     #[cfg(feature = "cmap-predefined")]
-    ("substituted_cjk", ""),
+    (
+        "substituted_cjk",
+        "cd107d384f3ade49b2128aedb5fcc79f773d7144c0516b3bf962c6061d1c3c5f",
+    ),
     // A substituted face drawing every code of Symbol's and ZapfDingbats'
     // built-in encodings by its glyph name, through the face's `post`
     // names, on every target.
-    ("substituted_symbols", ""),
+    (
+        "substituted_symbols",
+        "e62b3ae1e2514959be139ad84b4702f2b68fa7e3369669708ad415fa9604da78",
+    ),
     // An `/MMType1` font's embedded multiple-master program drawn at the
     // instance its name gives, on every target.
-    ("multiple_master", ""),
+    (
+        "multiple_master",
+        "5dd2a2c56f5280db6e299fbf1bf698bfbd47cd0b4f7e0da8cf46785aeed120b1",
+    ),
     // A page of a generated book set in `hyphens: auto` in British English,
     // its lines broken at the vendored `en-GB` dictionary's points (FT-15.7):
     // the trie walk, the points joined to UAX #14's opportunities and the
     // hyphen drawn at a line's end, on every target. Held in a build with the
     // `hyphenation` feature, which the page needs; its value is a run's.
     #[cfg(feature = "hyphenation")]
-    ("hyphenation", ""),
+    (
+        "hyphenation",
+        "3b37f4579a6fc8da4015861b0214eae04116a4cbbebea37927459eef60bcd863",
+    ),
     // A colour face's `COLR` version 1, `sbix` and `SVG ` glyphs written as
     // Type 3 procedures, on every target.
-    ("colour_glyphs", ""),
+    (
+        "colour_glyphs",
+        "749e7432242e35a68fac2b920d6db2b0e30e7665b026796db543b7a2ad90dbee",
+    ),
 ];
 
 #[test]
@@ -3545,17 +3572,44 @@ fn svg_output_is_stable_across_targets() {
             "bilevel",
             "17704be079071402a99457f13912c81f590ee940ff3625c311ec39ee19ac9f7f",
         ),
-        ("icc", ""),
-        ("jpeg_minified", ""),
-        ("jpx_minified", ""),
-        ("intents", ""),
+        (
+            "icc",
+            "47dc9a18e2982067ce364561978ba459b6958afc99f342f55991b8e084974077",
+        ),
+        (
+            "jpeg_minified",
+            "bc836781ed5b97b1346e926c639891bd7d4a02dd305d63e8b7dcdc471421e5fc",
+        ),
+        (
+            "jpx_minified",
+            "29fe07b17d9f3bc9e3961e605de01343e75e2c3959957ed03305a213f3c9db82",
+        ),
+        (
+            "intents",
+            "6e94bebfee0818ed8e19b4e1055157e40ff2b29ab8fe493eb8b86b20bfa717fb",
+        ),
         #[cfg(feature = "cmap-predefined")]
-        ("substituted_cjk", ""),
-        ("substituted_symbols", ""),
-        ("multiple_master", ""),
+        (
+            "substituted_cjk",
+            "72288612f14f371366c41d9e7f18dcec4187625dd02a8080bf55d7b4d40116f8",
+        ),
+        (
+            "substituted_symbols",
+            "87205b73cf1cb8f36f81a283ca6ce4b0e26b2a91c916cf65574dfceecd122cd8",
+        ),
+        (
+            "multiple_master",
+            "6f82dfd1cb717371abce22d20f8917ea071f48de70f16003bcad7c2b9bacc517",
+        ),
         #[cfg(feature = "hyphenation")]
-        ("hyphenation", ""),
-        ("colour_glyphs", ""),
+        (
+            "hyphenation",
+            "debd91b21ea7c95543b9d0d79c22957eee0fdb61e6f1499e60c36491ae84c9a9",
+        ),
+        (
+            "colour_glyphs",
+            "bba20320a6bef2b760022e8cf103cac1f6ca8f193f159b89a079a86b28d4c4fa",
+        ),
     ];
     assert_eq!(
         expected.len(),
@@ -3971,26 +4025,53 @@ fn icc_transform_sets() -> Vec<(&'static str, Answers)> {
 const ICC_TRANSFORMS: &[(&str, &str)] = &[
     // A matrix/TRC profile's three curve types inverted, and a grey
     // profile's under XYZ and under Lab, each intent's way in and out.
-    ("output_models", ""),
+    (
+        "output_models",
+        "fbaaeadad871a3454d61b80787789868a9d8476dc7067e8e3cf148818829a763",
+    ),
     // `mft2` and `mft1` out of Lab, one table an intent, and `mft2` out of
     // XYZ through its matrix.
-    ("output_lut", ""),
+    (
+        "output_lut",
+        "f3b8f94ee1b2a07bbc35e91fc674f8d64ca3d6bccb43db6b6e2cbba7c3081a02",
+    ),
     // An `mAB ` in and an `mBA ` of all five stages out.
-    ("output_mba", ""),
+    (
+        "output_mba",
+        "b2d96902257efefb3311a6d28e458359ba8ada5288a76bb8c6e12d6db95121ec",
+    ),
     // A link through its `D2B0`, and one through its `A2B0`.
-    ("link", ""),
+    (
+        "link",
+        "91bcde4830dadd693b23b50c36ae9dfecb5d40af2ced1e3ee170043ab56e750d",
+    ),
     // A gamut tag's in and out under each intent.
-    ("gamut", ""),
+    (
+        "gamut",
+        "d187cb485ec1f4597011404120c1fa77022c26b6a944aa79cefbad9efb33f448",
+    ),
     // Named colours over Lab and over XYZ.
-    ("named", ""),
+    (
+        "named",
+        "5526c4037291061447338bffa798dc4d9b13bb3e953831626251863652b98f28",
+    ),
     // `D2B0` and `B2D0` beside a model, and a version 5 profile's elements
     // both ways.
-    ("multi_process", ""),
+    (
+        "multi_process",
+        "04c1689eeeebcb8fdb3e0f547bb1516d06fe0345d49b56a82d797db9d6714314",
+    ),
     // A calculator element in, sampled calculator curves out.
-    ("calculator", ""),
+    (
+        "calculator",
+        "178047f794a22840970fd2a7643e07baea57f71f4ee0da70ff8dda48f000e012",
+    ),
     // Reflectance spectra reduced in, and the viewing conditions connected
     // both ways.
-    ("spectral", ""),
+    (
+        "spectral",
+        "930a717374fc66e10cd97cb13d680d0d3d9c6a3b8ea352aba2d939894b0588d9",
+    ),
 ];
 
 /// **Every transform RC-20 reads answers the same on every target**: the
@@ -4147,7 +4228,7 @@ fn v5_page() -> Vec<u8> {
 ///
 /// A run's output, recorded from `cargo test` on the first target it runs
 /// on, which prints the value to paste, and held there on every other.
-const V5_PAGE: &str = "";
+const V5_PAGE: &str = "a333609d7530ff120e924b265444ba59e3453ed488e103c28e944d29cbb24da9";
 
 /// **A page drawn through version 5 profiles renders the same on every
 /// target** (RC-20.14): [`v5_page`]'s three pictures, each through its own
@@ -4215,7 +4296,7 @@ fn a_v5_profiled_page_renders_the_same_on_every_target() {
 ///
 /// A run's output, recorded from `cargo test` on the first target it runs
 /// on, which prints the value to paste, and held there on every other.
-const FONT_MEASUREMENTS: &str = "";
+const FONT_MEASUREMENTS: &str = "34a4b74d26b584b78b4fca8ae985bb23f958b88e2aaa9650a2383cad5cf92164";
 
 /// The sizes the measurement fingerprint asks each `_at` answer and each
 /// text's length at: fractions, three of them with no exact binary form.
@@ -4632,7 +4713,7 @@ fn the_synthesised_fixed_document_is_the_same_bytes_on_every_target() {
 ///
 /// A run's output, recorded from `cargo test` on the first target it runs
 /// on, which prints the value to paste, and held there on every other.
-const SAVED_TYPE1_SUBSET: &str = "";
+const SAVED_TYPE1_SUBSET: &str = "33bd9bbc2c0dc851958ca440bcf4a60e87fb53b46ccb0ff4a54fb3fe6d77c6a7";
 
 /// A page drawing `AB` and `Aacute` in a Type 1 font whose program also
 /// carries `C`, a subroutine only `C` calls and the flex and hint
@@ -4760,7 +4841,8 @@ fn the_saved_type1_subset_is_the_same_bytes_on_every_target() {
 ///
 /// A run's output, recorded from `cargo test` on the first target it runs
 /// on, which prints the value to paste, and held there on every other.
-const SAVED_TYPE1_CONVERTED: &str = "";
+const SAVED_TYPE1_CONVERTED: &str =
+    "bb3d94f19e18098276fc124d36464c71a5583ba8bb1c2edbbbf45274ba11f2c1";
 
 /// **The converted Type 1 font's page is the same bytes on every target**
 /// (FT-11.8): the conversion's charstrings, its charset and encoding and the
@@ -4813,40 +4895,73 @@ fn the_converted_type1_font_is_the_same_bytes_on_every_target() {
 /// Every value is a run's output and is recorded from one, the four targets
 /// agreeing, as a render fingerprint is.
 const MARK_BOXES: &[(&str, &str)] = &[
-    ("text", ""),
-    ("gs_text", ""),
-    ("curves", ""),
-    ("shading", ""),
-    ("blend", ""),
-    ("pattern", ""),
-    ("optional", ""),
-    ("image", ""),
-    ("transparency", ""),
-    ("tiling", ""),
-    ("jbig2", ""),
-    ("mesh", ""),
-    ("jpx", ""),
-    ("cbz", ""),
-    ("xps", ""),
-    ("epub", ""),
-    ("analytic_axial", ""),
-    ("analytic_radial", ""),
-    ("analytic_blend", ""),
-    ("analytic_image", ""),
-    ("default_spaces", ""),
-    ("strokes", ""),
-    ("bilevel", ""),
-    ("icc", ""),
-    ("jpeg_minified", ""),
-    ("jpx_minified", ""),
-    ("intents", ""),
+    (
+        "text",
+        "(10.28, 40.0, 182.39999999999995, 69.8) (10, 30, 173, 30)",
+    ),
+    (
+        "gs_text",
+        "(10.28, 40.0, 182.39999999999995, 69.8) (10, 30, 173, 30)",
+    ),
+    ("curves", "(8.5, 8.5, 115.35, 85.35) (8, 14, 108, 78)"),
+    ("shading", "(0.0, 0.0, 120.0, 80.0) (0, 0, 120, 80)"),
+    ("blend", "(0.0, 0.0, 80.0, 80.0) (0, 0, 80, 80)"),
+    ("pattern", "(8.0, 8.0, 110.0, 60.0) (8, 20, 102, 52)"),
+    ("optional", "(3.5, 5.0, 116.5, 75.5) (3, 4, 114, 71)"),
+    ("image", "(5.0, 15.0, 144.0, 115.0) (5, 5, 139, 100)"),
+    ("transparency", "(0.0, 0.0, 120.0, 76.0) (0, 4, 120, 76)"),
+    ("tiling", "(6.0, 6.0, 115.875, 78.375) (6, 1, 110, 73)"),
+    ("jbig2", "(0.0, 3.0, 128.0, 120.0) (0, 0, 128, 117)"),
+    ("mesh", "(0.0, 0.0, 120.0, 80.0) (0, 0, 120, 80)"),
+    ("jpx", "(4.0, 12.0, 156.0, 48.0) (4, 12, 152, 36)"),
+    ("cbz", "(0.0, 0.0, 40.0, 40.0) (0, 0, 40, 40)"),
+    (
+        "xps",
+        "(75.0, 487.798828125, 225.0, 717.0) (75, 75, 150, 230)",
+    ),
+    (
+        "epub",
+        "(36.0, 53.903999999999996, 392.3280000000001, 533.208) (36, 114, 357, 481)",
+    ),
+    ("analytic_axial", "(0.0, 0.0, 16.0, 16.0) (0, 0, 16, 16)"),
+    ("analytic_radial", "(0.0, 0.0, 16.0, 16.0) (0, 0, 16, 16)"),
+    ("analytic_blend", "(0.0, 0.0, 48.0, 36.0) (0, 0, 48, 36)"),
+    ("analytic_image", "(0.0, 0.0, 16.0, 16.0) (0, 0, 16, 16)"),
+    ("default_spaces", "(0.0, 0.0, 120.0, 80.0) (0, 0, 120, 80)"),
+    (
+        "strokes",
+        "(4.25, 2.6534189489476074, 86.35000000000001, 128.7876386078303) (4, 2, 83, 127)",
+    ),
+    ("bilevel", "(2.3, 5.85, 87.05, 160.9) (2, 4, 86, 156)"),
+    ("icc", "(0.0, 0.0, 120.0, 80.0) (0, 0, 120, 80)"),
+    (
+        "jpeg_minified",
+        "(3.3, 50.6, 106.7, 151.6) (3, 5, 104, 102)",
+    ),
+    ("jpx_minified", "(3.3, 12.8, 86.2, 76.1) (3, 3, 84, 65)"),
+    ("intents", "(0.0, 0.0, 160.0, 60.0) (0, 0, 160, 60)"),
     #[cfg(feature = "cmap-predefined")]
-    ("substituted_cjk", ""),
-    ("substituted_symbols", ""),
-    ("multiple_master", ""),
+    (
+        "substituted_cjk",
+        "(28.0, 28.0, 462.0, 101.6) (28, 18, 434, 74)",
+    ),
+    (
+        "substituted_symbols",
+        "(2.0, 3.0, 637.0, 372.0) (2, 12, 635, 369)",
+    ),
+    (
+        "multiple_master",
+        "(11.6, 12.8, 69.36, 33.0718792866941) (11, 26, 59, 22)",
+    ),
     #[cfg(feature = "hyphenation")]
-    ("hyphenation", ""),
-    ("colour_glyphs", ""),
+    (
+        "hyphenation",
+        "(42.0, 42.80400000000009, 248.1240000000001, 310.404) (42, 49, 207, 269)",
+    ),
+    (
+        "colour_glyphs",
+        "(24.0, 22.0, 136.0, 56.0) (24, 24, 112, 34)",
+    ),
 ];
 
 /// **The page analysis's box is the same number on every target.** The box is
@@ -5061,40 +5176,136 @@ fn a_command_stream_replays_every_fingerprinted_page_byte_for_byte() {
 /// agreeing; [`the_command_stream_is_the_same_bytes_on_every_target`] prints
 /// the lines to paste.
 const COMMAND_STREAMS: &[(&str, &str)] = &[
-    ("text", ""),
-    ("gs_text", ""),
-    ("curves", ""),
-    ("shading", ""),
-    ("blend", ""),
-    ("pattern", ""),
-    ("optional", ""),
-    ("image", ""),
-    ("transparency", ""),
-    ("tiling", ""),
-    ("jbig2", ""),
-    ("mesh", ""),
-    ("jpx", ""),
-    ("cbz", ""),
-    ("xps", ""),
-    ("epub", ""),
-    ("analytic_axial", ""),
-    ("analytic_radial", ""),
-    ("analytic_blend", ""),
-    ("analytic_image", ""),
-    ("default_spaces", ""),
-    ("strokes", ""),
-    ("bilevel", ""),
-    ("icc", ""),
-    ("jpeg_minified", ""),
-    ("jpx_minified", ""),
-    ("intents", ""),
+    (
+        "text",
+        "43870798e1f774da1a6055f1ec31d5e769b9424247d35453b6ef4ca2180cf0b8",
+    ),
+    (
+        "gs_text",
+        "5ac6a4e788ceedb8398272ed0ab04ed44320d804d2c8ba889bb0fba4dcd1fc18",
+    ),
+    (
+        "curves",
+        "1c78a64095da7e44b0e43725d78d874c5795951674502e3f691b63f79f732bf5",
+    ),
+    (
+        "shading",
+        "999561cfd08402c2df1fcc287ae182f806bc6070507cf25f021377df27a2df00",
+    ),
+    (
+        "blend",
+        "3e97ffbd1ada65529ab0d41c69dfa6f2925daaae0e415203eff0e5cbc5ac6481",
+    ),
+    (
+        "pattern",
+        "e5a10fe1ecdc2f92b72def45c4b0dff284575ea0c287509d1828584abe2acbc7",
+    ),
+    (
+        "optional",
+        "cc09c25c34fd281009679e26f22d10f23c2c353ff68d3378a1457a638687fb15",
+    ),
+    (
+        "image",
+        "f6f28ee9477a0cbd01524e5f03b59524977b25a6dd6b3c0c00a175bcb25c3ad7",
+    ),
+    (
+        "transparency",
+        "7a41ae00269957a1603fb7b376372489844097195d7cd74b8f0747bd2aedf6e2",
+    ),
+    (
+        "tiling",
+        "e19d38bc443735c725eef746749d843c49e30b58120242f1e65a5bfcde62c663",
+    ),
+    (
+        "jbig2",
+        "94245b4939dbb844c2644323aeb18be6d07b07a9276704c624bcbe1f006806fc",
+    ),
+    (
+        "mesh",
+        "a96436ecb26031216101a84699a6211c59ca4b86ecc3335447c16e2aa8e803d3",
+    ),
+    (
+        "jpx",
+        "8a9dff0ccf536ca62e56e7b3c01cb64c85320966b8361b351520f644be7eadcc",
+    ),
+    (
+        "cbz",
+        "1e46b3fe5f4cfb95b291b326993324f7fd9c87ef206e415574c5553c67abd0ea",
+    ),
+    (
+        "xps",
+        "b7d5f36c52d3a2358b2cf974504ed458454bfbf3c0e1def04a354ba6f0184602",
+    ),
+    (
+        "epub",
+        "0c9a62679f75175b23e6a278687ee96bfaa8a0aa99f2411cc593ae67c4324054",
+    ),
+    (
+        "analytic_axial",
+        "6ce0a2b9623fda9885496ee7dc7e23c1f13ec94055a5b7a6c198dbe475ef599a",
+    ),
+    (
+        "analytic_radial",
+        "6220e4892dcf1f94a79b5b362c4186a8c070384019aea5882a5059ca63b1e2fa",
+    ),
+    (
+        "analytic_blend",
+        "91241acc9a12912b6d00d3fb9de006af132f622a97ef3b4aa672631feff5b9b4",
+    ),
+    (
+        "analytic_image",
+        "28e8030449e086faa68f0e65d2225717c193a9df3dbf0b99911afff568716545",
+    ),
+    (
+        "default_spaces",
+        "d86a2c879bf4b196657aa7baa359081386986beabf27afeea87f77422fcff237",
+    ),
+    (
+        "strokes",
+        "5402730eff7e6a022914b9dcfe825840d67f86677dae666268ae6f8df5fbb583",
+    ),
+    (
+        "bilevel",
+        "1447e891fbc4873242a7977dd22249286a08378ed458e9b0cb58005091ac5bb6",
+    ),
+    (
+        "icc",
+        "89ee1f664b8b71b544e4950a17c2182696271dda62d29024470331931e9df297",
+    ),
+    (
+        "jpeg_minified",
+        "f816c59e8d9c0221c9ca0165d5dbe206fa0c5c083f045966353fd7280960ce26",
+    ),
+    (
+        "jpx_minified",
+        "8f6e888b7dfb63f90a0a4837771c37a3d112dff02cce08257822a0c0cfeda063",
+    ),
+    (
+        "intents",
+        "488f096d15801404d2f5823fdfcd7103b26c72d054cbc58368e7486641a5f80d",
+    ),
     #[cfg(feature = "cmap-predefined")]
-    ("substituted_cjk", ""),
-    ("substituted_symbols", ""),
-    ("multiple_master", ""),
+    (
+        "substituted_cjk",
+        "8c7a44bf989a224f3556afc0638c96221300468356cc90f4844c561bbda24f03",
+    ),
+    (
+        "substituted_symbols",
+        "8f10bff37a96cc40bb6a89f9b3eecb706de654a01099c057ae26ac9a6b2f26e4",
+    ),
+    (
+        "multiple_master",
+        "f6a964e9398ff12384140024f5d198fc813485af5b3cf681b847ffae43e5a61b",
+    ),
     #[cfg(feature = "hyphenation")]
-    ("hyphenation", ""),
-    ("colour_glyphs", ""),
+    (
+        "hyphenation",
+        "1bbcce1e36abe284f92f9f81464c90ad4f3d2899fa1d894e73460e283fe3ca52",
+    ),
+    (
+        "colour_glyphs",
+        "1c6da533672b04f84e7472ffc0844e34e3f6dd54ba841114f8d6848cff637ecd",
+    ),
 ];
 
 /// **The command stream is the same bytes on every target** (RC-18.4): every
@@ -5922,7 +6133,7 @@ fn edit_annotations(editor: &mut tinker_pdf::DocumentEditor, document: &Document
 ///
 /// A run's output, recorded from `cargo test` on the first target it runs
 /// on, which prints the value to paste, and held there on every other.
-const PATCHED_PAGE: &str = "";
+const PATCHED_PAGE: &str = "4441f6706d68f7f544ece82f938d1e5fa4c6668601657884c8efd7b1691688cc";
 
 /// **A patched render reproduces the edited page's fingerprint** (P-17.7).
 /// [`annotated_page`], edited by [`edit_annotations`] and appended
@@ -5985,7 +6196,7 @@ mod embed_support;
 
 /// The two rewrites `the_rewritten_document_with_embedded_faces_is_the_same_bytes_on_every_target`
 /// hashes, each document's SHA-256 in hex and the two joined, hashed again.
-const EMBEDDED_REWRITE: &str = "";
+const EMBEDDED_REWRITE: &str = "044b9ec32e4ee70bf01b798a286ca29232703341ff249e77b4afd35b7f6e7275";
 
 /// **The bytes a save that embeds missing fonts writes** (FT-12.3,
 /// `docs/design/font-embedding.md`): a standard-14 page and an unembedded
@@ -6066,7 +6277,7 @@ fn converted(label: &str, document: tinker_pdf::Document) -> tinker_pdf::Documen
 /// What `document_search_is_stable_across_targets` hashes: every hit of its
 /// searches, recorded from the first target it runs on, which prints the
 /// line to paste, and held on every other.
-const DOCUMENT_SEARCH: &str = "";
+const DOCUMENT_SEARCH: &str = "7d36cf2bb2595304efd62b78336978ac79022250a62727cb8014033db58ba212";
 
 /// The document the search fingerprint reads: Helvetica lines over three
 /// pages, a phrase and a hyphenated word broken across a page break, two
