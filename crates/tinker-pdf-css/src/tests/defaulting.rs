@@ -170,19 +170,29 @@ fn unset_is_inherit_for_an_inherited_property_and_initial_for_the_rest() {
 /// build implements.
 ///
 /// §7.1's definition and [`ComputedStyle::inherit_from`]'s behaviour are the
-/// same rule written twice, so this asserts they agree — over all one hundred and fourteen
-/// longhands rather than a sample, because the two are only the same rule if
-/// they are the same rule everywhere.
+/// same rule written twice, so this asserts they agree — over all one hundred
+/// and seventeen longhands rather than a sample, because the two are only the
+/// same rule if they are the same rule everywhere. The parent moves `color`
+/// and the three inherited longhands added last, `font-variation-settings`,
+/// `font-optical-sizing` and `text-justify`, off their initial values, so a
+/// child's `unset` on each of them reads a different answer as `inherit` than
+/// as `initial`.
 #[test]
 fn unset_is_the_same_as_never_declaring_it_for_every_longhand() {
-    let control = child("div { color: #ff0000; border-top-width: 7px; font-size: 30px }");
+    const PARENT: &str = "div { color: #ff0000; border-top-width: 7px; font-size: 30px; \
+                          font-variation-settings: \"wght\" 700; font-optical-sizing: none; \
+                          text-justify: none }";
+    let control = child(PARENT);
+    let initial = ComputedStyle::initial();
+    assert_ne!(
+        control.font_variation_settings, initial.font_variation_settings,
+        "the fixture is worthless unless the child inherits a value"
+    );
+    assert_ne!(control.font_optical_sizing, initial.font_optical_sizing);
+    assert_ne!(control.text_justify, initial.text_justify);
     let mut checked = 0usize;
     for longhand in Longhand::ALL {
-        let source = format!(
-            "div {{ color: #ff0000; border-top-width: 7px; font-size: 30px }} \
-             p {{ {}: unset }}",
-            longhand.name()
-        );
+        let source = format!("{PARENT} p {{ {}: unset }}", longhand.name());
         let style = child(&source);
         assert_eq!(
             style,
@@ -192,7 +202,7 @@ fn unset_is_the_same_as_never_declaring_it_for_every_longhand() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 114, "every longhand, not a sample");
+    assert_eq!(checked, 117, "every longhand, not a sample");
 }
 
 /// **`text-shadow` inherits without being asked to** (`css-text-decor-3` §4:
