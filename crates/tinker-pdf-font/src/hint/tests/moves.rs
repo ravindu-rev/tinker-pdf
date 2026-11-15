@@ -248,7 +248,8 @@ fn mdap_moves_as_specified() {
     // consistent with the projection_vector": on 45 degrees, a point at 2.9
     // pixels along the vector goes to 3.
     let mut vm = setup(&[(131, 131)], &[(131, 131)], &[]);
-    let code = program(&[&vectors(D45, D45), &push(&[0]), &[op::MDAP + 1, op::GC]]);
+    // MDAP pops the point, so it is pushed a second time for GC to pop.
+    let code = program(&[&vectors(D45, D45), &push(&[0, 0]), &[op::MDAP + 1, op::GC]]);
     assert_eq!(exec(&mut vm, &code), Ok(()));
     assert_eq!(vm.stack(), &[192]);
     // It acts on the zone zp0 names.
