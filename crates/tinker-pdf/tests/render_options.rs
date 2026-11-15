@@ -2025,10 +2025,22 @@ fn a_display_list_draws_forced_colours_as_the_page_does() {
 /// `bundled-fonts` builds, the page embedding its own face — and one two
 /// targets disagree on is a determinism bug, never an edit of this table.
 const FORCED_COLOUR_OUTPUT: [(&str, &str); 4] = [
-    ("forced page, black on white, at 1x", ""),
-    ("forced page, black on white, fill-to-stroke, at 1x", ""),
-    ("forced page, yellow on navy, at 1.7x", ""),
-    ("forced page, yellow on navy, fill-to-stroke, at 1.7x", ""),
+    (
+        "forced page, black on white, at 1x",
+        "4ece661e7640aeb24417ffd0c0c890411c746e2512927fda2b166d2141e67605",
+    ),
+    (
+        "forced page, black on white, fill-to-stroke, at 1x",
+        "f17a622c87232abf1398e7c4f5431c5280ec81e6436a7f887e2bd9fee1c447f3",
+    ),
+    (
+        "forced page, yellow on navy, at 1.7x",
+        "af11fc63b56850f1eb514750d18fbf0eaac80b4b4573a076cda9287935c2e501",
+    ),
+    (
+        "forced page, yellow on navy, fill-to-stroke, at 1.7x",
+        "a0cafb68b2e7b30f7375c4fa9eda190697c2c82c7409050bca86e108e272a033",
+    ),
 ];
 
 /// **The forced-colour fingerprint** (RC-09.6): the forced page — text,
@@ -2104,7 +2116,7 @@ fn forced_colour_output_is_pinned() {
 /// determinism bug, never an edit of this table.
 const PLACED_ANNOTATION_OUTPUT: [(&str, &str); 1] = [(
     "a /NoZoom and /NoRotate annotation on a page turned a quarter, at magnification 2",
-    "",
+    "626e144e32fb4abbdf85e456eef122c3ef5c4fcbee3ef529422b7c53d37371f7",
 )];
 
 /// **A placed annotation's fingerprint** (RC-13.4): the page `render_support`
@@ -2149,7 +2161,7 @@ fn placed_annotation_output_is_pinned() {
 /// determinism bug, never an edit of this table.
 const OVERRIDDEN_LAYER_OUTPUT: [(&str, &str); 1] = [(
     "three bands of one radio-button collection, the first turned on past the locked third",
-    "",
+    "503352632b7ed8d2ba349fe0138920233616f9c89f2b5ca3f09ce301f29590a4",
 )];
 
 /// A 60x40 page: an unmarked grey bar under three bands, each marked with an
@@ -2723,16 +2735,37 @@ fn a_hairline_at_the_minimum_width_drops_out_nowhere() {
 /// after it — Linux, Windows and `wasm32-wasip1` — and one two targets
 /// disagree on is a determinism bug, never an edit of this table.
 const LEVELS_RULES_AND_WIDTHS: [(&str, &str); 8] = [
-    ("graphics at 2 bits and text at 4, at 1x", ""),
-    ("graphics at 1 bit and text at 7, at 1.7x", ""),
-    ("graphics at 0 bits under the centre rule, at 1x", ""),
-    ("text at 0 bits under the any-part rule, at 1.7x", ""),
-    ("anti-aliasing off under the centre rule, at 1x", ""),
-    ("anti-aliasing off under the any-part rule, at 1.7x", ""),
-    ("a thinnest line of 2.5 pixels, at 1x", ""),
+    (
+        "graphics at 2 bits and text at 4, at 1x",
+        "ca22bebb7252938cd3ce8ca789ddaec65867b7d245b4ee818590fbda3349062d",
+    ),
+    (
+        "graphics at 1 bit and text at 7, at 1.7x",
+        "2784ac234e5bd95e9954f3c51367c1d0dad7d210e7ea3a78f92727d02485b808",
+    ),
+    (
+        "graphics at 0 bits under the centre rule, at 1x",
+        "48e2636c91076afbebba396b49648e86d682a360c79d9f062fa66eb2aeadd6bb",
+    ),
+    (
+        "text at 0 bits under the any-part rule, at 1.7x",
+        "dfbc0289a992a68297f1e9b72430a79631cddff449331c597effaf8668a0cb33",
+    ),
+    (
+        "anti-aliasing off under the centre rule, at 1x",
+        "d65898c1d7c02e4711b4816ddf63aee503e0af40f058bba8b29e9302d1b2a7d3",
+    ),
+    (
+        "anti-aliasing off under the any-part rule, at 1.7x",
+        "50f890f4d952926413e128edc25cd55af48a92d9fa0ca225178add3b481e4cba",
+    ),
+    (
+        "a thinnest line of 2.5 pixels, at 1x",
+        "16ee1657870d56ea87db44f748bcc99312e6a8da38ec00b0f5bb1757ec92ca5b",
+    ),
     (
         "anti-aliasing off under the any-part rule, a thinnest line of a quarter pixel, at 1.7x",
-        "",
+        "43319e9e6291de932390c1548a3e34d07788b8892c3df5cae120049eec3cf03a",
     ),
 ];
 
