@@ -19,8 +19,7 @@ mod signatures;
 
 /// The file a path open reads (`docs/design/streaming-open.md`, "A
 /// file-backed source in the hosts that own files"): `tpdf`'s shape, copied,
-/// since this binding builds outside the workspace and cannot depend on a
-/// binary's module.
+/// since a library cannot depend on a binary's module.
 mod source {
     use std::fs::File;
     use std::io;
@@ -1222,7 +1221,7 @@ impl PyBitmap {
 /// URI, or absent — 12.3.3 makes `/Dest` optional and an entry without one is
 /// a real shape rather than a degraded one, because a part title above three
 /// chapters often points nowhere itself.
-#[pyclass(name = "OutlineEntry")]
+#[pyclass(name = "OutlineEntry", from_py_object)]
 #[derive(Clone)]
 pub struct PyOutlineEntry {
     /// The visible text.

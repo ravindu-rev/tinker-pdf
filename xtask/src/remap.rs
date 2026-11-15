@@ -7,12 +7,11 @@
 //! is a source file's name, kept for the message, and rustc writes the name
 //! as the file reached it:
 //!
-//! - **The engine's crates**, by their absolute paths when `bindings/js` or
-//!   `bindings/python` builds them. Each binding is a workspace root of its
-//!   own, so the engine is a path dependency outside it, and cargo hands
-//!   rustc a file outside the building workspace by its full path. Code
-//!   generated into `OUT_DIR` is named under the target directory, which a
-//!   release build keeps in the checkout.
+//! - **The workspace's crates**, by their paths inside the workspace, since
+//!   cargo hands rustc a member's files relative to the workspace root; the
+//!   bindings are members for that among other reasons (ruling 25). Code
+//!   generated into `OUT_DIR` is named under the target directory, by its
+//!   absolute path.
 //! - **Every crates.io dependency**, under `CARGO_HOME`'s `registry/src`.
 //! - **The standard library's generic code** that the build instantiates:
 //!   rustc names its files `/rustc/<commit>/library/...`, unless the
@@ -22,8 +21,8 @@
 //! # What each becomes
 //!
 //! `--remap-path-prefix`, a stable flag, rewrites each: the checkout's root
-//! to nothing, so an engine file reads `crates/<crate>/src/<file>.rs` as the
-//! root workspace's own builds name it; `CARGO_HOME` to `/cargo`; and the
+//! to nothing, so a file in the checkout, under the target directory among
+//! them, reads as the workspace names it; `CARGO_HOME` to `/cargo`; and the
 //! toolchain's `lib/rustlib/src/rust` to `/rustc/<commit>/`, the name the
 //! standard library carries without `rust-src`, so a toolchain with the
 //! component builds what one without it builds. The trailing `/` is what
@@ -32,15 +31,12 @@
 //! matches, so the flags run from the shortest prefix to the longest, and a
 //! `CARGO_HOME` inside the checkout keeps its own name.
 //!
-//! # What a remap does not reach
-//!
-//! cargo hashes each package's source into the `-C metadata` that names its
-//! symbols, and it hashes a path dependency outside the building workspace by
-//! its absolute path. Symbol names order the code and data the build lays
-//! out, so the wasm and the wheels, built from their bindings' workspaces,
-//! still differ from one checkout's location to another's with every path
-//! remapped. The root workspace's own builds, the C ABI's among them, hash
-//! their members by their paths relative to the root, and do not.
+//! With them, and with every package a member of the root workspace, so that
+//! cargo hashes each by its path inside the workspace into the `-C metadata`
+//! that names its symbols, a release build is the same bytes from any
+//! checkout path. What a linker writes of its own accord, an Apple dylib's
+//! install name or the time an MSVC link ran, is settled by the dynamic
+//! libraries' build scripts.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

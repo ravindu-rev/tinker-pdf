@@ -44,9 +44,12 @@ same bytes.
 The CLI's `tools/tpdf/build.rs` runs nothing: on Linux it asks the linker to
 align `tpdf`'s segments to 64 KiB, for the reason
 [docs/verification.md](docs/verification.md) gives under the corpus peaks.
-The C ABI's `crates/tinker-pdf-ffi/build.rs` runs nothing either: on Apple's
-platforms it names the dynamic library `@rpath/libtinker_pdf_ffi.dylib`,
-where the linker would write in the path it built the library at.
+The C ABI's `crates/tinker-pdf-ffi/build.rs` and the Python binding's
+`bindings/python/build.rs` run nothing either: each hands its dynamic
+library's link one argument, the C ABI on Apple's platforms the install name
+`@rpath/libtinker_pdf_ffi.dylib`, where the linker would write in the path it
+built the library at, and both on the MSVC targets `/Brepro`, where the
+linker would write in the time of the link.
 
 Features are a gate leg, and they cannot be run from the workspace root:
 

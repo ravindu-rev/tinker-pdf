@@ -588,7 +588,7 @@ fn snake_case(name: &str) -> String {
 /// writes the bytes the one read was written with. A real is a Python
 /// `float`, its bits as written, a NaN's payload and a negative zero
 /// included.
-#[pyclass(name = "CommandField", frozen)]
+#[pyclass(name = "CommandField", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyCommandField {
     inner: CommandField,
@@ -717,7 +717,7 @@ impl PyCommandField {
 /// places its kind names. A record of a kind this build does not know — one
 /// a newer minor version added — keeps its number and fields, and names no
 /// kind.
-#[pyclass(name = "CommandRecord", frozen)]
+#[pyclass(name = "CommandRecord", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyCommandRecord {
     inner: CommandRecord,

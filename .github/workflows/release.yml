@@ -173,7 +173,10 @@ jobs:
       # manylinux container whose cargo and toolchain sit under the
       # container's own home, so the container asks for its own flags before
       # it builds, building xtask outside the checkout it shares with the
-      # runner so that no root-owned target directory is left behind in it.
+      # runner. The wheel itself builds in the checkout's target directory,
+      # as a member of the workspace (ruling 25), which leaves that directory
+      # owned by the container's root; the steps after it that run cargo on
+      # the runner build into one of their own.
       - name: Remap the build's paths
         if: matrix.manylinux == 'off'
         shell: bash
@@ -213,7 +216,7 @@ jobs:
       # name them; the checkout, which the container shares, it can.
       - name: The wheel carries no path of this machine
         shell: bash
-        run: cargo run -q -p xtask -- remap-paths --check dist/*.whl
+        run: CARGO_TARGET_DIR="$RUNNER_TEMP/xtask" cargo run -q -p xtask -- remap-paths --check dist/*.whl
       - name: A face to draw with
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core

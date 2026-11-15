@@ -23,16 +23,14 @@
     "widest spread of one revision's size over the `runs` it names, five clean",
     "builds and one more under the previous stable toolchain, and `toolchains`",
     "names the compilers they built with; zero is a measurement too. A clean",
-    "build deletes `bindings/js/target` and `bindings/js/pkg` first, so each",
-    "compiles the revision anew. `cargo xtask check` refuses an entry missing",
-    "any of these, or carrying a key nothing reads.",
+    "build deletes `target/wasm32-unknown-unknown` and `bindings/js/pkg`",
+    "first, so each compiles the revision anew. `cargo xtask check` refuses",
+    "an entry missing any of these, or carrying a key nothing reads.",
     "",
-    "cargo still hashes the absolute path of each engine crate, a path",
-    "dependency outside `bindings/js`'s workspace, into the names of its",
-    "symbols, and their order lays the wasm out, so where a checkout sits can",
-    "still move the size. A profile's first figure and tolerance are written",
-    "by hand from its runs; `--record` only moves a figure whose tolerance it",
-    "keeps."
+    "The binding is a member of the root workspace (ruling 25), so a",
+    "revision's wasm is the same bytes from any checkout path. A profile's",
+    "first figure and tolerance are written by hand from its runs; `--record`",
+    "only moves a figure whose tolerance it keeps."
   ],
   "profiles": {
     "bundled-fonts": {

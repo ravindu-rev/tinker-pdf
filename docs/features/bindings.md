@@ -994,15 +994,20 @@ workspace is too much, because nothing is packaged when the first crate runs;
 pins the width. Under it nothing is unprovable, and the one step skipped is
 `dotnet nuget push`, which has no harmless form.
 
-**Every artefact is built under one release profile.** The C ABI builds in
-the root workspace, under its `[profile.release]`: thin LTO and one codegen
-unit. `bindings/js` and `bindings/python` are workspace roots of their own,
-and cargo reads a profile from the workspace root alone, so each declares the
-same table, and `cargo xtask profiles`, part of `cargo xtask check`, holds the
-three equal key for key — a binding whose table is missing, holds a key the
-root's does not or gives one another value is refused by its manifest and the
-key — so a profile change is made once, in all three, for the `.wasm`, the
-wheels and the native libraries alike.
+**Every artefact is built under one release profile.** Every package is a
+member of the root workspace, `bindings/js` and `bindings/python` among them
+(ruling 25), and cargo reads a profile from the workspace root alone, so the
+C ABI, the `.wasm` and the wheels are all built under the root's
+`[profile.release]`: thin LTO and one codegen unit. `cargo xtask profiles`,
+part of `cargo xtask check`, refuses a `[profile]` table in any member's
+manifest, which cargo would ignore with a warning that fails no build, so a
+profile change is made once, in the root, for every artefact. Membership is
+also what makes each artefact the same bytes from any checkout path: cargo
+names a member's symbols from its path inside the workspace, and would name
+a path dependency outside the building workspace from its absolute path. On
+Windows the wheel's extension module and the C ABI's DLL are linked with
+`/Brepro`, which each one's build script passes, so the MSVC linker derives
+the stamps it would take from the clock from the library's contents.
 
 ## API
 
@@ -1436,9 +1441,10 @@ cargo xtask bindings-coverage
   failing, an anchor that is not a certificate refused and not kept, the
   instant ignored unless the flag says otherwise, and signatures outliving
   the document they came from. CI's tests build and run the crate on every
-  pull request; the bindings and fuzz crates are outside the workspace, so
-  the bindings' local proof builds each binding, and `cargo xtask fuzz`,
-  inside `cargo xtask check`, checks the fuzz crate.
+  pull request, and build the two bindings natively beside it, since they
+  are workspace members; the bindings' local proof builds each binding's
+  package, and `cargo xtask fuzz`, inside `cargo xtask check`, checks the
+  fuzz crate, which is outside the workspace.
 - Smoke tests run against an *installed* artifact, never the source tree:
   `bindings/python/tests/wheel_smoke.py` against a `pip install`ed wheel,
   `bindings/js/tests/node_smoke.mjs` against an `npm install`ed tarball,

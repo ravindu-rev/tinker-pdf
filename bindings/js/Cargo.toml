@@ -1,15 +1,11 @@
-# Its own workspace root; see the same table in `bindings/python/Cargo.toml`
-# for why `exclude` in the root manifest is not enough on its own.
-[workspace]
-
 [package]
 name = "tinker-pdf-js"
-version = "0.0.1"
-edition = "2021"
-rust-version = "1.85"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/ravindu-rev/tinker-pdf"
-authors = ["tinker-pdf contributors"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 description = "JavaScript and WebAssembly bindings for tinker-pdf"
 publish = false
 
@@ -37,11 +33,3 @@ cjk-fonts = ["tinker-pdf/cjk-fonts"]
 tinker-pdf = { path = "../../crates/tinker-pdf", default-features = false }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
-
-# The root workspace's release profile, which cargo reads from the workspace
-# root alone, so this root declares it too: the `.wasm` is built as the C
-# ABI is. `cargo xtask profiles` holds this table equal to the root's, key for
-# key, so a profile change is made in all three manifests or fails `check`.
-[profile.release]
-lto = "thin"
-codegen-units = 1

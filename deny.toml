@@ -58,7 +58,8 @@ multiple-versions = "warn"
 # licence list has nothing to say about *what a crate does*.
 #
 # The workspace's whole dependency tree is `proptest` and its transitive
-# closure, plus the binding and fuzz tooling which lives outside the workspace.
+# closure, the two binding members' tooling, PyO3 and wasm-bindgen with
+# theirs, and the fuzz tooling, which lives outside the workspace.
 # Anything else arriving in the engine crates is the thing this policy exists
 # to prevent, so it is denied by name.
 deny = [

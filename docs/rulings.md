@@ -838,6 +838,16 @@ instead of living in one feature's head.
     the owner is asked only where a change would make something that works
     today worse.
 
+25. **The language bindings are members of the root workspace.** Binds
+    [bindings](features/bindings.md) and every crate a shipped artefact
+    holds. `bindings/js` and `bindings/python` are workspace members, so
+    cargo hashes every package a wasm or a wheel holds by its path inside
+    the workspace, never by where the checkout sits, and each shipped wasm
+    and wheel is the same bytes from any checkout path. `default-members`
+    names every other member, so a plain `cargo build` at the root compiles
+    neither PyO3 nor wasm-bindgen; a `--workspace` build compiles them too,
+    as do `-p`, maturin and wasm-pack.
+
 ## How to add a ruling
 
 State it in one bold sentence, name the features it binds, give the reason

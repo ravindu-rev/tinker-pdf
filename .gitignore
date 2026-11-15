@@ -1,5 +1,5 @@
 /target
-# The excluded bindings build into their own target directories.
+# fuzz/, a workspace of its own, builds into its own target directory.
 target/
 corpus/data/
 # Plan 14: corpora are fetched, pinned and never committed. `corpus-fetch`
@@ -20,7 +20,6 @@ testdata/golden/actual/
 bindings/dotnet/bin/
 bindings/dotnet/obj/
 bindings/dotnet/runtimes/
-bindings/*/Cargo.lock
 
 # wasm-pack's output. Everything in it is generated from `Cargo.toml` and
 # `src/` -- including `package.json`, which is why the npm package's version

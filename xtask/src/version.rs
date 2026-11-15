@@ -19,12 +19,12 @@
 //! ## The two halves
 //!
 //! **Versions.** The workspace's `[workspace.package] version` is the one
-//! source. Every crate inside the workspace must inherit it with
+//! source. Every member of the workspace, the two bindings that maturin and
+//! wasm-pack build among them (ruling 25), must inherit it with
 //! `version.workspace = true` rather than repeating it, so those cannot drift
-//! at all; the check enforces the inheritance rather than the number. The four
-//! manifests outside the workspace repeat it literally, because cargo,
-//! maturin, wasm-pack and MSBuild have no way to reach a workspace they are
-//! not in, and those are the ones compared.
+//! at all; the check enforces the inheritance rather than the number. The
+//! .NET project repeats it literally, because MSBuild has no way to reach a
+//! cargo workspace, and that is the one compared.
 //!
 //! `bindings/python/pyproject.toml` is a fifth place a version could live, and
 //! the check makes sure it does not: `dynamic = ["version"]` is what makes
@@ -52,14 +52,10 @@ pub enum Kind {
 
 /// The manifests that carry a literal version and must match the workspace.
 ///
-/// Everything under `crates/` is absent on purpose: those inherit with
+/// Every member of the workspace is absent on purpose: they inherit with
 /// `version.workspace = true` and are checked for the inheritance instead, so
 /// there is no number in them to compare.
-pub const EXTERNAL: &[(&str, Kind)] = &[
-    ("bindings/python/Cargo.toml", Kind::Cargo),
-    ("bindings/js/Cargo.toml", Kind::Cargo),
-    ("bindings/dotnet/TinkerPdf.csproj", Kind::MsBuild),
-];
+pub const EXTERNAL: &[(&str, Kind)] = &[("bindings/dotnet/TinkerPdf.csproj", Kind::MsBuild)];
 
 /// Crates that must never reach crates.io, and the reason each is here.
 ///

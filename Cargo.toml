@@ -38,14 +38,52 @@ members = [
   "tools/pdfcmp",
   "tools/tpdf",
   "xtask",
+  "bindings/js",
+  "bindings/python",
 ]
 
-# The language bindings build with their own tooling — maturin for Python,
-# wasm-pack for JavaScript — and pull dependencies the engine itself refuses.
-# Excluding them keeps `cargo build` at the workspace root free of both.
-exclude = [
-  "bindings/python",
-  "bindings/js",
+# The language bindings are members (ruling 25). cargo hashes a path
+# dependency outside the building workspace by its absolute path, into the
+# metadata that names the crate's symbols, so a binding built as a workspace
+# of its own would name every engine crate by where the checkout sits, and
+# its wasm or wheel would differ with every checkout path. As members, every
+# package is hashed by its path inside the workspace, and the artefacts are
+# the same bytes wherever the checkout sits.
+#
+# Every member but the two bindings is a default member: they build with
+# their own tooling, maturin for Python and wasm-pack for JavaScript, and pull
+# PyO3 and wasm-bindgen, dependencies the engine itself refuses, so a plain
+# `cargo build` at the root builds neither. `--workspace`, `-p` and the two
+# tools build them.
+default-members = [
+  "crates/tinker-pdf-cos",
+  "crates/tinker-pdf-filters",
+  "crates/tinker-pdf-zip",
+  "crates/tinker-pdf-archive",
+  "crates/tinker-pdf-xml",
+  "crates/tinker-pdf-svg",
+  "crates/tinker-pdf-css",
+  "crates/tinker-pdf-unicode",
+  "crates/tinker-pdf-layout",
+  "crates/tinker-pdf-crypto",
+  "crates/tinker-pdf-pki",
+  "crates/tinker-pdf-font",
+  "crates/tinker-pdf-font-cjk-jp",
+  "crates/tinker-pdf-font-cjk-cn",
+  "crates/tinker-pdf-font-cjk-tw",
+  "crates/tinker-pdf-font-cjk-kr",
+  "crates/tinker-pdf-shape",
+  "crates/tinker-pdf-color",
+  "crates/tinker-pdf-math",
+  "crates/tinker-pdf-pool",
+  "crates/tinker-pdf-raster",
+  "crates/tinker-pdf-content",
+  "crates/tinker-pdf-render",
+  "crates/tinker-pdf",
+  "crates/tinker-pdf-ffi",
+  "tools/pdfcmp",
+  "tools/tpdf",
+  "xtask",
 ]
 
 [workspace.package]
@@ -104,8 +142,9 @@ codegen-units = 1
 # PostScript and deflates the result with the engine's own encoder; unoptimised
 # that is most of a minute on every clean build, and it is a *cost paid by
 # everyone* rather than by whoever wrote it. This is the only knob that applies
-# to a build script and its dependencies, and the workspace has no proc macros
-# for it to affect.
+# to a build script and its dependencies. It reaches the proc macros too, which
+# only the bindings' tooling brings, PyO3's and wasm-bindgen's, and changes
+# nothing they generate.
 [profile.dev.build-override]
 opt-level = 2
 

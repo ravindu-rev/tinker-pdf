@@ -50,9 +50,9 @@ usage:
   cargo xtask tables    check that every engine crate builds every table it
                         derives at first use, in a `LazyLock`, and evaluates
                         none into a `static` or a `const`
-  cargo xtask profiles  check that bindings/js and bindings/python, each a
-                        workspace root of its own, declare the root's
-                        `[profile.release]`, key for key
+  cargo xtask profiles  check that no member of the workspace declares a
+                        build profile: cargo reads one from the root alone
+                        and ignores a member's
   cargo xtask bindings-coverage
                         list every public facade item with its standing on
                         the C ABI and each binding (ruling 11), then the
@@ -1145,6 +1145,9 @@ const TOOLS: &[(&str, &[&str])] = &[
         "xtask",
         &["tinker-pdf-crypto", "tinker-pdf-zip", "tinker-pdf-filters"],
     ),
+    // Ruling 11: a binding projects the facade and reaches nothing below it.
+    ("bindings/js", &["tinker-pdf"]),
+    ("bindings/python", &["tinker-pdf"]),
 ];
 
 /// Prints a task's outcome and turns it into an exit code.
@@ -2204,40 +2207,27 @@ fn is_list_with_imports(block: &str) -> bool {
     })
 }
 
-/// The manifests outside the root workspace whose artefacts ship, each a
-/// workspace root of its own that cargo reads a build profile from: the
-/// `.wasm` and the wheels (P-20.2).
-const BINDING_MANIFESTS: [&str; 2] = ["bindings/js/Cargo.toml", "bindings/python/Cargo.toml"];
-
-/// **Every artefact is built under the root's release profile** (P-20.2;
-/// `docs/features/bindings.md`).
+/// **Every artefact is built under the root's release profile** (P-20.2,
+/// ruling 25; `docs/features/bindings.md`).
 ///
-/// The C ABI builds in the root workspace, under its `[profile.release]`.
-/// The JavaScript and Python bindings are workspace roots of their own, and
-/// cargo reads a profile from the workspace root alone, so each declares the
-/// same table, and this holds the three equal key for key: a profile change
-/// made in one manifest and not the others fails here, so it is made once for
-/// every artefact.
+/// Every package is a member of the root workspace, the two bindings among
+/// them, and cargo reads a build profile from the workspace root alone: a
+/// `[profile]` table in a member's manifest is ignored, with a warning that
+/// fails no build. So no member declares one, and the C ABI, the `.wasm` and
+/// the wheels are all built under the root's, a table that reads as though it
+/// applied to one artefact and does not being refused where it is written.
 fn check_profiles() -> Result<(), Vec<String>> {
     let root = repo_root();
-    let read = |path: &str| {
-        std::fs::read_to_string(root.join(path))
-            .map_err(|error| format!("cannot read {path}: {error}"))
-    };
-    let root_manifest = read("Cargo.toml").map_err(|problem| vec![problem])?;
-    let mut problems = Vec::new();
-    let mut bindings = Vec::new();
-    for path in BINDING_MANIFESTS {
-        match read(path) {
-            Ok(text) => bindings.push((path, text)),
-            Err(problem) => problems.push(problem),
-        }
+    let members = xtask::version::workspace_manifests(&root);
+    if members.is_empty() {
+        return Err(vec![
+            "Cargo.toml lists no member whose manifest could be read".to_string(),
+        ]);
     }
-    let bindings: Vec<(&str, &str)> = bindings
+    let problems: Vec<String> = members
         .iter()
-        .map(|(path, text)| (*path, text.as_str()))
+        .flat_map(|(member, manifest)| member_profile_problems(member, manifest))
         .collect();
-    problems.extend(profile_problems(&root_manifest, &bindings));
     if problems.is_empty() {
         Ok(())
     } else {
@@ -2245,81 +2235,30 @@ fn check_profiles() -> Result<(), Vec<String>> {
     }
 }
 
-/// What holding each binding manifest's `[profile.release]` to the root
-/// manifest's finds: a binding with no such table, a key the root's sets that
-/// it lacks or sets otherwise, and a key it sets that the root's does not,
-/// each named by its manifest and the key.
-fn profile_problems(root: &str, bindings: &[(&str, &str)]) -> Vec<String> {
-    let Some(wanted) = release_profile(root) else {
-        return vec![
-            "Cargo.toml declares no [profile.release], so the bindings have no profile to \
-             declare"
-                .to_string(),
-        ];
-    };
-    let mut problems = Vec::new();
-    for (path, text) in bindings {
-        let Some(found) = release_profile(text) else {
-            problems.push(format!(
-                "{path} declares no [profile.release]; it is a workspace root of its own, so \
-                 cargo builds its artefact without the root's profile unless it declares the \
-                 same table"
-            ));
-            continue;
-        };
-        for (key, value) in &wanted {
-            match found.get(key) {
-                None => problems.push(format!(
-                    "{path}'s [profile.release] has no `{key}`; the root's sets `{key} = {value}`"
-                )),
-                Some(other) if other != value => problems.push(format!(
-                    "{path}'s [profile.release] sets `{key} = {other}` and the root's \
-                     `{key} = {value}`"
-                )),
-                Some(_) => {}
-            }
-        }
-        for (key, value) in &found {
-            if !wanted.contains_key(key) {
-                problems.push(format!(
-                    "{path}'s [profile.release] sets `{key} = {value}`, which the root's does \
-                     not"
-                ));
-            }
-        }
-    }
-    problems
-}
-
-/// The keys and values of a manifest's `[profile.release]` table — its own,
-/// not a sub-table such as `build-override` — each line's comment and spacing
-/// taken out; `None` when it has none.
-fn release_profile(manifest: &str) -> Option<BTreeMap<String, String>> {
-    let mut table: Option<BTreeMap<String, String>> = None;
-    let mut inside = false;
-    for line in manifest.lines() {
-        let line = toml_code(line).trim();
-        if line.starts_with('[') {
-            let header: String = line
-                .trim_start_matches('[')
+/// Each build profile table the manifest of `member`, a workspace member,
+/// declares, its `[profile.*]` sub-tables among them, by the manifest and the
+/// table.
+fn member_profile_problems(member: &str, manifest: &str) -> Vec<String> {
+    manifest
+        .lines()
+        .map(|line| toml_code(line).trim())
+        .filter(|line| line.starts_with('[') && !line.starts_with("[["))
+        .map(|line| {
+            line.trim_start_matches('[')
                 .trim_end_matches(']')
                 .chars()
                 .filter(|c| !c.is_whitespace())
-                .collect();
-            inside = !line.starts_with("[[") && header == "profile.release";
-            if inside {
-                table.get_or_insert_with(BTreeMap::new);
-            }
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        if let (Some(table), Some((key, value))) = (table.as_mut(), line.split_once('=')) {
-            table.insert(key.trim().to_string(), value.trim().to_string());
-        }
-    }
-    table
+                .collect::<String>()
+        })
+        .filter(|header| header == "profile" || header.starts_with("profile."))
+        .map(|header| {
+            format!(
+                "{member}/Cargo.toml declares [{header}], which cargo ignores: a member is \
+                 built under the workspace root's profiles, so the table belongs in the root's \
+                 Cargo.toml or nowhere"
+            )
+        })
+        .collect()
 }
 
 /// A TOML line before its comment: a `#` outside a quoted string starts one.
@@ -2786,78 +2725,51 @@ fn helper<'a>(bytes: &'a [u8]) -> &'a [u8] {
         }
     }
 
-    /// **A binding whose release profile is not the root's is refused**, by
-    /// its manifest and the key: no `[profile.release]` at all, a key the
-    /// root's sets missing or set otherwise, and a key the root's does not
-    /// set. One that matches key for key passes, whatever its comments,
-    /// spacing and order, and a sub-table such as `build-override` is no key
-    /// of the profile's.
+    /// **A member that declares a build profile is refused**, by its manifest
+    /// and the table, whatever the table's spacing or comments and whether it
+    /// is a profile or one of its sub-tables. A member declaring none passes,
+    /// and so does an array of tables or a key that merely names a profile.
     #[test]
-    fn a_binding_profile_unlike_the_roots_is_refused() {
-        let root = "[workspace]\nmembers = []\n\n[profile.release]\nlto = \"thin\"\n\
-                    codegen-units = 1\n\n[profile.release.build-override]\nopt-level = 2\n";
-        let same = "[package]\nname = \"a\" # the binding\n\n# The root's.\n\
-                    [ profile.release ]\ncodegen-units=1   # one unit\nlto = \"thin\"\n";
+    fn a_member_that_declares_a_profile_is_refused() {
+        let clean = "[package]\nname = \"a\" # profile.release, in a comment\n\n\
+                     [dependencies]\nprofile = \"1\"\n\n[[bench]]\nname = \"profile\"\n";
         assert_eq!(
-            profile_problems(root, &[("bindings/js/Cargo.toml", same)]),
+            member_profile_problems("bindings/js", clean),
             Vec::<String>::new()
         );
-        for (manifest, needle) in [
-            ("[package]\nname = \"a\"\n", "declares no [profile.release]"),
+        for (manifest, table) in [
+            ("[profile.release]\nlto = \"thin\"\n", "profile.release"),
             (
-                "[profile.dev]\nlto = \"thin\"\ncodegen-units = 1\n",
-                "declares no [profile.release]",
+                "[ profile.release ] # the root's\nlto = \"thin\"\n",
+                "profile.release",
             ),
             (
-                "[profile.release.build-override]\nlto = \"thin\"\ncodegen-units = 1\n",
-                "declares no [profile.release]",
+                "[profile.dev.build-override]\nopt-level = 2\n",
+                "profile.dev.build-override",
             ),
-            (
-                "[profile.release]\nlto = \"thin\"\n",
-                "has no `codegen-units`; the root's sets `codegen-units = 1`",
-            ),
-            (
-                "[profile.release]\nlto = \"fat\"\ncodegen-units = 1\n",
-                "sets `lto = \"fat\"` and the root's `lto = \"thin\"`",
-            ),
-            (
-                "[profile.release]\nlto = \"thin\"\ncodegen-units = 1\nopt-level = \"s\"\n",
-                "sets `opt-level = \"s\"`, which the root's does not",
-            ),
+            ("[profile]\nrelease = { lto = \"thin\" }\n", "profile"),
         ] {
-            let problems = profile_problems(root, &[("bindings/python/Cargo.toml", manifest)]);
+            let problems = member_profile_problems("bindings/python", manifest);
             assert_eq!(problems.len(), 1, "{manifest}: {problems:?}");
             assert!(
-                problems[0].starts_with("bindings/python/Cargo.toml")
-                    && problems[0].contains(needle),
+                problems[0].starts_with(&format!("bindings/python/Cargo.toml declares [{table}]")),
                 "{manifest}: {problems:?}"
             );
         }
-        // Each binding is judged on its own.
-        let problems = profile_problems(
-            root,
-            &[
-                ("bindings/js/Cargo.toml", "[package]\nname = \"js\"\n"),
-                ("bindings/python/Cargo.toml", same),
-            ],
+        // Each table is named on its own.
+        let problems = member_profile_problems(
+            "crates/tinker-pdf",
+            "[profile.release]\nlto = true\n[profile.test]\nopt-level = 1\n",
         );
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(
-            problems[0].starts_with("bindings/js/Cargo.toml"),
-            "{problems:?}"
-        );
-        // A root with no profile has nothing to hold the bindings to.
-        let problems = profile_problems("[workspace]\n", &[("bindings/js/Cargo.toml", same)]);
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].starts_with("Cargo.toml"), "{problems:?}");
+        assert_eq!(problems.len(), 2, "{problems:?}");
     }
 
-    /// The rule runs against this repository: both bindings declare the root
-    /// workspace's release profile.
+    /// The rule runs against this repository: no member declares a build
+    /// profile, the two bindings among them.
     #[test]
-    fn this_repositorys_bindings_build_under_the_roots_profile() {
+    fn no_member_of_this_repository_declares_a_profile() {
         if let Err(problems) = check_profiles() {
-            panic!("a binding's release profile is not the root's:\n{problems:#?}");
+            panic!("a member declares a build profile:\n{problems:#?}");
         }
     }
 }

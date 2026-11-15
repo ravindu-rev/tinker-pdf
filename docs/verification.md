@@ -1116,6 +1116,9 @@ checkout's, cargo's home and the toolchain's sources — with the
 `--remap-path-prefix` flags `cargo xtask remap-paths` prints for the machine
 it runs on, and its job holds the binary to carrying none of that machine's
 paths with `cargo xtask remap-paths --check`, a wheel read entry by entry.
+Every package a shipped binary holds is a member of the root workspace,
+the bindings among them (ruling 25), so with those flags the wasm and the
+wheels are the same bytes from any checkout path.
 
 ## Bounds are measured against real inputs
 

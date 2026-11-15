@@ -233,6 +233,16 @@ what a user gets rather than reaching past the API into a leaf. `xtask`
 holds the workspace police (`dag`, `libm`, `oracles`, `vendor`, `versions`,
 `check`) and the release, corpus and packaging machinery.
 
+The two bindings that build from Rust, `bindings/js` (wasm-bindgen) and
+`bindings/python` (PyO3), are members of the workspace and on the facade
+alone, by the same table, so every package an artefact holds is hashed by
+its path inside the workspace and the wasm and the wheels are the same
+bytes from any checkout path (ruling 25). They are left out of
+`default-members`: a plain `cargo build` at the root compiles neither PyO3
+nor wasm-bindgen, and a `--workspace` build, `-p`, maturin and wasm-pack
+compile them. The .NET, Go, Ruby and Java bindings are not Rust and sit
+over the C ABI.
+
 ### `tinker-pdf-archive`: why a second archive crate, and why no trait
 
 The comic path reads four containers, and the three that are not ZIP live

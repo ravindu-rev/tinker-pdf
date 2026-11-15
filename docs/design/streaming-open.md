@@ -735,7 +735,7 @@ more:
   `tinker_pdf`, so P-05.5's probe child includes it by path, as MS-05 reaches
   `benches/support`, and runs the CLI's own open rather than a copy of it.
 - **The Python binding** (P-05.7) carries its own copy of that shape, because
-  it builds outside the workspace and cannot depend on a binary's module.
+  a library cannot depend on a binary's module.
 - **.NET** (P-05.8) reads a `FileStream` at offsets behind
   `tpdf_document_open_streaming`'s vtable, its context a `GCHandle` the
   vtable's `free` releases, as Go's binding holds a `cgo.Handle`.
