@@ -640,9 +640,12 @@ fn a_profile_two_images_share_is_compiled_once() {
     expected.images_decoded = 2;
     expected.image_misses = 2;
     expected.image_hits = 1;
-    // Each decode reads its space once: the first compiles the profile.
+    // Each image's first draw reads its space twice: for how its colours take
+    // an intent, which keys its decode (RC-01.6), and at the decode itself.
+    // The first read compiles the profile, and the other three find it
+    // refused.
     expected.icc_transform_misses = 1;
-    expected.icc_transform_hits = 1;
+    expected.icc_transform_hits = 3;
     // Three draws from samples, two by two each: a profile that will not
     // parse is read through its component count (8.6.5.5), and the images
     // decode.
