@@ -172,7 +172,7 @@ pub fn register(
     placement: Placement,
     fonts: &Fonts<'_>,
     metrics: &BookMetrics<'_>,
-    resolve: impl FnMut(&str) -> Option<Vec<u8>>,
+    mut resolve: impl FnMut(&str) -> Option<Vec<u8>>,
 ) -> Registry {
     let space = Space {
         base: placement.matrix(scene.size),
@@ -183,7 +183,7 @@ pub fn register(
         builder,
         fonts,
         metrics,
-        resolve,
+        resolve: &mut resolve,
         entry_limit: placement.entry_limit,
         prefix: b"Svg".to_vec(),
         next: 0,
@@ -218,7 +218,7 @@ pub(crate) fn scene_operators(
     extent: [f64; 4],
     prefix: &[u8],
     entry_limit: usize,
-    resolve: impl FnMut(&str) -> Option<Vec<u8>>,
+    mut resolve: impl FnMut(&str) -> Option<Vec<u8>>,
 ) -> (Vec<u8>, Drawn) {
     let fonts = Fonts::new(super::typeface::FaceSet::EMPTY);
     let metrics = BookMetrics::STANDARD;
@@ -226,7 +226,7 @@ pub(crate) fn scene_operators(
         builder,
         fonts: &fonts,
         metrics: &metrics,
-        resolve,
+        resolve: &mut resolve,
         entry_limit,
         prefix: prefix.to_vec(),
         next: 0,
@@ -331,11 +331,16 @@ impl Cursor {
 type Embedded = (Vec<u8>, (f64, f64));
 
 /// The state of one [`register`] call.
-struct Writer<'b, 'f, 'm, R> {
+///
+/// The href resolver is held as a trait object rather than a type parameter:
+/// each caller's closure is a type of its own, and a writer generic in it
+/// would be compiled again for every one of them, the whole scene walk with
+/// it, where the resolver is asked once an image.
+struct Writer<'b, 'f, 'm> {
     builder: &'b mut DocumentBuilder,
     fonts: &'b Fonts<'f>,
     metrics: &'b BookMetrics<'m>,
-    resolve: R,
+    resolve: &'b mut dyn FnMut(&str) -> Option<Vec<u8>>,
     entry_limit: usize,
     /// What every resource name this writer hands out begins with.
     prefix: Vec<u8>,
@@ -351,7 +356,7 @@ struct Writer<'b, 'f, 'm, R> {
     drawn: Drawn,
 }
 
-impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
+impl Writer<'_, '_, '_> {
     /// A resource name no other resource on this page has.
     fn name(&mut self, kind: &str) -> Vec<u8> {
         let mut name = self.prefix.clone();
@@ -797,14 +802,8 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
             return known.clone();
         }
         let name = self.name("I");
-        let embedded = embed(
-            self.builder,
-            &name,
-            href,
-            self.entry_limit,
-            &mut self.resolve,
-        )
-        .map(|natural| (name, natural));
+        let embedded = embed(self.builder, &name, href, self.entry_limit, self.resolve)
+            .map(|natural| (name, natural));
         self.images.insert(href.to_owned(), embedded.clone());
         embedded
     }
@@ -1441,7 +1440,7 @@ fn embed(
     name: &[u8],
     href: &str,
     limit: usize,
-    resolve: &mut impl FnMut(&str) -> Option<Vec<u8>>,
+    resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
 ) -> Option<(f64, f64)> {
     let bytes = resolve(href)?;
     // The same two routes `cbz.rs` takes, and for its reasons: a JPEG is
