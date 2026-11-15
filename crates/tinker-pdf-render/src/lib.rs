@@ -11052,7 +11052,7 @@ mod tests {
     /// and an image in a hidden layer are hidden; an image this source has no
     /// samples for is drawn as its placeholder, and one it has is drawn from
     /// its samples, two by two; and a render cancelled before it starts counts
-    /// nothing.
+    /// nothing it drew or did, its canvas still the pixels it renders.
     #[test]
     fn the_counts_classify_what_the_render_drew() {
         let canvas = Canvas::new(40, 40, PixelFormat::Rgb8, Color::WHITE);
@@ -11132,7 +11132,16 @@ mod tests {
             &HiddenLayer,
         );
         let (_, _, counts) = renderer.finish_counted();
-        assert_eq!(counts, RenderCounts::default(), "a cancelled render");
+        // Nothing drawn and no work done; `pixels_rendered` is no count but
+        // the canvas's size (P-17.6), the page the render hands back.
+        assert_eq!(
+            counts,
+            RenderCounts {
+                pixels_rendered: 20 * 20,
+                ..RenderCounts::default()
+            },
+            "a cancelled render"
+        );
     }
 
     /// M3: a rectangle inside an `/OFF` layer paints nothing, and the same
