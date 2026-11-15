@@ -193,7 +193,9 @@ fn damaged_fax() -> Vec<u8> {
 }
 
 /// `images.rs`'s placeholder: a JPX codestream of four zero bytes, which this
-/// build refuses.
+/// build refuses as structurally invalid. The decode names its refusal's
+/// reason, `jpx-structure-invalid`, as the image's damage (ruling 10) and
+/// refuses the image by its codec, drawing the placeholder (ruling 2).
 fn refused_jpx() -> Vec<u8> {
     stream(
         "/Type /XObject /Subtype /Image /Width 2 /Height 2 \
@@ -609,7 +611,8 @@ fn a_budget_of_zero_decodes_an_image_at_every_draw() {
 /// name for it.** The damaged fax is `/Fax` on page 0 and `/Scan` on page 1;
 /// page 1's render finds it kept and names the damage under `/Scan`, as a
 /// render of its own decode does, and the refused JPEG 2000 image is refused
-/// once a document, each render saying its codec.
+/// once a document, each render naming its refusal's reason and saying its
+/// codec.
 #[test]
 fn a_kept_image_reports_what_its_decode_reported_under_each_name() {
     let bytes = document(
@@ -647,7 +650,7 @@ fn a_kept_image_reports_what_its_decode_reported_under_each_name() {
 
     let (first, stats) = counted(&document.page(0).expect("a page"), 72.0);
     assert_eq!(stats.images_decoded, 2, "{stats:?}");
-    assert_eq!(damage(&first), ["Fax"]);
+    assert_eq!(damage(&first), ["Fax", "Odd"]);
     assert_eq!(refused(&first), 1);
     let (second, stats) = counted(&document.page(1).expect("a page"), 72.0);
     assert_eq!(
@@ -655,7 +658,11 @@ fn a_kept_image_reports_what_its_decode_reported_under_each_name() {
         (0, 2),
         "both kept, the refusal as firmly as the picture: {stats:?}"
     );
-    assert_eq!(damage(&second), ["Scan"], "the damage under page 1's name");
+    assert_eq!(
+        damage(&second),
+        ["Scan", "Odd"],
+        "the damage under page 1's names, the refusal's reason with it"
+    );
     assert_eq!(refused(&second), 1);
     for (index, bitmap) in [(0, &first), (1, &second)] {
         let unbudgeted = plain
