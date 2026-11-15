@@ -62,6 +62,13 @@ fn calculator(program: &str) -> String {
     stream("/FunctionType 4 /Domain [0 1] /Range [0 1]", program)
 }
 
+/// [`calculator`] with outputs in `[-1 1]`: an undercolour removal, which
+/// 10.4.2.4 lets return "even a negative amount", and which `/Range [0 1]`
+/// would clip to none (7.10.1).
+fn signed_calculator(program: &str) -> String {
+    stream("/FunctionType 4 /Domain [0 1] /Range [-1 1]", program)
+}
+
 fn render(bytes: Vec<u8>, options: &RenderOptions) -> Bitmap {
     Document::open(bytes)
         .expect("the document opens")
@@ -90,7 +97,9 @@ fn table(curve: fn(f64) -> f64) -> [u8; 256] {
 }
 
 // The four curves, each a calculator whose arithmetic is IEEE's own, so the
-// test computes exactly what the function returns.
+// test computes exactly what the function returns, in Table 42's operators
+// alone: it has no `min`, so the doubling holds itself to 1 with `gt` and
+// `if`.
 const INVERT: &str = "{ 1 exch sub }";
 fn invert(x: f64) -> f64 {
     1.0 - x
@@ -103,7 +112,7 @@ const HALF: &str = "{ 0.5 mul 0.25 add }";
 fn half(x: f64) -> f64 {
     x * 0.5 + 0.25
 }
-const DOUBLE: &str = "{ 2 mul 1 min }";
+const DOUBLE: &str = "{ 2 mul dup 1 gt { pop 1 } if }";
 fn double(x: f64) -> f64 {
     (x * 2.0).min(1.0)
 }
@@ -446,7 +455,7 @@ fn curvy_type0(first: usize) -> Vec<String> {
 fn a_glyph_takes_the_transfer_and_the_ink_tables() {
     let mut extra = curves();
     extra.push(calculator(BLACK_HALF));
-    extra.push(calculator(REMOVE_LESS));
+    extra.push(signed_calculator(REMOVE_LESS));
     extra.extend(curvy_type0(12));
     let doc = |state: &str| {
         page(
@@ -546,7 +555,7 @@ fn unchanged(x: f64) -> f64 {
 /// shown as its light; and without the keys every byte is today's.
 #[test]
 fn black_generation_and_undercolour_removal_make_the_ink_the_test_computes() {
-    let mut extra = vec![calculator(BLACK_HALF), calculator(REMOVE_LESS)];
+    let mut extra = vec![calculator(BLACK_HALF), signed_calculator(REMOVE_LESS)];
     extra.push(stream(
         "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB \
          /BitsPerComponent 8 /Filter /ASCIIHexDecode",
