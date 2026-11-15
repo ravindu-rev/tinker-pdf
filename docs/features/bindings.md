@@ -730,7 +730,12 @@ lines, both directions, to the rule that the string is the arm's own name
   header rather than transcribing it, so cgo lays out every struct and
   every enum constant is the header's own.
   `bindings/go/tinkerpdf.go` links `target/release` with that directory as
-  its run path; `go run ./cmd/smoke testdata/simple-text.pdf FACE.ttf` and
+  its run path. On Windows it links `tinker_pdf_ffi.dll` by name, because
+  the directory also holds `tinker_pdf_ffi.lib`, the MSVC static library,
+  which MinGW's ld takes for `-ltinker_pdf_ffi` before the DLL and cannot
+  link; a Windows program has no run path, so `target/release` goes on
+  `PATH` to run one, and no `CGO_LDFLAGS` is needed. The programs are
+  `go run ./cmd/smoke testdata/simple-text.pdf FACE.ttf` and
   `go run ./cmd/parity testdata/form-fields.pdf` from `bindings/go`, the
   smoke program's command stream leg reading the checkout's Liberation Serif
   and an ICC profile from beside the `testdata` directory it is given. Every
@@ -915,7 +920,9 @@ must succeed first, so a binding that does not compile fails rather than skips.
 The Go surface runs with the library search path set to `target/release`
 alone, because under `cargo run` it otherwise holds `target/debug/deps`, where
 a test build can leave an older `libtinker_pdf_ffi`, and the loader prefers the
-search path to the program's run path.
+search path to the program's run path. On Windows, where the loader searches
+`PATH` and `cargo run` puts `target/debug/deps` at its head, `target/release`
+is put in front of it.
 
 **Agreement is not enough, and this is what makes it enough.** Seven
 byte-identical outputs tell you nothing if all seven are wrong. So every surface

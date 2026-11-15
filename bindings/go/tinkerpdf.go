@@ -9,9 +9,16 @@
 // docs/features/bindings.md.
 //
 // The library is linked from target/release (cargo build -p tinker-pdf-ffi
-// --release), with that directory as the run-time search path, so a program
-// built from this checkout finds the engine it was built against. A host that
-// installs the library elsewhere overrides both through CGO_LDFLAGS.
+// --release). On Linux and macOS that directory is the run-time search path
+// as well, so a program built from this checkout finds the engine it was
+// built against. On Windows the link names tinker_pdf_ffi.dll itself: the
+// directory also holds tinker_pdf_ffi.lib, the MSVC static library, which
+// MinGW's ld takes for -ltinker_pdf_ffi before the DLL and cannot link. A
+// Windows program has no run-time search path, so the loader finds the DLL
+// beside the program or on PATH, and target/release goes on PATH to run one.
+// A host that installs the library elsewhere names that directory in
+// CGO_LDFLAGS, whose flags come before these: -L for the link and, on Linux
+// and macOS, -Wl,-rpath for the run.
 //
 // Ownership is the C ABI's: every handle the engine allocates is released by
 // its Close, which is safe to call twice and on a nil receiver, and every byte
@@ -20,7 +27,8 @@ package tinkerpdf
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../crates/tinker-pdf-ffi/include
-#cgo LDFLAGS: -L${SRCDIR}/../../target/release -Wl,-rpath,${SRCDIR}/../../target/release -ltinker_pdf_ffi
+#cgo !windows LDFLAGS: -L${SRCDIR}/../../target/release -Wl,-rpath,${SRCDIR}/../../target/release -ltinker_pdf_ffi
+#cgo windows LDFLAGS: -L${SRCDIR}/../../target/release -l:tinker_pdf_ffi.dll
 #include <stdlib.h>
 #include "tinker_pdf.h"
 */

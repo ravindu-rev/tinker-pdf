@@ -41,6 +41,7 @@
 //! *which* one.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -593,7 +594,8 @@ fn present(program: &str, args: &[&str]) -> bool {
 }
 
 /// The Go binding: cgo over the committed header, linked against the release
-/// library with that directory as its run-time path.
+/// library with that directory as its run-time path, or, on Windows, where a
+/// program has none, at the head of `PATH`.
 fn go_surface(root: &Path, fixture: &Path) -> Surface {
     let library = match release_library(root) {
         Ok(library) => library,
@@ -615,7 +617,29 @@ fn go_surface(root: &Path, fixture: &Path) -> Surface {
         .env("DYLD_LIBRARY_PATH", &directory)
         .args(["run", "./cmd/parity"])
         .arg(fixture);
+    // A Windows program carries no run path. The loader looks beside the
+    // program, which `go run` builds in a temporary directory, and then along
+    // PATH, which under `cargo run` starts with target/debug/deps for the
+    // reason above; so there the release directory leads PATH.
+    if cfg!(windows) {
+        match path_led_by(&directory, std::env::var_os("PATH").as_deref()) {
+            Ok(path) => {
+                command.env("PATH", path);
+            }
+            Err(why) => return Surface::skipped("go", why),
+        }
+    }
     Surface::ready("go", command)
+}
+
+/// `path` with `directory` in front of it, in the platform's own spelling.
+fn path_led_by(directory: &Path, path: Option<&OsStr>) -> Result<OsString, String> {
+    let mut entries = vec![directory.to_path_buf()];
+    if let Some(path) = path {
+        entries.extend(std::env::split_paths(path));
+    }
+    std::env::join_paths(entries)
+        .map_err(|error| format!("{} cannot lead PATH: {error}", directory.display()))
 }
 
 /// The Ruby binding: Fiddle, from Ruby's standard library, so there is no gem
@@ -809,6 +833,24 @@ GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
     fn a_line_with_no_script_is_not_evidence() {
         assert!(harvest("WROTE sha256=aaaa surface=facade\n").is_empty());
         assert!(harvest("nothing here at all\n").is_empty());
+    }
+
+    /// On Windows the Go program finds the release library along PATH, so the
+    /// release directory comes first and the rest follows in its order: behind
+    /// target/debug/deps, which `cargo run` puts first, a test build's older
+    /// library would be the one loaded.
+    #[test]
+    fn the_release_directory_leads_path() {
+        let release = Path::new("checkout").join("target").join("release");
+        let rest = std::env::join_paths([Path::new("deps"), Path::new("bin")])
+            .expect("two plain directories join");
+        let led = path_led_by(&release, Some(&rest)).expect("a plain directory leads");
+        assert_eq!(
+            std::env::split_paths(&led).collect::<Vec<_>>(),
+            [release.clone(), PathBuf::from("deps"), PathBuf::from("bin")]
+        );
+        let alone = path_led_by(&release, None).expect("with no PATH at all");
+        assert_eq!(std::env::split_paths(&alone).collect::<Vec<_>>(), [release]);
     }
 
     /// JDK 21 needs the preview flags on both sides, 22 and later need
