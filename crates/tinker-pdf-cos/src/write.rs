@@ -1170,6 +1170,7 @@ pub fn incremental_update(
             reserved: None,
             parallelism: Parallelism::Serial,
             work: None,
+            standing: &[],
         },
     )
     .0
@@ -1206,6 +1207,7 @@ pub fn update_section(
             reserved: None,
             parallelism: Parallelism::Serial,
             work: None,
+            standing: &[],
         },
     )
     .0
@@ -1265,6 +1267,28 @@ pub(crate) struct UpdatePlan<'a> {
     /// The tally the update's sealing counts into, where the save counts
     /// ([`crate::Stats::stream_seal_passes`]).
     pub(crate) work: Option<&'a Work>,
+    /// Objects the update leaves where they lie in the bytes it follows, each
+    /// stated in its table beside the objects it writes. Empty for an update
+    /// that chains to a section stating them already; a document with no
+    /// such section has its update state every object it does not write
+    /// ([`Standing`]).
+    pub(crate) standing: &'a [Standing],
+}
+
+/// An object an incremental update states where it already lies: a row of
+/// its table pointing into the bytes it follows rather than into its own.
+///
+/// 7.5.6 has an update's section carry only what changed, because the
+/// section it chains to through `/Prev` states the rest. A document the repair
+/// scanner rebuilt has no section that does, and an update chained to nothing
+/// is the file's only table, which 7.5.4 has state every object: these are
+/// the rows for the ones the update does not write, at the offset and the
+/// generation of the `N G obj` header the scan found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Standing {
+    pub(crate) num: u32,
+    pub(crate) offset: u64,
+    pub(crate) gen: u16,
 }
 
 /// [`incremental_update`], optionally appending one object whose bytes the
@@ -1374,7 +1398,29 @@ pub(crate) fn update_section_reserving(
     }
 
     let xref_at = at(&out);
-    write_classic_xref(&mut out, &offsets);
+    if plan.standing.is_empty() {
+        write_classic_xref(&mut out, &offsets);
+    } else {
+        // The rows of what the section writes and of what it leaves where it
+        // lies, in one ascending run: the written row first where a caller
+        // names a number twice, since the section's own copy is the newest.
+        let mut rows: Vec<ClassicRow> = offsets
+            .iter()
+            .map(|&(num, offset)| ClassicRow {
+                num,
+                offset,
+                gen: 0,
+            })
+            .chain(plan.standing.iter().map(|standing| ClassicRow {
+                num: standing.num,
+                offset: standing.offset,
+                gen: standing.gen,
+            }))
+            .collect();
+        rows.sort_by_key(|row| row.num);
+        rows.dedup_by_key(|row| row.num);
+        write_classic_rows(&mut out, &rows);
+    }
 
     // 14.4: an update keeps the document's permanent identifier and moves the
     // second string, so a reader can tell two revisions of one document from
@@ -1397,7 +1443,15 @@ pub(crate) fn update_section_reserving(
         // The signature object is not in `changed` — it was serialised by the
         // caller — so its number has to be counted here or a reader would be
         // required to ignore the one object the file exists to carry.
-        .max(reserved.map_or(0, |(num, _)| num.saturating_add(1)));
+        .max(reserved.map_or(0, |(num, _)| num.saturating_add(1)))
+        // And neither is an object the section states where it lies.
+        .max(
+            plan.standing
+                .iter()
+                .map(|standing| standing.num.saturating_add(1))
+                .max()
+                .unwrap_or(0),
+        );
     trailer.insert(Name::SIZE, Object::Int(i64::from(size)));
     // 7.5.5 Table 15: /Prev names the previous cross-reference *section*. A
     // document with none — one the repair scanner rebuilt — gets no /Prev at
@@ -1914,6 +1968,31 @@ fn write_xref_stream(
 /// Entries are grouped into contiguous subsections, which is what makes an
 /// incremental update's table small: only the objects that changed appear.
 fn write_classic_xref(out: &mut Vec<u8>, offsets: &[(u32, u64)]) {
+    let rows: Vec<ClassicRow> = offsets
+        .iter()
+        .map(|&(num, offset)| ClassicRow {
+            num,
+            offset,
+            gen: 0,
+        })
+        .collect();
+    write_classic_rows(out, &rows);
+}
+
+/// One in-use row of a classic table: an object, where its `N G obj` header
+/// is, and the generation that header states.
+#[derive(Clone, Copy)]
+struct ClassicRow {
+    num: u32,
+    offset: u64,
+    gen: u16,
+}
+
+/// [`write_classic_xref`] over rows in ascending number order, each stating
+/// its own generation: an object this writer serialises is generation zero,
+/// and one an update leaves where it lies keeps the generation its header
+/// gives ([`Standing`]).
+fn write_classic_rows(out: &mut Vec<u8>, offsets: &[ClassicRow]) {
     out.extend_from_slice(b"xref\n");
 
     if offsets.is_empty() {
@@ -1930,7 +2009,7 @@ fn write_classic_xref(out: &mut Vec<u8>, offsets: &[(u32, u64)]) {
     // free head at all. Seventy-two corpus files produced such a table, and
     // this engine's own reader never looked: the strict validator is what
     // found it.
-    if offsets.first().is_some_and(|(num, _)| *num > 1) {
+    if offsets.first().is_some_and(|row| row.num > 1) {
         out.extend_from_slice(
             b"0 1
 0000000000 65535 f 
@@ -1941,14 +2020,14 @@ fn write_classic_xref(out: &mut Vec<u8>, offsets: &[(u32, u64)]) {
     let mut index = 0usize;
     while index < offsets.len() {
         let start = match offsets.get(index) {
-            Some((num, _)) => *num,
+            Some(row) => row.num,
             None => break,
         };
 
         // Find how far the run of consecutive numbers extends.
         let mut end = index;
-        while let (Some((a, _)), Some((b, _))) = (offsets.get(end), offsets.get(end + 1)) {
-            if b.saturating_sub(*a) == 1 {
+        while let (Some(a), Some(b)) = (offsets.get(end), offsets.get(end + 1)) {
+            if b.num.saturating_sub(a.num) == 1 {
                 end += 1;
             } else {
                 break;
@@ -1965,10 +2044,11 @@ fn write_classic_xref(out: &mut Vec<u8>, offsets: &[(u32, u64)]) {
             out.extend_from_slice(format!("{start} {count}\n").as_bytes());
         }
 
-        for (_, offset) in offsets.get(index..=end).unwrap_or_default() {
+        for row in offsets.get(index..=end).unwrap_or_default() {
             // 7.5.4: exactly twenty bytes per entry, including the trailing
             // two-character end-of-line.
-            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+            let (offset, gen) = (row.offset, row.gen);
+            out.extend_from_slice(format!("{offset:010} {gen:05} n \n").as_bytes());
         }
 
         index = end + 1;
@@ -2415,6 +2495,7 @@ mod tests {
                         reserved: None,
                         parallelism,
                         work: None,
+                        standing: &[],
                     },
                 )
                 .0

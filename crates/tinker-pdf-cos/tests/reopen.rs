@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use proptest::prelude::*;
 use tinker_pdf_cos::limits::MAX_REOPEN_DEPTH;
-use tinker_pdf_cos::write::{write_object, WriteMode, WriteOptions};
+use tinker_pdf_cos::write::{update_section, write_object, Prefix, WriteMode, WriteOptions};
 use tinker_pdf_cos::{
     annot, pages, CosDocument, Dict, DocumentBuilder, DocumentEditor, FullOpen, LadderLevel, Name,
-    ObjRef, Object, PdfString, Rect, SliceSource, StreamData, Warning, XrefEntry,
+    ObjRef, Object, ObjectSet, PdfString, Rect, SliceSource, StreamData, Warning, XrefEntry,
 };
 
 /// The options an incremental save takes.
@@ -777,11 +777,14 @@ fn appended(
 /// an edit of each, the document over the base and its update section reads,
 /// fact for fact, as the document over the two joined: every entry, object,
 /// stream extent, raw and decoded stream, page and content, the trailer and
-/// revisions, the ladder and every warning — the patched and the rescanned
-/// base's repairs among them, whose scans read the whole file, and the reads
-/// that cross the seam, the tail `startxref` is found in and the last line of
-/// a base with no line ending. A second update over the first reads the same
-/// way, and the whole-file read is the joined bytes.
+/// revisions, the ladder and every warning — the patched base's repairs among
+/// them, whose scan reads the whole file, and the reads that cross the seam,
+/// the tail `startxref` is found in and the last line of a base with no line
+/// ending. The update over the base with no table states every object, so
+/// the file it makes opens on `Trust`; a rescan across the seam is
+/// `a_rescan_across_the_seam_reads_as_over_the_joined_bytes`'s. A second
+/// update over the first reads the same way, and the whole-file read is the
+/// joined bytes.
 #[test]
 fn two_segments_read_as_their_concatenation() {
     for base in bases() {
@@ -812,7 +815,7 @@ fn two_segments_read_as_their_concatenation() {
         assert!(segmented.bytes() == joined.as_slice(), "{}", base.name);
         assert_eq!(
             segmented.ladder_level() == LadderLevel::Trust,
-            base.name != "a misplaced offset" && base.name != "no table",
+            base.name != "a misplaced offset",
             "{}: {:?}",
             base.name,
             segmented.warnings()
@@ -840,6 +843,49 @@ fn two_segments_read_as_their_concatenation() {
             &format!("{}, a second update", base.name),
         );
     }
+}
+
+/// **A rescan across the seam reads as one over the joined bytes.** An update
+/// over the base with no table that chains to nothing and states only the
+/// object it writes — what `write::update_section` writes when it is handed
+/// no section to chain to, where the editor's own update states every object
+/// — leaves the file a table that cannot place its root, so the document over
+/// the two segments rescans as the document over the joined bytes does, its
+/// scan reading the whole file across the seam, and reads, fact for fact, as
+/// that document does.
+#[test]
+fn a_rescan_across_the_seam_reads_as_over_the_joined_bytes() {
+    let original: Arc<[u8]> = tableless().into();
+    let doc = opened(Arc::clone(&original), None);
+    let mut changed = ObjectSet::new();
+    changed.insert(4, Object::Int(7));
+    let update: Arc<[u8]> = update_section(
+        Prefix::of(&original),
+        &changed,
+        doc.trailer(),
+        0,
+        doc.names_table(),
+        false,
+        None,
+    )
+    .into();
+    let joined = [&original[..], &update[..]].concat();
+    written_support::rewritten(
+        "a number added to a file with no table, chained to nothing",
+        &original[..],
+        &joined,
+    );
+
+    let segmented = CosDocument::open_appended(Arc::clone(&original), Arc::clone(&update))
+        .expect("it opens over two segments");
+    let whole = CosDocument::open(joined.clone()).expect("it opens joined");
+    assert_eq!(segmented.ladder_level(), LadderLevel::Rescan);
+    same_reading(
+        &reading(&segmented),
+        &reading(&whole),
+        "a rescan across the seam",
+    );
+    assert!(segmented.bytes() == joined.as_slice());
 }
 
 proptest! {

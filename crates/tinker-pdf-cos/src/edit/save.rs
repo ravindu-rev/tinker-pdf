@@ -294,7 +294,7 @@ impl DocumentEditor {
     /// [`CosDocument::open_appended`]: crate::CosDocument::open_appended
     #[must_use]
     pub fn save_update(&self, options: &WriteOptions) -> Vec<u8> {
-        let set = self.changed_set();
+        let (set, standing, previous) = self.update_parts();
         let trailer = self.update_trailer();
         let key = self.doc.file_key();
         let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
@@ -302,7 +302,7 @@ impl DocumentEditor {
             self.doc.prefix(),
             &set,
             &trailer,
-            self.doc.last_startxref(),
+            previous,
             &write::UpdatePlan {
                 names: self.doc.names_table(),
                 compress: options.compress,
@@ -310,6 +310,7 @@ impl DocumentEditor {
                 reserved: None,
                 parallelism: options.parallelism,
                 work: self.work.as_deref(),
+                standing: &standing,
             },
         )
         .0
@@ -317,13 +318,14 @@ impl DocumentEditor {
 
     /// The numbers of the objects [`DocumentEditor::save_update`]'s section
     /// writes, ascending: every object this editor has put or written, every
-    /// one it has deleted, and each page-tree node a page operation rewrites.
-    /// They are the numbers a reopen over that section parses afresh
-    /// ([`crate::CosDocument::reopen`]); object zero's free head, which its
-    /// table also states, is not one.
+    /// one it has deleted, and each page-tree node a page operation rewrites
+    /// — and, over a document the repair scanner rebuilt, each member of an
+    /// object stream the section writes out. They are the numbers a reopen
+    /// over that section parses afresh ([`crate::CosDocument::reopen`]);
+    /// object zero's free head, which its table also states, is not one.
     #[must_use]
     pub fn changed_numbers(&self) -> Vec<u32> {
-        self.changed_set().numbers()
+        self.update_parts().0.numbers()
     }
 
     /// Saves the edits as a document **sealed to recipients** rather than to
@@ -369,8 +371,6 @@ impl DocumentEditor {
         sealing: Option<write::Sealing<'_>>,
         work: Option<&Work>,
     ) -> Vec<u8> {
-        let set = self.changed_set();
-
         // A reordered page tree needs its /Kids and /Count rewritten.
         //
         // Computed once and applied to whichever object set the chosen mode
@@ -393,6 +393,9 @@ impl DocumentEditor {
                 // With every entry removed here written as null, so an earlier
                 // revision's trailer does not bring it back.
                 let trailer = self.update_trailer();
+                // Over a document the repair scanner rebuilt, the section
+                // states every object and chains to nothing (`update_parts`).
+                let (set, standing, previous) = self.update_parts();
                 // 7.6.2: the update is sealed with the key the document was
                 // opened with, because it appends into a file whose /Encrypt
                 // still stands. An unencrypted document, or one never
@@ -406,7 +409,7 @@ impl DocumentEditor {
                     self.doc.bytes(),
                     &set,
                     &trailer,
-                    self.doc.last_startxref(),
+                    previous,
                     &write::UpdatePlan {
                         names: self.doc.names_table(),
                         compress: options.compress,
@@ -414,6 +417,7 @@ impl DocumentEditor {
                         reserved: None,
                         parallelism: options.parallelism,
                         work,
+                        standing: &standing,
                     },
                 )
                 .0
@@ -570,6 +574,52 @@ impl DocumentEditor {
             Ok(decoded) if sink.is_empty() => Content::Decoded(decoded),
             _ => Content::Stored(stream.data.clone()),
         }
+    }
+
+    /// What an incremental update of these edits writes, the objects it
+    /// states where they lie, and the cross-reference section it chains to.
+    ///
+    /// Every incremental path takes it — [`DocumentEditor::save`],
+    /// [`DocumentEditor::save_update`] and the signer's — so the three write
+    /// one section.
+    ///
+    /// An update chains to the document's newest section, which states every
+    /// object the update does not write (7.5.6). A document the repair
+    /// scanner rebuilt has no section that does: its objects are where the
+    /// scan found them, and whatever tables it was opened over were
+    /// discarded. Chained to one of those, or to nothing, an update stating
+    /// only what changed leaves every other object unreachable, so a filled
+    /// form reopens with its catalog and none of its pages. Its section is
+    /// then the file's only table and states every object (7.5.4): each one
+    /// the scan found in the document's own bytes where it lies, under the
+    /// generation its header gives, and each member of an object stream,
+    /// which a classic table cannot place, written into the update; it names
+    /// no `/Prev`.
+    pub(super) fn update_parts(&self) -> (ObjectSet, Vec<write::Standing>, u64) {
+        let mut set = self.changed_set();
+        if self.doc.ladder_level() != crate::LadderLevel::Rescan {
+            return (set, Vec::new(), self.doc.last_startxref());
+        }
+        let mut standing = Vec::new();
+        for (num, entry) in self.doc.xref().iter() {
+            if num == 0 || set.get(num).is_some() {
+                continue;
+            }
+            match entry {
+                crate::XrefEntry::Offset { offset, gen } => {
+                    standing.push(write::Standing { num, offset, gen })
+                }
+                crate::XrefEntry::InStream { .. } => {
+                    if let Ok(object) = self.doc.get(ObjRef::new(num, 0)) {
+                        if !matches!(object.as_ref(), Object::Null) {
+                            set.insert(num, (*object).clone());
+                        }
+                    }
+                }
+                crate::XrefEntry::Free { .. } => {}
+            }
+        }
+        (set, standing, 0)
     }
 
     /// The overlay, deletions and page-tree rewrites as one object set.

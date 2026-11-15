@@ -43,9 +43,19 @@ byte — asserted by tests, not assumed — with the appended section opening
 on its own newline (7.5.6). Only the changed objects are written, followed
 by a classic cross-reference section covering exactly them, so the table
 stays small. `/Prev` names the previous cross-reference *section's* offset
-(7.5.5 Table 15); a base document with no section to chain to — one the
-repair scanner rebuilt — gets no `/Prev` at all, rather than a `/Prev 0`
-sending every reader to byte zero. `/Size` can only go up: the changed
+(7.5.5 Table 15). A document the repair scanner rebuilt has no section that
+states its objects — its objects are where the scan found them, and the
+tables it was opened over, if any, were discarded — so the editor's update
+of one is the file's only table (7.5.4): it names no `/Prev`, rather than a
+`/Prev 0` sending every reader to byte zero or a `/Prev` to a discarded
+section, states every object it leaves alone where the scan found it, under
+the generation its header gives, and writes out each member of an object
+stream, which a classic table cannot place. Stating only what changed would
+leave every other object unreachable to a reader that trusts the table.
+`DocumentEditor::save`, `save_update` and the signer write that one section
+(`edit::tests::an_update_over_a_rescanned_document_states_every_object`);
+the lower-level `write::incremental_update` writes the objects it is handed
+and chains to the offset it is given. `/Size` can only go up: the changed
 set's own maximum never clobbers the file's. An incremental update to a
 linearized file de-linearizes it by nature — the parameter dictionary goes
 stale — which is documented, not errored.

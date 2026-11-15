@@ -929,3 +929,119 @@ fn resetting_removes_a_value_that_has_no_default() {
     assert_eq!(field_named(&saved, "name").value, form::FieldValue::None);
     assert!(!field_named(&saved, "agree").value.is_on());
 }
+
+/// A page, one object under a generation of its own and an object stream of
+/// two members, with no cross-reference table at all: a document only the
+/// repair scanner opens.
+fn rescanned_document() -> Arc<CosDocument> {
+    let packed = "7 0 8 8 (seven) (eight)";
+    let text = format!(
+        "%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Kept 5 1 R /Packed [7 0 R 8 0 R] >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Resources << >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 11 >>
+stream
+0 0 m 1 1 l
+endstream
+endobj
+5 1 obj
+(a generation of its own)
+endobj
+6 0 obj
+<< /Type /ObjStm /N 2 /First 8 /Length {} >>
+stream
+{packed}
+endstream
+endobj
+trailer
+<< /Size 9 /Root 1 0 R >>
+%%EOF
+",
+        packed.len()
+    );
+    let doc = CosDocument::open(text.into_bytes()).expect("the scanner opens it");
+    assert_eq!(doc.ladder_level(), crate::LadderLevel::Rescan);
+    Arc::new(doc)
+}
+
+/// An object as `doc` reads it, spelled with `doc`'s own names, and a
+/// stream's stored bytes after its dictionary.
+fn spelled(doc: &CosDocument, r: ObjRef) -> Vec<u8> {
+    let object = doc.get(r).expect("the object reads");
+    let mut out = Vec::new();
+    crate::write::write_object(&mut out, &object, doc.names_table());
+    if matches!(object.as_ref(), Object::Stream(_)) {
+        out.extend_from_slice(&doc.stream_raw(r).expect("its data reads"));
+    }
+    out
+}
+
+/// **An update over a document the repair scanner rebuilt states every
+/// object** (ISO 32000-2 7.5.4). The document has no cross-reference section
+/// for the update to chain to, so the update's is the file's only table:
+/// chained to nothing and stating only what changed, it would leave the page
+/// tree and every other object the edit left alone unreachable, read as null
+/// by a reader that trusts the table. The section names no `/Prev` and states
+/// each object where it lies — the one under generation 1 with its own
+/// generation — and writes out the object stream's members, which a classic
+/// table cannot place, so the save opens on `Trust` and reads every object
+/// the document read. [`DocumentEditor::save_update`] writes the same
+/// section, and [`DocumentEditor::changed_numbers`] names the members it
+/// writes.
+#[test]
+fn an_update_over_a_rescanned_document_states_every_object() {
+    let doc = rescanned_document();
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    assert!(editor.rotate_page(0, 90));
+
+    let saved = reopen(&editor, WriteMode::Incremental);
+    assert_eq!(saved.ladder_level(), crate::LadderLevel::Trust);
+    let update = &saved.bytes()[doc.bytes().len()..];
+    assert!(
+        !String::from_utf8_lossy(update).contains("/Prev"),
+        "no section to chain to"
+    );
+    for r in [
+        ObjRef::new(1, 0),
+        ObjRef::new(2, 0),
+        ObjRef::new(4, 0),
+        ObjRef::new(5, 1),
+        ObjRef::new(6, 0),
+        ObjRef::new(7, 0),
+        ObjRef::new(8, 0),
+    ] {
+        assert_eq!(
+            spelled(&saved, r),
+            spelled(&doc, r),
+            "{} {} R reads as the document read it",
+            r.num,
+            r.gen
+        );
+    }
+    let page = &pages::collect(&saved)[0];
+    assert_eq!(page.rotation, 90, "and the edit is the update's");
+    assert_eq!(
+        pages::contents(&saved, page),
+        vec![ObjRef::new(4, 0)],
+        "its content reached through the page tree the update left where it lies"
+    );
+
+    let options = WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    };
+    assert!(editor.save_update(&options) == update, "one section");
+    let changed = editor.changed_numbers();
+    assert!(
+        changed.contains(&3) && changed.contains(&7) && changed.contains(&8),
+        "the page and the members it writes out: {changed:?}"
+    );
+}
