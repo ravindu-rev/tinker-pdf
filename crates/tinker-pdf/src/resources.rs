@@ -2108,8 +2108,13 @@ enum Arm {
     Row { pixel: Vec<u8>, out: Vec<u8> },
     /// One component of at most 8 bits, whatever its space and `/Decode`: the
     /// colour of each of its `2^bpc` values, packed `0x00RRGGBB`, filled the
-    /// first time a sample holds the value.
-    Values(Vec<u32>),
+    /// first time a sample holds the value, through a buffer the image keeps
+    /// for a tint transform's outputs or a palette's entry
+    /// (`ColorSpace::to_rgb_with_in`), so a fill allocates nothing.
+    Values {
+        colours: Vec<u32>,
+        scratch: Vec<f64>,
+    },
     /// 8-bit DeviceCMYK, or a profile approximated as it, with `/Decode`
     /// absent or `[0 1]`: 8.6.4.4's `(1 − x)(1 − k)` as a byte for each ink
     /// byte `x` against each black byte `k`, at `x · 256 + k`, read for each of
@@ -2187,14 +2192,15 @@ impl Converter {
                     _ => (0, 0, 0),
                 }
             }
-            Arm::Values(colours) => {
+            Arm::Values { colours, scratch } => {
                 let at = usize::try_from(value(0)).unwrap_or(usize::MAX);
                 match colours.get(at).copied() {
                     Some(packed) if packed != UNFILLED => unpack(packed),
                     _ => {
-                        let colour = converted(
+                        let colour = converted_with(
                             space,
                             &[component(space, decode, 0, value(0), max)],
+                            scratch,
                             conversion,
                         );
                         self.converted += 1;
@@ -2371,7 +2377,10 @@ impl Arm {
             }
         }
         if n == 1 && bpc <= 8 {
-            return Arm::Values(vec![UNFILLED; 1usize << bpc.max(1)]);
+            return Arm::Values {
+                colours: vec![UNFILLED; 1usize << bpc.max(1)],
+                scratch: Vec::new(),
+            };
         }
         if ours && eight && plain && n == 4 {
             return Arm::Cmyk(vec![UNFILLED_BYTE; CMYK_PAIRS]);
@@ -10841,8 +10850,8 @@ mod tests {
                 Arm::Copy { grey: true } => "copy grey",
                 Arm::Copy { grey: false } => "copy",
                 Arm::Row { .. } => "row",
-                Arm::Values(table) => {
-                    assert_eq!(table.len(), 1 << bpc.max(1), "a value a table entry");
+                Arm::Values { colours, .. } => {
+                    assert_eq!(colours.len(), 1 << bpc.max(1), "a value a table entry");
                     "values"
                 }
                 Arm::Cmyk(table) => {

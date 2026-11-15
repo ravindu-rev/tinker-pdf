@@ -1739,7 +1739,7 @@ image, a JPEG's strips and a JPEG 2000 image's samples (`resources.rs`'s
 | --- | --- |
 | 8-bit DeviceRGB or DeviceGray, or a refused profile approximated as either, `/Decode` absent or `[0 1]`, no colour key | a copy, a grey replicated to three (P-08's identity path) |
 | 8-bit ICC, `/Decode` absent or `[0 1]`, no colour key, a transform over the space's components | the row path |
-| Any one-component space at up to 8 bits, DeviceGray among them, any `/Decode` | a table of 2^bpc colours, an entry filled through `to_rgb` the first time a sample holds its value |
+| Any one-component space at up to 8 bits, DeviceGray among them, any `/Decode` | a table of 2^bpc colours, an entry filled through `to_rgb` the first time a sample holds its value, a tint transform's outputs and a palette's entry in a buffer the image keeps (`ColorSpace::to_rgb_with_in`) |
 | 8-bit DeviceCMYK, or a profile approximated as it, `/Decode` absent or `[0 1]`, and a CMYK JPEG in its own colour | one table of 8.6.4.4's `(1 − x)(1 − k)`, 256 × 256 bytes read for each of C, M and Y against K, an entry filled by the `to_rgb` of the pixel that first asks for it, which fills its three at once |
 | Everything else | `to_rgb` over buffers the image keeps — its components, and a tint transform's outputs (`ColorSpace::to_rgb_with_in`) — with `Remembered` |
 

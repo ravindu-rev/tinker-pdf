@@ -424,14 +424,18 @@ fn each_device_arm_draws_what_to_rgb_gives_each_input() {
 /// one size, allocates as many times — a `/DeviceN` image, whose colours
 /// convert through its tint transform into a buffer the image keeps and are
 /// remembered in a table of fixed size; a `/Separation` image and a
-/// DeviceCMYK one, read through tables of fixed size; and an ICC image, read
-/// through its transform's row path. Each page is rendered once first, so
-/// what the first render of a process builds is not counted against the
-/// uniform image.
+/// DeviceCMYK one, read through tables of fixed size, the first's entries
+/// filled through its tint transform into a buffer the image keeps; two
+/// `/Indexed` images, one over DeviceRGB and one over a `/Separation`, their
+/// tables' entries read from the palette into that buffer and, for the
+/// second, through the tint transform; and an ICC image, read through its
+/// transform's row path. Each page is rendered once first, so what the first
+/// render of a process builds is not counted against the uniform image.
 #[test]
 fn an_image_converts_in_allocations_flat_in_its_colours() {
     let side = 64u32;
-    let cases: [(&str, u32, String, Vec<Vec<u8>>); 4] = [
+    let spot_palette: String = (0..256u32).map(|i| format!("{i:02X}")).collect();
+    let cases: [(&str, u32, String, Vec<Vec<u8>>); 6] = [
         (
             "a /DeviceN image",
             2,
@@ -449,6 +453,24 @@ fn an_image_converts_in_allocations_flat_in_its_colours() {
             4,
             "/ColorSpace /DeviceCMYK /BitsPerComponent 8".to_string(),
             vec![],
+        ),
+        (
+            "an /Indexed image over DeviceRGB",
+            1,
+            format!(
+                "/ColorSpace [/Indexed /DeviceRGB 255 <{}>] /BitsPerComponent 8",
+                palette()
+            ),
+            vec![],
+        ),
+        (
+            "an /Indexed image over a /Separation",
+            1,
+            format!(
+                "/ColorSpace [/Indexed [/Separation /Spot /DeviceRGB 6 0 R] 255 <{spot_palette}>] \
+                 /BitsPerComponent 8"
+            ),
+            vec![separation_tint()],
         ),
         (
             "an ICC image",

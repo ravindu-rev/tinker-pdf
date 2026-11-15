@@ -539,7 +539,8 @@ transform's row path, which converts bytes as the transform converts
 components, through tables the transform builds once; an image of one
 component of up to eight bits, whatever its space and `/Decode`, reads a
 table of its `2^bpc` values' colours, each converted through its space the
-first time a sample holds it; an 8-bit DeviceCMYK image under `/Decode` absent
+first time a sample holds it, a tint transform's outputs and a palette's entry
+in a buffer it keeps; an 8-bit DeviceCMYK image under `/Decode` absent
 or `[0 1]`, and a CMYK JPEG drawn in its own colour a strip at a time, reads a
 table of 8.6.4.4's `(1 − x)(1 − k)` for each ink byte against each black
 byte, each entry filled by the conversion of the pixel that first asks for

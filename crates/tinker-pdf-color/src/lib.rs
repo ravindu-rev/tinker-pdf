@@ -385,7 +385,8 @@ impl ColorSpace {
     /// [`ColorSpace::to_rgb`] for a caller converting once a pixel, the same
     /// colour: a `/Separation` or `/DeviceN` space evaluates its tint
     /// transform into `scratch`, which the caller keeps, rather than into a
-    /// buffer of its own.
+    /// buffer of its own, and an `/Indexed` space reads its palette's entry
+    /// there.
     #[must_use]
     pub fn to_rgb_with(&self, components: &[f64], scratch: &mut Vec<f64>) -> (u8, u8, u8) {
         self.to_rgb_with_in(components, scratch, icc::Conversion::default())
@@ -406,6 +407,28 @@ impl ColorSpace {
             } => {
                 tint.eval_into(components, scratch);
                 alternate.to_rgb_in(scratch, conversion)
+            }
+            // The entry converts through the base as `to_rgb_in` converts it.
+            // A base with a tint transform reads the entry from a copy on the
+            // stack, so that the transform's outputs can take `scratch`.
+            ColorSpace::Indexed { base, lookup, high } => {
+                palette_entry_into(base, lookup, *high, components, scratch);
+                match &**base {
+                    ColorSpace::Separation {
+                        alternate, tint, ..
+                    } => {
+                        let mut copy = [0.0; TINT_INPUTS_ON_STACK];
+                        match copy.get_mut(..scratch.len()) {
+                            Some(entry) => {
+                                entry.copy_from_slice(scratch);
+                                tint.eval_into(entry, scratch);
+                                alternate.to_rgb_in(scratch, conversion)
+                            }
+                            None => base.to_rgb_in(scratch, conversion),
+                        }
+                    }
+                    other => other.to_rgb_in(scratch, conversion),
+                }
             }
             other => other.to_rgb_in(components, conversion),
         }
@@ -490,6 +513,20 @@ fn cmyk_light(c: f64, m: f64, y: f64, k: f64) -> [f64; 3] {
 /// entry its index rounds to, held to `0..=high`, each byte over 255, and
 /// zero past the end of `lookup`.
 fn palette_entry(base: &ColorSpace, lookup: &[u8], high: u32, components: &[f64]) -> Vec<f64> {
+    let mut entry = Vec::with_capacity(base.components());
+    palette_entry_into(base, lookup, high, components, &mut entry);
+    entry
+}
+
+/// [`palette_entry`] into `out`, which is cleared first: the same values,
+/// into a buffer the caller keeps.
+fn palette_entry_into(
+    base: &ColorSpace,
+    lookup: &[u8],
+    high: u32,
+    components: &[f64],
+    out: &mut Vec<f64>,
+) {
     let index = components
         .first()
         .copied()
@@ -498,10 +535,15 @@ fn palette_entry(base: &ColorSpace, lookup: &[u8], high: u32, components: &[f64]
         .round() as usize;
     let n = base.components();
     let start = index.saturating_mul(n);
-    (0..n)
-        .map(|i| lookup.get(start + i).map_or(0.0, |&b| f64::from(b) / 255.0))
-        .collect()
+    out.clear();
+    out.extend((0..n).map(|i| lookup.get(start + i).map_or(0.0, |&b| f64::from(b) / 255.0)));
 }
+
+/// The most components of a palette's entry [`ColorSpace::to_rgb_with_in`]
+/// copies onto the stack for a base's tint transform to read: PDF's ceiling
+/// of 32 colorants (Annex C), past which a `/DeviceN` base converts as
+/// [`ColorSpace::to_rgb_in`] converts it.
+const TINT_INPUTS_ON_STACK: usize = 32;
 
 /// A `CalGray` component as XYZ (8.6.5.2): `A^G` scales the white point. `a`
 /// is already in `0..=1`, which is this space's own range.
@@ -1149,6 +1191,59 @@ mod tests {
                 ColorSpace::DeviceRgb.to_rgb_with(&[a, 0.5, 1.0 - a], &mut scratch),
                 ColorSpace::DeviceRgb.to_rgb(&[a, 0.5, 1.0 - a])
             );
+        }
+    }
+
+    /// An `/Indexed` colour through a kept buffer is `to_rgb`'s, whatever
+    /// the buffer held: its palette's entry read there over DeviceRGB, over
+    /// a two-ink `/DeviceN` whose tint transform reads the entry from a copy,
+    /// and over a base of more colorants than PDF's 32, which converts as
+    /// `to_rgb` converts it; at every index and one past `high`.
+    #[test]
+    fn an_indexed_colour_through_a_kept_buffer_is_its_colour() {
+        let ink = |c0: f64, c1: f64| Function::Exponential {
+            domain: (0.0, 1.0),
+            c0: vec![c0],
+            c1: vec![c1],
+            n: 2.2,
+        };
+        let two_inks = ColorSpace::Separation {
+            components: 2,
+            alternate: Box::new(ColorSpace::DeviceCmyk),
+            tint: Box::new(Function::Array(vec![
+                ink(0.0, 0.9),
+                ink(0.1, 0.4),
+                ink(0.0, 0.0),
+                ink(0.2, 0.7),
+            ])),
+            colorants: Colorants::default(),
+        };
+        let many_inks = ColorSpace::Separation {
+            components: TINT_INPUTS_ON_STACK + 8,
+            alternate: Box::new(ColorSpace::DeviceRgb),
+            tint: Box::new(Function::Identity),
+            colorants: Colorants::default(),
+        };
+        for base in [ColorSpace::DeviceRgb, two_inks, many_inks] {
+            let n = base.components();
+            let high = 7u32;
+            let lookup: Vec<u8> = (0..(high as usize + 1) * n)
+                .map(|i| (i * 37 % 256) as u8)
+                .collect();
+            let space = ColorSpace::Indexed {
+                base: Box::new(base),
+                lookup,
+                high,
+            };
+            let mut scratch = vec![0.5; 3];
+            for index in 0..=high + 1 {
+                let components = [f64::from(index)];
+                assert_eq!(
+                    space.to_rgb_with(&components, &mut scratch),
+                    space.to_rgb(&components),
+                    "index {index} over a base of {n} components"
+                );
+            }
         }
     }
 
