@@ -609,6 +609,20 @@ The subsetter checks its own output: `verify` outlines every
 retained glyph in both programs and compares the segments, and a subset that
 disagrees is not used.
 
+**What the pages drew** is what the builder's own text calls placed, and what
+the operators a caller writes itself show: a page's `PageBuilder::raw`
+content, read as the page is pushed; a form's and a tiling pattern's content,
+read as each is added; and the procedure of each colour glyph a run drew. They
+are read as a reader reads a content stream — `Tf` selects a font resource,
+`q` and `Q` save and restore it with the graphics state, `Tj`, `'`, `"` and
+`TJ` show their strings' codes in it, and an inline image's data is passed
+over to its `EI` — and each code is taken in the encoding the builder writes
+its font with: a simple font's code is the character `WinAnsiEncoding` gives
+it, and a composite font's an `/Identity-H` CID, the glyph its program gives
+that CID, which `/W` measures too. Content that shows text before it selects a
+font of its own shows it in whatever font is current where it is drawn, so then
+every embedded font keeps every glyph its codes reach.
+
 The 9.6.4 six-letter tag is prefixed to `/BaseFont`. A face that is not cut
 down is embedded whole — larger and correct (ruling 2) — and
 `DocumentBuilder::finish_reporting` returns an `EmbeddedWhole` naming the

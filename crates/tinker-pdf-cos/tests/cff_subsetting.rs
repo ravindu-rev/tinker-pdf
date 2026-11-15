@@ -1163,3 +1163,89 @@ fn a_subset_no_smaller_than_the_face_is_declined_and_named() {
         "and carries no subset tag, because there is no subset"
     );
 }
+
+/// A one-page document whose only drawing is `operators`, through
+/// [`tinker_pdf_cos::PageBuilder::raw`], over the fonts `register` adds;
+/// nothing is declined.
+fn raw_document(
+    label: &str,
+    register: impl FnOnce(&mut DocumentBuilder),
+    operators: &[u8],
+) -> CosDocument {
+    let mut builder = DocumentBuilder::new();
+    register(&mut builder);
+    builder.add_page(200.0, 100.0, |page| page.raw(operators));
+    let (bytes, warnings) = builder.finish_reporting();
+    written_support::authored(label, &bytes);
+    assert!(
+        warnings.is_empty(),
+        "{label}: nothing declined: {warnings:?}"
+    );
+    CosDocument::open(bytes).expect("the document opens")
+}
+
+/// **Every CFF kind keeps what `raw` shows in it**, as a `glyf` face does
+/// (`page_operations.rs`): a bare program and an `OpenType` one as simple
+/// fonts, their codes the characters `WinAnsiEncoding` gives them; the
+/// `OpenType` one as a composite font, its codes the glyphs; and a CID-keyed
+/// program, its codes the CIDs its charset gives the glyphs — each kept in a
+/// subset that is still cut, and each composite glyph measured in `/W`.
+#[test]
+fn every_cff_kind_keeps_what_raw_shows_in_it() {
+    let cff = cff_program(None);
+    for (label, program) in [
+        ("a bare cff drawn through raw", cff.clone()),
+        ("an opentype cff drawn through raw", otto(&cff)),
+    ] {
+        let doc = raw_document(
+            label,
+            |builder| assert!(builder.add_embedded_font(b"F0", b"Fixture", &program)),
+            b"BT /F0 24 Tf 20 40 Td (AC) Tj ET",
+        );
+        let (embedded_program, _, _) = embedded(&doc, b"F0");
+        assert!(embedded_program.len() < program.len(), "{label}: a subset");
+        let inner = cff_of(&embedded_program);
+        outlines_agree(&cff, &inner, &[0, 1, 3]);
+        let after = tinker_pdf_font::Cff::parse(&inner).expect("it parses");
+        assert!(
+            after
+                .outline(2)
+                .expect("glyph 2 answers")
+                .segments
+                .is_empty(),
+            "{label}: `B` was not shown"
+        );
+    }
+
+    let program = otto(&cff);
+    let doc = raw_document(
+        "an opentype cff drawn through raw as a composite font",
+        |builder| assert!(builder.add_cid_font(b"C0", b"Fixture", &program)),
+        b"BT /C0 24 Tf 20 40 Td <00040009> Tj ET",
+    );
+    let (embedded_program, _, _) = embedded(&doc, b"C0");
+    assert!(embedded_program.len() < program.len(), "a subset");
+    let inner = cff_of(&embedded_program);
+    outlines_agree(&cff, &inner, &[0, 4, 9]);
+    let after = tinker_pdf_font::Cff::parse(&inner).expect("it parses");
+    assert!(after
+        .outline(5)
+        .expect("glyph 5 answers")
+        .segments
+        .is_empty());
+    // The wrapper's `hmtx` gives glyph `g` 500 + g units of a 1000-unit em.
+    let cid = descendant(&doc, &page_font(&doc, b"C0"));
+    assert_eq!(widths(&doc, &cid), [4.0, 504.0, 9.0, 509.0]);
+
+    let program = cid_keyed_program();
+    let doc = raw_document(
+        "a cid-keyed cff drawn through raw",
+        |builder| assert!(builder.add_cid_font(b"C0", b"Fixture", &program)),
+        b"BT /C0 24 Tf 20 40 Td <0025002A> Tj ET",
+    );
+    let (embedded_program, _, _) = embedded(&doc, b"C0");
+    assert!(embedded_program.len() < program.len(), "a subset");
+    outlines_agree_by_cid(&program, &embedded_program, &[37, 42]);
+    let cid = descendant(&doc, &page_font(&doc, b"C0"));
+    assert_eq!(widths(&doc, &cid), [37.0, 600.0, 42.0, 600.0]);
+}

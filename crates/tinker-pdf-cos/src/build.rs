@@ -17,6 +17,8 @@ use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::text_string::encode_text_string;
 use crate::write::{rewrite, ObjectSet, StreamData, WriteOptions};
 
+mod shown;
+
 /// Image data to embed.
 ///
 /// **`#[non_exhaustive]`**, from gap 29 milestone 4. A caller outside this
@@ -1997,6 +1999,15 @@ impl<'a> FontProgram<'a> {
         }
     }
 
+    /// How many glyphs the program carries: `maxp`'s count for TrueType
+    /// outlines, the CharStrings INDEX's for CFF ones.
+    fn glyph_count(&self) -> usize {
+        match self {
+            FontProgram::TrueType(sfnt) => sfnt.glyph_count().map_or(0, usize::from),
+            FontProgram::OpenType(_, cff) | FontProgram::Bare(cff) => cff.glyph_count(),
+        }
+    }
+
     /// One glyph's advance, in the thousandths of a text space unit `/Widths`
     /// and `/W` are stated in.
     fn width(&self, glyph: u16) -> Option<f64> {
@@ -2330,6 +2341,10 @@ pub struct PageBuilder {
     /// stands for. `/W` comes from the first and `/ToUnicode` from the second,
     /// and they are two independent statements about one glyph.
     drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>>,
+    /// Where in `content` the operators [`PageBuilder::raw`] appended lie, in
+    /// order: what they show is read from there as the page is pushed, since
+    /// nothing else records it.
+    raw_spans: Vec<std::ops::Range<usize>>,
     /// `/CropBox`, when the caller stated one. See [`PageBuilder::set_crop_box`].
     crop_box: Option<[f64; 4]>,
     /// `/BleedBox`, likewise.
@@ -3865,8 +3880,8 @@ impl PageBuilder {
     /// `font` names a font registered with [`DocumentBuilder::add_base_font`].
     pub fn text(&mut self, font: &[u8], size: f64, x: f64, y: f64, text: &str) {
         // Recorded so `finish` can subset an embedded font to what the
-        // document actually draws. The builder is the only way content gets
-        // written, so this sees everything.
+        // document actually draws: each of the builder's own calls records
+        // what it writes, and what `raw` writes is read as the page is pushed.
         self.used
             .entry(font.to_vec())
             .or_default()
@@ -4413,8 +4428,17 @@ impl PageBuilder {
     ///
     /// An escape hatch for callers that know the operator set; nothing checks
     /// what goes in, so a malformed sequence produces a malformed page.
+    ///
+    /// What its text-showing operators show is read when the page is pushed,
+    /// in the font the page's `Tf`, `q` and `Q` leave selected — whether its
+    /// own or a text call's before it — and an embedded font keeps those
+    /// glyphs in its subset (`docs/features/fonts.md`): a simple font's codes
+    /// read through the `WinAnsiEncoding` it is written with, a composite
+    /// font's through `/Identity-H`, which also states their widths in `/W`.
     pub fn raw(&mut self, operators: &[u8]) {
+        let start = self.content.len();
         self.content.extend_from_slice(operators);
+        self.raw_spans.push(start..self.content.len());
         self.content.push(b'\n');
     }
 
@@ -5358,6 +5382,17 @@ pub struct DocumentBuilder {
     /// this builder does not own. Merged with every page's own record at
     /// `finish`; see that method for why the record is the document's.
     drawn: BTreeMap<Vec<u8>, BTreeMap<u16, String>>,
+    /// The codes the operators a caller wrote itself showed in each font
+    /// resource ([`shown`]): every page's [`PageBuilder::raw`] content, read
+    /// as the page is pushed; every form's and tiling pattern's content, read
+    /// as it is added; and the procedure of every colour glyph a run drew,
+    /// read at `finish`. Joined there to what the builder's own calls drew.
+    shown: BTreeMap<Vec<u8>, BTreeSet<u16>>,
+    /// Whether such content showed text before selecting a font of its own:
+    /// a form, pattern or glyph procedure drawn in whatever font is current
+    /// where it is drawn, which may be any, so every embedded font keeps
+    /// every glyph its codes reach.
+    shown_inherited: bool,
     /// Colour faces, written as Type 3 fonts at `finish`, once the glyphs
     /// their runs drew and the codes those took are known.
     colour_fonts: Vec<ColourFont>,
@@ -5443,6 +5478,8 @@ impl DocumentBuilder {
             embedded: Vec::new(),
             cid_fonts: Vec::new(),
             drawn: BTreeMap::new(),
+            shown: BTreeMap::new(),
+            shown_inherited: false,
             colour_fonts: Vec::new(),
             subset_fonts: true,
             embedded_whole: Vec::new(),
@@ -6825,6 +6862,7 @@ impl DocumentBuilder {
                 data: form.content.to_vec(),
             },
         );
+        self.note_shown_whole(form.content);
         self.resources.forms.push((resource.to_vec(), reference));
         if form.group.is_some() {
             self.groups.insert(resource.to_vec());
@@ -7059,6 +7097,7 @@ impl DocumentBuilder {
                 data: pattern.content.to_vec(),
             },
         );
+        self.note_shown_whole(pattern.content);
         self.resources.patterns.push((resource.to_vec(), reference));
         true
     }
@@ -7525,6 +7564,63 @@ impl DocumentBuilder {
     /// earns its size.
     pub fn set_subset_fonts(&mut self, subset: bool) {
         self.subset_fonts = subset;
+    }
+
+    /// Joins what the operators a caller wrote showed
+    /// ([`DocumentBuilder::note_shown`]) to what the builder's own calls drew,
+    /// in the encoding each font is written with. A simple embedded font's
+    /// codes are the characters `WinAnsiEncoding` gives them, which its
+    /// subset is cut by. A composite font's are `/Identity-H` CIDs, each the
+    /// glyph its program gives it — `.notdef` for one the program does not
+    /// carry — which its subset keeps and `/W` measures, with no text for
+    /// `/ToUnicode`, since the operators state none. Content that showed text
+    /// in the font it is drawn in gives every embedded font every code.
+    fn join_shown(
+        &mut self,
+        used: &mut BTreeMap<Vec<u8>, BTreeSet<char>>,
+        drawn: &mut BTreeMap<Vec<u8>, BTreeMap<u16, String>>,
+    ) {
+        let shown = std::mem::take(&mut self.shown);
+        let every = self.shown_inherited;
+        let win_ansi =
+            |code: u8| tinker_pdf_font::base_char(tinker_pdf_font::BaseEncoding::WinAnsi, code);
+        for font in &self.embedded {
+            let codes = shown.get(&font.resource);
+            if codes.is_none() && !every {
+                continue;
+            }
+            let characters = used.entry(font.resource.clone()).or_default();
+            if every {
+                characters.extend((0..=u8::MAX).filter_map(win_ansi));
+            } else if let Some(codes) = codes {
+                let bytes = codes.iter().filter_map(|&code| u8::try_from(code).ok());
+                characters.extend(bytes.filter_map(win_ansi));
+            }
+        }
+        for font in &self.cid_fonts {
+            let codes = shown.get(&font.resource);
+            if codes.is_none() && !every {
+                continue;
+            }
+            let Some(kind) = FontProgram::parse(&font.program) else {
+                continue;
+            };
+            let count = u16::try_from(kind.glyph_count()).unwrap_or(u16::MAX);
+            let glyphs = drawn.entry(font.resource.clone()).or_default();
+            if every {
+                for glyph in 0..count {
+                    glyphs.entry(glyph).or_default();
+                }
+            } else if let Some(codes) = codes {
+                for &code in codes {
+                    // 9.7.6.3: a CID with no glyph is drawn as CID 0's.
+                    let glyph = kind.glyph_for_code(code);
+                    glyphs
+                        .entry(if glyph < count { glyph } else { 0 })
+                        .or_default();
+                }
+            }
+        }
     }
 
     /// Writes the font dictionaries, cutting each program down to the
@@ -8635,6 +8731,7 @@ impl DocumentBuilder {
             composite: self.composite.clone(),
             used: BTreeMap::new(),
             drawn: BTreeMap::new(),
+            raw_spans: Vec::new(),
             crop_box: None,
             bleed_box: None,
             links: Vec::new(),
@@ -8681,7 +8778,33 @@ impl DocumentBuilder {
         let (carried, refused) = page.carry_over(&mut self.next_carry);
         self.carried = carried;
         self.carried_refused = refused;
+        // What `raw` drew, which no call recorded: the content is whole now.
+        if !page.raw_spans.is_empty() {
+            let found = shown::shown(&page.content, shown::Read::Page(&page.raw_spans), |font| {
+                page.composite.contains_key(font)
+            });
+            self.note_shown(found);
+        }
         self.pages.push(page);
+    }
+
+    /// Joins what [`shown::shown`] read in content a caller wrote to the
+    /// document's record of it.
+    fn note_shown(&mut self, found: shown::Shown) {
+        for (font, codes) in found.codes {
+            self.shown.entry(font).or_default().extend(codes);
+        }
+        self.shown_inherited |= found.inherited;
+    }
+
+    /// What `content`, a form's or tiling pattern's that a caller wrote
+    /// whole, shows, read in the fonts registered so far — the ones its
+    /// `/Resources` can name.
+    fn note_shown_whole(&mut self, content: &[u8]) {
+        let found = shown::shown(content, shown::Read::Whole, |font| {
+            self.composite.contains_key(font)
+        });
+        self.note_shown(found);
     }
 
     /// Sets an `/Info` field.
@@ -9226,6 +9349,23 @@ impl DocumentBuilder {
                 }
             }
         }
+        // A colour glyph's procedure reaches the file once a run drew the
+        // glyph, so what the procedures of the drawn glyphs show is read now,
+        // before the fonts it shows text in are cut.
+        let procedures: Vec<shown::Shown> = self
+            .colour_fonts
+            .iter()
+            .flat_map(|face| face.codes.keys().filter_map(|id| face.glyphs.get(id)))
+            .map(|procedure| {
+                shown::shown(&procedure.content, shown::Read::Whole, |font| {
+                    self.composite.contains_key(font)
+                })
+            })
+            .collect();
+        for found in procedures {
+            self.note_shown(found);
+        }
+        self.join_shown(&mut used, &mut drawn);
         self.write_embedded_fonts(&used);
         self.write_cid_fonts(&drawn);
         self.write_colour_fonts();

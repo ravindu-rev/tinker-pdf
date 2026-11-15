@@ -9,8 +9,8 @@ mod written_support;
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
-    annot, pages, CosDocument, DocumentBuilder, DocumentEditor, Object, Rect, WriteMode,
-    WriteOptions,
+    annot, pages, ColourGlyph, CosDocument, Dict, DocumentBuilder, DocumentEditor, FormXObject,
+    Glyph, Object, PlacedGlyph, Rect, TilingPattern, TilingType, WriteMode, WriteOptions,
 };
 
 fn document(pages: usize, label: &str) -> Arc<CosDocument> {
@@ -688,6 +688,258 @@ fn length1_describes_the_subset_and_not_the_original() {
         length1,
         embedded.len(),
         "the subset's length, not the face's"
+    );
+}
+
+/// The program embedded for the font the first page names `resource`, and the
+/// font dictionary its descriptor hangs off: the descendant, for a composite
+/// font.
+fn program_of(doc: &CosDocument, resource: &[u8]) -> (Vec<u8>, Dict) {
+    let collected = pages::collect(doc);
+    let resources = collected[0].resources.as_ref().expect("resources");
+    let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
+    let font = doc.resolve_key(fonts.as_dict().expect("a font table"), doc.intern(resource));
+    let mut font = font.as_dict().cloned().expect("the font");
+    let descendants = doc.resolve_key(&font, doc.intern(b"DescendantFonts"));
+    if let Some(first) = descendants.as_array().and_then(<[Object]>::first) {
+        font = doc
+            .resolve(first)
+            .as_dict()
+            .cloned()
+            .expect("the descendant");
+    }
+    let descriptor = doc.resolve_key(&font, doc.intern(b"FontDescriptor"));
+    let file = descriptor
+        .as_dict()
+        .expect("a descriptor")
+        .get_ref(doc.intern(b"FontFile2"))
+        .expect("an embedded program");
+    (doc.stream_decoded(file).expect("it decodes"), font)
+}
+
+/// Whether glyph `glyph` of a `glyf` program draws anything.
+fn draws(program: &[u8], glyph: u16) -> bool {
+    let sfnt = tinker_pdf_font::Sfnt::parse(program).expect("a font");
+    tinker_pdf_font::glyf::outline(&sfnt, glyph).is_some_and(|outline| !outline.is_empty())
+}
+
+/// Which of `letters` a program cut from [`subsettable_font`] still draws:
+/// that face gives `A` glyph 1, and so on upward.
+fn drawn_letters(program: &[u8], letters: &str) -> String {
+    letters
+        .chars()
+        .filter(|&c| {
+            let glyph = u16::try_from(u32::from(c) - u32::from('A') + 1).expect("a glyph");
+            draws(program, glyph)
+        })
+        .collect()
+}
+
+/// `/W`, flattened to its numbers.
+fn widths(doc: &CosDocument, cid: &Dict) -> Vec<f64> {
+    fn flatten(doc: &CosDocument, value: &Object, out: &mut Vec<f64>) {
+        let value = doc.resolve(value);
+        match value.as_array() {
+            Some(items) => {
+                for item in items {
+                    flatten(doc, item, out);
+                }
+            }
+            None => out.push(value.as_number().expect("a number")),
+        }
+    }
+    let mut out = Vec::new();
+    flatten(doc, &doc.resolve_key(cid, doc.intern(b"W")), &mut out);
+    out
+}
+
+/// **A face drawn only through `raw` keeps the outlines its operators
+/// show.** `raw` records no characters, so a subset cut to what the builder's
+/// calls recorded drew every letter it showed blank. What its text-showing
+/// operators show is read as the page is pushed, and the program is still a
+/// subset of the face.
+#[test]
+fn a_face_drawn_only_through_raw_keeps_its_outlines() {
+    let program = subsettable_font(64);
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_embedded_font(b"F0", b"Boxy", &program));
+    builder.add_page(200.0, 100.0, |page| {
+        page.raw(b"BT /F0 12 Tf 10 50 Td (AC) Tj ET");
+    });
+    let (embedded, base) = embedded_program(built(
+        "a face drawn only through raw keeps its outlines",
+        builder,
+    ));
+    assert!(embedded.len() < program.len(), "still a subset");
+    assert!(base.ends_with("+Boxy"), "and named as one: {base}");
+    assert_eq!(drawn_letters(&embedded, "ABCZ"), "AC");
+}
+
+/// **Raw operators are read in the font the page leaves selected**, as a
+/// reader reads them: the font a text call selected, for a `Tj` after it; a
+/// `Tf` in one call, for the text of the next; the font `q` saved, after its
+/// `Q`; and `'`, `"` and `TJ` as well as `Tj` — while a comment and an inline
+/// image's data show nothing.
+#[test]
+fn raw_operators_are_read_in_the_font_the_page_leaves_selected() {
+    let program = subsettable_font(64);
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_embedded_font(b"F0", b"Boxy", &program));
+    assert!(builder.add_embedded_font(b"F1", b"Boxy", &program));
+    builder.add_page(200.0, 200.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 180.0, "A");
+        page.raw(b"BT 10 170 Td (B) Tj ET");
+        page.raw(b"BT /F1 12 Tf");
+        page.raw(b"10 160 Td (C) Tj ET");
+        page.raw(b"q BT /F0 12 Tf 10 150 Td (D) Tj ET Q BT 10 140 Td (E) Tj ET");
+        page.raw(b"BT 10 130 Td (F) ' 0 0 (G) \" [(H) -100 (I)] TJ ET % (Z) Tj");
+        page.raw(b"BI /W 6 /H 1 /CS /G /BPC 8 ID (Y) Tj EI");
+    });
+    let doc = CosDocument::open(built(
+        "raw operators are read in the font the page leaves selected",
+        builder,
+    ))
+    .expect("it opens");
+    let letters = "ABCDEFGHIYZ";
+    assert_eq!(drawn_letters(&program_of(&doc, b"F0").0, letters), "ABD");
+    assert_eq!(drawn_letters(&program_of(&doc, b"F1").0, letters), "CEFGHI");
+}
+
+/// **A composite face drawn through `raw` keeps its glyphs and states their
+/// widths**: an `/Identity-H` string's two-byte codes are the glyphs, each kept
+/// in the subset and measured in `/W` — which had no entry for a glyph `raw`
+/// alone drew, so a reader gave it `/DW`'s em — and a code past the face's
+/// glyphs is drawn as CID 0 (9.7.6.3), which leaves every other width stated.
+#[test]
+fn a_composite_face_drawn_through_raw_keeps_and_measures_its_glyphs() {
+    let program = subsettable_font(64);
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"C0", b"Boxy", &program));
+    builder.add_page(200.0, 100.0, |page| {
+        page.raw(b"BT /C0 12 Tf 10 50 Td <000300050FFF> Tj ET");
+    });
+    let doc = CosDocument::open(built(
+        "a composite face drawn through raw keeps and measures its glyphs",
+        builder,
+    ))
+    .expect("it opens");
+    let (embedded, descendant) = program_of(&doc, b"C0");
+    assert!(embedded.len() < program.len(), "still a subset");
+    for (glyph, kept) in [(0, true), (3, true), (4, false), (5, true)] {
+        assert_eq!(draws(&embedded, glyph), kept, "glyph {glyph}");
+    }
+    // `hmtx` gives glyph `g` an advance of 500 + g units of a 1000-unit em.
+    assert_eq!(
+        widths(&doc, &descendant),
+        [0.0, 500.0, 3.0, 503.0, 5.0, 505.0]
+    );
+}
+
+/// **A form's, a tiling pattern's and a drawn colour glyph's content keep what
+/// they show**: each is read in the fonts registered before it, which are the
+/// ones its `/Resources` names — a form and a pattern as they are added, a
+/// colour glyph's procedure once a run has drawn the glyph and put the
+/// procedure in the file, and never for a glyph no run drew.
+#[test]
+fn content_a_caller_wrote_whole_keeps_what_it_shows() {
+    let program = subsettable_font(64);
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_embedded_font(b"F0", b"Boxy", &program));
+    assert!(builder.add_form(
+        b"Fm0",
+        &FormXObject {
+            bbox: [0.0, 0.0, 100.0, 100.0],
+            matrix: None,
+            group: None,
+            content: b"BT /F0 12 Tf (J) Tj ET",
+        },
+    ));
+    assert!(builder.add_tiling_pattern(
+        b"P0",
+        &TilingPattern {
+            bbox: [0.0, 0.0, 10.0, 10.0],
+            x_step: 10.0,
+            y_step: 10.0,
+            matrix: None,
+            tiling_type: TilingType::ConstantSpacing,
+            content: b"BT /F0 8 Tf (K) Tj ET",
+        },
+    ));
+    assert!(builder.add_colour_font(b"Co0", b"Colour", 1000));
+    for (id, content) in [
+        (1, b"BT /F0 12 Tf (L) Tj ET"),
+        (2, b"BT /F0 12 Tf (M) Tj ET"),
+    ] {
+        assert!(builder.add_colour_glyph(
+            b"Co0",
+            &ColourGlyph {
+                id,
+                advance: 500.0,
+                bbox: [0.0, 0.0, 500.0, 500.0],
+                content,
+            },
+        ));
+    }
+    let mut run = Vec::new();
+    assert!(builder.colour_glyph_run(
+        &mut run,
+        b"Co0",
+        12.0,
+        [1.0, 0.0, 0.0, 1.0, 10.0, 20.0],
+        &[PlacedGlyph {
+            glyph: Glyph { id: 1, text: "x" },
+            x: 0.0,
+            rise: 0.0,
+        }],
+    ));
+    builder.add_page(200.0, 100.0, |page| {
+        assert!(page.form(b"Fm0"));
+        page.raw(&run);
+    });
+    let doc = CosDocument::open(built(
+        "content a caller wrote whole keeps what it shows",
+        builder,
+    ))
+    .expect("it opens");
+    assert_eq!(
+        drawn_letters(&program_of(&doc, b"F0").0, "JKLMN"),
+        "JKL",
+        "glyph 2 was never drawn, so its procedure is in no file"
+    );
+}
+
+/// **Content shown in the font it is drawn in keeps every glyph its codes
+/// reach**: a form that selects no font of its own shows text in whatever
+/// font is current where it is drawn, which may be any, so every embedded
+/// font keeps every character `WinAnsiEncoding` gives a code — and nothing
+/// past them, so the face is still cut.
+#[test]
+fn text_in_an_inherited_font_keeps_every_code() {
+    // Glyphs 1 to 299 are `A` to U+016B, a range `WinAnsiEncoding` covers in
+    // part: its codes reach `Z`, `ÿ` and `Œ`, and no code reaches `Ā`.
+    let program = subsettable_font(300);
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_embedded_font(b"F0", b"Boxy", &program));
+    assert!(builder.add_form(
+        b"Fm0",
+        &FormXObject {
+            bbox: [0.0, 0.0, 100.0, 100.0],
+            matrix: None,
+            group: None,
+            content: b"BT 10 10 Td (a) Tj ET",
+        },
+    ));
+    builder.add_page(200.0, 100.0, |page| {
+        page.text(b"F0", 12.0, 10.0, 50.0, "A");
+        assert!(page.form(b"Fm0"));
+    });
+    let (embedded, base) =
+        embedded_program(built("text in an inherited font keeps every code", builder));
+    assert!(embedded.len() < program.len(), "still a subset");
+    assert!(base.ends_with("+Boxy"), "and named as one: {base}");
+    assert_eq!(
+        drawn_letters(&embedded, "AZ\u{FF}\u{152}\u{100}"),
+        "AZ\u{FF}\u{152}"
     );
 }
 

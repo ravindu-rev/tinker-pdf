@@ -410,10 +410,6 @@ fn each_box_option_is_the_faces_own_metrics() {
     const SIZE: f64 = 20.0;
     let face = liberation_sans();
     let mut builder = DocumentBuilder::new();
-    // Embedded whole: the subset keeps what the builder's text calls drew,
-    // and the raw operators below are none of them, so a subset would draw
-    // these letters with empty outlines. Whole, the program is `face`.
-    builder.set_subset_fonts(false);
     assert!(builder.add_embedded_font(b"F0", b"LiberationSans", &face));
     builder.add_page(300.0, 200.0, |page| {
         page.raw(

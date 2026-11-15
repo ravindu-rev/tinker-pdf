@@ -83,7 +83,10 @@ index, in the string, `/W` and `/ToUnicode` alike
 ([fonts](fonts.md)). With `set_subset_fonts(true)` an embedded TrueType face is cut to
 the glyphs the document draws — `glyf`/`loca` rebuilt, composite components
 followed, the 9.6.4 subset name tag written — so a line of Latin text set in
-a CJK face costs kilobytes rather than the whole face.
+a CJK face costs kilobytes rather than the whole face. What it draws includes
+what the operators a caller writes itself show — `raw`'s, a form's, a tiling
+pattern's, a drawn colour glyph's procedure — read in the font their `Tf`, `q`
+and `Q` leave selected ([fonts](fonts.md)).
 
 **Colour glyphs.** `add_colour_font(resource, name, units_per_em)` registers
 a colour face, written as Type 3 fonts (9.6.4;
