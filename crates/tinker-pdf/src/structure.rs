@@ -547,7 +547,7 @@ impl StructureTree {
         // whose sequences live in two streams has one slot for both and the
         // key's stream half is not part of the comparison.
         let mut warnings = join.warnings;
-        let distinct: BTreeSet<u32> = claimed.iter().map(|(_, _, mcid)| *mcid).collect();
+        let distinct: BTreeSet<u32> = crate::sort::set(claimed.iter().map(|(_, _, mcid)| *mcid));
         if let Some(key) = self.struct_parents.get(&index) {
             if let Some(declared) = self.parent_tree.get(key) {
                 if *declared != distinct.len() {
@@ -786,10 +786,8 @@ pub(crate) fn bind_counted(
 
     let all = crate::stats::pages(doc, work);
     let page_count = u32::try_from(all.len()).unwrap_or(u32::MAX);
-    let pages: BTreeMap<ObjRef, u32> = all
-        .into_iter()
-        .map(|page| (page.reference, page.index))
-        .collect();
+    let pages: BTreeMap<ObjRef, u32> =
+        crate::sort::map(all.into_iter().map(|page| (page.reference, page.index)));
     let role_map = read_role_map(doc, root);
 
     let mut walk = Walk {

@@ -157,11 +157,12 @@ pub(super) fn shown(content: &[u8], read: Read<'_>, two_bytes: impl Fn(&[u8]) ->
         }
     }
     Shown {
-        codes: fonts
-            .into_iter()
-            .filter(|(.., codes)| !codes.is_empty())
-            .map(|(font, _, codes)| (font, codes))
-            .collect(),
+        codes: crate::sort::map(
+            fonts
+                .into_iter()
+                .filter(|(.., codes)| !codes.is_empty())
+                .map(|(font, _, codes)| (font, codes)),
+        ),
         inherited,
     }
 }

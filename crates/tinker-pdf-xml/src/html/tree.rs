@@ -83,7 +83,7 @@ struct Formatting {
 impl Formatting {
     fn new(tag: Tag) -> Self {
         let mut order: Vec<usize> = (0..tag.attributes.len()).collect();
-        order.sort_by(|&a, &b| {
+        crate::sort::by(&mut order, |&a, &b| {
             let name = |at: usize| tag.attributes.get(at).map(|(name, _)| name);
             name(a).cmp(&name(b))
         });
@@ -2073,15 +2073,16 @@ impl<'a> TreeBuilder<'a> {
         let at = match self.merged.iter().position(|(n, _)| *n == node) {
             Some(at) => at,
             None => {
-                let names = element
-                    .attributes
-                    .iter()
-                    .filter(|a| a.namespace.is_none())
-                    .map(|a| {
-                        self.steps.one();
-                        a.name.clone()
-                    })
-                    .collect();
+                let names = crate::sort::set(
+                    element
+                        .attributes
+                        .iter()
+                        .filter(|a| a.namespace.is_none())
+                        .map(|a| {
+                            self.steps.one();
+                            a.name.clone()
+                        }),
+                );
                 self.merged.push((node, names));
                 self.merged.len() - 1
             }

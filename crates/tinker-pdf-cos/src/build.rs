@@ -7791,7 +7791,7 @@ impl DocumentBuilder {
 
             // 9.7.4.2: glyph 0 is `.notdef` and a font without it is a font a
             // reader cannot fall back through.
-            let mut ids: BTreeSet<u16> = mapping.keys().copied().collect();
+            let mut ids: BTreeSet<u16> = crate::sort::set(mapping.keys().copied());
             ids.insert(0);
 
             let (program, subsetted) = if self.subset_fonts {
@@ -8951,11 +8951,11 @@ impl DocumentBuilder {
                 stack.push(&entry.children);
             }
         }
-        let dangling: BTreeSet<Vec<u8>> = used
-            .into_iter()
-            .filter(|name| !resolves(name))
-            .map(<[u8]>::to_vec)
-            .collect();
+        let dangling: BTreeSet<Vec<u8>> = crate::sort::set(
+            used.into_iter()
+                .filter(|name| !resolves(name))
+                .map(<[u8]>::to_vec),
+        );
         dangling.into_iter().collect()
     }
 
@@ -9291,10 +9291,11 @@ impl DocumentBuilder {
         // The named destinations whose page arrived. Anything naming one that
         // is not here is dangling and is written with no destination at all
         // (see `Target`), the rule an index past the last page already follows.
-        let live: BTreeMap<Vec<u8>, (u32, DestKind)> = std::mem::take(&mut self.destinations)
-            .into_iter()
-            .filter(|(_, (index, _))| (*index as usize) < page_refs.len())
-            .collect();
+        let live: BTreeMap<Vec<u8>, (u32, DestKind)> = crate::sort::map(
+            std::mem::take(&mut self.destinations)
+                .into_iter()
+                .filter(|(_, (index, _))| (*index as usize) < page_refs.len()),
+        );
 
         // Every character every page drew, per font resource. Gathered before
         // anything is written because the embedded programs are subset to it.
@@ -9393,11 +9394,11 @@ impl DocumentBuilder {
                 }
             }
         }
-        let annotation_keys: BTreeMap<(usize, usize), i64> = held
-            .iter()
-            .enumerate()
-            .map(|(at, held)| (*held, (page_keys + at) as i64))
-            .collect();
+        let annotation_keys: BTreeMap<(usize, usize), i64> = crate::sort::map(
+            held.iter()
+                .enumerate()
+                .map(|(at, held)| (*held, (page_keys + at) as i64)),
+        );
         let mut annotations: Vec<Vec<Option<ObjRef>>> = pages
             .iter()
             .map(|page| vec![None; page.links.len()])

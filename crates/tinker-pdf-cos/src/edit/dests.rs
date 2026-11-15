@@ -113,10 +113,11 @@ impl DocumentEditor {
             Some(Object::Dict(d)) => d.clone(),
             _ => Dict::default(),
         };
-        self.dests_entries(&names, dests_key)
-            .into_iter()
-            .map(|(key, _)| (key, (0, DestKind::Fit)))
-            .collect()
+        crate::sort::map(
+            self.dests_entries(&names, dests_key)
+                .into_iter()
+                .map(|(key, _)| (key, (0, DestKind::Fit))),
+        )
     }
 
     /// Every entry of the `/Dests` tree under `names`, as this editor has it.

@@ -564,10 +564,11 @@ impl Plan {
         // Per-page sizes, for the page-offset hint table. A page's "length"
         // is the bytes of its run, which is what a reader must have received
         // before it can draw the page.
-        let sizes: BTreeMap<u32, u32> = ordered
-            .iter()
-            .map(|placed| (placed.number, placed.bytes.len() as u32))
-            .collect();
+        let sizes: BTreeMap<u32, u32> = crate::sort::map(
+            ordered
+                .iter()
+                .map(|placed| (placed.number, placed.bytes.len() as u32)),
+        );
         let length_of = |run: &[u32]| -> u32 {
             run.iter()
                 .filter_map(|old| mapping.get(old))
@@ -1128,7 +1129,7 @@ fn write_subsection(out: &mut Vec<u8>, entries: &[(u32, u64)]) {
     out.extend_from_slice(format!("0 {count}\n").as_bytes());
     out.extend_from_slice(b"0000000000 65535 f \n");
 
-    let map: BTreeMap<u32, u64> = entries.iter().copied().collect();
+    let map: BTreeMap<u32, u64> = crate::sort::map(entries.iter().copied());
     for number in 1..count as u32 {
         match map.get(&number) {
             Some(at) => {

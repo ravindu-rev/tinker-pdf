@@ -1458,10 +1458,11 @@ impl Validator<'_> {
         // file names its first page's objects in two tables and there is no
         // reason to check them twice, but an *older* revision's entry still
         // has to point at a real header.
-        let distinct: BTreeSet<(u32, RawEntry)> = sections
-            .iter()
-            .flat_map(|section| section.entries.iter().copied())
-            .collect();
+        let distinct: BTreeSet<(u32, RawEntry)> = crate::sort::set(
+            sections
+                .iter()
+                .flat_map(|section| section.entries.iter().copied()),
+        );
         for (num, entry) in distinct {
             if let RawEntry::Offset { offset, gen } = entry {
                 self.entry_header(num, gen, offset);
@@ -3360,17 +3361,14 @@ impl Validator<'_> {
         boundaries.extend(sections.iter().map(|section| section.at));
         crate::sort::ascending(&mut boundaries);
 
-        offsets
-            .iter()
-            .map(|(num, at)| {
-                let next = boundaries
-                    .iter()
-                    .copied()
-                    .find(|other| *other > *at)
-                    .unwrap_or(self.buf.len() as u64);
-                (*num, (*at, next.saturating_sub(*at)))
-            })
-            .collect()
+        crate::sort::map(offsets.iter().map(|(num, at)| {
+            let next = boundaries
+                .iter()
+                .copied()
+                .find(|other| *other > *at)
+                .unwrap_or(self.buf.len() as u64);
+            (*num, (*at, next.saturating_sub(*at)))
+        }))
     }
 
     /// The first indirect object in the file, by position rather than by

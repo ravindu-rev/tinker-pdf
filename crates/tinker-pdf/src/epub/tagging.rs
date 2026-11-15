@@ -106,10 +106,11 @@ pub(crate) fn writing_modes(
             }
         }
     }
-    seen.into_iter()
-        .filter(|(_, at)| at.rtl)
-        .filter_map(|(element, at)| at.direction.map(|rtl| (element, rtl)))
-        .collect()
+    crate::sort::map(
+        seen.into_iter()
+            .filter(|(_, at)| at.rtl)
+            .filter_map(|(element, at)| at.direction.map(|rtl| (element, rtl))),
+    )
 }
 
 /// Every `<th>` and `<td>` of a content document that carries an `id` **and

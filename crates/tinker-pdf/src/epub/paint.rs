@@ -1342,11 +1342,12 @@ impl<'a> Fonts<'a> {
             .collect();
         // A run's spacing as a reader measures it on the page: first, since
         // which runs share a line is measured so too.
-        *self.along.borrow_mut() = painted
-            .iter()
-            .map(|run| (run_key(run), along_the_line(effects.matrix(run.anchor))))
-            .filter(|(_, along)| *along != 1.0)
-            .collect();
+        *self.along.borrow_mut() = crate::sort::map(
+            painted
+                .iter()
+                .map(|run| (run_key(run), along_the_line(effects.matrix(run.anchor))))
+                .filter(|(_, along)| *along != 1.0),
+        );
         let mut map: BTreeMap<RunKey, (String, String)> = BTreeMap::new();
         for (at, run) in painted.iter().enumerate() {
             let before = at
@@ -1474,16 +1475,18 @@ impl<'a> Fonts<'a> {
             .filter(|run| run.painted && !run.generated)
             .collect();
         *self.declared.borrow_mut() = tagging.map_or_else(BTreeMap::new, |tagging| {
+            crate::sort::map(
+                painted
+                    .iter()
+                    .filter_map(|run| tagging.declared(run).map(|rtl| (run_key(run), rtl))),
+            )
+        });
+        let order: BTreeMap<RunKey, usize> = crate::sort::map(
             painted
                 .iter()
-                .filter_map(|run| tagging.declared(run).map(|rtl| (run_key(run), rtl)))
-                .collect()
-        });
-        let order: BTreeMap<RunKey, usize> = painted
-            .iter()
-            .enumerate()
-            .map(|(at, run)| (run_key(run), at))
-            .collect();
+                .enumerate()
+                .map(|(at, run)| (run_key(run), at)),
+        );
         let mut drawings: BTreeMap<RunKey, Drawing> = BTreeMap::new();
         // The page's runs are planned anew ([`Fonts::plan_run`]), and its
         // lines of units read anew ([`Fonts::readings`]).
@@ -1727,11 +1730,11 @@ impl<'a> Fonts<'a> {
         places: &[usize],
         options: &[(RunKey, Drawing)],
     ) -> Vec<(RunKey, Drawing)> {
-        let runs: BTreeMap<RunKey, (usize, &TextRun)> = line
-            .iter()
-            .zip(places)
-            .map(|(run, &place)| (run_key(run), (place, *run)))
-            .collect();
+        let runs: BTreeMap<RunKey, (usize, &TextRun)> = crate::sort::map(
+            line.iter()
+                .zip(places)
+                .map(|(run, &place)| (run_key(run), (place, *run))),
+        );
         let mut kept: Vec<(RunKey, Drawing)> = Vec::new();
         for &(key, drawing) in options {
             let Some(&(place, run)) = runs.get(&key) else {
@@ -4762,12 +4765,13 @@ fn sharing_a_line(
     painted: &[&TextRun],
     along: &dyn Fn(&TextRun) -> f64,
 ) -> std::collections::BTreeSet<RunKey> {
-    page_lines(painted, along)
-        .into_iter()
-        .filter(|line| holds_two_paragraphs(line.iter().copied()))
-        .flatten()
-        .map(run_key)
-        .collect()
+    crate::sort::set(
+        page_lines(painted, along)
+            .into_iter()
+            .filter(|line| holds_two_paragraphs(line.iter().copied()))
+            .flatten()
+            .map(run_key),
+    )
 }
 
 /// The lines of `painted`, a page's runs, as a reader of the page finds them:
@@ -5727,11 +5731,12 @@ impl Atomics {
     /// `tree`, the box tree the chapter is laid out from, sets it.
     #[must_use]
     pub fn of(tree: &BoxNode, pages: &[LayoutPage]) -> Atomics {
-        let recorded: std::collections::BTreeSet<u32> = pages
-            .iter()
-            .flat_map(|page| &page.atomics)
-            .filter_map(|atomic| atomic.anchor)
-            .collect();
+        let recorded: std::collections::BTreeSet<u32> = crate::sort::set(
+            pages
+                .iter()
+                .flat_map(|page| &page.atomics)
+                .filter_map(|atomic| atomic.anchor),
+        );
         let mut out = Atomics::default();
         if recorded.is_empty() {
             return out;
@@ -5984,15 +5989,16 @@ fn plaintext_bases(
     pages: &[LayoutPage],
     resolved: &BTreeMap<usize, Paragraph>,
 ) -> BTreeMap<usize, bool> {
-    pages
-        .iter()
-        .flat_map(|page| &page.runs)
-        .filter(|run| run.paragraph_rtl.is_none())
-        .filter_map(|run| {
-            let paragraph = resolved.get(&run.paragraph)?;
-            Some((run.paragraph, paragraph.base_level().is_rtl()))
-        })
-        .collect()
+    crate::sort::map(
+        pages
+            .iter()
+            .flat_map(|page| &page.runs)
+            .filter(|run| run.paragraph_rtl.is_none())
+            .filter_map(|run| {
+                let paragraph = resolved.get(&run.paragraph)?;
+                Some((run.paragraph, paragraph.base_level().is_rtl()))
+            }),
+    )
 }
 
 /// [`split_at_levels`] over a page that holds a stand-in: each line is one
@@ -6110,21 +6116,22 @@ fn paragraphs(pages: &[LayoutPage]) -> (BTreeMap<usize, Paragraph>, Vec<Vec<Plac
         }
         places.push(here);
     }
-    let resolved = gathered
-        .into_iter()
-        .filter(|(_, paragraph)| paragraph.right_to_left)
-        .map(|(number, mut paragraph)| {
-            while let Some(e) = paragraph.open.pop() {
-                paragraph.text.push(closer(&e));
-            }
-            let direction = match paragraph.base {
-                Some(true) => BaseDirection::RightToLeft,
-                Some(false) => BaseDirection::LeftToRight,
-                None => BaseDirection::Auto,
-            };
-            (number, Paragraph::new(&paragraph.text, direction))
-        })
-        .collect();
+    let resolved = crate::sort::map(
+        gathered
+            .into_iter()
+            .filter(|(_, paragraph)| paragraph.right_to_left)
+            .map(|(number, mut paragraph)| {
+                while let Some(e) = paragraph.open.pop() {
+                    paragraph.text.push(closer(&e));
+                }
+                let direction = match paragraph.base {
+                    Some(true) => BaseDirection::RightToLeft,
+                    Some(false) => BaseDirection::LeftToRight,
+                    None => BaseDirection::Auto,
+                };
+                (number, Paragraph::new(&paragraph.text, direction))
+            }),
+    );
     (resolved, places)
 }
 

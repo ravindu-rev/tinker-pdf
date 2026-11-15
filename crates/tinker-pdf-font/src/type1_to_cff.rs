@@ -207,14 +207,15 @@ pub fn type1_to_cff(program: &[u8]) -> Result<Type1Cff, Type1CffRefusal> {
 
     // ---- every glyph drawn ------------------------------------------------
 
-    let defined: BTreeSet<usize> = scan_subrs(&layout.private)
-        .entries
-        .iter()
-        .filter_map(|entry| match entry.key {
-            Key::Subr(index) => stored(index),
-            Key::Glyph(_) => None,
-        })
-        .collect();
+    let defined: BTreeSet<usize> = crate::sort::set(
+        scan_subrs(&layout.private)
+            .entries
+            .iter()
+            .filter_map(|entry| match entry.key {
+                Key::Subr(index) => stored(index),
+                Key::Glyph(_) => None,
+            }),
+    );
     let mut work = 0u64;
     let mut drawn: Vec<Drawn> = Vec::with_capacity(count);
     for glyph in 0..count {

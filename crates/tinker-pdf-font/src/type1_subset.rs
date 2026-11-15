@@ -178,28 +178,26 @@ pub fn subset_type1(program: &[u8], glyphs: &BTreeSet<u16>) -> Result<Type1Subse
     };
 
     let count = font.glyph_count();
-    let mut keep: BTreeSet<u16> = glyphs
-        .iter()
-        .copied()
-        .filter(|&glyph| usize::from(glyph) < count)
-        .collect();
+    let mut keep: BTreeSet<u16> = crate::sort::set(
+        glyphs
+            .iter()
+            .copied()
+            .filter(|&glyph| usize::from(glyph) < count),
+    );
     // 9.6.5.2: `.notdef` is what a name the program lacks draws, so every
     // subset defines it (9.9.2).
     if let Some(notdef) = font.glyph_for_name(b".notdef") {
         keep.insert(notdef);
     }
 
-    let defined: BTreeSet<usize> = subrs
-        .entries
-        .iter()
-        .filter_map(|entry| match entry.key {
+    let defined: BTreeSet<usize> =
+        crate::sort::set(subrs.entries.iter().filter_map(|entry| match entry.key {
             Key::Subr(index) => stored(index),
             Key::Glyph(_) => None,
-        })
-        .collect();
+        }));
 
     // Chapter 8.4: subroutines 0 to 3 are flex's and hint replacement's.
-    let mut reached: BTreeSet<usize> = (0..4).filter(|i| defined.contains(i)).collect();
+    let mut reached: BTreeSet<usize> = crate::sort::set((0..4).filter(|i| defined.contains(i)));
     let mut pending: Vec<u16> = keep.iter().copied().collect();
     let mut hint_subrs: Vec<usize> = Vec::new();
     while let Some(glyph) = pending.pop() {

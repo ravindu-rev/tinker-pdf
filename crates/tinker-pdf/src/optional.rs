@@ -241,11 +241,11 @@ impl OptionalContent {
                 })
             });
             let collections = radio_collections(doc, if inherits { &default } else { applied });
-            let locked: BTreeSet<ObjRef> = refs_of(doc, applied, b"Locked").into_iter().collect();
+            let locked: BTreeSet<ObjRef> = crate::sort::set(refs_of(doc, applied, b"Locked"));
             apply_overrides(
                 &layers.overrides,
                 &Constraints {
-                    listed: all.iter().copied().collect(),
+                    listed: crate::sort::set(all.iter().copied()),
                     locked,
                     collections,
                 },

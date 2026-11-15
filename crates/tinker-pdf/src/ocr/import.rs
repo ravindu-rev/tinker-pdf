@@ -1122,11 +1122,8 @@ fn read_alto(
 
         // Reading order: the document's stated one, else each `IDNEXT` chain
         // from a block nothing names, else document order.
-        let position_of: BTreeMap<usize, usize> = text_blocks
-            .iter()
-            .enumerate()
-            .map(|(i, &b)| (b, i))
-            .collect();
+        let position_of: BTreeMap<usize, usize> =
+            crate::sort::map(text_blocks.iter().enumerate().map(|(i, &b)| (b, i)));
         let named: Vec<usize> = if let Some(order) = &stated_order {
             order
                 .iter()
@@ -1407,13 +1404,13 @@ fn read_page_xml(
         .filter(|&r| tree.child(r, "TextLine").is_some())
         .collect();
     let position_of: BTreeMap<usize, usize> =
-        regions.iter().enumerate().map(|(i, &r)| (r, i)).collect();
-    let line_numbers: BTreeMap<usize, usize> = tree
-        .descendants(page, "TextLine")
-        .into_iter()
-        .enumerate()
-        .map(|(n, l)| (l, n))
-        .collect();
+        crate::sort::map(regions.iter().enumerate().map(|(i, &r)| (r, i)));
+    let line_numbers: BTreeMap<usize, usize> = crate::sort::map(
+        tree.descendants(page, "TextLine")
+            .into_iter()
+            .enumerate()
+            .map(|(n, l)| (l, n)),
+    );
 
     // The regions a `regionRef` reaches: a region of lines itself, or the
     // regions of lines inside a region that holds only regions; any other

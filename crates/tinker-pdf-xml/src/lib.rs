@@ -116,6 +116,7 @@ pub mod html;
 pub mod limits;
 mod namespace;
 mod scan;
+mod sort;
 mod text;
 
 #[cfg(test)]

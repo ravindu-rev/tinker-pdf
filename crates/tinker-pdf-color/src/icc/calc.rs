@@ -734,7 +734,7 @@ impl Calculator {
         }
         let mut regions: Vec<(usize, usize)> = distinct.clone();
         regions.push(main);
-        regions.sort_unstable();
+        crate::sort::ascending(&mut regions);
         for pair in regions.windows(2) {
             if pair[0].1 > pair[1].0 {
                 return Err(IccError::MalformedTag);
@@ -888,7 +888,7 @@ fn sub_element(
                 channels.push(found);
             }
             let mut sorted = distinct.clone();
-            sorted.sort_unstable();
+            crate::sort::ascending(&mut sorted);
             if sorted.windows(2).any(|pair| pair[0].1 > pair[1].0) {
                 return Err(IccError::MalformedTag);
             }

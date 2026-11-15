@@ -1074,11 +1074,8 @@ pub(crate) fn subset_explained(
     // `callsubr` operands inside it are renumbered against that context's
     // local INDEX, and two contexts do not agree on those numbers.
     let kept_global: Vec<(usize, usize)> = walk.used_global.iter().copied().collect();
-    let global_map: BTreeMap<(usize, usize), usize> = kept_global
-        .iter()
-        .enumerate()
-        .map(|(new, &key)| (key, new))
-        .collect();
+    let global_map: BTreeMap<(usize, usize), usize> =
+        crate::sort::map(kept_global.iter().enumerate().map(|(new, &key)| (key, new)));
 
     let new_gsubr_bias = bias(kept_global.len());
     let new_local_bias: Vec<i32> = kept_local.iter().map(|slot| bias(slot.len())).collect();

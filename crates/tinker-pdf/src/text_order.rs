@@ -250,13 +250,14 @@ pub(crate) fn into_logical_order_knowing(
 /// ([`rejoin_split_lines`]), a piece with no right-to-left character among
 /// them.
 pub(crate) fn sequences_read(page: &TextPage) -> BTreeSet<(u64, u32)> {
-    page.blocks()
-        .iter()
-        .filter(|block| block.lines.iter().any(|line| holds_rtl(&line.chars)))
-        .flat_map(|block| block.lines.iter())
-        .flat_map(|line| line.chars.iter())
-        .filter_map(|c| c.mcid.map(|mcid| (c.stream, mcid)))
-        .collect()
+    crate::sort::set(
+        page.blocks()
+            .iter()
+            .filter(|block| block.lines.iter().any(|line| holds_rtl(&line.chars)))
+            .flat_map(|block| block.lines.iter())
+            .flat_map(|line| line.chars.iter())
+            .filter_map(|c| c.mcid.map(|mcid| (c.stream, mcid))),
+    )
 }
 
 /// [`into_logical_order`], each line's reading asked of `known` where there
@@ -346,7 +347,7 @@ fn keep_stated_on_first_line(
         let mut at = 0usize;
         while at < block.lines.len() {
             let line = &mut block.lines[at];
-            let here: BTreeSet<u32> = line.chars.iter().filter_map(|c| c.stated).collect();
+            let here: BTreeSet<u32> = crate::sort::set(line.chars.iter().filter_map(|c| c.stated));
             if here.iter().any(|span| placed.contains(span)) {
                 let (gone, kept): (Vec<TextChar>, Vec<TextChar>) = std::mem::take(&mut line.chars)
                     .into_iter()

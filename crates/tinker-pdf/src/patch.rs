@@ -82,7 +82,7 @@ pub(crate) fn patch(
     options: &RenderOptions,
 ) -> Option<Patch> {
     let page = after.page(index)?;
-    let changed: BTreeSet<u32> = changed.iter().copied().collect();
+    let changed: BTreeSet<u32> = crate::sort::set(changed.iter().copied());
     let result = match plan(before, &page, &changed, previous, options) {
         Err(why) => {
             *previous = page.render(options);
@@ -329,17 +329,19 @@ fn changed_annotations(
             .and_then(|dict| dict.get(doc.intern(b"AP")))
             .is_some_and(|ap| reaches(doc, &[ap], changed, page))
     };
-    let old_refs: BTreeSet<ObjRef> = old.iter().filter_map(|entry| entry.reference).collect();
-    let new_refs: BTreeSet<ObjRef> = new.iter().filter_map(|entry| entry.reference).collect();
-    let altered: BTreeSet<ObjRef> = new
-        .iter()
-        .filter_map(|entry| entry.reference.map(|r| (r, entry)))
-        .filter(|(r, entry)| {
-            old_refs.contains(r)
-                && (changed.contains(&r.num) || appearance_changed(new_doc, &entry.dict))
-        })
-        .map(|(r, _)| r)
-        .collect();
+    let old_refs: BTreeSet<ObjRef> =
+        crate::sort::set(old.iter().filter_map(|entry| entry.reference));
+    let new_refs: BTreeSet<ObjRef> =
+        crate::sort::set(new.iter().filter_map(|entry| entry.reference));
+    let altered: BTreeSet<ObjRef> = crate::sort::set(
+        new.iter()
+            .filter_map(|entry| entry.reference.map(|r| (r, entry)))
+            .filter(|(r, entry)| {
+                old_refs.contains(r)
+                    && (changed.contains(&r.num) || appearance_changed(new_doc, &entry.dict))
+            })
+            .map(|(r, _)| r),
+    );
 
     // The annotations left alone draw in the same order on both pages.
     let kept = |entries: &[Entry], other: &BTreeSet<ObjRef>| -> Vec<ObjRef> {

@@ -259,10 +259,11 @@ impl crate::Page {
         let defined = defined_on_page(&self.doc, &self.inner);
         let inventory: Vec<SpotColorant> = defined.iter().map(|(spot, _)| spot.clone()).collect();
         let planned = plan(&inventory, &[], u64::from(width) * u64::from(height));
-        let definitions: BTreeMap<&[u8], &SpotDefinition> = defined
-            .iter()
-            .map(|(spot, definition)| (spot.name.as_slice(), definition))
-            .collect();
+        let definitions: BTreeMap<&[u8], &SpotDefinition> = crate::sort::map(
+            defined
+                .iter()
+                .map(|(spot, definition)| (spot.name.as_slice(), definition)),
+        );
         let resources = crate::resources::PageResources::new_in(
             &self.doc,
             &self.inner,

@@ -29,6 +29,7 @@ use tinker_pdf_math as math;
 
 pub mod function;
 pub mod icc;
+mod sort;
 
 pub use function::Function;
 

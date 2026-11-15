@@ -8574,7 +8574,9 @@ pub(crate) mod tests {
         /// one before it. In units of 2^-16 of a level.
         fn simplex(&self, mut at: Vec<usize>, axes: &[usize], fractions: &[i64]) -> [i128; 3] {
             let mut order = axes.to_vec();
-            order.sort_by(|&a, &b| fractions[b].cmp(&fractions[a]).then(a.cmp(&b)));
+            crate::sort::by(&mut order, |&a, &b| {
+                fractions[b].cmp(&fractions[a]).then(a.cmp(&b))
+            });
             let mut previous = self.node(&at);
             let mut sum = previous.map(|value| i128::from(value) << 16);
             for axis in order {

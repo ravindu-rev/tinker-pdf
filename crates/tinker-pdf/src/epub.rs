@@ -1997,12 +1997,13 @@ fn write_chapters<R: read::Resources + ?Sized>(
         // `/Link` an `/OBJR` to its annotation, and one with none would claim
         // an association the file does not contain. Decided over the whole
         // chapter so both halves of a link broken over a page are one type.
-        let linked: std::collections::BTreeSet<usize> = (0..chapter.pages.len())
-            .filter_map(|offset| links.get(chapter.first_page + offset))
-            .flatten()
-            .filter(|(rect, _, _)| tagging::is_link_rect(*rect))
-            .map(|(_, _, element)| *element)
-            .collect();
+        let linked: std::collections::BTreeSet<usize> = crate::sort::set(
+            (0..chapter.pages.len())
+                .filter_map(|offset| links.get(chapter.first_page + offset))
+                .flatten()
+                .filter(|(rect, _, _)| tagging::is_link_rect(*rect))
+                .map(|(_, _, element)| *element),
+        );
         let cells = chapter
             .reading
             .as_ref()

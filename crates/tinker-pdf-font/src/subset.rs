@@ -438,11 +438,8 @@ fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>, reshape: &Reshape) -
 
     // .notdef is what a reader draws for anything the font does not cover,
     // so it is never optional.
-    let mut keep: BTreeSet<u16> = glyphs
-        .iter()
-        .copied()
-        .filter(|&g| g < glyph_count)
-        .collect();
+    let mut keep: BTreeSet<u16> =
+        crate::sort::set(glyphs.iter().copied().filter(|&g| g < glyph_count));
     keep.insert(0);
     close_over_components(sfnt, &mut keep);
 
@@ -451,12 +448,13 @@ fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>, reshape: &Reshape) -
     let metrics = if reshape.advances.is_empty() {
         None
     } else {
-        let kept: BTreeMap<u16, f64> = reshape
-            .advances
-            .iter()
-            .filter(|(glyph, _)| keep.contains(glyph))
-            .map(|(glyph, advance)| (*glyph, *advance))
-            .collect();
+        let kept: BTreeMap<u16, f64> = crate::sort::map(
+            reshape
+                .advances
+                .iter()
+                .filter(|(glyph, _)| keep.contains(glyph))
+                .map(|(glyph, advance)| (*glyph, *advance)),
+        );
         Some(reshaped_metrics(sfnt, glyph_count, &kept)?)
     };
 

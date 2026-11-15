@@ -709,13 +709,13 @@ impl DocumentEditor {
 
         // Every object the editor has, ascending, so the report is in object
         // order whatever order the overlay's map keeps.
-        let mut numbers: BTreeSet<u32> = self
-            .doc
-            .xref()
-            .iter()
-            .map(|(num, _)| num)
-            .filter(|num| *num != 0)
-            .collect();
+        let mut numbers: BTreeSet<u32> = crate::sort::set(
+            self.doc
+                .xref()
+                .iter()
+                .map(|(num, _)| num)
+                .filter(|num| *num != 0),
+        );
         numbers.extend(self.overlay.keys().copied());
         for num in &self.deleted {
             numbers.remove(num);

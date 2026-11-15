@@ -1697,12 +1697,12 @@ fn rewrite(
 
     // Every program some font in the document reaches, before the jobs are
     // consumed below. What is left over is what `orphans` reports.
-    let covered: BTreeSet<u32> = jobs
-        .keys()
-        .chain(usage.direct.keys())
-        .chain(written.iter())
-        .map(|program| program.num)
-        .collect();
+    let covered: BTreeSet<u32> = crate::sort::set(
+        jobs.keys()
+            .chain(usage.direct.keys())
+            .chain(written.iter())
+            .map(|program| program.num),
+    );
 
     for (program, job) in jobs {
         let Some(bytes) = bytes_of(editor, program, op) else {
@@ -2270,11 +2270,11 @@ fn convert_type1(
             }
         }
     }
-    let glyphs: BTreeSet<u16> = job
-        .glyphs
-        .iter()
-        .filter_map(|glyph| converted.glyphs.get(usize::from(*glyph)).copied())
-        .collect();
+    let glyphs: BTreeSet<u16> = crate::sort::set(
+        job.glyphs
+            .iter()
+            .filter_map(|glyph| converted.glyphs.get(usize::from(*glyph)).copied()),
+    );
     match tinker_pdf_font::subset_cff(&converted.program, &glyphs) {
         Some(cut) if cut.len() < bytes.len() => Some(Ok(Cut {
             bytes: cut,

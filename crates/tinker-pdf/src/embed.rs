@@ -596,16 +596,17 @@ fn embed_simple(
         chosen.insert(code, drew.glyph);
     }
 
-    let glyphs: BTreeSet<u16> = chosen.values().copied().collect();
+    let glyphs: BTreeSet<u16> = crate::sort::set(chosen.values().copied());
     let (warnings, advances) = widths(font, &original, answer.program, &chosen);
 
     // What each drawn code reads as: the text the document gives it, which
     // the font as written states in a `/ToUnicode`.
-    let texts: BTreeMap<u32, String> = chosen
-        .keys()
-        .map(|&code| (code, original.text_of(code)))
-        .filter(|(_, text)| !text.is_empty())
-        .collect();
+    let texts: BTreeMap<u32, String> = crate::sort::map(
+        chosen
+            .keys()
+            .map(|&code| (code, original.text_of(code)))
+            .filter(|(_, text)| !text.is_empty()),
+    );
 
     // The form ISO 19005's encoding clause admits at every part: a TrueType
     // font symbolic, with no `/Encoding` and one (3,0) subtable stating each
@@ -806,7 +807,7 @@ fn embed_composite(
         chosen.insert(code, drew.glyph);
     }
 
-    let glyphs: BTreeSet<u16> = chosen.values().copied().collect();
+    let glyphs: BTreeSet<u16> = crate::sort::set(chosen.values().copied());
     let (warnings, advances) = widths(font, &original, program, &chosen);
     let cut = tinker_pdf_font::subset_with(
         program,
