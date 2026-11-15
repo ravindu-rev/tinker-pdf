@@ -1653,7 +1653,7 @@ fn decode_within(
             &mut charged,
         )
     };
-    let slots = super::map_in_turn(executor, listed.len(), &decode, Result::is_err);
+    let slots = super::map_in_turn(executor, listed.len(), decode, Result::is_err);
     // Up to the first refusal, which ends the reading back; a slot left
     // empty only ever follows one.
     let mut results = Vec::with_capacity(slots.len());

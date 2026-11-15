@@ -649,6 +649,11 @@ fn read_tiles(
     Ok(tiles)
 }
 
+/// Where one packet stands in a tile's read order, as
+/// `(layer, resolution, component, precinct)`: [`layout_for_test`]'s order.
+#[cfg(test)]
+pub(crate) type PacketPlace = (u16, u8, u16, u32);
+
 /// Tile `t`'s geometry and the order its packets are read in, as
 /// `(layer, resolution, component, precinct)`, for the test writer that
 /// encodes whole codestreams from chosen coefficients
@@ -663,7 +668,7 @@ fn read_tiles(
 pub(crate) fn layout_for_test(
     stream: &Codestream<'_>,
     t: u32,
-) -> Result<(Tile, Vec<(u16, u8, u16, u32)>), Refusal> {
+) -> Result<(Tile, Vec<PacketPlace>), Refusal> {
     let mut budget = MAX_JPX_CODE_BLOCKS;
     let index = u16::try_from(t).map_err(|_| Refusal::Budget("tiles"))?;
     let tile = build_tile(stream, t, index, &mut budget)?;

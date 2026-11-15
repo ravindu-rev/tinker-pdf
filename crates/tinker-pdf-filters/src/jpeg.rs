@@ -6110,7 +6110,7 @@ mod tests {
         ] {
             for scale in JpegScale::ALL {
                 let n = u64::from(scale.block_samples());
-                let expected = (u64::from(full) * n + 7) / 8;
+                let expected = (u64::from(full) * n).div_ceil(8);
                 assert_eq!(
                     u64::from(scale.length(full)),
                     expected,

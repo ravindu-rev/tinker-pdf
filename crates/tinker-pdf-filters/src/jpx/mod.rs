@@ -991,7 +991,7 @@ fn decode_inner(
         };
         (drawn, own)
     };
-    let slots = map_in_turn(executor, tiles.len(), &draw, |(drawn, _)| drawn.is_err());
+    let slots = map_in_turn(executor, tiles.len(), draw, |(drawn, _)| drawn.is_err());
     // As one loop drawing the tiles in turn would have met them: each tile's
     // clamp and its counts up to the first refusal, which is the answer.
     for (t, slot) in slots.into_iter().enumerate() {

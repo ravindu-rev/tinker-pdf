@@ -1891,7 +1891,7 @@ fn apart<T: Send>(
         let made = make(i, &mut own);
         (made, own)
     };
-    let slots = super::map_in_turn(executor, len, &make, |(made, _)| made.is_err());
+    let slots = super::map_in_turn(executor, len, make, |(made, _)| made.is_err());
     let mut parts = Vec::with_capacity(len);
     for (i, slot) in slots.into_iter().enumerate() {
         let (made, own) = slot.unwrap_or_else(|| make(i));

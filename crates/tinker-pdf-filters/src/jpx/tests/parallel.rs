@@ -15,7 +15,7 @@
 use std::sync::Mutex;
 use std::thread::{self, ThreadId};
 
-use super::writer::{coded, At, Spec};
+use super::writer::{coded, At, Component, Spec};
 use crate::jpx::codestream::parse;
 use crate::jpx::tier2::{self, Orientation, Tile};
 use crate::jpx::{
@@ -114,7 +114,7 @@ fn noise(at: At) -> i32 {
 /// Many tiles of many code-blocks: a 40 by 34 image at an odd origin in 16
 /// by 16 tiles, three levels, 8 by 8 blocks, over `components`, with
 /// `cb_style`'s Table A.19 bits.
-fn many_blocks(components: &[(u8, bool, u8, u8)], mct: bool, cb_style: u8) -> Spec {
+fn many_blocks(components: &[Component], mct: bool, cb_style: u8) -> Spec {
     Spec {
         xsiz: 40,
         ysiz: 34,
@@ -153,14 +153,14 @@ fn serial(bytes: &[u8], request: &JpxRequest) -> Outcome {
     (decoded, warnings)
 }
 
+/// What tier-1 came to, the budget it left, and every block's coefficients:
+/// [`tier1_on`]'s answer.
+type Tier1Outcome = (Result<u64, Refusal>, u64, Vec<Vec<i32>>);
+
 /// Tier-1 alone over `bytes`'s tiles on `executor` from a budget of
 /// `budget`: what it came to, the budget left, and every block's
 /// coefficients, by tile, component, resolution, band, precinct and block.
-fn tier1_on(
-    bytes: &[u8],
-    executor: &dyn Executor,
-    budget: u64,
-) -> Option<(Result<u64, Refusal>, u64, Vec<Vec<i32>>)> {
+fn tier1_on(bytes: &[u8], executor: &dyn Executor, budget: u64) -> Option<Tier1Outcome> {
     let stream = parse(bytes).ok()?;
     let mut tiles: Vec<Tile> = tier2::decode_tiles(&stream).ok()?;
     let (decoded, left) = tier1::decode_tiles_within(&stream, &mut tiles, 0, executor, budget);

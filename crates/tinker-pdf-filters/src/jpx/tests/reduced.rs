@@ -18,7 +18,7 @@
 //! dequantises to the same coefficients whether it sits under `N` levels or
 //! `N - d`: a derived step depends on the level count.
 
-use super::writer::{boxed, coded, At, Spec, SIGNATURE};
+use super::writer::{boxed, coded, At, Component, Spec, SIGNATURE};
 use crate::jpx::codestream::parse;
 use crate::jpx::tier2::{layout_for_test, Orientation};
 use crate::jpx::{jpx_decode, jpx_decode_request, jpx_header, JpxImage, JpxRequest};
@@ -64,7 +64,7 @@ fn noise(at: At) -> i32 {
 
 /// A 37 x 29 image at an odd origin, one tile, 8 x 8 code-blocks, `levels`
 /// levels of `filter`, over `components`.
-fn spec(filter: Filter, levels: u8, components: &[(u8, bool, u8, u8)], mct: bool) -> Spec {
+fn spec(filter: Filter, levels: u8, components: &[Component], mct: bool) -> Spec {
     Spec {
         xsiz: 40,
         ysiz: 34,
@@ -149,7 +149,7 @@ fn same_picture(got: &JpxImage, want: &JpxImage, case: &str) {
 
 #[test]
 fn a_reduced_decode_is_the_full_decode_of_its_own_low_bands() {
-    let shapes: [(&str, &[(u8, bool, u8, u8)], bool); 3] = [
+    let shapes: [(&str, &[Component], bool); 3] = [
         ("grey", &[(8, false, 1, 1)], false),
         (
             "three components and G.2's transform",

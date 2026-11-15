@@ -11,6 +11,9 @@
 //! not define, because half the tests here are about what the decoder refuses
 //! and a writer that could only emit valid files could not write them.
 
+/// One component's SIZ fields: `(Ssiz precision, signed, XRsiz, YRsiz)`.
+pub(crate) type Component = (u8, bool, u8, u8);
+
 /// A codestream's main header, as fields rather than bytes.
 ///
 /// The defaults are the smallest thing OpenJPEG will also produce: a 4 x 4
@@ -29,7 +32,7 @@ pub(crate) struct Spec {
     pub(crate) xtosiz: u32,
     pub(crate) ytosiz: u32,
     /// `(Ssiz precision, signed, XRsiz, YRsiz)` per component.
-    pub(crate) components: Vec<(u8, bool, u8, u8)>,
+    pub(crate) components: Vec<Component>,
     /// Overrides `Csiz` independently of `components.len()`, so a SIZ whose
     /// length and component count disagree can be written.
     pub(crate) csiz_override: Option<u16>,
@@ -306,6 +309,9 @@ pub(crate) struct At {
 /// bit-planes it is missing below `Mb`; `None` for a block of zeros.
 type Coded = Option<(Vec<u8>, u32, u32)>;
 
+/// One precinct band's inclusion tree and zero bit-plane tree.
+type BandTrees = (TagWriter, TagWriter);
+
 /// `spec`'s codestream with every code-block carrying the coefficients
 /// `value` names: each block coded by tier-1's test encoder to the bottom
 /// plane in the code-block style its component's header names
@@ -438,7 +444,7 @@ fn code_tile(
 fn tag_trees(
     tile: &crate::jpx::tier2::Tile,
     blocks: &[Vec<Vec<Vec<Vec<Coded>>>>],
-) -> Vec<Vec<Vec<Vec<(TagWriter, TagWriter)>>>> {
+) -> Vec<Vec<Vec<Vec<BandTrees>>>> {
     let mut out = Vec::new();
     for (c, component) in tile.components.iter().enumerate() {
         let mut by_resolution = Vec::new();
@@ -473,7 +479,7 @@ fn tag_trees(
 fn write_packet(
     tile: &crate::jpx::tier2::Tile,
     blocks: &[Vec<Vec<Vec<Vec<Coded>>>>],
-    trees: &mut [Vec<Vec<Vec<(TagWriter, TagWriter)>>>],
+    trees: &mut [Vec<Vec<Vec<BandTrees>>>],
     (c, r, p): (usize, usize, usize),
     data: &mut Vec<u8>,
 ) {

@@ -965,7 +965,9 @@ fn shares<A: Arith + PartialEq>(samples: &[A], w: usize, h: usize, label: &str) 
         "{label}: each column lifted once"
     );
     let caller = thread::current().id();
-    let passes: [(&str, fn(&Ran) -> u64); 2] = [
+    // How much of a pass one job lifted.
+    type Lifted = fn(&Ran) -> u64;
+    let passes: [(&str, Lifted); 2] = [
         ("rows", |job| job.rows),
         ("blocks of columns", |job| u64::from(job.columns > 0)),
     ];
