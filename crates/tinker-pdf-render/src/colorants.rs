@@ -386,7 +386,8 @@ mod tests {
     #[test]
     fn a_device_n_component_alone_has_every_other_at_zero() {
         // { c0 c1 } -> { c0+c1  c0  c1  0 }
-        let program = tinker_pdf_color::function::parse_postscript(b"{ 2 copy add 3 1 roll 0 }");
+        let program = tinker_pdf_color::function::parse_postscript(b"{ 2 copy add 3 1 roll 0 }")
+            .expect("a calculator");
         let space = ColorSpace::Separation {
             components: 2,
             alternate: Box::new(ColorSpace::DeviceCmyk),

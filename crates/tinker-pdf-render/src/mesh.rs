@@ -1527,7 +1527,8 @@ mod tests {
                 range: vec![(0.0, 1.0); 3],
                 program: tinker_pdf_color::function::parse_postscript(
                     b"{ 2 copy add 0.5 mul 3 1 roll }",
-                ),
+                )
+                .expect("a calculator"),
             }),
         };
         let carried = mesh(

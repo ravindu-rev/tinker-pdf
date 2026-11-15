@@ -1041,7 +1041,8 @@ mod tests {
                 range: vec![(0.0, 1.0); 3],
                 program: tinker_pdf_color::function::parse_postscript(
                     b"{ 2 copy add 0.5 mul 3 1 roll }",
-                ),
+                )
+                .expect("a calculator"),
             }),
         };
         let shadings = [
@@ -1078,7 +1079,8 @@ mod tests {
                     range: vec![(0.0, 1.0); 2],
                     program: tinker_pdf_color::function::parse_postscript(
                         b"{ 40 div exch 40 div 2 copy gt { exch } if }",
-                    ),
+                    )
+                    .expect("a calculator"),
                 },
                 domain: [0.0, 40.0, 0.0, 40.0],
                 matrix: Matrix::IDENTITY,
@@ -1433,7 +1435,8 @@ mod tests {
             function: Function::PostScript {
                 domain: vec![(0.0, 100.0); 2],
                 range: vec![(0.0, 1.0)],
-                program: tinker_pdf_color::function::parse_postscript(b"{ add 200 div }"),
+                program: tinker_pdf_color::function::parse_postscript(b"{ add 200 div }")
+                    .expect("a calculator"),
             },
             domain: [0.0, 100.0, 0.0, 100.0],
             matrix: Matrix::IDENTITY,
@@ -1637,7 +1640,8 @@ mod tests {
         let calculator = Function::PostScript {
             domain: vec![(0.0, 1.0)],
             range: vec![(0.0, 1.0); 3],
-            program: tinker_pdf_color::function::parse_postscript(b"{ dup dup }"),
+            program: tinker_pdf_color::function::parse_postscript(b"{ dup dup }")
+                .expect("a calculator"),
         };
         let mut scratch = ShadingScratch::default();
         scratch.tabulate(&ColorSpace::DeviceRgb, &calculator, 0.0, 1.0, u64::MAX);

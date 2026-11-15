@@ -6504,10 +6504,27 @@ impl PageResources {
                 let reference = object.as_objref()?;
                 let data = self.decoded(reference).ok()?;
                 if kind == 4 {
+                    // 7.10.5.1: a token outside the calculator's subset is an
+                    // error, so the function is refused, as one that cannot be
+                    // read is, and the document says which token (ruling 10).
+                    // A refusal is kept with the function's read, so it is
+                    // said once.
+                    let program = match tinker_pdf_color::function::parse_postscript(&data) {
+                        Ok(program) => program,
+                        Err(refused) => {
+                            let token = calculator_token(refused.refusal);
+                            let name = self.doc.intern(&refused.token);
+                            self.doc.warn_once(
+                                Some(reference),
+                                WarningKind::CalculatorTokenRefused(token, name),
+                            );
+                            return None;
+                        }
+                    };
                     return Some(Function::PostScript {
                         domain: pairs(&numbers(b"Domain")),
                         range: pairs(&numbers(b"Range")),
-                        program: tinker_pdf_color::function::parse_postscript(&data),
+                        program,
                     });
                 }
                 Some(Function::Sampled {
@@ -9524,6 +9541,23 @@ pub(crate) fn device_n_attributes(
         colorants,
         process,
     })
+}
+
+/// The kind of token the document's warning names for a calculator the
+/// colour crate refused: the same classes, said in the warning's own terms.
+fn calculator_token(
+    refusal: tinker_pdf_color::function::CalculatorRefusal,
+) -> tinker_pdf_cos::CalculatorToken {
+    use tinker_pdf_color::function::CalculatorRefusal as R;
+    use tinker_pdf_cos::CalculatorToken as T;
+    match refusal {
+        R::Operator => T::Operator,
+        R::Name => T::Name,
+        R::String => T::String,
+        R::Composite => T::Composite,
+        R::Procedure => T::Procedure,
+        R::Bound => T::Bound,
+    }
 }
 
 /// Adds to an image's warnings why each default it fell back from was

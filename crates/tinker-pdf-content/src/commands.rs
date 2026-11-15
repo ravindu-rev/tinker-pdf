@@ -37,7 +37,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tinker_pdf_color::function::{parse_postscript, Function, PsOp};
+use tinker_pdf_color::function::{calculator_operator, Function, PsOp};
 
 use crate::device::{Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::interpret::{Form, Group, GroupSpace, MaskGroup};
@@ -1424,10 +1424,8 @@ fn read_program(
                 name += 1;
                 // The name as the colour crate spells it, so the operator is
                 // its own static name and the program evaluates as parsed.
-                let parsed = parse_postscript(spelled);
-                let op = match parsed.as_slice() {
-                    [PsOp::Op(op)] if op.as_bytes() == spelled.as_slice() => *op,
-                    _ => return Err(fields.wrong("a calculator operator 7.10.5 does not name")),
+                let Some(op) = calculator_operator(spelled) else {
+                    return Err(fields.wrong("a calculator operator 7.10.5 does not name"));
                 };
                 stack
                     .last_mut()
@@ -3456,7 +3454,10 @@ mod tests {
         let calculator = Arc::new(Function::PostScript {
             domain: vec![(0.0, 1.0)],
             range: vec![(0.0, 1.0)],
-            program: parse_postscript(b"{ dup 0.5 gt { 1 exch sub } if }"),
+            program: tinker_pdf_color::function::parse_postscript(
+                b"{ dup 0.5 gt { 1 exch sub } if }",
+            )
+            .expect("a calculator"),
         });
         state.set_stored(|s| {
             s.rendering_intent = RenderingIntent::Unrecognised;

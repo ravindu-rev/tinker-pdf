@@ -869,7 +869,8 @@ mod tests {
             tint: Box::new(tinker_pdf_color::Function::PostScript {
                 domain: vec![(0.0, 1.0); names.len()],
                 range: vec![(0.0, 1.0); 4],
-                program: tinker_pdf_color::function::parse_postscript(program),
+                program: tinker_pdf_color::function::parse_postscript(program)
+                    .expect("a calculator"),
             }),
             colorants: tinker_pdf_color::Colorants {
                 names,

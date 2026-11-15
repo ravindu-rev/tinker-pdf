@@ -833,7 +833,8 @@ fn repair_tier(kind: WarningKind) -> Tier {
         | WarningKind::CMap(_)
         | WarningKind::PredefinedCMapUnknown(_)
         | WarningKind::PredefinedCMapApproximate(_)
-        | WarningKind::MultipleMasterInstance(_) => Tier::Semantics,
+        | WarningKind::MultipleMasterInstance(_)
+        | WarningKind::CalculatorTokenRefused(..) => Tier::Semantics,
         _ => Tier::Structure,
     }
 }

@@ -10,12 +10,14 @@
 //! bounds are a security property rather than tidiness. The language is the
 //! arithmetic subset of 7.10.5 and nothing more: it has no file, name, string
 //! or dictionary operators, no way to define a procedure, and no access to
-//! anything outside its own operand stack. Evaluation is bounded on every
-//! axis that could otherwise run away — the stack is capped at the
-//! specification's 100 entries, `if`/`ifelse` nesting at 32, the token count
-//! at 65536 — and division by zero yields zero rather than an infinity that
-//! would propagate into a colour. It cannot loop: the language has no loop
-//! operator and the interpreter never revisits an instruction.
+//! anything outside its own operand stack. [`parse_postscript`] refuses a
+//! program holding any token outside that subset, and one past its bounds —
+//! `if`/`ifelse` nesting at 32, the token count at 65536 — rather than reading
+//! past either ([`CalculatorError`]). Evaluation is bounded too — the stack is
+//! capped at the specification's 100 entries — and division by zero yields
+//! zero rather than an infinity that would propagate into a colour. It cannot
+//! loop: the language has no loop operator and the interpreter never revisits
+//! an instruction.
 
 use tinker_pdf_math as math;
 
@@ -837,71 +839,341 @@ fn int_op(stack: &mut Stack<'_>, f: impl Fn(i64, i64) -> i64) {
     stack.push(f(a, b) as f64);
 }
 
-/// Parses a type 4 program's source.
+/// Table 42's operators, the whole of what a type 4 program may name.
+const OPERATORS: [&str; 42] = [
+    "add", "sub", "mul", "div", "idiv", "mod", "neg", "abs", "sqrt", "sin", "cos", "atan", "exp",
+    "ln", "log", "cvi", "cvr", "floor", "ceiling", "round", "truncate", "dup", "pop", "exch",
+    "copy", "index", "roll", "eq", "ne", "gt", "ge", "lt", "le", "and", "or", "xor", "not",
+    "bitshift", "true", "false", "if", "ifelse",
+];
+
+/// The most tokens a type 4 program may hold, the outer braces among them.
+pub const MAX_PS_TOKENS: usize = 1 << 16;
+
+/// The most `{ … }` procedures a type 4 program may nest inside its outer
+/// braces.
+pub const MAX_PS_DEPTH: u32 = 32;
+
+/// The most bytes of a refused token [`CalculatorError::token`] keeps.
+pub const MAX_REFUSED_TOKEN: usize = 64;
+
+/// Table 42's operator spelled `name`, as the static name a parsed program
+/// holds it by; `None` for every other name.
 #[must_use]
-pub fn parse_postscript(source: &[u8]) -> Vec<PsOp> {
-    const NAMES: [&str; 42] = [
-        "add", "sub", "mul", "div", "idiv", "mod", "neg", "abs", "sqrt", "sin", "cos", "atan",
-        "exp", "ln", "log", "cvi", "cvr", "floor", "ceiling", "round", "truncate", "dup", "pop",
-        "exch", "copy", "index", "roll", "eq", "ne", "gt", "ge", "lt", "le", "and", "or", "xor",
-        "not", "bitshift", "true", "false", "if", "ifelse",
-    ];
+pub fn calculator_operator(name: &[u8]) -> Option<&'static str> {
+    OPERATORS
+        .iter()
+        .copied()
+        .find(|operator| operator.as_bytes() == name)
+}
 
-    fn parse(tokens: &mut std::slice::Iter<'_, Vec<u8>>, depth: u32) -> Vec<PsOp> {
-        let mut out = Vec::new();
-        if depth > 32 {
-            return out;
+/// What kind of token made a type 4 program unreadable
+/// ([`CalculatorError`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CalculatorRefusal {
+    /// An executable name Table 42 does not list — `min`, `def`, `loop`, a
+    /// misspelled operator, or a word such as `inf` that PostScript reads as
+    /// a name rather than a number.
+    Operator,
+    /// A literal name, `/x`, or an immediately evaluated one, `//x`.
+    Name,
+    /// A string: `( … )`, a hexadecimal `< … >` or a base-85 `<~ … ~>`.
+    String,
+    /// An array or a dictionary: `[ … ]` or `<< … >>`.
+    Composite,
+    /// A brace that pairs with no other: a `}` with no `{` open, or a `{`
+    /// never closed.
+    Procedure,
+    /// A program past the calculator's bounds: more than [`MAX_PS_DEPTH`]
+    /// procedures nested, or more than [`MAX_PS_TOKENS`] tokens.
+    Bound,
+}
+
+/// Why a type 4 program cannot be read (7.10.5): the first token the
+/// calculator's subset of PostScript does not allow, as the program writes
+/// it. 7.10.5.1 restricts the language to numbers, booleans, Table 42's
+/// operators and the braces of `if` and `ifelse` — no names, strings,
+/// arrays or dictionaries — and a token outside that subset is an error
+/// rather than a token to pass over: a function holding one is refused, as a
+/// function that cannot be read is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalculatorError {
+    /// What kind of token it is.
+    pub refusal: CalculatorRefusal,
+    /// The token, as the program writes it, its first
+    /// [`MAX_REFUSED_TOKEN`] bytes.
+    pub token: Vec<u8>,
+}
+
+/// One token of a type 4 program, lexed.
+enum Lexed {
+    Open,
+    Close,
+    Number(f64),
+    Operator(&'static str),
+}
+
+/// PostScript's white-space characters (PLRM 3.2.2).
+fn is_white(byte: u8) -> bool {
+    matches!(byte, b'\0' | b'\t' | b'\n' | 0x0C | b'\r' | b' ')
+}
+
+/// PostScript's delimiters (PLRM 3.2.2).
+fn is_delimiter(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+    )
+}
+
+/// A regular token read as a number by PostScript's syntax (PLRM 3.2.2): a
+/// signed integer, a signed real with a point, an exponent or both, or a
+/// radix number `base#digits`, base 2 to 36. Anything else — `inf`, `NaN`,
+/// `1.2.3`, `0x10` — is a name.
+fn ps_number(token: &[u8]) -> Option<f64> {
+    if let Some(hash) = token.iter().position(|&b| b == b'#') {
+        let (base, digits) = (token.get(..hash)?, token.get(hash + 1..)?);
+        if base.is_empty() || base.len() > 2 || !base.iter().all(u8::is_ascii_digit) {
+            return None;
         }
-        while let Some(token) = tokens.next() {
-            match token.as_slice() {
-                b"{" => out.push(PsOp::Block(parse(tokens, depth + 1))),
-                b"}" => return out,
-                other => {
-                    let text = String::from_utf8_lossy(other);
-                    if let Ok(number) = text.parse::<f64>() {
-                        out.push(PsOp::Number(number));
-                    } else if let Some(name) = NAMES.iter().find(|n| **n == text) {
-                        out.push(PsOp::Op(name));
+        let base = base
+            .iter()
+            .fold(0u32, |total, digit| total * 10 + u32::from(digit - b'0'));
+        if !(2..=36).contains(&base) || digits.is_empty() {
+            return None;
+        }
+        let mut value = 0.0f64;
+        for &digit in digits {
+            let digit = char::from(digit).to_digit(base)?;
+            value = value * f64::from(base) + f64::from(digit);
+        }
+        return Some(value);
+    }
+    let body = match token.first() {
+        Some(b'+' | b'-') => token.get(1..)?,
+        _ => token,
+    };
+    let (mantissa, exponent) = match body.iter().position(|&b| b == b'e' || b == b'E') {
+        Some(at) => (body.get(..at)?, Some(body.get(at + 1..)?)),
+        None => (body, None),
+    };
+    let point = mantissa.iter().position(|&b| b == b'.');
+    let (whole, fraction) = match point {
+        Some(at) => (mantissa.get(..at)?, mantissa.get(at + 1..)?),
+        None => (mantissa, &[][..]),
+    };
+    let digits = |part: &[u8]| part.iter().all(u8::is_ascii_digit);
+    if !digits(whole) || !digits(fraction) || whole.len() + fraction.len() == 0 {
+        return None;
+    }
+    if let Some(exponent) = exponent {
+        let exponent = match exponent.first() {
+            Some(b'+' | b'-') => exponent.get(1..)?,
+            _ => exponent,
+        };
+        if exponent.is_empty() || !digits(exponent) {
+            return None;
+        }
+    }
+    std::str::from_utf8(token).ok()?.parse::<f64>().ok()
+}
+
+/// A refusal of `refusal` naming the token at `source[from..to]`.
+fn refused(refusal: CalculatorRefusal, source: &[u8], from: usize, to: usize) -> CalculatorError {
+    let end = to
+        .min(source.len())
+        .min(from.saturating_add(MAX_REFUSED_TOKEN));
+    CalculatorError {
+        refusal,
+        token: source.get(from..end).unwrap_or_default().to_vec(),
+    }
+}
+
+/// Where the string opening at `from` ends, its closing delimiter included,
+/// or the source's end where it never closes: a literal string's balanced
+/// parentheses and escapes, a hexadecimal string's `>` and a base-85 one's
+/// `~>` (PLRM 3.2.2).
+fn string_end(source: &[u8], from: usize) -> usize {
+    match (source.get(from), source.get(from + 1)) {
+        (Some(b'('), _) => {
+            let (mut depth, mut at) = (0usize, from);
+            while let Some(&byte) = source.get(at) {
+                match byte {
+                    b'\\' => at += 1,
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return at + 1;
+                        }
                     }
+                    _ => {}
                 }
+                at += 1;
             }
+            source.len()
         }
-        out
+        (Some(b'<'), Some(b'~')) => source
+            .get(from..)
+            .and_then(|rest| rest.windows(2).position(|pair| pair == b"~>"))
+            .map_or(source.len(), |at| from + at + 2),
+        _ => source
+            .get(from..)
+            .and_then(|rest| rest.iter().position(|&b| b == b'>'))
+            .map_or(source.len(), |at| from + at + 1),
     }
+}
 
-    // Split on whitespace, keeping braces as their own tokens.
-    let mut tokens: Vec<Vec<u8>> = Vec::new();
-    let mut current = Vec::new();
-    for &b in source {
-        match b {
-            b'{' | b'}' => {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
-                }
-                tokens.push(vec![b]);
+/// Lexes a type 4 program (PLRM 3.2.2), comments passed over: each token a
+/// brace, a number or a Table 42 operator, and the first that is none of them
+/// refused.
+fn lex(source: &[u8]) -> Result<Vec<Lexed>, CalculatorError> {
+    use CalculatorRefusal as R;
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(&byte) = source.get(at) {
+        let from = at;
+        match byte {
+            _ if is_white(byte) => {
+                at += 1;
+                continue;
             }
-            _ if b.is_ascii_whitespace() => {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
+            // 7.10.5.1 allows comments: to the end of the line.
+            b'%' => {
+                while source.get(at).is_some_and(|&b| b != b'\n' && b != b'\r') {
+                    at += 1;
+                }
+                continue;
+            }
+            b'{' => {
+                out.push(Lexed::Open);
+                at += 1;
+            }
+            b'}' => {
+                out.push(Lexed::Close);
+                at += 1;
+            }
+            b'(' | b')' => {
+                let to = if byte == b'(' {
+                    string_end(source, from)
+                } else {
+                    from + 1
+                };
+                return Err(refused(R::String, source, from, to));
+            }
+            b'<' | b'>' => {
+                let doubled = source.get(from + 1) == Some(&byte);
+                if doubled {
+                    return Err(refused(R::Composite, source, from, from + 2));
+                }
+                let to = if byte == b'<' {
+                    string_end(source, from)
+                } else {
+                    from + 1
+                };
+                return Err(refused(R::String, source, from, to));
+            }
+            b'[' | b']' => return Err(refused(R::Composite, source, from, from + 1)),
+            b'/' => {
+                let mut to = from + 1;
+                if source.get(to) == Some(&b'/') {
+                    to += 1;
+                }
+                while source
+                    .get(to)
+                    .is_some_and(|&b| !is_white(b) && !is_delimiter(b))
+                {
+                    to += 1;
+                }
+                return Err(refused(R::Name, source, from, to));
+            }
+            _ => {
+                while source
+                    .get(at)
+                    .is_some_and(|&b| !is_white(b) && !is_delimiter(b))
+                {
+                    at += 1;
+                }
+                let token = source.get(from..at).unwrap_or_default();
+                if let Some(value) = ps_number(token) {
+                    out.push(Lexed::Number(value));
+                } else if let Some(operator) = calculator_operator(token) {
+                    out.push(Lexed::Operator(operator));
+                } else {
+                    return Err(refused(R::Operator, source, from, at));
                 }
             }
-            _ => current.push(b),
         }
-        if tokens.len() > 1 << 16 {
-            break;
+        if out.len() > MAX_PS_TOKENS {
+            return Err(refused(R::Bound, source, from, at.max(from + 1)));
         }
     }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
+    Ok(out)
+}
 
-    let mut iter = tokens.iter();
-    let parsed = parse(&mut iter, 0);
+/// Parses a type 4 program's source (7.10.5), or refuses it at the first
+/// token the calculator's subset does not allow ([`CalculatorError`]).
+///
+/// The program is a run of numbers, Table 42's operators and `{ … }`
+/// procedures, comments passed over, normally the whole of it inside one
+/// pair of braces; an unbraced program is read as its tokens. Nothing is
+/// passed over unread: a token of any other kind, a brace that pairs with
+/// none, and a program past [`MAX_PS_DEPTH`] or [`MAX_PS_TOKENS`] refuse the
+/// whole program.
+pub fn parse_postscript(source: &[u8]) -> Result<Vec<PsOp>, CalculatorError> {
+    let tokens = lex(source)?;
+    // The procedures open around the token being read, innermost last.
+    let mut open: Vec<Vec<PsOp>> = vec![Vec::new()];
+    for token in tokens {
+        match token {
+            Lexed::Open => {
+                // The outer braces are one more than the nesting allows.
+                if open.len() > MAX_PS_DEPTH as usize + 1 {
+                    return Err(CalculatorError {
+                        refusal: CalculatorRefusal::Bound,
+                        token: b"{".to_vec(),
+                    });
+                }
+                open.push(Vec::new());
+            }
+            Lexed::Close => {
+                let body = match open.pop() {
+                    Some(body) if !open.is_empty() => body,
+                    _ => {
+                        return Err(CalculatorError {
+                            refusal: CalculatorRefusal::Procedure,
+                            token: b"}".to_vec(),
+                        })
+                    }
+                };
+                if let Some(outer) = open.last_mut() {
+                    outer.push(PsOp::Block(body));
+                }
+            }
+            Lexed::Number(value) => {
+                if let Some(body) = open.last_mut() {
+                    body.push(PsOp::Number(value));
+                }
+            }
+            Lexed::Operator(operator) => {
+                if let Some(body) = open.last_mut() {
+                    body.push(PsOp::Op(operator));
+                }
+            }
+        }
+    }
+    if open.len() != 1 {
+        return Err(CalculatorError {
+            refusal: CalculatorRefusal::Procedure,
+            token: b"{".to_vec(),
+        });
+    }
+    let parsed = open.pop().unwrap_or_default();
     // The whole program is normally wrapped in one pair of braces.
-    match parsed.as_slice() {
+    Ok(match parsed.as_slice() {
         [PsOp::Block(body)] => body.clone(),
         _ => parsed,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1126,7 +1398,7 @@ mod tests {
 
     #[test]
     fn a_postscript_function_computes() {
-        let program = parse_postscript(b"{ 2 mul }");
+        let program = parse_postscript(b"{ 2 mul }").expect("a calculator");
         let f = Function::PostScript {
             domain: vec![(0.0, 1.0)],
             range: vec![(0.0, 2.0)],
@@ -1139,7 +1411,7 @@ mod tests {
     #[test]
     fn postscript_conditionals_work() {
         // Return 1 when the input exceeds a half, else 0.
-        let program = parse_postscript(b"{ 0.5 gt { 1 } { 0 } ifelse }");
+        let program = parse_postscript(b"{ 0.5 gt { 1 } { 0 } ifelse }").expect("a calculator");
         let f = Function::PostScript {
             domain: vec![(0.0, 1.0)],
             range: vec![(0.0, 1.0)],
@@ -1155,7 +1427,7 @@ mod tests {
             Function::PostScript {
                 domain: vec![(0.0, 100.0)],
                 range: vec![(-100.0, 100.0)],
-                program: parse_postscript(src),
+                program: parse_postscript(src).expect("a calculator"),
             }
             .eval(&[input])
         };
@@ -1178,7 +1450,7 @@ mod tests {
             Function::PostScript {
                 domain: vec![(0.0, 100.0)],
                 range: vec![(-100.0, 100.0); outputs],
-                program: parse_postscript(src),
+                program: parse_postscript(src).expect("a calculator"),
             }
             .eval(&[5.0])
         };
@@ -1217,7 +1489,7 @@ mod tests {
             Function::PostScript {
                 domain: vec![(0.0, 1.0)],
                 range: vec![(0.0, 1.0)],
-                program: parse_postscript(b"{ pop 0.5 add }"),
+                program: parse_postscript(b"{ pop 0.5 add }").expect("a calculator"),
             },
             ramp,
         ]);
@@ -1231,7 +1503,7 @@ mod tests {
             Function::PostScript {
                 domain: vec![(0.0, 1.0)],
                 range: vec![(0.0, 1.0); 2],
-                program: parse_postscript(" 1".repeat(150).as_bytes()),
+                program: parse_postscript(" 1".repeat(150).as_bytes()).expect("a calculator"),
             },
         ]);
         deep.eval_into(&[0.75], &mut out);
@@ -1279,7 +1551,7 @@ mod tests {
         let f = Function::PostScript {
             domain: vec![(0.0, 1.0)],
             range: vec![(0.0, 10.0); 10],
-            program: parse_postscript(source.as_bytes()),
+            program: parse_postscript(source.as_bytes()).expect("a calculator"),
         };
         let wanted: Vec<f64> = (1..=10).rev().map(f64::from).collect();
         assert_eq!(f.eval(&[0.0]), wanted);
@@ -1293,19 +1565,145 @@ mod tests {
         let f = Function::PostScript {
             domain: vec![(0.0, 1.0)],
             range: vec![(0.0, 1.0)],
-            program: parse_postscript(b"{ add add add mul mul }"),
+            program: parse_postscript(b"{ add add add mul mul }").expect("a calculator"),
         };
         assert_eq!(f.eval(&[0.5]).len(), 1);
 
-        // Nonsense source parses to something that evaluates.
-        for src in [b"".as_slice(), b"{{{{{{", b"}}}}", b"garbage tokens"] {
-            let _ = Function::PostScript {
-                domain: vec![(0.0, 1.0)],
-                range: vec![(0.0, 1.0)],
-                program: parse_postscript(src),
-            }
-            .eval(&[0.5]);
+        // An empty program is the inputs, and nonsense is refused, never
+        // read past.
+        assert_eq!(parse_postscript(b""), Ok(Vec::new()));
+        for src in [b"{{{{{{".as_slice(), b"}}}}", b"garbage tokens"] {
+            assert!(parse_postscript(src).is_err(), "{src:?}");
         }
+    }
+
+    /// The refusal `source` makes: its kind and the token it names.
+    fn refusal_of(source: &[u8]) -> (CalculatorRefusal, String) {
+        let error = parse_postscript(source).expect_err("refused");
+        (
+            error.refusal,
+            String::from_utf8_lossy(&error.token).into_owned(),
+        )
+    }
+
+    /// **A token outside 7.10.5.1's subset refuses the program**, at the first
+    /// one, named as written, by its kind: an executable name Table 42 does
+    /// not list — a PostScript operator outside the subset, a misspelling, a
+    /// word Rust would read as a number and PostScript reads as a name — a
+    /// literal or an immediately evaluated name, the three strings, an array
+    /// and a dictionary or a stray end of either, a brace with no partner, and
+    /// a program past either bound. Nothing before or after the token is read
+    /// in its place.
+    #[test]
+    fn every_kind_of_token_outside_the_subset_refuses_the_program() {
+        use CalculatorRefusal as R;
+        let cases: [(&[u8], R, &str); 21] = [
+            (b"{ 2 mul 1 min }", R::Operator, "min"),
+            (b"{ dup 0 gt { 1 } if 3 4 max }", R::Operator, "max"),
+            (b"{ /x 1 def }", R::Name, "/x"),
+            (b"{ 1 2 adds }", R::Operator, "adds"),
+            (b"{ inf }", R::Operator, "inf"),
+            (b"{ NaN }", R::Operator, "NaN"),
+            (b"{ 1.2.3 }", R::Operator, "1.2.3"),
+            (b"{ 0x10 add }", R::Operator, "0x10"),
+            (b"{ 1 e5 }", R::Operator, "e5"),
+            (b"{ //add }", R::Name, "//add"),
+            (
+                b"{ (a (nested) string) pop }",
+                R::String,
+                "(a (nested) string)",
+            ),
+            (b"{ ) }", R::String, ")"),
+            (b"{ <41 42> pop }", R::String, "<41 42>"),
+            (b"{ <~87cURD~> pop }", R::String, "<~87cURD~>"),
+            (b"{ [ 1 2 ] }", R::Composite, "["),
+            (b"{ 1 ] }", R::Composite, "]"),
+            (b"{ << /a 1 >> }", R::Composite, "<<"),
+            (b"{ 1 >> }", R::Composite, ">>"),
+            (b"{ 1 > }", R::String, ">"),
+            (b"{ 1 } }", R::Procedure, "}"),
+            (b"{ 1 { 2 }", R::Procedure, "{"),
+        ];
+        for (source, refusal, token) in cases {
+            assert_eq!(
+                refusal_of(source),
+                (refusal, token.to_string()),
+                "{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+
+        // A long token is named by its first 64 bytes.
+        let long = format!("{{ {} }}", "q".repeat(200));
+        let (refusal, token) = refusal_of(long.as_bytes());
+        assert_eq!((refusal, token.len()), (R::Operator, MAX_REFUSED_TOKEN));
+
+        // Past 32 procedures nested inside the outer braces, and past 65 536
+        // tokens.
+        let nested =
+            |depth: usize| format!("{{ {}{} }}", "true { ".repeat(depth), "} if ".repeat(depth));
+        assert!(parse_postscript(nested(MAX_PS_DEPTH as usize).as_bytes()).is_ok());
+        assert_eq!(
+            refusal_of(nested(MAX_PS_DEPTH as usize + 1).as_bytes()),
+            (R::Bound, "{".to_string())
+        );
+        let many = |count: usize| format!("{{{}}}", " 1".repeat(count));
+        assert!(parse_postscript(many(MAX_PS_TOKENS - 2).as_bytes()).is_ok());
+        assert_eq!(
+            refusal_of(many(MAX_PS_TOKENS - 1).as_bytes()).0,
+            R::Bound,
+            "the outer braces count"
+        );
+    }
+
+    /// **What 7.10.5.1 allows is read**: comments, to the end of the line,
+    /// holding anything at all; PostScript's integers, reals with a point, an
+    /// exponent or both, and radix numbers; every one of Table 42's 42
+    /// operators; and an unbraced program as its tokens.
+    #[test]
+    fn comments_numbers_and_every_operator_are_read() {
+        let commented = parse_postscript(b"{ % min (a string) /name [ ]\r 2 mul %\n 1 add }")
+            .expect("comments are passed over");
+        assert_eq!(
+            commented,
+            vec![
+                PsOp::Number(2.0),
+                PsOp::Op("mul"),
+                PsOp::Number(1.0),
+                PsOp::Op("add"),
+            ]
+        );
+        let numbers = parse_postscript(
+            b"{ 123 -98 +17 0 -.002 34.5 1E6 1.0e-5 -1. 8#1777 16#FFFE 2#1000 36#Z }",
+        )
+        .expect("PostScript's numbers");
+        let read: Vec<f64> = numbers
+            .iter()
+            .map(|op| match op {
+                PsOp::Number(value) => *value,
+                _ => f64::NAN,
+            })
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                123.0, -98.0, 17.0, 0.0, -0.002, 34.5, 1e6, 1e-5, -1.0, 1023.0, 65534.0, 8.0, 35.0
+            ]
+        );
+        for operator in OPERATORS {
+            assert_eq!(calculator_operator(operator.as_bytes()), Some(operator));
+            let program = format!("{{ {operator} }}");
+            assert_eq!(
+                parse_postscript(program.as_bytes()),
+                Ok(vec![PsOp::Op(operator)]),
+                "{operator}"
+            );
+        }
+        assert_eq!(calculator_operator(b"min"), None);
+        assert_eq!(
+            parse_postscript(b"2 mul"),
+            Ok(vec![PsOp::Number(2.0), PsOp::Op("mul")])
+        );
     }
 
     /// The functions a table stands in for: one input, of types 0, 2 or 3,
@@ -1339,7 +1737,7 @@ mod tests {
         let calculator = Function::PostScript {
             domain: vec![(0.0, 1.0)],
             range: vec![(0.0, 1.0)],
-            program: parse_postscript(b"{ 2 mul }"),
+            program: parse_postscript(b"{ 2 mul }").expect("a calculator"),
         };
         let stitch = |pieces: Vec<Function>| Function::Stitching {
             domain: (0.0, 1.0),

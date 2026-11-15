@@ -20,7 +20,7 @@
 //! | a two-input sampled table is read along its first input alone (the old reader) | 1 |
 //! | the table's last input varies fastest | 1 |
 
-use tinker_pdf::{Document, RenderOptions};
+use tinker_pdf::{CalculatorToken, Document, RenderOptions, WarningKind};
 
 /// A one-page document, 100 by 100 points, whose page shades its whole box
 /// with `/Sh0` — object 5 — whose function is object 6, written as `function`.
@@ -281,4 +281,68 @@ fn a_shading_evaluates_its_function_at_most_once_per_table_entry() {
         200 * 200,
         "and four times over at twice the scale"
     );
+}
+
+/// **A calculator holding a token outside 7.10.5.1's subset is refused, by
+/// name**: an axial shading whose type 4 function computes with `min`, which
+/// Table 42 does not list, paints as the same shading under a function no
+/// reader can read, `/FunctionType 9` — the grey ramp of
+/// `Function::Identity` — and the document says so once, however many times
+/// the page is drawn, at the function's object, naming the token; a literal
+/// name and a string are refused alike, each by its own kind.
+#[test]
+fn a_calculator_holding_a_token_outside_the_subset_is_refused_by_name() {
+    let refused = |program: &[u8]| {
+        pdf(
+            AXIAL,
+            &stream(
+                "/FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1]",
+                program,
+            ),
+        )
+    };
+    let unreadable = pdf(AXIAL, b"<< /FunctionType 9 /Domain [0 1] >>");
+    let render = |bytes: Vec<u8>| {
+        let document = Document::open(bytes).expect("it opens");
+        let first = document
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        let second = document
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        assert_eq!(first.data, second.data);
+        (document, first)
+    };
+    let (_, plain) = render(unreadable);
+    for (program, token, name) in [
+        (
+            b"{ dup 0 exch 1 min }".as_slice(),
+            CalculatorToken::Operator,
+            "min",
+        ),
+        (b"{ /x pop dup dup }", CalculatorToken::Name, "/x"),
+        (b"{ (r) pop dup dup }", CalculatorToken::String, "(r)"),
+    ] {
+        let (document, drawn) = render(refused(program));
+        assert_eq!(drawn.data, plain.data, "{name}: drawn as unreadable");
+        let named: Vec<(Option<u32>, CalculatorToken, String)> = document
+            .warnings()
+            .iter()
+            .filter_map(|warning| match warning.kind {
+                WarningKind::CalculatorTokenRefused(kind, token) => Some((
+                    warning.object.map(|object| object.num),
+                    kind,
+                    String::from_utf8_lossy(&document.cos().name_bytes(token)?).into_owned(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            named,
+            vec![(Some(6), token, name.to_string())],
+            "{name}: once, at the function, by name"
+        );
+    }
 }

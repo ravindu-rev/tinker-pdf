@@ -257,6 +257,19 @@ pub enum WarningKind {
     /// the [`Warning`]'s object the font's dictionary where it has one.
     MultipleMasterInstance(MultipleMasterInstance),
 
+    // ---- functions (7.10) ------------------------------------------------
+    /// 7.10.5.1: a type 4 function's program holds a token the calculator's
+    /// subset of PostScript does not allow — an operator Table 42 does not
+    /// list, a name, a string, an array or a dictionary, a brace that pairs
+    /// with none — or passes its bounds, and the function was refused, read
+    /// as a function that cannot be read is by whatever names it. The
+    /// [`CalculatorToken`] says what kind of token it was, and the [`Name`]
+    /// is the token as the program writes it, its first 64 bytes,
+    /// resolvable through [`crate::CosDocument::name_bytes`]: a warning that
+    /// cannot say *which* token is not actionable (ruling 10). Reported once a
+    /// function, the [`Warning`]'s object the function's stream.
+    CalculatorTokenRefused(CalculatorToken, Name),
+
     // ---- the leniency ladder ---------------------------------------------
     /// No trailer dictionary was found; one was assembled from what the
     /// scanner recovered.
@@ -332,6 +345,41 @@ pub enum WarningKind {
         /// The character the font could not draw.
         character: char,
     },
+}
+
+/// What kind of token made a type 4 function's program unreadable
+/// ([`WarningKind::CalculatorTokenRefused`]), by 7.10.5.1's subset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CalculatorToken {
+    /// An executable name Table 42 does not list — `min`, `def`, a
+    /// misspelled operator, or a word such as `inf` that PostScript reads as
+    /// a name rather than a number.
+    Operator,
+    /// A literal name, `/x`, or an immediately evaluated one, `//x`.
+    Name,
+    /// A string: `( … )`, a hexadecimal `< … >` or a base-85 `<~ … ~>`.
+    String,
+    /// An array or a dictionary: `[ … ]` or `<< … >>`.
+    Composite,
+    /// A brace that pairs with no other.
+    Procedure,
+    /// A program past the calculator's bounds: more procedures nested, or
+    /// more tokens, than it reads.
+    Bound,
+}
+
+impl CalculatorToken {
+    /// A short stable identifier.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CalculatorToken::Operator => "operator",
+            CalculatorToken::Name => "name",
+            CalculatorToken::String => "string",
+            CalculatorToken::Composite => "composite",
+            CalculatorToken::Procedure => "procedure",
+            CalculatorToken::Bound => "bound",
+        }
+    }
 }
 
 /// Which instance of an embedded multiple-master program a font was drawn
@@ -450,6 +498,7 @@ impl WarningKind {
             WarningKind::PredefinedCMapUnknown(_) => "predefined-cmap-unknown",
             WarningKind::PredefinedCMapApproximate(_) => "predefined-cmap-approximate",
             WarningKind::MultipleMasterInstance(_) => "multiple-master-instance",
+            WarningKind::CalculatorTokenRefused(..) => "calculator-token-refused",
             WarningKind::TrailerSynthesized => "trailer-synthesized",
             WarningKind::RootSynthesized => "root-synthesized",
             WarningKind::RootMissing => "root-missing",
@@ -493,6 +542,14 @@ impl fmt::Display for WarningKind {
             WarningKind::MultipleMasterInstance(instance) => {
                 write!(f, "multiple-master-instance ({})", instance.as_str())
             }
+            // The token is an id against the document's own table, as a
+            // CMap's name is above.
+            WarningKind::CalculatorTokenRefused(token, n) => write!(
+                f,
+                "calculator-token-refused ({}, name #{})",
+                token.as_str(),
+                n.id()
+            ),
             WarningKind::SecurityHandler(n) => write!(f, "security-handler: {n:?}"),
             WarningKind::FieldCharacterUnrepresentable { character } => write!(
                 f,

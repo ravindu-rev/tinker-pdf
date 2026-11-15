@@ -382,7 +382,16 @@ exponential (`Function::Exponential`, 7.10.3), stitching
 (`Function::Stitching`, 7.10.4) and the PostScript calculator
 (`Function::PostScript`, 7.10.5, bounded on every axis: a 100-entry stack, 32
 levels of `if`/`ifelse`, 65 536 tokens, no loop operator), plus
-`Function::Array` for the arrays a `/Function` entry may hold. A shading's
+`Function::Array` for the arrays a `/Function` entry may hold. A calculator
+reads numbers, Table 42's 42 operators and the braces of `if` and `ifelse`,
+comments passed over; a program holding any other token — an operator Table
+42 does not list, such as `min`, a literal name, a string, an array or a
+dictionary, a brace that pairs with none — or past either bound is refused
+whole, never read past, and the function reads as one that cannot be read
+does wherever it is named, `WarningKind::CalculatorTokenRefused` naming the
+token and its kind once at the function's object
+(`every_kind_of_token_outside_the_subset_refuses_the_program`,
+`a_calculator_holding_a_token_outside_the_subset_is_refused_by_name`). A shading's
 one `/Function` may be a sampled or calculator stream reached through its
 reference; `tests/shading_functions.rs` holds both stream types to their own
 colours. A sampled function of more than one input — a `/DeviceN` tint
