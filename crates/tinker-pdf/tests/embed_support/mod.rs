@@ -13,6 +13,12 @@
     reason = "shared by two test binaries; each uses a different subset"
 )]
 
+/// The validate-on-save helper's facade reading, for the page this module
+/// builds; a test that takes this module may take the reading itself too.
+#[allow(clippy::duplicate_mod)]
+#[path = "../written_support/mod.rs"]
+mod written_support;
+
 use std::sync::Arc;
 
 use tinker_pdf::{Bitmap, DocumentBuilder, FontProvider, SimpleFontProvider};
@@ -648,14 +654,18 @@ pub fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
 
 /// A page showing `text` at 24 points in `/F0`, the builder's Helvetica,
 /// which embeds nothing and states no widths: the standard 14 as most
-/// documents name them.
+/// documents name them. Held to the validate-on-save helper as a document
+/// this engine wrote from nothing it did not write.
+#[track_caller]
 pub fn standard_page(text: &str) -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
     builder.add_base_font(b"F0", b"Helvetica");
     builder.add_page(320.0, 80.0, |page| {
         page.text(b"F0", 24.0, 12.0, 30.0, text);
     });
-    builder.finish()
+    let bytes = builder.finish();
+    written_support::authored("a page in the builder's Helvetica", &bytes);
+    bytes
 }
 
 /// A page showing `content` with `/F0`, object 4, the font `font` writes
