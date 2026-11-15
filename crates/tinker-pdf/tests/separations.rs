@@ -952,19 +952,63 @@ fn a_page_with_no_spots_has_its_process_plates() {
 
 // ---- images on plates (RC-04.12) --------------------------------------------
 
-/// The spaces the image tests draw in, as the page's `/ColorSpace` names
-/// them: `/G`, a `/Separation` of `Gold` onto cyan; `/V`, one of `Violet`
-/// onto cyan, which the composite case's plan composites; `/DN`, a
-/// `/DeviceN` of `Gold` and `Silver` onto cyan and magenta; `/IN`, an
-/// `/Indexed` over `/DN` of four entries; `/IK`, an `/Indexed` over
-/// DeviceCMYK of three; and `/NO`, `/Separation /None`.
-const IMAGE_SPACES: &str = "/ColorSpace << \
-    /G [/Separation /Gold /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>] \
-    /V [/Separation /Violet /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>] \
-    /DN [/DeviceN [/Gold /Silver] /DeviceCMYK 7 0 R] \
-    /IN [/Indexed [/DeviceN [/Gold /Silver] /DeviceCMYK 7 0 R] 3 <10406080 90A0C0F0>] \
-    /IK [/Indexed /DeviceCMYK 2 <10203040 50607080 90A0B0C0>] \
-    /NO [/Separation /None /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>] >>";
+/// The spaces the image tests draw in, each by the key the page's
+/// `/ColorSpace` gives it and as its array: `/GO`, a `/Separation` of `Gold`
+/// onto cyan; `/V`, one of `Violet` onto cyan, which the composite case's
+/// plan composites; `/DN`, a `/DeviceN` of `Gold` and `Silver` onto cyan and
+/// magenta; `/IN`, an `/Indexed` over `/DN` of four entries; `/IK`, an
+/// `/Indexed` over DeviceCMYK of three; and `/NO`, `/Separation /None`.
+///
+/// An inline image names its space by the key (8.9.7), and none of them is
+/// `G`, `RGB`, `CMYK` or `I`, which an inline image reads as the device spaces
+/// and `/Indexed` whatever `/ColorSpace` holds (8.9.7, note 3). A stored
+/// image writes the array itself: an image XObject's space is "defined
+/// directly as a PDF object, not by an entry in the ColorSpace resource
+/// subdictionary" (8.6.3).
+const IMAGE_SPACES: [(&str, &str); 6] = [
+    (
+        "GO",
+        "[/Separation /Gold /DeviceCMYK \
+         << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>]",
+    ),
+    (
+        "V",
+        "[/Separation /Violet /DeviceCMYK \
+         << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>]",
+    ),
+    ("DN", "[/DeviceN [/Gold /Silver] /DeviceCMYK 7 0 R]"),
+    (
+        "IN",
+        "[/Indexed [/DeviceN [/Gold /Silver] /DeviceCMYK 7 0 R] 3 <10406080 90A0C0F0>]",
+    ),
+    (
+        "IK",
+        "[/Indexed /DeviceCMYK 2 <10203040 50607080 90A0B0C0>]",
+    ),
+    (
+        "NO",
+        "[/Separation /None /DeviceCMYK \
+         << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>]",
+    ),
+];
+
+/// The page's `/ColorSpace` dictionary of [`IMAGE_SPACES`].
+fn image_spaces() -> String {
+    let entries: String = IMAGE_SPACES
+        .iter()
+        .map(|(key, array)| format!("/{key} {array} "))
+        .collect();
+    format!("/ColorSpace << {entries}>>")
+}
+
+/// The space `space` names as a stored image's dictionary writes it: the
+/// array of an [`IMAGE_SPACES`] key, and a family name as it is.
+fn stored_space(space: &str) -> &str {
+    IMAGE_SPACES
+        .iter()
+        .find(|(key, _)| space.strip_prefix('/') == Some(*key))
+        .map_or(space, |(_, array)| array)
+}
 
 /// `/IN`'s palette, Gold then Silver an entry.
 const DN_PALETTE: [[u8; 2]; 4] = [[0x10, 0x40], [0x60, 0x80], [0x90, 0xA0], [0xC0, 0xF0]];
@@ -1018,7 +1062,7 @@ fn image_cases() -> Vec<ImageCase> {
         },
         ImageCase {
             what: "a /Separation",
-            space: "/G",
+            space: "/GO",
             bpc: 8,
             decode: "",
             sample: |i| vec![((i * 53 + 7) % 256) as u8],
@@ -1060,7 +1104,7 @@ fn image_cases() -> Vec<ImageCase> {
         },
         ImageCase {
             what: "a one-bit /Separation read inverted",
-            space: "/G",
+            space: "/GO",
             bpc: 1,
             decode: "/Decode [1 0]",
             sample: |i| vec![u8::from((i * 5 + i / 3) % 2 == 1)],
@@ -1105,23 +1149,26 @@ fn packed(samples: &[Vec<u8>], width: usize, bpc: u32) -> Vec<u8> {
 
 /// A page of 12 by 8 points over a process backdrop that draws `draw`, an
 /// image of `width` by `height` samples in `case`'s space — stored as
-/// `/Im`, or inline — over the 4 by 2 points from `(2, 3)`.
+/// `/Im`, its space's array in its dictionary, or inline, naming its space's
+/// key — over the 4 by 2 points from `(2, 3)`.
 fn image_page(case: &ImageCase, width: usize, height: usize, inline: bool) -> Document {
     let samples: Vec<Vec<u8>> = (0..width * height).map(case.sample).collect();
     let data = packed(&samples, width, case.bpc);
     let dict = format!(
         "/Width {width} /Height {height} /BitsPerComponent {} /ColorSpace {} {}",
-        case.bpc, case.space, case.decode
+        case.bpc,
+        stored_space(case.space),
+        case.decode
     );
     let mut content = b"0.1 0.2 0.3 0.4 k 0 0 12 8 re f q 4 0 0 2 2 3 cm ".to_vec();
     if inline {
         // Hexadecimal, so no run of the samples can read as `EI`.
-        let abbreviated = dict
-            .replace("/Width", "/W")
-            .replace("/Height", "/H")
-            .replace("/BitsPerComponent", "/BPC")
-            .replace("/ColorSpace", "/CS")
-            .replace("/Decode", "/D");
+        let abbreviated = format!(
+            "/W {width} /H {height} /BPC {} /CS {} {}",
+            case.bpc,
+            case.space,
+            case.decode.replace("/Decode", "/D")
+        );
         content.extend_from_slice(
             format!("BI {abbreviated} /F /AHx ID {}> EI ", hex(&data)).as_bytes(),
         );
@@ -1134,7 +1181,8 @@ fn image_page(case: &ImageCase, width: usize, height: usize, inline: bool) -> Do
         b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 12 8] \
-             /Resources << {IMAGE_SPACES} /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>"
+             /Resources << {} /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>",
+            image_spaces()
         )
         .into_bytes(),
         render_support::raw_stream("", &content),
@@ -1224,20 +1272,16 @@ fn an_image_in_each_ink_space_lands_on_its_plates() {
 /// light is on the page asked for in ink, and no ink on any spot.
 #[test]
 fn an_image_of_none_or_of_light_reaches_plates_as_a_light_page_has_it() {
-    let spaces = format!(
-        "/ColorSpace << /G {GOLD} /NO [/Separation /None /DeviceCMYK \
-         << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>] >> \
-         /XObject << /Im 5 0 R >>"
-    );
+    // The stored image writes the array itself and the inline one names the
+    // resource, as `IMAGE_SPACES` says each must (8.6.3, 8.9.7).
+    let none = "[/Separation /None /DeviceCMYK \
+                << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>]";
+    let spaces = format!("/ColorSpace << /G {GOLD} /NO {none} >> /XObject << /Im 5 0 R >>");
     let backdrop = "0.1 0.2 0.3 0.4 k 0 0 10 10 re f /G cs 0.5 scn 0 0 1 1 re f";
     let plain = separations(
-        &painted_with(
-            &spaces,
-            backdrop,
-            image_of("/NO", &[0x10, 0x80, 0xff, 0x40]),
-        )
-        .page(0)
-        .expect("a page"),
+        &painted_with(&spaces, backdrop, image_of(none, &[0x10, 0x80, 0xff, 0x40]))
+            .page(0)
+            .expect("a page"),
         &RenderOptions::default(),
         &[],
     );
@@ -1248,7 +1292,7 @@ fn an_image_of_none_or_of_light_reaches_plates_as_a_light_page_has_it() {
         let doc = painted_with(
             &spaces,
             &format!("{backdrop} {draw}"),
-            image_of("/NO", &[0x10, 0x80, 0xff, 0x40]),
+            image_of(none, &[0x10, 0x80, 0xff, 0x40]),
         );
         let page = doc.page(0).expect("a page");
         let none = separations(&page, &RenderOptions::default(), &[]);
