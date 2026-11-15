@@ -1502,6 +1502,8 @@ mod tests {
                 "KANNADA LETTER AA, Vowel_Independent",
             ),
             ('\u{1A80}', Category::B, "TAI THAM HORA DIGIT ZERO, Number"),
+            // UISC before Script: the ASCII digits are Number, and Common.
+            ('1', Category::B, "DIGIT ONE, Number though Common"),
             (
                 '\u{0E32}',
                 Category::B,
@@ -1600,7 +1602,11 @@ mod tests {
             ),
             // Others.
             (' ', Category::O, "SPACE, Zs"),
-            ('1', Category::O, "DIGIT ONE, Common"),
+            (
+                '+',
+                Category::O,
+                "PLUS SIGN, Sm, a Common character no other row takes",
+            ),
             ('\u{0300}', Category::O, "COMBINING GRAVE ACCENT, Inherited"),
             // The rephas.
             (

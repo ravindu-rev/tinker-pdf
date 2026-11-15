@@ -751,7 +751,8 @@ the three with Left pre), and Overstruck is below for `V` and `VM`.
 
 **What the table does not settle, and this crate's reading of it.** The table
 lists its rows without an order, and a character can meet two: Thai's `SARA
-AA` is Vowel_Dependent and Lo and also not Common. They are read in this
+AA` is Vowel_Dependent and Lo and also not Common, and the ASCII digits are
+Number and also Common, so `B`. They are read in this
 order: the fixed code points (`CGJ`, `VS`, `WJ`, the four `GB` code points);
 then UISC with its UGC split; then, for a character UISC calls Other,
 `Joining_Type` (`B`), UGC (`IND` for Po, `S` for So and Sc, `O` for Zs),
