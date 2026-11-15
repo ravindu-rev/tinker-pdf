@@ -871,6 +871,16 @@ const MAX_CACHED_ENTRIES: usize = 1 << 12;
 /// and one past this reads as nothing, so a function that holds itself ends.
 const MAX_FUNCTION_DEPTH: u32 = 8;
 
+/// The bit that marks a Type 3 font's identity ([`Type3Glyph::font`]) as a
+/// font written directly into the showing scope's `/Font`, the rest of it
+/// that scope's font id for it, its name there: what identifies a font that
+/// has no reference, in the one scope that can answer for it (Table 121).
+/// No packed reference reaches it, a reference being 48 bits, nor does a
+/// reserved name's id, whose mark is the top bit.
+///
+/// [`Type3Glyph::font`]: tinker_pdf_content::Type3Glyph::font
+const DIRECT_TYPE3: u64 = 1 << 62;
+
 /// One font a scope's content selects, read on the first question about the
 /// name it selects it by (`docs/design/performance.md`, P-02, "The font
 /// table").
@@ -3478,24 +3488,32 @@ impl PageResources {
     /// than by a name: a soft mask's group, `/G` being a form XObject
     /// reached through `/SMask` by its stream (11.6.5.2, 8.10.1), and a
     /// Type 3 font, whose `/Resources` are its glyph procedures' (9.6.5,
-    /// Table 121). Built as [`PageResources::form_resources`] builds a
-    /// form's and kept beside them under the same key, the object's packed
-    /// reference. `None` where the object has none, and the content's names
-    /// resolve in the scope that set the `gs` or showed the glyph.
+    /// Table 121) — by its reference, or, written directly into this scope's
+    /// `/Font`, by its name there ([`DIRECT_TYPE3`]). Built as
+    /// [`PageResources::form_resources`] builds a form's and kept beside
+    /// them under the same key, the identity: a reference means the same in
+    /// every scope, and a name only in this one, whose caches these are.
+    /// `None` where the object has none, and the content's names resolve in
+    /// the scope that set the `gs` or showed the glyph.
     fn object_resources(&self, object: u64) -> Option<Arc<PageResources>> {
         if object == 0 {
             return None;
         }
-        let reference = ObjRef::new(u32::try_from(object >> 16).ok()?, (object & 0xFFFF) as u16);
         let made = Cell::new(false);
         let built = self.caches.form_scopes.read(object, || {
             made.set(true);
             self.count(Counter::FormScopeMisses);
-            let dict = self
-                .doc
-                .get(reference)
-                .ok()
-                .and_then(|value| value.as_dict().cloned());
+            let dict = if object & DIRECT_TYPE3 != 0 {
+                self.font_by_id(object & !DIRECT_TYPE3)
+                    .filter(|found| found.object.is_none())
+                    .and_then(|found| found.dict.as_dict().cloned())
+            } else {
+                u32::try_from(object >> 16)
+                    .ok()
+                    .map(|num| ObjRef::new(num, (object & 0xFFFF) as u16))
+                    .and_then(|reference| self.doc.get(reference).ok())
+                    .and_then(|value| value.as_dict().cloned())
+            };
             Filled::Keep(dict.and_then(|dict| self.build_own_resources(&dict)))
         });
         if !made.get() {
@@ -4560,10 +4578,12 @@ impl FontSource for PageResources {
             // tells a procedure that shows its own glyph from one that shows
             // another.
             stream: crate::structure::stream_id(reference),
-            // The font's, which its `/Resources` are kept by (Table 121); a
-            // font written into the scope has none, and its procedures run
-            // where it is shown.
-            font: found.object.map_or(0, crate::structure::stream_id),
+            // The font's, which its `/Resources` are kept by (Table 121): its
+            // reference, or, for a font written into this scope's `/Font`,
+            // its name there, which only this scope answers for.
+            font: found
+                .object
+                .map_or(DIRECT_TYPE3 | found.id, crate::structure::stream_id),
         })
     }
 

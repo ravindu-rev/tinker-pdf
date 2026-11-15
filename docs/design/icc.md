@@ -774,7 +774,7 @@ read in different scopes.
 | Page | its `/Resources`, inherited down the page tree (7.7.3.4) | `PageResources::new`, over the inherited dictionary (`crates/tinker-pdf-cos/src/pages.rs`) |
 | Form XObject | its own `/Resources` (8.10.1); without them, the page's, a construct 7.8.3 calls obsolete | its own (`form_resources`), or the invoking scope when it has none |
 | Tiling pattern | its own `/Resources`, required (Table 75) | its own, or the invoking scope's when absent |
-| Type 3 glyph | the font's `/Resources`, or the page's when absent (9.6.5, Table 121) | the font's own (`object_resources`, kept beside the forms' by the font dictionary's reference), or the scope that shows the glyph when it has none; a font written directly into a resource dictionary has no reference to keep them by, and its procedures run in the showing scope |
+| Type 3 glyph | the font's `/Resources`, or the page's when absent (9.6.5, Table 121) | the font's own (`object_resources`, kept beside the forms' by the font's reference, or, for a font written directly into the showing scope's `/Font`, by its name there), or the scope that shows the glyph when it has none |
 | Annotation appearance | its own `/Resources`, an appearance stream being a form XObject (12.5.5) | its own, or an empty scope when it has none (`crates/tinker-pdf/src/annots.rs`) |
 | Soft-mask group | `/G`'s own `/Resources`, `/G` being a form XObject (11.6.5.2, 8.10.1) | its own (`mask_resources`, kept beside the forms' by `/G`'s stream), or the scope that set the `gs` when it has none, as a form's |
 

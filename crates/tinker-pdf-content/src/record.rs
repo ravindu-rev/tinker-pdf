@@ -321,7 +321,8 @@ pub enum Event {
     /// A Type 3 glyph's procedure began running in its font's own
     /// `/Resources` ([`Device::begin_type3_glyph`], Table 121).
     BeginType3Glyph {
-        /// The font dictionary's identity, [`crate::Type3Glyph::font`].
+        /// The font's identity in the scope that shows the glyph,
+        /// [`crate::Type3Glyph::font`].
         font: u64,
     },
     /// The procedure [`Event::BeginType3Glyph`] began has run.

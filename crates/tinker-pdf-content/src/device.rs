@@ -345,8 +345,8 @@ pub trait Device {
     }
 
     /// A Type 3 glyph's procedure is about to run in its font's own
-    /// `/Resources` (9.6.5, Table 121): `font` is the font dictionary's
-    /// identity, [`crate::Type3Glyph::font`], which
+    /// `/Resources` (9.6.5, Table 121): `font` is the font's identity in the
+    /// scope that shows the glyph, [`crate::Type3Glyph::font`], which
     /// [`crate::FontSource::type3_scope`] answered with a scope.
     ///
     /// Table 121 makes the font's `/Resources` the dictionary the

@@ -8,16 +8,19 @@
 //! state, a colour space or a pattern that only its font's resources hold.
 //!
 //! Each page shows one glyph of `/T3` at 100 points over the whole page, its
-//! procedure a `d0` glyph that paints with what it names. Every page is drawn
-//! three ways — rendered, from its display list, and from its command stream
-//! — and each way draws the same pixels.
+//! procedure a `d0` glyph that paints with what it names. Table 121 does not
+//! tell a font written directly into the page's `/Font` from one it refers to,
+//! so every case is drawn with each. Every page is drawn three ways —
+//! rendered, from its display list, and from its command stream — and each
+//! way draws the same pixels.
 //!
 //! # Counted injection
 //!
 //! | Defect injected | Tests that failed |
 //! | --- | ---: |
-//! | the interpreter and the renderer run the procedure where it is shown | 6 |
-//! | the command stream records no Type 3 font's scope | 5 |
+//! | the interpreter and the renderer run the procedure where it is shown | 8 |
+//! | the command stream records no Type 3 font's scope | 7 |
+//! | a font written directly into the page's `/Font` is given no identity, so keeps the showing scope | 2 |
 
 use tinker_pdf::{
     Bitmap, CommandField, CommandKind, CommandStream, Document, RenderOptions, SvgOptions,
@@ -142,15 +145,32 @@ fn kinds() -> [Kind; 5] {
 /// A 100-point page showing `/T3`'s `A` at 100 points from the origin, its
 /// procedure (object 6) `1000 0 d0` and `content`; `own` is what the font's
 /// `/Resources` hold, or none, and `page` what the page's hold beside `/T3`.
+/// The font is object 5, to which the page's `/Font` refers.
 /// Objects 7 to 15 are what a resource names: Liberation Serif, embedded
 /// (its descriptor and program 8 and 9), a black and a grey one-pixel image,
 /// a black and a grey shading pattern, and a Type 3 font whose `H` draws
 /// nothing (its procedure 15).
 fn pdf(page: Resource, own: Option<Resource>, content: &str) -> Vec<u8> {
+    pdf_with(page, own, content, false)
+}
+
+/// [`pdf`], the font written directly into the page's `/Font` where `direct`
+/// is set, so that it has no reference, object 5 then an empty dictionary.
+fn pdf_with(page: Resource, own: Option<Resource>, content: &str, direct: bool) -> Vec<u8> {
     let resources = own.map_or_else(String::new, |own| {
         format!("/Resources << {} >>", own.with_fonts(""))
     });
-    let page = page.with_fonts("/T3 5 0 R");
+    let font = format!(
+        "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+         /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 6 0 R >> \
+         /Encoding << /Type /Encoding /Differences [65 /a] >> /FirstChar 65 \
+         /LastChar 65 /Widths [1000] {resources} >>"
+    );
+    let page = if direct {
+        page.with_fonts(&format!("/T3 {font}"))
+    } else {
+        page.with_fonts("/T3 5 0 R")
+    };
     let stream = |dict: String, data: &[u8]| {
         let mut out = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
         out.extend_from_slice(data);
@@ -183,13 +203,11 @@ fn pdf(page: Resource, own: Option<Resource>, content: &str) -> Vec<u8> {
         )
         .into_bytes(),
         stream(String::new(), b"BT /T3 100 Tf 0 0 Td (A) Tj ET"),
-        format!(
-            "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
-             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 6 0 R >> \
-             /Encoding << /Type /Encoding /Differences [65 /a] >> /FirstChar 65 \
-             /LastChar 65 /Widths [1000] {resources} >>"
-        )
-        .into_bytes(),
+        if direct {
+            b"<< >>".to_vec()
+        } else {
+            font.into_bytes()
+        },
         stream(String::new(), procedure.as_bytes()),
         b"<< /Type /Font /Subtype /TrueType /BaseFont /LiberationSerif /FirstChar 72 \
           /LastChar 72 /Widths [722] /FontDescriptor 8 0 R /Encoding /WinAnsiEncoding >>"
@@ -397,8 +415,9 @@ fn the_svg_writer_and_the_text_read_the_fonts_scope() {
 
 /// **The command stream records the font's scope** (minor 6): a procedure
 /// whose font brings resources is a `BeginType3Glyph` and its end, by the
-/// font's dictionary, and the scope a `Scope` record under the page's, by no
-/// form name and by the font's dictionary; a font with none is neither.
+/// font's identity — its reference here — and the scope a `Scope` record
+/// under the page's, by no form name and by the same identity; a font with
+/// none is neither.
 #[test]
 fn the_command_stream_records_the_fonts_scope() {
     let scope = CommandKind::Scope.number();
@@ -449,4 +468,86 @@ fn the_command_stream_records_the_fonts_scope() {
             }
         }
     }
+}
+
+/// **A font written directly into the page's `/Font` runs its procedures in
+/// its own `/Resources` too** (Table 121, which does not tell it from a font
+/// the page refers to): each kind, held only in its `/Resources`, draws what
+/// the referred font draws with them; with none, it draws from the page's,
+/// as before; and a name in both resolves to the font's own, not the page's.
+#[test]
+fn a_direct_type3_font_runs_its_procedures_in_its_own_resources() {
+    let nothing = render(
+        pdf_with(NONE, None, "", true),
+        "a procedure painting nothing",
+    );
+    for kind in kinds() {
+        let what = kind.what;
+        let referred = render(pdf(NONE, Some(kind.drawing), kind.content), what);
+        let own = render(pdf_with(NONE, Some(kind.drawing), kind.content, true), what);
+        assert!(own.data == referred.data, "{what}: its own resources draw");
+        assert!(own.data != nothing.data, "{what}: and draw something");
+        let showing = render(pdf_with(kind.drawing, None, kind.content, true), what);
+        assert!(
+            showing.data == own.data,
+            "{what}: a direct font with none draws from the page's"
+        );
+        let both = render(
+            pdf_with(kind.other, Some(kind.drawing), kind.content, true),
+            what,
+        );
+        let page = render(pdf_with(kind.other, None, kind.content, true), what);
+        assert!(
+            both.data == own.data,
+            "{what}: a name in both is the font's"
+        );
+        assert!(both.data != page.data, "{what}: and not the page's");
+    }
+}
+
+/// **A direct font's scope is keyed by its name in the page's `/Font`**:
+/// with no reference, its `BeginType3Glyph` carries the identity the page's
+/// scope gives it — bit 62 set over its name's id there — and the stream's
+/// `Scope` record for it, under the page's, carries the same.
+#[test]
+fn a_direct_type3_fonts_scope_is_keyed_by_its_name() {
+    let scope = CommandKind::Scope.number();
+    let begin = CommandKind::BeginType3Glyph.number();
+    let kind = &kinds()[1];
+    let document =
+        Document::open(pdf_with(NONE, Some(kind.drawing), kind.content, true)).expect("it opens");
+    let bytes = document.page(0).expect("a page").command_stream();
+    let stream = CommandStream::parse(&bytes).expect("the stream reads");
+    let begun: Vec<&CommandField> = stream
+        .records()
+        .iter()
+        .filter(|record| record.kind == begin)
+        .filter_map(|record| record.fields.first())
+        .collect();
+    let [CommandField::Unsigned(font)] = begun.as_slice() else {
+        panic!("one bracket, by an identity: {begun:?}");
+    };
+    assert_eq!(
+        font >> 62,
+        1,
+        "a name's identity, not a reference: {font:#x}"
+    );
+    let scopes: Vec<&[CommandField]> = stream
+        .records()
+        .iter()
+        .filter(|record| record.kind == scope)
+        .map(|record| record.fields.as_slice())
+        .collect();
+    assert_eq!(
+        scopes,
+        vec![
+            &[
+                CommandField::Unsigned(1),
+                CommandField::Unsigned(0),
+                CommandField::Nothing,
+                CommandField::Unsigned(*font),
+            ][..]
+        ],
+        "the font's scope, under the page's, by the same identity"
+    );
 }

@@ -178,9 +178,11 @@ impl PageRecord {
 pub(crate) struct ScopeEntry {
     pub(crate) parent: Option<u64>,
     pub(crate) name: Option<Vec<u8>>,
-    /// The object whose own resources the scope is — a mask group's stream,
-    /// a Type 3 font's dictionary — packed as `Form::stream` packs a
-    /// reference: never 0, which is no object.
+    /// The object whose own resources the scope is, by the identity the
+    /// parent scope knows it by: a mask group's stream and a Type 3 font's
+    /// dictionary by their references, packed as `Form::stream` packs one,
+    /// and a Type 3 font written into the parent's resource dictionary by
+    /// its name there. Never 0, which is no object.
     pub(crate) own: Option<u64>,
 }
 

@@ -85,11 +85,13 @@ pub struct Type3Glyph {
     /// run itself for ever, and is run once — from one that shows another
     /// glyph of its font.
     pub stream: u64,
-    /// The font dictionary's own indirect reference, packed as
-    /// [`Form::stream`] packs a form's, and `0` for a font written directly
-    /// into a resource dictionary: the identity
-    /// [`FontSource::type3_scope`] is asked by, since the font's
-    /// `/Resources` are the procedure's (Table 121).
+    /// The font's identity, which [`FontSource::type3_scope`] is asked by
+    /// in the scope that shows the glyph, since the font's `/Resources` are
+    /// the procedure's (Table 121): whatever the source tells its fonts
+    /// apart by there — its dictionary's indirect reference, packed as
+    /// [`Form::stream`] packs a form's, or, for a font written directly into
+    /// a resource dictionary, its name in that dictionary. `0` is no
+    /// identity, and keeps the showing scope.
     pub font: u64,
 }
 
@@ -505,8 +507,8 @@ pub trait FontSource {
     /// has its own (9.6.5, Table 121): the procedure's named resources are
     /// the font's `/Resources`, and the scope that shows the glyph only
     /// where the font has none, which is what `None` keeps. `font` is
-    /// [`Type3Glyph::font`]; `0`, a font with no object, keeps the showing
-    /// scope too.
+    /// [`Type3Glyph::font`], asked of the scope that shows the glyph, which
+    /// is the one a name in it means anything in.
     ///
     /// Whole, as a form's are: a name the font's resources lack resolves
     /// nowhere, not in the showing scope. The device is told the procedure
@@ -5272,7 +5274,7 @@ mod tests {
     /// **A Type 3 glyph's procedure runs in its font's own resources**
     /// (9.6.5, Table 121): where the font brings them, the procedure's `/Im`
     /// is the form they hold, and the device hears the bracket the procedure
-    /// runs in, by the font's dictionary, around the procedure's own `q` and
+    /// runs in, by the font's identity, around the procedure's own `q` and
     /// `Q`; where the font brings none, `/Im` is looked up where the glyph is
     /// shown, which holds no form, and nothing is bracketed.
     #[test]

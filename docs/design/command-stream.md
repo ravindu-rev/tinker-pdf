@@ -105,8 +105,7 @@ appearance's, which is every scope a stream of minor 4 or older holds.
 Minor 6 adds kinds 39 and 40, `BeginType3Glyph` and `EndType3Glyph`, the
 bracket of a Type 3 glyph's procedure that runs in its font's own resources
 (9.6.5, Table 121), which a reader of an earlier minor steps over, and lets
-`Scope`'s fourth field name a Type 3 font's dictionary as it names a mask
-group's stream.
+`Scope`'s fourth field name a Type 3 font as it names a mask group's stream.
 
 A reference is a field `Unsigned(i)`, the `i`th record of its table counted
 from zero in stream order, or `Nothing` for none. Every definition precedes
@@ -180,7 +179,7 @@ Lab.
 | 36 | `RecursionRefused` | — |
 | 37 | `NestedBudgetSpent` | — |
 | 38 | `DepthRefused` | — |
-| 39 | `BeginType3Glyph` | font: the font dictionary's reference, packed as a stream's |
+| 39 | `BeginType3Glyph` | font: the font's identity in the scope that shows the glyph — its dictionary's reference, packed as a stream's, or, for a font written directly into that scope's `/Font`, its name's id there with bit 62 set |
 | 40 | `EndType3Glyph` | — |
 
 A path is its operators, one byte a segment — 0 move, 1 line, 2 curve, 3
@@ -197,7 +196,7 @@ events it stands for, in their order.
 | 65 | `Annotation` | scope: the commands after it, up to the next `Annotation` or `End`, are one annotation's appearance |
 | 66 | `MissingFont` | name: a font the page's interpretation could not resolve, said where the replay reaches it |
 | 67 | `RepairedSpace` | name, repair: a colour space the interpretation read with a repair, likewise |
-| 68 | `Scope` | id, parent scope, form name: a form's resources; with no parent and no name, an annotation appearance's; and, from minor 5 and only where it is one, the object whose own resources the scope is, under the scope that reached it and with no form name: a soft mask group's stream, under the scope that set the `gs` (11.6.5.2, 8.10.1), and, from minor 6, a Type 3 font's dictionary, under the scope that showed its glyph (Table 121) |
+| 68 | `Scope` | id, parent scope, form name: a form's resources; with no parent and no name, an annotation appearance's; and, from minor 5 and only where it is one, the object whose own resources the scope is, under the scope that reached it and with no form name: a soft mask group's stream, under the scope that set the `gs` (11.6.5.2, 8.10.1), and, from minor 6, a Type 3 font, by `BeginType3Glyph`'s identity for it, under the scope that showed its glyph (Table 121) |
 | 69 | `Outline` | scope, font id, code, found, outline operators, outline numbers, notes |
 | 70 | `FontIdentity` | scope, font id, identity (0 none, 1 an object, 2 the scope's own), object |
 | 71 | `Profile` | an ICC profile's bytes |
@@ -257,7 +256,7 @@ the value the page's resources gave, in the scope the renderer is in:
   scope at its `EndSoftMask`, as it does a form's at `BeginForm` and
   `EndForm`.
 - **`type3_scope`**: the `Scope` record whose parent is the asking scope,
-  the one that showed the glyph, and whose object is the font's dictionary,
+  the one that showed the glyph, and whose object is the font's identity,
   a fresh scope each time; none where the font brings no resources. The
   writer asks it at each `BeginType3Glyph` and leaves the scope at its
   `EndType3Glyph`.

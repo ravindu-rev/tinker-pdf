@@ -1132,6 +1132,12 @@ fn note_scope(usage: &mut Usage, doc: &CosDocument, scope: &PageResources) {
     // report to find out whether a disclosure is still in the file would
     // otherwise be told nothing at all about it.
     for dict in scope.direct_fonts() {
+        // A Type 3 font written here is a Type 3 font for what its own
+        // `/Resources` name too (Table 121 does not tell it from one this
+        // scope refers to), and the fonts there are left whole alike.
+        for inner in type3_dict_resource_fonts(doc, &dict) {
+            usage.refuse(inner, UntouchedReason::Type3Resource);
+        }
         // A Type 3 font has no program, and is said the same way: its
         // procedures are what it carries.
         let procedures = type3_procedures(doc, &dict);
@@ -1581,6 +1587,12 @@ fn type3_resource_fonts(doc: &CosDocument, font: ObjRef) -> Vec<ObjRef> {
     let Some(dict) = object.as_dict() else {
         return Vec::new();
     };
+    type3_dict_resource_fonts(doc, dict)
+}
+
+/// The fonts the `/Resources` of the Type 3 font `dict` names, a font this
+/// scope refers to or one written into it alike (9.6.5, Table 121).
+fn type3_dict_resource_fonts(doc: &CosDocument, dict: &Dict) -> Vec<ObjRef> {
     let subtype = dict
         .get_name(doc.intern(b"Subtype"))
         .and_then(|n| doc.name_bytes(n));
@@ -4053,13 +4065,20 @@ mod document_refusals {
         assert_eq!(only_program(&open(after)).len(), whole);
     }
 
-    /// 9.6.5 lets a Type 3 font carry resources for its glyph procedures. This
-    /// engine's interpreter runs a procedure in the **enclosing** scope, so a
-    /// `/F0` inside a procedure is credited to the enclosing `/F0` and the
-    /// Type 3 font's own `/F0` is credited with nothing — which would empty
-    /// its program.
+    /// 9.6.5 lets a Type 3 font carry resources for its glyph procedures,
+    /// which this engine runs a procedure in (Table 121) and a reader that
+    /// does not read them runs it without. The walk credits the enclosing
+    /// scope's `/F0` with what a procedure shows, and leaves the Type 3
+    /// font's own `/F0` whole, so neither reading loses a glyph — whether the
+    /// page refers to the Type 3 font or has it written into its `/Font`.
     #[test]
     fn a_font_a_type3_fonts_own_resources_name_is_left_whole_and_reported() {
+        for direct in [false, true] {
+            a_type3_fonts_own_font_is_left_whole(direct);
+        }
+    }
+
+    fn a_type3_fonts_own_font_is_left_whole(direct: bool) {
         let built = whole_face_document(&[(40.0, "Handgloves")]);
         let doc = open(built);
         let whole = only_program(&doc).len();
@@ -4102,7 +4121,12 @@ mod document_refusals {
         );
         dict.insert(editor.intern(b"CharProcs"), Object::Dict(procedures));
         dict.insert(editor.intern(b"Resources"), Object::Dict(inner_resources));
-        editor.put(type3, Object::Dict(dict));
+        let named = if direct {
+            Object::Dict(dict)
+        } else {
+            editor.put(type3, Object::Dict(dict));
+            Object::Ref(type3)
+        };
 
         // The page names the Type 3 font; the embedded face is reachable only
         // through that font's own `/Resources`.
@@ -4111,17 +4135,26 @@ mod document_refusals {
             panic!("the page is a dictionary");
         };
         let mut fonts = Dict::new();
-        fonts.insert(editor.intern(b"T3"), Object::Ref(type3));
+        fonts.insert(editor.intern(b"T3"), named);
         let mut resources = Dict::new();
         resources.insert(editor.intern(b"Font"), Object::Dict(fonts));
         page_dict.insert(editor.intern(b"Resources"), Object::Dict(resources));
         editor.put(page, Object::Dict(page_dict));
 
         let (after, report) = subset(saved(&editor));
-        assert_eq!(report.subsetted, Vec::new());
-        assert_eq!(report.untouched.len(), 1, "{:?}", report.untouched);
-        assert_eq!(report.untouched[0].reason, UntouchedReason::Type3Resource);
-        assert_eq!(only_program(&open(after)).len(), whole);
+        assert_eq!(report.subsetted, Vec::new(), "direct {direct}");
+        assert_eq!(
+            report.untouched.len(),
+            1,
+            "direct {direct}: {:?}",
+            report.untouched
+        );
+        assert_eq!(
+            report.untouched[0].reason,
+            UntouchedReason::Type3Resource,
+            "direct {direct}"
+        );
+        assert_eq!(only_program(&open(after)).len(), whole, "direct {direct}");
     }
 
     /// 9.6.6.4 ends its selection order with a **guess** — read the code as

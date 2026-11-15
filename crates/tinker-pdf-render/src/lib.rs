@@ -1006,9 +1006,10 @@ pub trait GlyphSource {
     /// The resources a Type 3 font brings for its glyph procedures, if it
     /// has its own (9.6.5, Table 121): the device's half of
     /// `FontSource::type3_scope`, asked about the same font, by its
-    /// dictionary's identity, when the interpreter says a procedure runs
-    /// there (`Device::begin_type3_glyph`), so the two scopes stay in step
-    /// as [`GlyphSource::form_scope`]'s do. `None` keeps the showing scope.
+    /// identity in the scope that shows the glyph, when the interpreter says
+    /// a procedure runs there (`Device::begin_type3_glyph`), so the two
+    /// scopes stay in step as [`GlyphSource::form_scope`]'s do. `None` keeps
+    /// the showing scope.
     fn type3_scope(&self, font: u64) -> Option<Arc<Self>>
     where
         Self: Sized,
