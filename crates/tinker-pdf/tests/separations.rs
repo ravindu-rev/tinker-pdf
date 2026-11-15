@@ -2467,14 +2467,38 @@ fn a_page_past_the_plate_cap_reports_what_it_left() {
 /// value is the one the first target to run this gives, held on every other:
 /// a hash two targets disagree on is a determinism bug, never a table edit.
 const SEPARATION_FINGERPRINTS: [(&str, &str); 8] = [
-    ("Cyan", ""),
-    ("Magenta", ""),
-    ("Yellow", ""),
-    ("Black", ""),
-    ("Gold", ""),
-    ("Silver", ""),
-    ("Teal", ""),
-    ("Plum", ""),
+    (
+        "Cyan",
+        "eaee40b5759075ad71d92e92a28dd8aaa31586ddeca8fe02fa136937f5691a07",
+    ),
+    (
+        "Magenta",
+        "14935f8e6a6766be34856075b47a54ac98793a1514ecc48bc0c68e5490dececf",
+    ),
+    (
+        "Yellow",
+        "c50c164fb6d275241b612e082d1e2dd1cfc8b556fdee7c34f28ea90582261e4a",
+    ),
+    (
+        "Black",
+        "4c4e8ab5ce8d2561c18febcf974954320e8cf4d5fbeee5c9be57c56ca83a52f3",
+    ),
+    (
+        "Gold",
+        "4aaae1ed180a7361eef34b0cf1dc96837fb1ff00c6dbff1e6082b3a9eebce5e1",
+    ),
+    (
+        "Silver",
+        "30431a3ca244dc0006a317232574c93357941dafdb40b6d24ac54b842fa5b78c",
+    ),
+    (
+        "Teal",
+        "1a83d7245af01a47640687fee12b56645d429457d7855992e98a6784112aae2d",
+    ),
+    (
+        "Plum",
+        "561b7afd021f3daf7ee5c8ecaaf865e6e814a3fa730bef6cba35ab43e0af2f81",
+    ),
 ];
 
 /// The least ink each plate of the separations fixture holds at 72 dpi, in
