@@ -1569,6 +1569,13 @@ fn flatness_tolerance(state: &GraphicsState) -> f64 {
     }
 }
 
+/// Whether a glyph's text is known to stand for a space: some text, all of
+/// it white space. Empty text is not: it is a code nothing maps, which may
+/// stand for anything.
+fn is_space(text: &str) -> bool {
+    !text.is_empty() && text.trim().is_empty()
+}
+
 /// `path` flattened at `tolerance` into straight segments, one subpath a
 /// polyline: a text clip's glyph kept at the flatness it was shown at, once
 /// the clip's glyphs no longer share one.
@@ -6244,7 +6251,11 @@ impl<G: GlyphSource> Renderer<'_, G> {
         }
 
         let Some(outline) = self.glyphs.outline(glyph.font_id, glyph.code) else {
-            if !glyph.text.trim().is_empty() {
+            // Only a glyph known to stand for a space draws nothing whatever
+            // face draws it. One whose text nothing maps — a composite font's
+            // code with no `/ToUnicode` — may stand for anything, and is a
+            // glyph that went undrawn.
+            if !is_space(&glyph.text) {
                 self.missing_fonts = self.missing_fonts.saturating_add(1);
             }
             return;
@@ -10682,6 +10693,63 @@ mod tests {
         }
         fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
             (0.0, 880.0, -1000.0)
+        }
+    }
+
+    /// [`OneChar`], but `u` maps to no text and `s` to a space.
+    struct SomeUnmapped;
+
+    impl tinker_pdf_content::FontSource for SomeUnmapped {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| {
+                    let text = match b {
+                        b'u' => String::new(),
+                        b's' => " ".to_owned(),
+                        _ => char::from(b).to_string(),
+                    };
+                    (u32::from(b), text, 500.0)
+                })
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+    }
+
+    /// **A glyph left undrawn is reported unless it is a space.** No glyph
+    /// has an outline here: a page showing a letter, or a code that maps to
+    /// no text — a composite font's code with no `/ToUnicode` — reports the
+    /// font it could not draw, however many spaces stand beside it, and a
+    /// page showing only spaces, which no face draws anything of, reports
+    /// nothing.
+    #[test]
+    fn an_undrawn_glyph_is_reported_unless_it_is_a_space() {
+        for (shown, reported) in [
+            ("A", true),
+            ("u", true),
+            ("uu", true),
+            ("su", true),
+            ("sA", true),
+            ("s", false),
+            ("ss", false),
+        ] {
+            let canvas = Canvas::new(60, 60, PixelFormat::Rgb8, Color::WHITE);
+            let mut renderer = Renderer::new(canvas, page_transform(60.0, 1.0), &NoGlyphs);
+            let content = format!("BT /F0 20 Tf 2 4 Td ({shown}) Tj ET");
+            interpret(
+                content.as_bytes(),
+                Matrix::IDENTITY,
+                &mut renderer,
+                &SomeUnmapped,
+            );
+            let (_, warnings) = renderer.finish();
+            assert_eq!(
+                warnings.contains(&RenderWarning::UnreadableFont),
+                reported,
+                "({shown}) Tj: {warnings:?}"
+            );
         }
     }
 

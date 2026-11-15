@@ -1010,7 +1010,10 @@ to affect pagination) installs a provider; `Page::render` reports
 `RenderWarning::UnreadableFont` on `Bitmap::warnings` when glyphs went
 undrawn, and `Page::text` — which needs no outlines and consults no provider
 — reports `TextWarning::UnknownFont` and `TextWarning::UnmappedCode` on
-`TextPage::warnings`. Parse-time CMap leniencies land on
+`TextPage::warnings`. A glyph counts as undrawn unless its text is white
+space, which no face draws anything of: a code that maps to no text — a
+composite font's with no `/ToUnicode` — counts, and `Page::to_svg` counts
+the same glyphs. Parse-time CMap leniencies land on
 `Document::warnings()` as typed `WarningKind` values when a font is read — by
 a page's render or text the first time its content selects the font, so a
 font a page names and never uses raises none of them there. Writing:

@@ -1582,16 +1582,15 @@ fn without_the_tables_the_cjk_faces_draw_no_cid_by_guess() {
 /// **Without the CJK profile, unembedded CJK text is reported** (FT-01.9):
 /// a build without `cjk-fonts` carries no CJK face, so with no host
 /// provider each collection's page draws nothing and reports the font it
-/// could not draw.
+/// could not draw, as a bitmap and as SVG.
 #[cfg(not(feature = "cjk-fonts"))]
 #[test]
 fn without_the_cjk_profile_unembedded_cjk_text_is_reported() {
     for (ordering, encoding, info, characters) in CJK_COLLECTIONS {
-        let bitmap = Document::open(cjk_collection_page(encoding, info, characters))
-            .expect("it opens")
-            .page(0)
-            .expect("a page")
-            .render(&RenderOptions::default());
+        let document =
+            Document::open(cjk_collection_page(encoding, info, characters)).expect("it opens");
+        let page = document.page(0).expect("a page");
+        let bitmap = page.render(&RenderOptions::default());
         assert!(reports(&bitmap), "{ordering}: {:?}", bitmap.warnings);
         for pen in CJK_PENS.iter().take(3) {
             assert_eq!(
@@ -1600,6 +1599,14 @@ fn without_the_cjk_profile_unembedded_cjk_text_is_reported() {
                 "{ordering}: nothing is drawn"
             );
         }
+        let svg = page.to_svg(&tinker_pdf::SvgOptions::default());
+        assert!(
+            svg.warnings.contains(&tinker_pdf::SvgWarning::Render(
+                tinker_pdf::RenderWarning::UnreadableFont
+            )),
+            "{ordering}: as SVG, {:?}",
+            svg.warnings
+        );
     }
 }
 

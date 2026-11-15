@@ -1284,7 +1284,11 @@ impl Device for Writer<'_> {
             self.text_clip_requested = true;
         }
         let Some(outline) = self.glyphs.outline(glyph.font_id, glyph.code) else {
-            if !glyph.text.trim().is_empty() {
+            // As the renderer counts it: every glyph but one whose text is
+            // known to be a space, which no face draws anything of. Text that
+            // nothing maps may stand for anything.
+            let space = !glyph.text.is_empty() && glyph.text.trim().is_empty();
+            if !space {
                 self.warn(SvgWarning::Render(RenderWarning::UnreadableFont));
             }
             return;
