@@ -32,8 +32,10 @@ fn a_curves_box_is_its_extremes_not_its_control_points() {
         },
     ];
     assert_eq!(path_box(&path), Some(rect(0.0, 0.0, 10.0, 7.5)));
-    // An S whose two turns are both inside: `x = 3t(1-t)^2*4 - 3t^2(1-t)*4`
-    // runs from 0 out to `±4 sqrt(3) / 9` and back.
+    // An S whose two turns are both inside: `x = 3t(1-t)^2*4 - 3t^2(1-t)*4`,
+    // which is `12t(1-t)(1-2t)`, turns where `6t^2 - 6t + 1` is 0, at
+    // `t = 1/2 ∓ sqrt(3) / 6`, where `t(1-t)` is 1/6 and `1-2t` is
+    // `±sqrt(3) / 3`: it runs from 0 out to `±2 sqrt(3) / 3` and back.
     let s = [
         PathSegment::MoveTo { x: 0.0, y: 0.0 },
         PathSegment::CurveTo {
@@ -46,7 +48,7 @@ fn a_curves_box_is_its_extremes_not_its_control_points() {
         },
     ];
     let b = path_box(&s).expect("a box");
-    let reach = 4.0 * 3f64.sqrt() / 9.0;
+    let reach = 2.0 * 3f64.sqrt() / 3.0;
     assert!(
         (b.x1 - reach).abs() < 1e-12 && (b.x0 + reach).abs() < 1e-12,
         "{b:?}"
