@@ -635,7 +635,7 @@ fn ink_output_is_pinned() {
         "ink page, in ink",
         &render(ink_page(), &options),
         780,
-        "d8ca10789bb0cec54eb2d16e5b9d43432be855235b5a56e1137148c1f72afd75",
+        "ec59e19aff51f49f7dc4ee256df38901a9aec41d5e617dc131c5c7e16835c17d",
     );
 }
 
@@ -667,7 +667,7 @@ fn the_default_is_unchanged() {
             "hard-edge page",
             hard_edge_page(),
             1100,
-            "03dbe46995a5a1bdf69376e57a5e67de9ea24c8be8f3d19b41b2265bb679812c",
+            "c572896773541f81d880d498c3c7c302632be8927237e2cb68a33ea6fe87694b",
         ),
     ] {
         let default = render(page.clone(), &RenderOptions::default());
@@ -1049,19 +1049,19 @@ fn transparent_and_premultiplied_output_is_pinned() {
         "ink page as a layer, straight",
         &render(ink_page(), &layer(PixelFormat::Rgba8, false)),
         780,
-        "dc8ad1fb83b335e6dae243b9c4deca910e6c0fe8d1ed709585542b7aaff9ad30",
+        "9249e3317debe30eaad835d6574c77f62330557041d9625a9ca47ed3f0fe8e4f",
     );
     pinned(
         "ink page as a layer, premultiplied",
         &render(ink_page(), &layer(PixelFormat::Rgba8, true)),
         780,
-        "732b177c00dda1fb2755b569a6f27225bd7e5cead07bc58f164f227cfb013b31",
+        "930636a40c7a9e2c70d0bfba9562c3250d50712636872e28a11e407d2e941ac1",
     );
     pinned(
         "hard-edge page as a layer, premultiplied",
         &render(hard_edge_page(), &layer(PixelFormat::Rgba8, true)),
         1100,
-        "30569c270e26bb77f4597fbb04e7f9239554a05d6bb2132da6f9ffaa081cbce8",
+        "953a88352a4e1a2fa75cc705f1f98202779d69c8926d645315b317f880d66a1d",
     );
 }
 
@@ -1414,12 +1414,12 @@ fn hard_edged_output_is_pinned() {
         (
             1.0,
             890,
-            "f407710585c1a5218877c3fb1f8689204f24d8835340c72ef5f313ea874c9561",
+            "763e295f522cb7d8ea2a022d8b5ef4eabd51b79ba6fed99d23ffba1f27b5d7e4",
         ),
         (
             1.7,
             2490,
-            "39d5aba7acb9e32ea92f05d49797e42499118e63cd66e9a7a6a19152b222401c",
+            "a218f4f7d4b5f1d596dfcecf009a16f8545541c7725e7cbbef2ee0dc7b758453",
         ),
     ] {
         pinned(
