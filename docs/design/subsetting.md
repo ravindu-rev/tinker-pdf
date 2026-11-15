@@ -63,7 +63,8 @@ A Type 1 program names its charstrings, and a code reaches one through an
 encoding (ISO 32000-2 9.6.5.2): the document's `/Encoding`, where it names
 the code, and otherwise the program's own built-in encoding. `cos::Font::
 glyph_name` is the first: `/Differences`, then a base encoding the dictionary
-names, `None` where the document named nothing. The second is the program's
+names, by Annex D.2's column for it (`base_glyph_name`), `None` where the
+document named nothing. The second is the program's
 `/Encoding`: its `dup <code> /<name> put` entries, or — chapter 10.3 — the
 token `StandardEncoding`, which assigns the Adobe Standard Encoding, so
 `Type1::glyph_for_code` reads a program that says `/Encoding

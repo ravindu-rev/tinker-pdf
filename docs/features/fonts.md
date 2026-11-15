@@ -239,8 +239,13 @@ own charstring and never composed again, so a `seac` that names itself
 draws rather than recursing. Glyphs are addressed by name
 ([design](../design/subsetting.md), *Which glyphs a Type 1 code selects*),
 one choice for drawing, `to_svg` and the subset walk (`type1_selection` in
-`resources.rs`): the name the document's `/Encoding` gives the code, where the
-program has that charstring; then the code's text, by its first character's
+`resources.rs`): the name the document's `/Encoding` gives the code — its
+`/Differences` name, else Annex D.2's name for the code in the base encoding
+the dictionary names (`base_glyph_name`: StandardEncoding's,
+MacRomanEncoding's or WinAnsiEncoding's column, the last two `quotesingle`
+and `grave` at 0x27 and 0x60, with the second codes D.2's notes give `space`
+and `hyphen`) — where the program has that charstring; then the code's
+text, by its first character's
 Adobe Glyph List name; then the program's built-in encoding — its `dup`
 entries, or the Standard Encoding where the program says `/Encoding
 StandardEncoding` (chapter 10.3). So a `/Differences` name with no Unicode
@@ -1148,8 +1153,9 @@ a name of Table D.2's Standard Latin set, D.5's Symbol set or D.6's
 ZapfDingbats set, or the Glyph List's `uniXXXX` and `uXXXX` to `uXXXXXX`
 forms, a suffix from the first period dropped and a ligature's name standing
 for no character; a CID-keyed CFF maps none. D.2's 229 names are transcribed
-into the module, since the base encodings name StandardEncoding's codes and
-the printable ASCII ones alone. `glyph_name` and `glyph_for_name` answer
+into the module with their characters, since the base encodings name codes,
+not characters, and `minus` is in none a font names. `glyph_name` and
+`glyph_for_name` answer
 names both ways — `post`'s, the charset's or the `/CharStrings` keys, a name
 answering the lowest glyph it is given to — and `text_length` a text's
 unshaped length: each character's glyph, the face's `.notdef` where it has
@@ -2218,9 +2224,9 @@ corpora already vendored here. So every name stays on the list.
   cut short and changed, and ask every answer.
 - `crates/tinker-pdf/src/font_metrics.rs` — a drawn shape's box, a curve's
   extreme in it and its control points not; the names a character is read
-  from; D.2's set against the font crate's StandardEncoding and
-  WinAnsiEncoding tables, transcribed apart; the flags' bits; and the
-  constructors' refusals.
+  from; D.2's set against the font crate's StandardEncoding,
+  WinAnsiEncoding and MacRomanEncoding names and characters, transcribed
+  apart; the flags' bits; and the constructors' refusals.
 - `crates/tinker-pdf-cos/src/streams.rs` — an unrecorded decode records
   nothing, takes nothing from the reads after it, and gives the bytes a
   recorded one gives.

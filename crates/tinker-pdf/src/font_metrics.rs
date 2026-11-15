@@ -909,10 +909,10 @@ fn latin() -> &'static Latin {
 
 /// Table D.2, the Standard Latin character set: its 229 names, each with the
 /// character its CHAR column shows, by name. Transcribed whole, because the
-/// font crate's base encodings name only StandardEncoding's codes and the
-/// printable ASCII ones; the second codes D.2's notes give `space` and
-/// `hyphen` in WinAnsiEncoding and MacRomanEncoding name no character of
-/// their own.
+/// font crate's base encodings name codes, not characters, and `minus` is in
+/// none a font names, PDFDocEncoding alone encoding it; the second codes
+/// D.2's notes give `space` and `hyphen` in WinAnsiEncoding and
+/// MacRomanEncoding name no character of their own.
 const STANDARD_LATIN: [(&str, char); 229] = [
     ("A", '\u{0041}'),
     ("AE", '\u{00C6}'),
@@ -1420,10 +1420,13 @@ mod tests {
     }
 
     /// D.2's set, transcribed, against the font crate's base encodings,
-    /// transcribed apart: StandardEncoding's every name with the character
-    /// its code stands for, and every character WinAnsiEncoding encodes. It
-    /// holds its names' characters and not the second codes its notes give
-    /// `space` and `hyphen`.
+    /// transcribed apart: StandardEncoding's, WinAnsiEncoding's and
+    /// MacRomanEncoding's every name with the character its code stands for,
+    /// and every character WinAnsiEncoding encodes. It holds its names'
+    /// characters and not the second codes its notes give `space` and
+    /// `hyphen`. MacRomanEncoding's 0xCA and 0xDB are `space` and `currency`
+    /// in D.2 (notes 6 and 1), where `base_char` reads Mac OS Roman's
+    /// no-break space and euro.
     #[test]
     fn the_standard_latin_set_is_d2s_names() {
         use tinker_pdf_font::{base_char, base_glyph_name, BaseEncoding};
@@ -1431,15 +1434,23 @@ mod tests {
         let latin = latin();
         assert_eq!(latin.names.len(), STANDARD_LATIN.len(), "each name once");
         for code in 0..=u8::MAX {
-            if let (Some(name), Some(c)) = (
-                base_glyph_name(BaseEncoding::Standard, code),
-                base_char(BaseEncoding::Standard, code),
-            ) {
-                assert_eq!(
-                    latin.names.get(name),
-                    Some(&c),
-                    "StandardEncoding's /{name}"
-                );
+            for encoding in [
+                BaseEncoding::Standard,
+                BaseEncoding::WinAnsi,
+                BaseEncoding::MacRoman,
+            ] {
+                if encoding == BaseEncoding::MacRoman && matches!(code, 0xCA | 0xDB) {
+                    continue;
+                }
+                if let (Some(name), Some(c)) =
+                    (base_glyph_name(encoding, code), base_char(encoding, code))
+                {
+                    assert_eq!(
+                        latin.names.get(name),
+                        Some(&c),
+                        "{encoding:?}'s /{name} at {code:#04X}"
+                    );
+                }
             }
             let encoded =
                 base_char(BaseEncoding::WinAnsi, code).filter(|c| *c >= ' ' && *c != '\u{7F}');

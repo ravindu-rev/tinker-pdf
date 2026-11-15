@@ -111,6 +111,261 @@ const MAC_ROMAN_HIGH: [char; 128] = [
     '\u{F8FF}', 'Ò', 'Ú', 'Û', 'Ù', 'ı', 'ˆ', '˜', '¯', '˘', '˙', '˚', '¸', '˝', '˛', 'ˇ',
 ];
 
+/// WinAnsiEncoding's glyph names, by code, wherever they are not the ones
+/// [`ASCII_NAMES`] gives: Annex D.2's WIN column, which names `quotesingle`
+/// and `grave` at 0x27 and 0x60, and every code from 0x80 it encodes, with
+/// notes 5 and 6's second codes for `hyphen`, 0xAD, and `space`, 0xA0.
+const WIN_ANSI_NAMES: [(u8, &str); 125] = [
+    (0x27, "quotesingle"),
+    (0x60, "grave"),
+    (0x80, "Euro"),
+    (0x82, "quotesinglbase"),
+    (0x83, "florin"),
+    (0x84, "quotedblbase"),
+    (0x85, "ellipsis"),
+    (0x86, "dagger"),
+    (0x87, "daggerdbl"),
+    (0x88, "circumflex"),
+    (0x89, "perthousand"),
+    (0x8A, "Scaron"),
+    (0x8B, "guilsinglleft"),
+    (0x8C, "OE"),
+    (0x8E, "Zcaron"),
+    (0x91, "quoteleft"),
+    (0x92, "quoteright"),
+    (0x93, "quotedblleft"),
+    (0x94, "quotedblright"),
+    (0x95, "bullet"),
+    (0x96, "endash"),
+    (0x97, "emdash"),
+    (0x98, "tilde"),
+    (0x99, "trademark"),
+    (0x9A, "scaron"),
+    (0x9B, "guilsinglright"),
+    (0x9C, "oe"),
+    (0x9E, "zcaron"),
+    (0x9F, "Ydieresis"),
+    (0xA0, "space"),
+    (0xA1, "exclamdown"),
+    (0xA2, "cent"),
+    (0xA3, "sterling"),
+    (0xA4, "currency"),
+    (0xA5, "yen"),
+    (0xA6, "brokenbar"),
+    (0xA7, "section"),
+    (0xA8, "dieresis"),
+    (0xA9, "copyright"),
+    (0xAA, "ordfeminine"),
+    (0xAB, "guillemotleft"),
+    (0xAC, "logicalnot"),
+    (0xAD, "hyphen"),
+    (0xAE, "registered"),
+    (0xAF, "macron"),
+    (0xB0, "degree"),
+    (0xB1, "plusminus"),
+    (0xB2, "twosuperior"),
+    (0xB3, "threesuperior"),
+    (0xB4, "acute"),
+    (0xB5, "mu"),
+    (0xB6, "paragraph"),
+    (0xB7, "periodcentered"),
+    (0xB8, "cedilla"),
+    (0xB9, "onesuperior"),
+    (0xBA, "ordmasculine"),
+    (0xBB, "guillemotright"),
+    (0xBC, "onequarter"),
+    (0xBD, "onehalf"),
+    (0xBE, "threequarters"),
+    (0xBF, "questiondown"),
+    (0xC0, "Agrave"),
+    (0xC1, "Aacute"),
+    (0xC2, "Acircumflex"),
+    (0xC3, "Atilde"),
+    (0xC4, "Adieresis"),
+    (0xC5, "Aring"),
+    (0xC6, "AE"),
+    (0xC7, "Ccedilla"),
+    (0xC8, "Egrave"),
+    (0xC9, "Eacute"),
+    (0xCA, "Ecircumflex"),
+    (0xCB, "Edieresis"),
+    (0xCC, "Igrave"),
+    (0xCD, "Iacute"),
+    (0xCE, "Icircumflex"),
+    (0xCF, "Idieresis"),
+    (0xD0, "Eth"),
+    (0xD1, "Ntilde"),
+    (0xD2, "Ograve"),
+    (0xD3, "Oacute"),
+    (0xD4, "Ocircumflex"),
+    (0xD5, "Otilde"),
+    (0xD6, "Odieresis"),
+    (0xD7, "multiply"),
+    (0xD8, "Oslash"),
+    (0xD9, "Ugrave"),
+    (0xDA, "Uacute"),
+    (0xDB, "Ucircumflex"),
+    (0xDC, "Udieresis"),
+    (0xDD, "Yacute"),
+    (0xDE, "Thorn"),
+    (0xDF, "germandbls"),
+    (0xE0, "agrave"),
+    (0xE1, "aacute"),
+    (0xE2, "acircumflex"),
+    (0xE3, "atilde"),
+    (0xE4, "adieresis"),
+    (0xE5, "aring"),
+    (0xE6, "ae"),
+    (0xE7, "ccedilla"),
+    (0xE8, "egrave"),
+    (0xE9, "eacute"),
+    (0xEA, "ecircumflex"),
+    (0xEB, "edieresis"),
+    (0xEC, "igrave"),
+    (0xED, "iacute"),
+    (0xEE, "icircumflex"),
+    (0xEF, "idieresis"),
+    (0xF0, "eth"),
+    (0xF1, "ntilde"),
+    (0xF2, "ograve"),
+    (0xF3, "oacute"),
+    (0xF4, "ocircumflex"),
+    (0xF5, "otilde"),
+    (0xF6, "odieresis"),
+    (0xF7, "divide"),
+    (0xF8, "oslash"),
+    (0xF9, "ugrave"),
+    (0xFA, "uacute"),
+    (0xFB, "ucircumflex"),
+    (0xFC, "udieresis"),
+    (0xFD, "yacute"),
+    (0xFE, "thorn"),
+    (0xFF, "ydieresis"),
+];
+
+/// MacRomanEncoding's, the same way: D.2's MAC column, with note 6's second
+/// code for `space`, 0xCA. Note 1 keeps `currency` at 0xDB, where Apple
+/// later put the euro, and the Mac OS characters outside the standard Latin
+/// set — `notequal`, `infinity`, the Apple logo and the rest — have no code
+/// in it.
+const MAC_ROMAN_NAMES: [(u8, &str); 115] = [
+    (0x27, "quotesingle"),
+    (0x60, "grave"),
+    (0x80, "Adieresis"),
+    (0x81, "Aring"),
+    (0x82, "Ccedilla"),
+    (0x83, "Eacute"),
+    (0x84, "Ntilde"),
+    (0x85, "Odieresis"),
+    (0x86, "Udieresis"),
+    (0x87, "aacute"),
+    (0x88, "agrave"),
+    (0x89, "acircumflex"),
+    (0x8A, "adieresis"),
+    (0x8B, "atilde"),
+    (0x8C, "aring"),
+    (0x8D, "ccedilla"),
+    (0x8E, "eacute"),
+    (0x8F, "egrave"),
+    (0x90, "ecircumflex"),
+    (0x91, "edieresis"),
+    (0x92, "iacute"),
+    (0x93, "igrave"),
+    (0x94, "icircumflex"),
+    (0x95, "idieresis"),
+    (0x96, "ntilde"),
+    (0x97, "oacute"),
+    (0x98, "ograve"),
+    (0x99, "ocircumflex"),
+    (0x9A, "odieresis"),
+    (0x9B, "otilde"),
+    (0x9C, "uacute"),
+    (0x9D, "ugrave"),
+    (0x9E, "ucircumflex"),
+    (0x9F, "udieresis"),
+    (0xA0, "dagger"),
+    (0xA1, "degree"),
+    (0xA2, "cent"),
+    (0xA3, "sterling"),
+    (0xA4, "section"),
+    (0xA5, "bullet"),
+    (0xA6, "paragraph"),
+    (0xA7, "germandbls"),
+    (0xA8, "registered"),
+    (0xA9, "copyright"),
+    (0xAA, "trademark"),
+    (0xAB, "acute"),
+    (0xAC, "dieresis"),
+    (0xAE, "AE"),
+    (0xAF, "Oslash"),
+    (0xB1, "plusminus"),
+    (0xB4, "yen"),
+    (0xB5, "mu"),
+    (0xBB, "ordfeminine"),
+    (0xBC, "ordmasculine"),
+    (0xBE, "ae"),
+    (0xBF, "oslash"),
+    (0xC0, "questiondown"),
+    (0xC1, "exclamdown"),
+    (0xC2, "logicalnot"),
+    (0xC4, "florin"),
+    (0xC7, "guillemotleft"),
+    (0xC8, "guillemotright"),
+    (0xC9, "ellipsis"),
+    (0xCA, "space"),
+    (0xCB, "Agrave"),
+    (0xCC, "Atilde"),
+    (0xCD, "Otilde"),
+    (0xCE, "OE"),
+    (0xCF, "oe"),
+    (0xD0, "endash"),
+    (0xD1, "emdash"),
+    (0xD2, "quotedblleft"),
+    (0xD3, "quotedblright"),
+    (0xD4, "quoteleft"),
+    (0xD5, "quoteright"),
+    (0xD6, "divide"),
+    (0xD8, "ydieresis"),
+    (0xD9, "Ydieresis"),
+    (0xDA, "fraction"),
+    (0xDB, "currency"),
+    (0xDC, "guilsinglleft"),
+    (0xDD, "guilsinglright"),
+    (0xDE, "fi"),
+    (0xDF, "fl"),
+    (0xE0, "daggerdbl"),
+    (0xE1, "periodcentered"),
+    (0xE2, "quotesinglbase"),
+    (0xE3, "quotedblbase"),
+    (0xE4, "perthousand"),
+    (0xE5, "Acircumflex"),
+    (0xE6, "Ecircumflex"),
+    (0xE7, "Aacute"),
+    (0xE8, "Edieresis"),
+    (0xE9, "Egrave"),
+    (0xEA, "Iacute"),
+    (0xEB, "Icircumflex"),
+    (0xEC, "Idieresis"),
+    (0xED, "Igrave"),
+    (0xEE, "Oacute"),
+    (0xEF, "Ocircumflex"),
+    (0xF1, "Ograve"),
+    (0xF2, "Uacute"),
+    (0xF3, "Ucircumflex"),
+    (0xF4, "Ugrave"),
+    (0xF5, "dotlessi"),
+    (0xF6, "circumflex"),
+    (0xF7, "tilde"),
+    (0xF8, "macron"),
+    (0xF9, "breve"),
+    (0xFA, "dotaccent"),
+    (0xFB, "ring"),
+    (0xFC, "cedilla"),
+    (0xFD, "hungarumlaut"),
+    (0xFE, "ogonek"),
+    (0xFF, "caron"),
+];
+
 /// The character a code stands for in a base encoding.
 ///
 /// `None` where the encoding leaves the code undefined, which callers report
@@ -148,16 +403,21 @@ pub fn base_char(encoding: BaseEncoding, code: u8) -> Option<char> {
     }
 }
 
-/// The glyph name a code stands for in a base encoding, where one is defined.
+/// The glyph name a code stands for in a base encoding, where one is defined:
+/// Annex D.2's column for the encoding, StandardEncoding's, MacRomanEncoding's
+/// or WinAnsiEncoding's. PDFDocEncoding, which is none of the encodings
+/// Table 112 lets a font name as its base encoding, has the printable ASCII
+/// names alone.
 #[must_use]
 pub fn base_glyph_name(encoding: BaseEncoding, code: u8) -> Option<&'static str> {
-    if let BaseEncoding::Standard = encoding {
-        if let Some((_, name)) = STANDARD_HIGH.iter().find(|(c, _)| *c == code) {
-            return Some(name);
-        }
-    }
-    ASCII_NAMES
-        .iter()
+    let own: &[(u8, &str)] = match encoding {
+        BaseEncoding::Standard => &STANDARD_HIGH,
+        BaseEncoding::WinAnsi => &WIN_ANSI_NAMES,
+        BaseEncoding::MacRoman => &MAC_ROMAN_NAMES,
+        BaseEncoding::PdfDoc => &[],
+    };
+    own.iter()
+        .chain(&ASCII_NAMES)
         .find(|(c, _)| *c == code)
         .map(|(_, name)| *name)
 }
@@ -933,6 +1193,79 @@ mod tests {
         // A code the encoding genuinely leaves undefined still has no name.
         assert_eq!(base_glyph_name(BaseEncoding::Standard, 0xFF), None);
         assert_eq!(base_glyph_name(BaseEncoding::Standard, b'A'), Some("A"));
+    }
+
+    /// Annex D.2's WIN and MAC columns name their encodings' codes, the
+    /// quotes at 0x27 and 0x60 among them, and notes 5 and 6 give `hyphen`
+    /// and `space` their second codes; StandardEncoding keeps its own quotes.
+    #[test]
+    fn win_ansi_and_mac_roman_name_what_annex_d2_names() {
+        use BaseEncoding::{MacRoman, PdfDoc, Standard, WinAnsi};
+        for (encoding, code, name) in [
+            (WinAnsi, 0x27, Some("quotesingle")),
+            (WinAnsi, 0x60, Some("grave")),
+            (WinAnsi, 0x80, Some("Euro")),
+            (WinAnsi, 0x81, None),
+            (WinAnsi, 0x8E, Some("Zcaron")),
+            (WinAnsi, 0x92, Some("quoteright")),
+            (WinAnsi, 0x95, Some("bullet")),
+            (WinAnsi, 0xA0, Some("space")),
+            (WinAnsi, 0xAD, Some("hyphen")),
+            (WinAnsi, 0xC4, Some("Adieresis")),
+            (WinAnsi, 0xFF, Some("ydieresis")),
+            (MacRoman, 0x27, Some("quotesingle")),
+            (MacRoman, 0x60, Some("grave")),
+            (MacRoman, 0x80, Some("Adieresis")),
+            (MacRoman, 0xA5, Some("bullet")),
+            (MacRoman, 0xAD, None),
+            (MacRoman, 0xCA, Some("space")),
+            (MacRoman, 0xD5, Some("quoteright")),
+            (MacRoman, 0xDB, Some("currency")),
+            (MacRoman, 0xF0, None),
+            (MacRoman, 0xFF, Some("caron")),
+            (Standard, 0x27, Some("quoteright")),
+            (Standard, 0x60, Some("quoteleft")),
+            (PdfDoc, b'A', Some("A")),
+            (PdfDoc, 0x95, None),
+        ] {
+            assert_eq!(
+                base_glyph_name(encoding, code),
+                name,
+                "{encoding:?} {code:#04X}"
+            );
+        }
+    }
+
+    /// The names and [`base_char`]'s characters are two transcriptions of
+    /// D.2: WinAnsiEncoding names every code from 0x20 that `base_char`
+    /// reads but 0x7F, and MacRomanEncoding every one but 0x7F and the Mac OS
+    /// characters outside the standard Latin set, which D.2 does not encode.
+    /// Each names a glyph at one code, but for `hyphen` and `space`.
+    #[test]
+    fn the_base_encodings_name_the_codes_they_read() {
+        let mac_os_only: [u8; 15] = [
+            0xAD, 0xB0, 0xB2, 0xB3, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBD, 0xC3, 0xC5, 0xC6, 0xD7,
+            0xF0,
+        ];
+        for (encoding, unnamed) in [
+            (BaseEncoding::WinAnsi, &[][..]),
+            (BaseEncoding::MacRoman, &mac_os_only[..]),
+        ] {
+            let mut seen: Vec<&str> = Vec::new();
+            for code in 0x20..=u8::MAX {
+                let name = base_glyph_name(encoding, code);
+                let read =
+                    base_char(encoding, code).is_some() && code != 0x7F && !unnamed.contains(&code);
+                assert_eq!(name.is_some(), read, "{encoding:?} {code:#04X}");
+                if let Some(name) = name {
+                    assert!(
+                        !seen.contains(&name) || matches!(name, "hyphen" | "space"),
+                        "{encoding:?} names {name} twice"
+                    );
+                    seen.push(name);
+                }
+            }
+        }
     }
 
     #[test]
