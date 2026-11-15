@@ -25,7 +25,9 @@ pub enum BaseEncoding {
     PdfDoc,
 }
 
-/// Names differing from Latin-1 in StandardEncoding, by code (Annex D.2).
+/// StandardEncoding's glyph names, by code, wherever they are not the ones
+/// [`ASCII_NAMES`] gives: Annex D.2's STD column, which names `quoteright`
+/// and `quoteleft` at 0x27 and 0x60, and every code from 0xA1 it encodes.
 ///
 /// The eight names from `Oslash` on were missing until August 2026, which no
 /// test noticed because the codes they sit at have no Latin-1 meaning either
@@ -33,7 +35,9 @@ pub enum BaseEncoding {
 /// Glyph *selection* is what made it visible: a CFF font's standard-encoding
 /// fallback resolves a code to a name and the name to a glyph, so a missing
 /// name is a glyph that draws as `.notdef`.
-const STANDARD_HIGH: [(u8, &str); 54] = [
+const STANDARD_NAMES: [(u8, &str); 56] = [
+    (0x27, "quoteright"),
+    (0x60, "quoteleft"),
     (0xA1, "exclamdown"),
     (0xA2, "cent"),
     (0xA3, "sterling"),
@@ -394,6 +398,10 @@ const MAC_ROMAN_NAMES: [(u8, &str); 115] = [
     (0xFF, "caron"),
 ];
 
+/// PDFDocEncoding's printable ASCII names where they are not the ones
+/// [`ASCII_NAMES`] gives: D.2's PDF column at 0x27 and 0x60.
+const PDF_DOC_ASCII_NAMES: [(u8, &str); 2] = [(0x27, "quotesingle"), (0x60, "grave")];
+
 /// The character a code stands for in a base encoding.
 ///
 /// `None` where the encoding leaves the code undefined, which callers report
@@ -426,7 +434,7 @@ pub fn base_char(encoding: BaseEncoding, code: u8) -> Option<char> {
             0x27 => Some('\u{2019}'),
             0x60 => Some('\u{2018}'),
             0x00..=0x7F => Some(char::from(code)),
-            _ => STANDARD_HIGH
+            _ => STANDARD_NAMES
                 .iter()
                 .find(|(c, _)| *c == code)
                 .and_then(|(_, name)| glyph_name_to_char(name)),
@@ -454,15 +462,15 @@ pub fn mac_os_roman_char(code: u8) -> Option<char> {
 /// The glyph name a code stands for in a base encoding, where one is defined:
 /// Annex D.2's column for the encoding, StandardEncoding's, MacRomanEncoding's
 /// or WinAnsiEncoding's. PDFDocEncoding, which is none of the encodings
-/// Table 112 lets a font name as its base encoding, has the printable ASCII
-/// names alone.
+/// Table 112 lets a font name as its base encoding, has its printable ASCII
+/// names alone, `quotesingle` and `grave` at 0x27 and 0x60 among them.
 #[must_use]
 pub fn base_glyph_name(encoding: BaseEncoding, code: u8) -> Option<&'static str> {
     let own: &[(u8, &str)] = match encoding {
-        BaseEncoding::Standard => &STANDARD_HIGH,
+        BaseEncoding::Standard => &STANDARD_NAMES,
         BaseEncoding::WinAnsi => &WIN_ANSI_NAMES,
         BaseEncoding::MacRoman => &MAC_ROMAN_NAMES,
-        BaseEncoding::PdfDoc => &[],
+        BaseEncoding::PdfDoc => &PDF_DOC_ASCII_NAMES,
     };
     own.iter()
         .chain(&ASCII_NAMES)
@@ -956,8 +964,13 @@ const DINGBATS_UNENCODED: [(&str, char); 14] = [
     ("a206", '\u{2770}'),
 ];
 
-/// Glyph names for the printable ASCII range, shared by every encoding.
-const ASCII_NAMES: [(u8, &str); 95] = [
+/// The printable ASCII glyph names every base encoding and the Adobe Glyph
+/// List share, by code, each standing for the character its code is: all
+/// but 0x27 and 0x60, which StandardEncoding names `quoteright` and
+/// `quoteleft` and the other three `quotesingle` and `grave` — the Glyph
+/// List's names for U+0027 and U+0060, which [`NAMED`] holds with the curly
+/// quotes'.
+const ASCII_NAMES: [(u8, &str); 93] = [
     (32, "space"),
     (33, "exclam"),
     (34, "quotedbl"),
@@ -965,7 +978,6 @@ const ASCII_NAMES: [(u8, &str); 95] = [
     (36, "dollar"),
     (37, "percent"),
     (38, "ampersand"),
-    (39, "quoteright"),
     (40, "parenleft"),
     (41, "parenright"),
     (42, "asterisk"),
@@ -1022,7 +1034,6 @@ const ASCII_NAMES: [(u8, &str); 95] = [
     (93, "bracketright"),
     (94, "asciicircum"),
     (95, "underscore"),
-    (96, "quoteleft"),
     (97, "a"),
     (98, "b"),
     (99, "c"),
@@ -1055,7 +1066,10 @@ const ASCII_NAMES: [(u8, &str); 95] = [
     (126, "asciitilde"),
 ];
 
-/// Named glyphs outside ASCII that appear in `/Differences` constantly.
+/// Named glyphs outside [`ASCII_NAMES`] that appear in `/Differences`
+/// constantly, each with the character the Adobe Glyph List gives it:
+/// `quotesingle` U+0027, `grave` U+0060, `quoteleft` U+2018 and `quoteright`
+/// U+2019 among them.
 const NAMED: [(&str, char); 72] = [
     ("exclamdown", '¡'),
     ("cent", '¢'),
@@ -1155,12 +1169,14 @@ pub fn glyph_name_for_char(c: char) -> Option<String> {
     (code <= 0xFFFF).then(|| format!("uni{code:04X}"))
 }
 
-/// The character a glyph name stands for.
+/// The character a glyph name stands for, as the Adobe Glyph List gives it.
 ///
 /// Covers the ASCII names, the common named glyphs, and the algorithmic
 /// `uniXXXX` and `uXXXX[XX]` forms of the Adobe Glyph List specification. A
 /// name this does not know returns `None`, which the caller reports rather
-/// than substituting something plausible.
+/// than substituting something plausible. A name stands for its character,
+/// never for a code an encoding puts it at: `quoteright` is U+2019, though
+/// StandardEncoding's 0x27 names it.
 #[must_use]
 pub fn glyph_name_to_char(name: &str) -> Option<char> {
     if let Some((code, _)) = ASCII_NAMES.iter().find(|(_, n)| *n == name) {
@@ -1371,12 +1387,68 @@ mod tests {
         assert_eq!(glyph_name_to_char("nosuchglyph"), None);
     }
 
+    /// `ASCII_NAMES` holds every printable code but 0x27 and 0x60, in order,
+    /// each name standing for its code's character through the Glyph List
+    /// both ways; every base encoding names every printable code, each its
+    /// own names at 0x27 and 0x60.
     #[test]
     fn ascii_names_are_complete_and_ordered() {
-        assert_eq!(ASCII_NAMES.len(), 95, "every printable ASCII code");
-        for (i, (code, _)) in ASCII_NAMES.iter().enumerate() {
-            assert_eq!(usize::from(*code), i + 32);
+        let shared: Vec<u8> = (0x20..=0x7E)
+            .filter(|c| !matches!(c, 0x27 | 0x60))
+            .collect();
+        assert_eq!(
+            ASCII_NAMES
+                .iter()
+                .map(|(code, _)| *code)
+                .collect::<Vec<_>>(),
+            shared
+        );
+        for (code, name) in ASCII_NAMES {
+            assert_eq!(glyph_name_to_char(name), Some(char::from(code)), "{name}");
+            assert_eq!(glyph_name_for_char(char::from(code)).as_deref(), Some(name));
         }
+        for encoding in [
+            BaseEncoding::Standard,
+            BaseEncoding::WinAnsi,
+            BaseEncoding::MacRoman,
+            BaseEncoding::PdfDoc,
+        ] {
+            for code in 0x20..=0x7E {
+                let name = base_glyph_name(encoding, code);
+                match code {
+                    0x27 | 0x60 => {}
+                    _ => assert_eq!(name, glyph_name_for_char(char::from(code)).as_deref()),
+                }
+                let quotes = match encoding {
+                    BaseEncoding::Standard => ("quoteright", "quoteleft"),
+                    _ => ("quotesingle", "grave"),
+                };
+                match code {
+                    0x27 => assert_eq!(name, Some(quotes.0), "{encoding:?}"),
+                    0x60 => assert_eq!(name, Some(quotes.1), "{encoding:?}"),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// The Adobe Glyph List's characters for the four quote names, both
+    /// ways: a name stands for its character, not for the code
+    /// StandardEncoding puts it at.
+    #[test]
+    fn the_quotes_are_the_glyph_lists() {
+        for (name, c) in [
+            ("quoteright", '\u{2019}'),
+            ("quoteleft", '\u{2018}'),
+            ("quotesingle", '\u{27}'),
+            ("grave", '\u{60}'),
+        ] {
+            assert_eq!(glyph_name_to_char(name), Some(c), "{name}");
+            assert_eq!(glyph_name_for_char(c).as_deref(), Some(name), "{c:?}");
+        }
+        // StandardEncoding's 0x27 and 0x60 read as its names' characters.
+        assert_eq!(base_char(BaseEncoding::Standard, 0x27), Some('\u{2019}'));
+        assert_eq!(base_char(BaseEncoding::Standard, 0x60), Some('\u{2018}'));
     }
 
     /// Table D.5 again, keyed by name, as the table itself orders its rows,
