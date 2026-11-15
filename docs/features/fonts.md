@@ -1673,8 +1673,11 @@ What it does:
   over no angle is the first stop short of the angle and the last from it
   on. A node several parents
   name that paints only inside its own outlines is one form each parent draws,
-  so a fan-out writes its tables and not its paths. COLR version 0's layers
-  come next, bottom first, each layer's outline filled under `q`/`Q` in its
+  so a fan-out writes its tables and not its paths, while the forms nest
+  within the fourteen levels this engine draws below a glyph's own form when
+  a page's run shows it; past them the node is drawn where it stands. COLR
+  version 0's layers come next, bottom first, each layer's outline filled
+  under `q`/`Q` in its
   palette colour and alpha, a foreground layer setting no colour so it paints
   in the text's own. Then the `SVG ` description: the element `glyph<id>` of
   the glyph's document — gzip-encoded or not — read by
@@ -1704,9 +1707,10 @@ What it does:
   be drawn as is named on `ColourFace::warnings` and drawn as its next table:
   a graph with no clip box that a fill leaves unbounded
   (`ColourWarning::Unbounded`), one whose walk passes `MAX_DRAWN_PAINTS`
-  paints or holds a colour line past what one calculator holds
-  (`GraphTooLarge`), one naming a palette entry the palette lacks
-  (`PaletteEntryMissing`), one whose gradient stop names the text's own
+  paints, whose groups alone nest past those fourteen levels or that holds a
+  colour line past what one calculator holds (`GraphTooLarge`), one naming a
+  palette entry the palette lacks (`PaletteEntryMissing`), one whose
+  gradient stop names the text's own
   colour, which a procedure every run shares cannot state
   (`ForegroundStop`), a bitmap a strike's data the reader refused, whose
   graphic its decoder refuses or that nothing places — a strike of no size,
@@ -2153,7 +2157,7 @@ corpora already vendored here. So every name stays on the list.
 | A gzip-encoded `SVG ` document that inflates past `MAX_SVG_DOCUMENT` (16 MiB), or that RFC 1952's reader refuses | `SvgRefusal::TooLarge`, `SvgRefusal::Gzip` | A few kilobytes of deflate inflate to gigabytes (ruling 1), and a document cut short or read past a failed check is a different picture, so the glyph is left to the next table that describes it | [design](../design/colour-fonts.md) |
 | A COLR version 1 gradient whose colour line names the text's own colour, written into a document | `ColourWarning::ForegroundStop` | A glyph's procedure is shared by every run that shows it, so it cannot state the colour a run is shown in, and the CPAL chapter's interpolation of that colour in linear light has no construct that leaves it unstated; the glyph is drawn as its next table, a glyph with a fill missing being a different picture | [design](../design/colour-fonts.md) |
 | A COLR version 1 composite in `SRC_ATOP`, `DEST_ATOP`, `XOR` or `PLUS`, written into a document | `ColourWarning::CompositeDrawnSourceOver` | Each sums two terms, and ISO 32000-2's transparency composites one over the other; drawn source-over, the backdrop then the source, until the owner rules how (H-141 (c)) and its own step writes it | [ROADMAP](../ROADMAP.md) FT-06.18 |
-| A COLR version 1 graph with no clip box that a fill leaves unbounded, or whose walk passes `MAX_DRAWN_PAINTS` | `ColourWarning::Unbounded`, `GraphTooLarge` | The chapter forbids drawing an unbounded glyph; a graph of 2^64 paths is a few hundred bytes (ruling 1); the glyph is drawn as its next table | [design](../design/colour-fonts.md) |
+| A COLR version 1 graph with no clip box that a fill leaves unbounded, whose walk passes `MAX_DRAWN_PAINTS`, or whose groups nest past the fourteen levels of forms this engine draws below a glyph's own form | `ColourWarning::Unbounded`, `GraphTooLarge` | The chapter forbids drawing an unbounded glyph; a graph of 2^64 paths is a few hundred bytes (ruling 1); content nested past what the interpreter runs would draw nothing and say nothing; the glyph is drawn as its next table | [design](../design/colour-fonts.md) |
 | A bitmap glyph, written into a document, whose graphic no decoder reads or that decodes past `MAX_BITMAP_BYTES`, whose strike's data the reader refused, or that nothing places — a strike of no size, a `CBDT` glyph with only vertical metrics in a horizontal run | `ColourWarning::BitmapRefused` with its `BitmapRefusal` | A picture half read is a different picture, and one with no position has no place to be drawn; the glyph is drawn as its next table | [design](../design/colour-fonts.md) |
 | TrueType and Type 2 hinting | none — outlines are unhinted, not degraded | The bytecode interpreter makes small text differently wrong; subset output keeps `cvt `/`fpgm`/`prep` for readers that disagree. Stem darkening, the bytecode interpreter, CFF hints and an autohinter are roadmap rows, the small-text judgement a person's | [ROADMAP](../ROADMAP.md) FT-04a…FT-04d |
 

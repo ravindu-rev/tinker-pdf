@@ -1169,8 +1169,12 @@ impl Exact {
     }
 }
 
-/// How deep form XObjects may nest before recursion is refused (8.10).
-const MAX_FORM_DEPTH: u32 = 16;
+/// How deep nested content may run before a stream is refused (8.10): forms,
+/// soft masks' groups and Type 3 glyph procedures, the page's own content at
+/// depth 0. A stream asked for by content running at this depth is not run,
+/// so the deepest one that runs is the sixteenth below the page — the bound a
+/// writer of nested content keeps inside for its content to be drawn here.
+pub const MAX_FORM_DEPTH: u32 = 16;
 
 /// How many transparency groups and soft masks' groups one interpretation
 /// runs the content of, at any depth and whatever the device answers (11.6.6,

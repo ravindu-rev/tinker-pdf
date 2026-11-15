@@ -47,8 +47,11 @@
 //! A version 1 node with several parents that draws nothing outside its own
 //! glyph outlines is written once, as a form each parent draws, so a graph
 //! that fans one table out to many parents writes its tables and not its
-//! paths; and every walk is held to [`MAX_DRAWN_PAINTS`] paints, past which
-//! the glyph is drawn as its next table and named (ruling 1).
+//! paths — while its forms nest within `MAX_NESTED_FORMS`, the depth this
+//! engine draws nested content to below a page's run; every walk
+//! is held to [`MAX_DRAWN_PAINTS`] paints, past which the glyph is drawn as
+//! its next table and named (ruling 1), and so is a graph whose groups alone
+//! nest past `MAX_NESTED_FORMS`.
 //!
 //! Every number reaches the content through one rounding to a ten-thousandth
 //! of a font unit, and every angle reaches a matrix through
@@ -141,6 +144,22 @@ pub const MAX_BITMAP_BYTES: usize = 1 << 26;
 /// drawn where it stands, and this caps those walks.
 pub const MAX_DRAWN_PAINTS: usize = 1 << 16;
 
+/// The most levels of forms one glyph's version 1 graph nests below the
+/// glyph's own form: a shared table's form, a composite's groups and a
+/// translucent gradient's soft mask a level each.
+///
+/// This engine runs content [`tinker_pdf_content::MAX_FORM_DEPTH`] streams
+/// below a page and draws nothing deeper, so a fan-out that wrote every
+/// shared table as a form nested its leaves past it and drew them as
+/// nothing, silently. The glyph's procedure and its own form are two of
+/// those levels, so a run written into a page's content, as
+/// `shaping::write_run` writes one, draws a glyph within this whole. A
+/// shared table whose form would nest past it is drawn where it stands, as
+/// one with a single parent is, its paints counted against
+/// [`MAX_DRAWN_PAINTS`]; a graph whose groups alone nest past it is drawn as
+/// its next table and named, [`ColourWarning::GraphTooLarge`].
+pub(crate) const MAX_NESTED_FORMS: usize = tinker_pdf_content::MAX_FORM_DEPTH as usize - 2;
+
 /// What a colour glyph could not be drawn as its tables describe it, and what
 /// it was drawn as instead (ruling 10). Each names the glyph.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -194,11 +213,12 @@ pub enum ColourWarning {
         /// The glyph.
         glyph: u16,
     },
-    /// A `COLR` version 1 graph whose walk passed [`MAX_DRAWN_PAINTS`], a
-    /// shared table's form that could not be written, or a gradient whose
-    /// colour line is past what one calculator function holds (7.10.5, and
-    /// the builder's limits on it): the glyph is drawn as its next table, or
-    /// its outline.
+    /// A `COLR` version 1 graph whose walk passed [`MAX_DRAWN_PAINTS`], whose
+    /// groups nest past the levels of forms below its own that this engine
+    /// draws when a page's run shows it, a shared table's form that
+    /// could not be written, or a gradient whose colour line is past what one
+    /// calculator function holds (7.10.5, and the builder's limits on it): the
+    /// glyph is drawn as its next table, or its outline.
     GraphTooLarge {
         /// The glyph.
         glyph: u16,
@@ -941,6 +961,10 @@ impl<'a> ColourFace<'a> {
             });
         }
         let survey = Survey::of(graph, self.sfnt);
+        if survey.nested(graph.root()) > MAX_NESTED_FORMS {
+            self.warn(ColourWarning::GraphTooLarge { glyph });
+            return None;
+        }
         let clip = colr.clip_box(glyph).map(clip_rect);
         let bounds = match clip {
             Some(rect) => Some(rect),
@@ -1059,6 +1083,12 @@ struct Survey {
     /// The box of a node's outlines in its own space: what a bounded node
     /// can draw inside.
     extent: BTreeMap<PaintId, Option<[f64; 4]>>,
+    /// How many levels the forms a node's own drawing writes nest, below
+    /// where it is drawn.
+    height: BTreeMap<PaintId, usize>,
+    /// The shared nodes written once as a form their parents draw: each one
+    /// whose form nests within [`MAX_NESTED_FORMS`].
+    formed: BTreeSet<PaintId>,
 }
 
 impl Survey {
@@ -1070,6 +1100,8 @@ impl Survey {
             exposed: BTreeMap::new(),
             bounded: BTreeMap::new(),
             extent: BTreeMap::new(),
+            height: BTreeMap::new(),
+            formed: BTreeSet::new(),
         };
         // Depth-first from the root, without recursion: a node is finished
         // once its children are. The reader holds the graph acyclic.
@@ -1176,8 +1208,49 @@ impl Survey {
             survey.exposed.insert(id, exposed);
             survey.bounded.insert(id, bounded);
             survey.extent.insert(id, extent);
+            // How deep this node's drawing nests forms: a child at a level
+            // more where it is a form of its own, and a construct's groups as
+            // the walk writes them.
+            let used = |child: &PaintId| survey.nested(*child);
+            let height = match paint {
+                Paint::Solid { .. } | Paint::Refused(_) => 0,
+                // A translucent colour line's alphas are a soft mask's group,
+                // counted for every gradient as the most one nests.
+                Paint::LinearGradient { .. }
+                | Paint::RadialGradient { .. }
+                | Paint::SweepGradient { .. } => 1,
+                Paint::Composite {
+                    source,
+                    mode,
+                    backdrop,
+                } => match construct(*mode) {
+                    Construct::Nothing => 0,
+                    Construct::One(Side::Source) => used(source),
+                    Construct::One(Side::Backdrop) => used(backdrop),
+                    Construct::Over { .. } | Construct::SourceOver => {
+                        used(source).max(used(backdrop))
+                    }
+                    // The kept paint in a group of its own under a soft mask
+                    // of the other's group.
+                    Construct::Masked { .. } => 1 + used(source).max(used(backdrop)),
+                    // An isolated group holding the backdrop and the source's
+                    // own group.
+                    Construct::Blend(_) => (1 + used(backdrop)).max(2 + used(source)),
+                },
+                _ => children.iter().map(used).max().unwrap_or(0),
+            };
+            survey.height.insert(id, height);
+            if survey.shared(id) && height < MAX_NESTED_FORMS {
+                survey.formed.insert(id);
+            }
         }
         survey
+    }
+
+    /// How many levels of forms drawing node `id` nests where its parent
+    /// draws it: its own forms', and one more for a node that is a form.
+    fn nested(&self, id: PaintId) -> usize {
+        self.height.get(&id).copied().unwrap_or(0) + usize::from(self.formed.contains(&id))
     }
 
     fn bounded(&self, id: PaintId) -> bool {
@@ -1188,9 +1261,10 @@ impl Survey {
         self.extent.get(&id).copied().flatten()
     }
 
-    /// Whether a node is written once as a form its parents draw: it has
+    /// Whether a node may be written once as a form its parents draw: it has
     /// several, and paints nothing outside its own outlines, so what it draws
-    /// does not depend on where it is drawn.
+    /// does not depend on where it is drawn. It is one where its form nests
+    /// within [`MAX_NESTED_FORMS`] ([`Survey::formed`]).
     fn shared(&self, id: PaintId) -> bool {
         self.parents.get(&id).copied().unwrap_or(0) > 1
             && !self.exposed.get(&id).copied().unwrap_or(true)
@@ -1242,7 +1316,7 @@ impl Walk<'_, '_> {
             self.fail(ColourWarning::GraphTooLarge { glyph: self.glyph });
             return;
         }
-        if self.survey.shared(id) {
+        if self.survey.formed.contains(&id) {
             if let Some(name) = self.form(id) {
                 crate::form_data::write_name(out, &name);
                 out.extend_from_slice(b" Do\n");

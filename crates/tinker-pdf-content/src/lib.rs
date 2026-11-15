@@ -29,7 +29,7 @@ pub use device::{Device, Glyph, GlyphExtent, GlyphQueries, ImageRef, MarkedProps
 pub use interpret::{
     interpret, interpret_counted, DeviceDefaults, FontSource, Form, FormDrawn, FormInvocation,
     FormRecording, Group, GroupSpace, Layer, MaskGroup, SoftMask, StateParameters, Type3Glyph,
-    MAX_GROUP_RUNS, NESTED_RUN_COST, NESTED_WORK_FLOOR, NESTED_WORK_RATE,
+    MAX_FORM_DEPTH, MAX_GROUP_RUNS, NESTED_RUN_COST, NESTED_WORK_FLOOR, NESTED_WORK_RATE,
 };
 pub use plain::{hyphen_join, HyphenCounts, HyphenJoin, PlainText, PlainTextOptions};
 pub use record::{Answers, Capture, Event, EventKind, MarkedScope, RecordingDevice};

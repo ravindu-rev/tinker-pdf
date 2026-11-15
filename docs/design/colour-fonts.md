@@ -210,7 +210,18 @@ visually bounded", and the rest of the graph read. A refused root answers
   already is: the arena holds each table once, so a graph that fans one table
   out to many parents costs its tables, not its paths. The writer writes a
   node with more than one parent once, as a form XObject each parent draws,
-  so the written bytes are linear in the nodes too.
+  so the written bytes are linear in the nodes too — while the forms nest
+  within `MAX_NESTED_FORMS`, fourteen levels below the glyph's own form. The
+  interpreter runs nested content sixteen streams below a page and no deeper
+  (`MAX_FORM_DEPTH`), and the glyph's procedure and its form are two of
+  them, so a run in a page's content draws a glyph within that whole. Each
+  node's height — the levels of forms its drawing nests, a shared node's
+  form, a composite's groups (two for a blend, its own and its source's
+  inside it; one for a masked mode) and a gradient's soft mask a level each
+  — is surveyed children first, and a shared node is a form only where its
+  form keeps within the bound; past it the node is drawn where it stands,
+  its paints counted against `MAX_DRAWN_PAINTS`, and a graph whose groups
+  alone pass it is `GraphTooLarge`.
 - **Depth.** `MAX_PAINT_DEPTH`, 64 paints from the root to the deepest leaf.
   A table is read at the depth of the first path that reaches it; an edge
   whose path would pass the limit, by reading a new table or by reaching a

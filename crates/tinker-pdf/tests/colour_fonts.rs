@@ -3259,6 +3259,42 @@ fn a_fan_out_past_the_walk_budget_is_named() {
     ));
 }
 
+/// `MULTIPLY` composites nested `depth` deep, each the one below as its
+/// source over the blue square as its backdrop, the red square innermost.
+fn multiplied(depth: usize, rect: u16) -> V1 {
+    (0..depth).fold(filled(rect, 0), |below, _| {
+        V1::Composite(Box::new(below), 23, Box::new(filled(rect, 1)))
+    })
+}
+
+/// A blend composite is two levels of groups — its own, and its source's
+/// inside it. This engine draws content sixteen streams below a page
+/// (`MAX_FORM_DEPTH`), the glyph's procedure and its own form two of them:
+/// composites nested within the other fourteen are drawn, red multiplied by
+/// blue to black, and one composite past them the glyph is drawn as its
+/// outline and named, where the levels past the depth would otherwise draw
+/// nothing and say nothing.
+#[test]
+fn composites_nested_past_the_forms_drawn_are_named() {
+    let levels = tinker_pdf_content::MAX_FORM_DEPTH as usize - 2;
+    let within = levels / 2;
+    for (depth, named) in [(within, false), (within + 1, true)] {
+        let face = v1_face("A", |rect, _| vec![('A', multiplied(depth, rect(0)))], &[]);
+        let (bytes, warnings) =
+            colour_document(&face, "A", PaletteChoice::Default, DocumentBuilder::new());
+        let a = face.glyph_of('A').expect("covered");
+        let (bitmap, _) = rendered(bytes);
+        let got = pixel(&bitmap, at_units(0.0, [300.0, 300.0]), 100.0);
+        if named {
+            assert_eq!(warnings, [ColourWarning::GraphTooLarge { glyph: a }]);
+            assert!(close(got, TEXT_GREEN, 2), "{depth}: {got:?}");
+        } else {
+            assert!(warnings.is_empty(), "{depth}: {warnings:?}");
+            assert!(close(got, [0, 0, 0], 2), "{depth}: {got:?}");
+        }
+    }
+}
+
 // ---- The price (FT-06.17a) ------------------------------------------------
 
 /// The table [`colour_glyph_costs`] writes, committed beside this file:
