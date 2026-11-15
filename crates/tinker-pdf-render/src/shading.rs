@@ -114,6 +114,10 @@ pub struct ShadingRow<'a> {
 }
 
 /// How a row's parameter is had.
+///
+/// Held in the row itself, never boxed: a sweep makes a row for every device
+/// row it paints, so a walk on the heap would be an allocation a row, which
+/// `crates/tinker-pdf/tests/shading_work.rs` counts.
 enum Walk {
     /// From the clause's expression at every pixel.
     Direct,
@@ -124,7 +128,7 @@ enum Walk {
         at: Option<(i64, f64)>,
     },
     /// Type 3's `b` and `c`, stepped.
-    Radial(Box<Radial>),
+    Radial(Radial),
 }
 
 /// What a radial shading's row steps (8.7.4.5.4).
@@ -182,7 +186,7 @@ impl Shading {
                 // `radial_parameter`'s own line between the quadratic and the
                 // linear family: the linear one is not stepped.
                 if finite && a.abs() >= 1e-9 {
-                    Walk::Radial(Box::new(Radial {
+                    Walk::Radial(Radial {
                         a,
                         inverse_a: 1.0 / a,
                         db,
@@ -195,7 +199,7 @@ impl Shading {
                         dc: 0.0,
                         b_scale: 0.0,
                         c_scale: 0.0,
-                    }))
+                    })
                 } else {
                     Walk::Direct
                 }
