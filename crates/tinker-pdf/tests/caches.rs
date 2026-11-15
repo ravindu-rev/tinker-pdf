@@ -992,16 +992,21 @@ fn profiles_page() -> Vec<u8> {
 
 /// **A profile named on every page and in a form compiles once**: twenty
 /// pages, each naming one RGB and one CMYK profile and drawing a form whose
-/// own resources name both again, rendered twice each under a budget,
-/// compile two transforms between them — each scope's first question about
-/// a name finds the profile's transforms kept from the first one's — and
-/// every page draws what a document with no budget draws, which compiles
-/// each profile once in every scope of every render: the page's and the
-/// form's.
+/// own resources name both again, rendered twice each under a budget both
+/// sets of transforms fit, compile two transforms between them — each
+/// scope's first question about a name finds the profile's transforms kept
+/// from the first one's — and every page draws what a document with no
+/// budget draws, which compiles each profile once in every scope of every
+/// render: the page's and the form's. Under the budget the form's drawing is
+/// kept as well (P-16.6): the first render interprets it, asking its scope's
+/// two names, and every later one replays it, asking only the page's two.
 #[test]
 fn a_profile_named_on_every_page_compiles_once() {
     let bytes = profiles_page();
-    let document = budgeted(bytes.clone(), 1 << 20);
+    // A budget both sets fit: the CMYK profile's is charged a four-input grid
+    // for each of its intents (`Transforms::bytes_bound`), past a mebibyte,
+    // and a set past the budget is compiled at every question.
+    let document = budgeted(bytes.clone(), 16 << 20);
     let plain = Document::open(bytes).expect("it opens");
     let (mut misses, mut hits, mut unbudgeted_misses) = (0, 0, 0);
     for pass in 0..2 {
@@ -1009,6 +1014,17 @@ fn a_profile_named_on_every_page_compiles_once() {
             let (bitmap, stats) = counted(&document.page(index).expect("a page"), 72.0);
             misses += stats.icc_transform_misses;
             hits += stats.icc_transform_hits;
+            let first = pass == 0 && index == 0;
+            assert_eq!(
+                (
+                    stats.forms_interpreted,
+                    stats.forms_replayed,
+                    stats.cache_evictions
+                ),
+                (u64::from(first), u64::from(!first), 0),
+                "pass {pass}, page {index}: the form interpreted once and replayed \
+                 after, nothing evicted"
+            );
             let (alone, alone_stats) = counted(&plain.page(index).expect("a page"), 72.0);
             unbudgeted_misses += alone_stats.icc_transform_misses;
             assert_eq!(
@@ -1019,9 +1035,11 @@ fn a_profile_named_on_every_page_compiles_once() {
         }
     }
     assert_eq!(misses, 2, "two transforms compiled for forty renders");
+    // The page's two names in each of forty renders and the form's two in the
+    // first, all but the first two of them hits.
     assert_eq!(
         hits,
-        4 * 40 - 2,
+        2 * 40 + 2 - 2,
         "every other question found the transforms kept"
     );
     assert_eq!(unbudgeted_misses, 4 * 40);
