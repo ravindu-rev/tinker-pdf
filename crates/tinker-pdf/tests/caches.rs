@@ -39,6 +39,7 @@ use tinker_pdf::{
 };
 
 mod render_support;
+mod written_support;
 
 /// What the cache charges an entry beside its payload.
 const ENTRY_BYTES: u64 = 64;
@@ -1632,6 +1633,11 @@ fn an_appended_document_charges_its_objects_as_its_open_did() {
             &tinker_pdf::write::AppendOptions::default(),
         )
         .expect("it appends");
+        // The save the append writes: the hand-built page's bytes and the
+        // update section after them, held as an update of that input.
+        let mut saved = bytes.clone();
+        saved.extend_from_slice(&appended.update);
+        written_support::rewritten(&format!("{label}: the page turned"), &bytes, saved);
         let reopened = &appended.document;
         assert_eq!(reopened.cos().objects_charged(), charged, "{label}");
         assert_eq!(

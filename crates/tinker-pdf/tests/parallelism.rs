@@ -11,6 +11,7 @@
 
 mod guard_support;
 mod render_support;
+mod written_support;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -548,9 +549,16 @@ fn redacted_editor() -> tinker_pdf::DocumentEditor {
     editor
 }
 
-/// The editor's document saved as `options` asks.
+/// The editor's document saved as `options` asks, held as a save of the
+/// hand-built document it was opened from.
 fn saved_with(options: &tinker_pdf::write::SaveOptions) -> tinker_pdf::write::Saved {
-    tinker_pdf::write::save(&mut redacted_editor(), options)
+    let saved = tinker_pdf::write::save(&mut redacted_editor(), options);
+    written_support::rewritten(
+        "the subset document, page 3 redacted",
+        subset_document(),
+        &saved.bytes,
+    );
+    saved
 }
 
 /// **A subset walk on 2, 3, 4 and 7 threads cuts what the serial walk cuts.**
@@ -660,6 +668,11 @@ fn a_subset_walk_on_four_threads_walks_no_page_on_the_caller() {
             parallelism: Parallelism::Threads(4),
             ..SaveOptions::default()
         },
+    );
+    written_support::rewritten(
+        "one page saved on four threads",
+        guard_support::document(0, 1),
+        &saved.bytes,
     );
     assert_eq!(
         placed(&saved.stats.expect("asked")),
