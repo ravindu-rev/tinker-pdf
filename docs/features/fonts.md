@@ -228,8 +228,11 @@ its reason), and one that inflates past the cap (`TooLarge`), refused rather
 than cut.
 
 **Type 1** (9.9, `/FontFile`). `Type1::parse` reads PFB, PFA and the bare
-bytes a PDF embeds: eexec decryption, the second decryption layer around each
-charstring with the font's own `/lenIV`, and Type 1 charstrings — `hsbw`'s
+bytes a PDF embeds: eexec decryption, its `/Subrs` and `/CharStrings` read up
+to the `closefile` that ends the encrypted portion (Type 1 Font Format, 2.4),
+so the clear-text zeros and `cleartomark` after it, decrypted with the rest,
+are read as no entry; the second decryption layer around each charstring
+with the font's own `/lenIV`; and Type 1 charstrings — `hsbw`'s
 side bearing, `seac` accent composition, and `flex` through the
 `callothersubr`/`pop` callback protocol. A `seac` component is drawn as its
 own charstring and never composed again, so a `seac` that names itself
@@ -2238,7 +2241,9 @@ corpora already vendored here. So every name stays on the list.
   no weight vector, or one past sixteen numbers, draws its first master as
   before, as does a blend call of the wrong count; the four- and six-quantity
   othersubrs return their quantities in order; Appendix C's optical-size map
-  normalises segment by segment; and the cleartext arrays are bounded.
+  normalises segment by segment; and the cleartext arrays are bounded. Its
+  scanners read no entry past the `closefile` token, though what follows it
+  decrypts to one, and a literal `/closefile` or a longer name ends nothing.
 - `crates/tinker-pdf/tests/multiple_master.rs` — an `/MMType1` page embedding
   a two-axis, four-master program renders byte for byte, writes the SVG and
   reads the text of a `/Type1` twin whose one master is the instance's

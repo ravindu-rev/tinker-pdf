@@ -1696,7 +1696,8 @@ pub(crate) struct Scan {
     pub(crate) capped: bool,
 }
 
-/// `/Subrs <n> array` followed by `dup <i> <len> RD <bytes> NP`.
+/// `/Subrs <n> array` followed by `dup <i> <len> RD <bytes> NP`, up to the
+/// `closefile` that ends the encrypted portion ([`find_closefile`]).
 pub(crate) fn scan_subrs(private: &[u8]) -> Scan {
     let mut scan = Scan {
         entries: Vec::new(),
@@ -1710,6 +1711,9 @@ pub(crate) fn scan_subrs(private: &[u8]) -> Scan {
 
     let mut i = 0usize;
     while let Some(found) = find(&region[i..], b"dup ") {
+        if find_closefile(&region[i..i + found]).is_some() {
+            break;
+        }
         let start = i + found + 4;
         let rest = &region[start..];
 
@@ -1754,7 +1758,8 @@ pub(crate) fn scan_subrs(private: &[u8]) -> Scan {
     scan
 }
 
-/// `/CharStrings <n> dict dup begin` then `/<name> <len> RD <bytes> ND`.
+/// `/CharStrings <n> dict dup begin` then `/<name> <len> RD <bytes> ND`, up
+/// to the `closefile` that ends the encrypted portion ([`find_closefile`]).
 pub(crate) fn scan_charstrings(private: &[u8]) -> Scan {
     let mut scan = Scan {
         entries: Vec::new(),
@@ -1773,6 +1778,9 @@ pub(crate) fn scan_charstrings(private: &[u8]) -> Scan {
         let Some(slash) = region[i..].iter().position(|b| *b == b'/') else {
             break;
         };
+        if find_closefile(&region[i..i + slash]).is_some() {
+            break;
+        }
         let name_start = i + slash + 1;
         let rest = &region[name_start..];
 
@@ -1902,6 +1910,34 @@ fn binary_start(data: &[u8]) -> Option<(Range<usize>, usize)> {
         .position(u8::is_ascii_whitespace)
         .unwrap_or(rest.len());
     Some((start..start + token_end, start + token_end + 1))
+}
+
+/// Where `text` first holds the executable name `closefile`: bounded at each
+/// end by the text's end, white space or a delimiter, and no literal
+/// `/closefile`.
+///
+/// The `currentfile closefile` sequence ends the eexec-encrypted portion
+/// (Type 1 Font Format, 2.4), and what follows it is the clear text's 512
+/// zeros and `cleartomark` (2.3), which [`Layout::read`] decrypts with the
+/// rest into bytes that are none of the program's. The scanners look for the
+/// token in the text they walk between entries — chapter 10 looks for tokens
+/// outside the charstrings' binary bytes — and stop there, so nothing that
+/// text decrypts to is read as a subroutine or a charstring.
+pub(crate) fn find_closefile(text: &[u8]) -> Option<usize> {
+    const TOKEN: &[u8] = b"closefile";
+    // PostScript's white space includes NUL (PLRM 3.2.2).
+    let regular = |b: u8| b != 0 && !b.is_ascii_whitespace() && !b"()<>[]{}/%".contains(&b);
+    let mut from = 0usize;
+    while let Some(at) = text.get(from..).and_then(|rest| find(rest, TOKEN)) {
+        let start = from + at;
+        let before = start.checked_sub(1).and_then(|i| text.get(i)).copied();
+        let after = text.get(start + TOKEN.len()).copied();
+        if !before.is_some_and(|b| b == b'/' || regular(b)) && !after.is_some_and(regular) {
+            return Some(start);
+        }
+        from = start + 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -2964,6 +3000,60 @@ mod tests {
         assert_eq!(private[entry.length], b'3');
         assert_eq!(&private[entry.rd.clone()], b"RD");
         assert_eq!(&private[entry.data.clone()], b"xyz");
+    }
+
+    /// 2.4: `currentfile closefile` ends the encrypted portion, and what the
+    /// reader decrypts after it — the clear text's zeros and `cleartomark` —
+    /// is no entry of the program's, whatever it decrypts to.
+    #[test]
+    fn the_scanners_stop_at_closefile() {
+        let private = b"/Subrs 1 array\ndup 0 2 RD ab NP\nND\n\
+            /CharStrings 1 dict dup begin\n/one 3 RD xyz ND\nend\n\
+            mark currentfile closefile\ndup 1 2 RD cd NP\n/two 3 RD abc ND\n";
+        let subrs = scan_subrs(private);
+        assert_eq!(subrs.entries.len(), 1);
+        assert_eq!(subrs.entries[0].key, Key::Subr(0));
+        let glyphs = scan_charstrings(private);
+        assert_eq!(glyphs.entries.len(), 1);
+        assert_eq!(glyphs.entries[0].key, Key::Glyph(b"one".to_vec()));
+
+        // A whole program whose bytes after `closefile` decrypt to a
+        // charstring entry, as a trailer's may: the program reads its own.
+        let square = Type1::parse(&font_with_square()).expect("it parses");
+        let mut private = b"dup /Private 8 dict dup begin\n/lenIV 4 def\n\
+            /Subrs 0 array ND\n/CharStrings 1 dict dup begin\n/square "
+            .to_vec();
+        let charstring = encrypt(
+            square.charstring(0).expect("the square"),
+            CHARSTRING_KEY,
+            &PAD,
+        );
+        private.extend_from_slice(format!("{} RD ", charstring.len()).as_bytes());
+        private.extend_from_slice(&charstring);
+        private.extend_from_slice(b" ND\nend\nend\nmark currentfile closefile\n/ghost 1 RD x ND\n");
+        let mut program = b"%!PS-AdobeFont-1.0: Test\ncurrentfile eexec\n".to_vec();
+        program.extend(encrypt(&private, EEXEC_KEY, &PAD));
+        let font = Type1::parse(&program).expect("it parses");
+        assert_eq!(font.glyph_count(), 1);
+        assert_eq!(font.glyph_for_name(b"ghost"), None);
+        assert_eq!(
+            font.outline(0).map(|o| o.segments),
+            square.outline(0).map(|o| o.segments)
+        );
+    }
+
+    /// `closefile` counts as the executable name alone: bounded by white
+    /// space, a delimiter or the text's ends, and not the literal
+    /// `/closefile`.
+    #[test]
+    fn closefile_is_found_as_a_token() {
+        assert_eq!(find_closefile(b"mark currentfile closefile\n"), Some(17));
+        assert_eq!(find_closefile(b"closefile"), Some(0));
+        assert_eq!(find_closefile(b"{closefile}"), Some(1));
+        assert_eq!(find_closefile(b"x\0closefile\0"), Some(2));
+        assert_eq!(find_closefile(b"/closefile closefileX Xclosefile"), None);
+        assert_eq!(find_closefile(b"/closefile closefile"), Some(11));
+        assert_eq!(find_closefile(b""), None);
     }
 
     /// An index past the 65 535 the reader stores is passed over on every

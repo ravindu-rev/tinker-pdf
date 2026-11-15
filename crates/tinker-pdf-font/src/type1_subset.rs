@@ -19,8 +19,8 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 
 use crate::type1::{
-    encrypt, find, scan_charstrings, scan_subrs, Bound, Entry, Key, Layout, Trace, Type1,
-    CHARSTRING_KEY, EEXEC_KEY,
+    encrypt, find, find_closefile, scan_charstrings, scan_subrs, Bound, Entry, Key, Layout, Trace,
+    Type1, CHARSTRING_KEY, EEXEC_KEY,
 };
 
 /// The operator steps one subset may spend tracing and verifying its glyphs:
@@ -149,7 +149,8 @@ pub fn subset_type1(program: &[u8], glyphs: &BTreeSet<u16>) -> Result<Type1Subse
         return Err(Type1Refusal::Entries);
     }
 
-    // 2.4: the encrypted portion ends with `mark currentfile closefile`.
+    // 2.4: the encrypted portion ends with `mark currentfile closefile`, the
+    // token the scanners stopped at.
     let after_entries = charstrings
         .entries
         .iter()
@@ -157,12 +158,9 @@ pub fn subset_type1(program: &[u8], glyphs: &BTreeSet<u16>) -> Result<Type1Subse
         .map(|entry| entry.data.end)
         .max()
         .unwrap_or(0);
-    let close = find(
-        private.get(after_entries..).unwrap_or_default(),
-        b"closefile",
-    )
-    .map(|at| after_entries + at)
-    .ok_or(Type1Refusal::NoCloseFile)?;
+    let close = find_closefile(private.get(after_entries..).unwrap_or_default())
+        .map(|at| after_entries + at)
+        .ok_or(Type1Refusal::NoCloseFile)?;
     let close_end = close + b"closefile".len();
 
     let text = text_between(private, &subrs.entries, &charstrings.entries, close)?;
