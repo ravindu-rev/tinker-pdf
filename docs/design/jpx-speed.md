@@ -64,7 +64,9 @@ committed codestream decodes to today's samples exactly. What holds it:
   decoded at a full request and pinned by its geometry,
   its precision and the CRC-32 of its samples and its opacity channel, taken
   before any mechanism lands, so each later step proves it moved nothing. A
-  moved pin is a finding, never an edit.
+  speed step moves no pin, so one it moves is a bug in it, fixed rather than
+  recorded again; a decoder change that T.800 accounts for records the pin
+  again in that change, its cause named (ruling 24).
 
 The writer-made codestreams the tests below build are written by this
 repository's own test writers and read back by this repository's decoder, so
@@ -422,7 +424,7 @@ under 140 MB (P-10.13).
 
 | Risk | Mitigation |
 | --- | --- |
-| A speed mechanism moves a sample, which a 9/7 tolerance cannot see | `jpx_decodes.rs` pins every committed decode's CRC-32 at a full request before anything lands; a moved pin is a finding, never an edit |
+| A speed mechanism moves a sample, which a 9/7 tolerance cannot see | `jpx_decodes.rs` pins every committed decode's CRC-32 at a full request before anything lands; a speed mechanism moves none, so a pin one moves is a bug in it, never recorded again (ruling 24) |
 | The plane format drifts — a wider plane, a narrower constant, a reordered product — and the overflow proof or the error analysis stops holding | Planes stay `i32` at Q0 and Q12, constants `i64` at Q24, products `i64` at Q36 with `mul_q24`'s rounding, in today's order; `the_fixed_point_97_tracks_an_f64_reference_of_f382` and `the_lifting_stays_inside_the_i64_product_bound` keep running |
 | Packed tier-1 state agrees with a round trip that shares its mistake | The test encoder keeps the transcribed `Block`; the packed contexts are compared with the transcribed ones at every coefficient, and the Annex D tables entry by entry |
 | The register MQ decoder counts decisions differently and moves JBIG2's budget | `take_decisions` is asserted equal to the struct decoder's over noise streams with markers and truncation; JBIG2's Annex H tests and fingerprint unmoved |

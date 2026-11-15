@@ -963,8 +963,10 @@ fn every_shape_of_the_image_run_exception_is_pinned() {
     assert!(
         wrong.is_empty(),
         "{} of the class's {} readings are not their pins: a moved pin is a \
-         finding about the renderer, never an edit, and an empty one is a pin \
-         not yet taken. The readings:\n{}",
+         finding about the renderer, checked against ruling 5 and RC-21's design \
+         and recorded again only where they account for the move, a bug \
+         otherwise (ruling 24), and an empty one is a pin not yet taken. The \
+         readings:\n{}",
         wrong.len(),
         measured.len(),
         wrong.join("\n")

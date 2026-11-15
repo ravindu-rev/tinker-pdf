@@ -1754,7 +1754,9 @@ Not in `baseline.json`, which holds a machine's times and is read as such: a
 byte count is neither. Beside the generators, because a count is a fact about
 those bytes alone, and a generator changed under it would leave it describing
 other bytes — so the digest fails the generator first, and a moved digest is
-a finding, never re-pinned. `tests/level_six_counts.rs` reaches them by path
+a bug in the change that moved the generator, never re-pinned: the count was
+computed once, on those bytes (ruling 17), so no change accounts for a move
+(ruling 24). `tests/level_six_counts.rs` reaches them by path
 and runs both generators under `cargo test`; P-04.4's `deflate_size.rs` reads
 them the same way. Nothing in the tree runs level 6: no first-party encoder
 has it, and an outside one may not decide a build (ruling 13).

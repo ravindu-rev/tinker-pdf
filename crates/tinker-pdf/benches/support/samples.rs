@@ -95,7 +95,9 @@ pub const PAGE_BYTES: usize = 1240 * 1755 * 3;
 /// again against a build and nothing in the tree runs level 6: a count states
 /// a target and judges no output. A count describes its bytes alone, so each
 /// generator asserts them of its own output and a generator changed under
-/// its count fails there first; a moved digest is a finding, never re-pinned.
+/// its count fails there first; a moved digest is a bug in the change that
+/// moved the generator, never re-pinned, since the count was computed once on
+/// these bytes (rulings 17 and 24).
 pub struct LevelSix {
     /// How many bytes a level-6 deflate gives on the input.
     pub count: usize,

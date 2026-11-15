@@ -10,7 +10,10 @@
 //! channels, its precision, whether it was truncated, and the CRC-32 of its
 //! samples and of its opacity channel, taken before any of that work landed.
 //!
-//! A moved pin is a finding about the change that moved it, never an edit.
+//! A moved pin is a finding about the change that moved it, decided as
+//! ruling 24 decides one: the speed work moves none, so a pin it moves is a
+//! bug in it, and a decoder change that T.800 accounts for records the pin
+//! again in that change, with its cause named.
 
 use std::path::Path;
 

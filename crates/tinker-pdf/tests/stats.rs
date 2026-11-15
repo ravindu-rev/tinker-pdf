@@ -10,8 +10,9 @@
 //! **Every expected count is derived here** from what the fixture holds and
 //! what today's code does with it, and the reason is written beside each
 //! figure. A count that moves is a change in what a render does, which is the
-//! finding the tally exists to make, and is read as one: never re-pinned to
-//! match.
+//! finding the tally exists to make, and is read as one: the change is checked
+//! against the specification and its design, a correct one derives the count
+//! again here with its reason (ruling 24), and none is re-pinned to match.
 //!
 //! What today's code does, once, so the derivations below can cite it:
 //!
