@@ -1184,7 +1184,7 @@ trait Target: Device {
     fn settle(&mut self) {}
 }
 
-impl Target for Renderer<'_, PageResources> {
+impl Target for Renderer<'_> {
     fn push(&mut self, scope: Arc<PageResources>) {
         self.push_resources(scope);
     }
@@ -1199,7 +1199,7 @@ impl Target for Renderer<'_, PageResources> {
 /// images, repaired spaces and images drawn reduced — with the call's
 /// ordinal, for [`merged`].
 struct Stamping<'a, 'g> {
-    renderer: &'a mut Renderer<'g, PageResources>,
+    renderer: &'a mut Renderer<'g>,
     resources: &'a PageResources,
     ordinal: u64,
     stamps: Stamps,

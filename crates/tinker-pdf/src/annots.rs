@@ -44,7 +44,7 @@ pub(crate) trait AppearanceDevice: Device {
     fn annotation(&mut self, _widget: bool) {}
 }
 
-impl AppearanceDevice for Renderer<'_, PageResources> {
+impl AppearanceDevice for Renderer<'_> {
     fn push_scope(&mut self, scope: Arc<PageResources>) {
         self.push_resources(scope);
     }

@@ -373,8 +373,9 @@ mod tests {
             self.identity
         }
 
-        fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>> {
-            (name == b"Fm").then(|| self.form.clone()).flatten()
+        fn form_scope(&self, name: &[u8]) -> Option<Arc<dyn GlyphSource>> {
+            let form = (name == b"Fm").then(|| self.form.clone()).flatten()?;
+            Some(form)
         }
 
         fn kept_mask(&self, key: &MaskKey) -> Option<Result<Arc<Mask>, u64>> {

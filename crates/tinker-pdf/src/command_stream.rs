@@ -227,7 +227,7 @@ impl CommandStream {
     fn replay_onto(
         &self,
         options: &RenderOptions,
-        renderer: &mut Renderer<'_, StreamScope>,
+        renderer: &mut Renderer<'_>,
         source: &StreamScope,
     ) {
         let parsed = &self.stream.parsed;
@@ -240,7 +240,7 @@ impl CommandStream {
                 continue;
             }
             let scope = Arc::new(source.scoped(layer.scope));
-            renderer.push_resources(Arc::clone(&scope));
+            renderer.push_resources(scope.clone());
             replay_layer(layer, renderer, &scope);
             renderer.pop_resources();
         }
@@ -653,30 +653,34 @@ mod tests {
             })
         }
 
-        fn form_scope(&self, name: &[u8]) -> Option<Arc<Logging>> {
-            let answer = self.inner.form_scope(name);
+        fn form_scope(&self, name: &[u8]) -> Option<Arc<dyn GlyphSource>> {
+            let answer = self.inner.form_resources(name);
             self.ask(Asked::FormScope(
                 self.path.clone(),
                 name.to_vec(),
                 answer.is_some(),
             ));
-            answer.map(|scope| Arc::new(self.below(Step::Form(name.to_vec()), scope)))
+            let scope: Arc<dyn GlyphSource> =
+                Arc::new(self.below(Step::Form(name.to_vec()), answer?));
+            Some(scope)
         }
 
-        fn mask_scope(&self, stream: u64) -> Option<Arc<Logging>> {
-            let answer = self.inner.mask_scope(stream);
+        fn mask_scope(&self, stream: u64) -> Option<Arc<dyn GlyphSource>> {
+            let answer = self.inner.object_resources(stream);
             self.ask(Asked::MaskScope(
                 self.path.clone(),
                 stream,
                 answer.is_some(),
             ));
-            answer.map(|scope| Arc::new(self.below(Step::Mask(stream), scope)))
+            let scope: Arc<dyn GlyphSource> = Arc::new(self.below(Step::Mask(stream), answer?));
+            Some(scope)
         }
 
-        fn type3_scope(&self, font: u64) -> Option<Arc<Logging>> {
-            let answer = self.inner.type3_scope(font);
+        fn type3_scope(&self, font: u64) -> Option<Arc<dyn GlyphSource>> {
+            let answer = self.inner.object_resources(font);
             self.ask(Asked::Type3Scope(self.path.clone(), font, answer.is_some()));
-            answer.map(|scope| Arc::new(self.below(Step::Type3(font), scope)))
+            let scope: Arc<dyn GlyphSource> = Arc::new(self.below(Step::Type3(font), answer?));
+            Some(scope)
         }
     }
 

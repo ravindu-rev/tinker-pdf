@@ -982,10 +982,7 @@ pub trait GlyphSource {
     /// in step without either seam handing the other a resource dictionary.
     /// Shared and cached by the implementor, for `FontSource::form_scope`'s
     /// reason: a page invoking one form many times must not rebuild it.
-    fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>>
-    where
-        Self: Sized,
-    {
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<dyn GlyphSource>> {
         let _ = name;
         None
     }
@@ -995,10 +992,7 @@ pub trait GlyphSource {
     /// asked about the same group, by its stream, when the renderer enters
     /// it, so the two scopes stay in step as [`GlyphSource::form_scope`]'s
     /// do. `None` keeps the scope that set the `gs`.
-    fn mask_scope(&self, stream: u64) -> Option<Arc<Self>>
-    where
-        Self: Sized,
-    {
+    fn mask_scope(&self, stream: u64) -> Option<Arc<dyn GlyphSource>> {
         let _ = stream;
         None
     }
@@ -1010,10 +1004,7 @@ pub trait GlyphSource {
     /// a procedure runs there (`Device::begin_type3_glyph`), so the two
     /// scopes stay in step as [`GlyphSource::form_scope`]'s do. `None` keeps
     /// the showing scope.
-    fn type3_scope(&self, font: u64) -> Option<Arc<Self>>
-    where
-        Self: Sized,
-    {
+    fn type3_scope(&self, font: u64) -> Option<Arc<dyn GlyphSource>> {
         let _ = font;
         None
     }
@@ -1289,7 +1280,7 @@ struct GroupFrame {
 }
 
 /// A soft-mask group being rendered (11.6.5.2).
-struct MaskFrame<'g, G> {
+struct MaskFrame<'g> {
     /// The canvas the render was drawing into.
     parent: Canvas,
     /// Where the mask's buffer sits in it.
@@ -1322,7 +1313,7 @@ struct MaskFrame<'g, G> {
     /// serial it held (11.6.5.2, 8.10.1): put back as the mask closes,
     /// wherever it closes from. `None` for a group that brought none, which
     /// runs in the scope that set the `gs`.
-    scope: Option<(Scope<'g, G>, u64)>,
+    scope: Option<(Scope<'g>, u64)>,
 }
 
 /// The most pixels a run of images may be held over: a quarter of a page.
@@ -1440,20 +1431,20 @@ struct ImageRun {
 /// The device's half of `FontSource`'s scope. Both are asked for the same form
 /// by the same name at the same moment, so they change together without either
 /// crate handing the other a resource dictionary it should not know about.
-enum Scope<'g, G> {
+enum Scope<'g> {
     /// The caller's, borrowed for the whole render.
-    Borrowed(&'g G),
+    Borrowed(&'g dyn GlyphSource),
     /// A form's own, shared with whatever cached it.
-    Owned(Arc<G>),
+    Owned(Arc<dyn GlyphSource>),
 }
 
-impl<G> core::ops::Deref for Scope<'_, G> {
-    type Target = G;
+impl<'g> core::ops::Deref for Scope<'g> {
+    type Target = dyn GlyphSource + 'g;
 
-    fn deref(&self) -> &G {
+    fn deref(&self) -> &(dyn GlyphSource + 'g) {
         match self {
-            Scope::Borrowed(glyphs) => glyphs,
-            Scope::Owned(glyphs) => glyphs,
+            Scope::Borrowed(glyphs) => *glyphs,
+            Scope::Owned(glyphs) => &**glyphs,
         }
     }
 }
@@ -1639,9 +1630,16 @@ fn polyline(path: &Path, tolerance: f64) -> Path {
 }
 
 /// The rasterizing device.
-pub struct Renderer<'g, G: GlyphSource> {
+///
+/// Its glyph source is a trait object rather than a type parameter: the
+/// renderer is the largest code a page's drawing runs, and a renderer generic
+/// in its source would be compiled again for every source a build renders
+/// through — a page's resources and a command stream's replay scope in the
+/// facade — where the source is asked once a glyph, an image or a shading,
+/// for work far larger than the call (ruling 19).
+pub struct Renderer<'g> {
     canvas: Canvas,
-    glyphs: Scope<'g, G>,
+    glyphs: Scope<'g>,
     /// The transform from PDF user space to device pixels.
     ///
     /// **Never translated after construction.** A tile, a transparency group's
@@ -1770,17 +1768,17 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// caller says so instead. Until this existed the appearance's resources
     /// reached the interpreter and not the device, so a name that resolved for
     /// text did not resolve for an image.
-    pushed_scopes: Vec<(Scope<'g, G>, u64)>,
+    pushed_scopes: Vec<(Scope<'g>, u64)>,
     /// The resource scope each open form displaced, innermost last, with the
     /// serial it held.
     ///
     /// `None` for a form that brought no `/Resources` of its own, which is the
     /// common case and costs one `Option` rather than a clone of the page's.
-    form_scopes: Vec<Option<(Scope<'g, G>, u64)>>,
+    form_scopes: Vec<Option<(Scope<'g>, u64)>>,
     /// The resource scope each Type 3 glyph procedure running in its font's
     /// own `/Resources` displaced, innermost last, with the serial it held
     /// (Table 121); `None` where the source answered none for the font.
-    type3_scopes: Vec<Option<(Scope<'g, G>, u64)>>,
+    type3_scopes: Vec<Option<(Scope<'g>, u64)>>,
     /// The serial of the scope `glyphs` is: 0 for the one the renderer was
     /// made with, and the next number at each scope a form brings or a caller
     /// pushes. A font written into a scope's dictionary keys its glyph masks
@@ -1807,7 +1805,7 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// pops it, so an `/SMask` set inside `q ... Q` does not survive the `Q`.
     soft: Option<Arc<Mask>>,
     /// Soft-mask groups being rendered, innermost last.
-    mask_frames: Vec<MaskFrame<'g, G>>,
+    mask_frames: Vec<MaskFrame<'g>>,
     /// How many tiling-pattern cells this renderer is drawing inside
     /// (8.7.3.2), so a pattern that fills with itself terminates.
     ///
@@ -2183,13 +2181,13 @@ fn transfer_table(function: &Function) -> [u8; 256] {
     sample_function(function, 0.0).map(|v| (v * 255.0).round() as u8)
 }
 
-impl<'g, G: GlyphSource> Renderer<'g, G> {
+impl<'g> Renderer<'g> {
     /// A renderer drawing into a new canvas.
     ///
     /// `base` maps PDF user space to pixels, which is where the y-flip lives:
     /// PDF counts upward from the bottom-left, a raster counts downward from
     /// the top-left.
-    pub fn new(canvas: Canvas, base: Matrix, glyphs: &'g G) -> Renderer<'g, G> {
+    pub fn new(canvas: Canvas, base: Matrix, glyphs: &'g dyn GlyphSource) -> Renderer<'g> {
         let frame = Bounds::of_rect(canvas.device_rect());
         let canvas_rect = canvas.device_rect();
         let own_plates = plate_bytes_of(canvas.format, frame.area());
@@ -2893,7 +2891,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     ///
     /// For a content stream the caller reached by reference — an annotation's
     /// appearance — where there is no name for the interpreter to announce.
-    pub fn push_resources(&mut self, resources: Arc<G>) {
+    pub fn push_resources(&mut self, resources: Arc<dyn GlyphSource>) {
         let outer = mem::replace(&mut self.glyphs, Scope::Owned(resources));
         let serial = self.next_scope();
         self.pushed_scopes.push((outer, serial));
@@ -6147,7 +6145,7 @@ fn stroke_style(state: &GraphicsState) -> StrokeStyle {
     }
 }
 
-impl<G: GlyphSource> Renderer<'_, G> {
+impl Renderer<'_> {
     /// Fills `path` under `rule` in the fill slot's paint of `state`: its
     /// pattern where it names one, 8.7.3, so the fill colour is not used at
     /// all — painting it would put `/Pattern`'s nominal black over every
@@ -6539,7 +6537,7 @@ impl<G: GlyphSource> Renderer<'_, G> {
     }
 }
 
-impl<G: GlyphSource> Device for Renderer<'_, G> {
+impl Device for Renderer<'_> {
     fn is_cancelled(&self) -> bool {
         self.stopping()
     }
@@ -8339,7 +8337,7 @@ mod tests {
                 &NoGlyphs,
             )
         };
-        let floors = |r: &Renderer<'_, NoGlyphs>| (r.thinnest(false), r.thinnest(true));
+        let floors = |r: &Renderer<'_>| (r.thinnest(false), r.thinnest(true));
         assert_eq!(floors(&make()), (0.8, 0.6), "the default");
         assert_eq!(
             floors(&make().with_antialias(false)),
@@ -8426,7 +8424,7 @@ mod tests {
         // The initial graphics state, opaque black (8.4.1): a derived default
         // fills at alpha 0, paints nothing, and holds every graphics case
         // without a pixel to read. So every case paints, and is read.
-        let soft = |drive: &dyn Fn(&mut Renderer<'_, NoGlyphs>)| {
+        let soft = |drive: &dyn Fn(&mut Renderer<'_>)| {
             let canvas = Canvas::new(32, 32, PixelFormat::Rgb8, Color::WHITE);
             let mut renderer =
                 Renderer::new(canvas, page_transform(32.0, 1.0), &NoGlyphs).with_levels(0, 8);
@@ -8438,18 +8436,18 @@ mod tests {
         };
         assert!(!soft(&|_| {}), "a fill outside a text object is graphics");
         assert!(
-            soft(&|r: &mut Renderer<'_, NoGlyphs>| r.begin_text()),
+            soft(&|r: &mut Renderer<'_>| r.begin_text()),
             "a fill inside one is text"
         );
         assert!(
-            !soft(&|r: &mut Renderer<'_, NoGlyphs>| {
+            !soft(&|r: &mut Renderer<'_>| {
                 r.begin_text();
                 r.end_text();
             }),
             "an ended one is over"
         );
         assert!(
-            !soft(&|r: &mut Renderer<'_, NoGlyphs>| {
+            !soft(&|r: &mut Renderer<'_>| {
                 r.save_state();
                 r.begin_text();
                 r.restore_state();
@@ -8457,7 +8455,7 @@ mod tests {
             "a restore ends what its save did not hold"
         );
         assert!(
-            soft(&|r: &mut Renderer<'_, NoGlyphs>| {
+            soft(&|r: &mut Renderer<'_>| {
                 r.begin_text();
                 r.save_state();
                 r.restore_state();
@@ -8465,7 +8463,7 @@ mod tests {
             "and keeps what it did"
         );
         assert!(
-            !soft(&|r: &mut Renderer<'_, NoGlyphs>| {
+            !soft(&|r: &mut Renderer<'_>| {
                 assert!(r.begin_form(1, b"Fm0"));
                 r.begin_text();
                 r.end_form(1);
@@ -11602,7 +11600,7 @@ mod tests {
     #[test]
     fn page_frame_rectangles_are_the_masks_rectangles_on_a_whole_page() {
         #[track_caller]
-        fn check(r: &Renderer<'_, NoGlyphs>, step: &str) {
+        fn check(r: &Renderer<'_>, step: &str) {
             assert_eq!(
                 r.frame,
                 Bounds::of_rect(r.canvas.device_rect()),
@@ -12157,7 +12155,7 @@ mod forced_colour_tests {
 
     /// A renderer over a white grey canvas: forced, with or without
     /// fill-to-stroke, or ordinary.
-    fn renderer(forced: Option<bool>) -> Renderer<'static, NoGlyphs> {
+    fn renderer(forced: Option<bool>) -> Renderer<'static> {
         let canvas = Canvas::new(SIZE, SIZE, PixelFormat::Gray8, Color::WHITE);
         let renderer = Renderer::new(canvas, page_transform(f64::from(SIZE), 1.0), &GLYPHS);
         match forced {
@@ -12189,7 +12187,7 @@ mod forced_colour_tests {
         state
     }
 
-    fn pixels(renderer: Renderer<'static, NoGlyphs>) -> Vec<u8> {
+    fn pixels(renderer: Renderer<'static>) -> Vec<u8> {
         let (canvas, warnings) = renderer.finish();
         assert!(warnings.is_empty(), "{warnings:?}");
         canvas.data
@@ -12279,7 +12277,7 @@ mod forced_colour_tests {
             backdrop: None,
             transfer: None,
         };
-        let draw = |renderer: &mut Renderer<'static, NoGlyphs>| {
+        let draw = |renderer: &mut Renderer<'static>| {
             renderer.fill_path(&square(2.0, 2.0, 8.0), &plain(), false);
             if renderer.begin_soft_mask(&mask, &square(0.0, 0.0, 24.0), &plain()) {
                 renderer.fill_path(&square(0.0, 0.0, 24.0), &plain(), false);
@@ -12336,7 +12334,7 @@ mod forced_colour_tests {
             backdrop: None,
             transfer: None,
         };
-        let draw = |renderer: &mut Renderer<'static, NoGlyphs>| -> (bool, bool) {
+        let draw = |renderer: &mut Renderer<'static>| -> (bool, bool) {
             let grouped = renderer.begin_group(group, &loud());
             renderer.fill_path(&square(2.0, 2.0, 8.0), &loud(), false);
             renderer.fill_path(&square(6.0, 6.0, 8.0), &loud(), false);
@@ -12420,7 +12418,7 @@ mod snapshot_tests {
 
     static IMAGES: Images = Images;
 
-    fn renderer() -> Renderer<'static, Images> {
+    fn renderer() -> Renderer<'static> {
         let canvas = Canvas::new(SIZE, SIZE, PixelFormat::Rgb8, Color::WHITE);
         Renderer::new(canvas, page_transform(f64::from(SIZE), 1.0), &IMAGES)
     }
@@ -13531,7 +13529,7 @@ mod plate_tests {
     fn only_a_render_on_plates_with_a_plan_asks_for_colorants() {
         let content = b"/Gold cs 0.6 scn 0 0 10 10 re f /Inks CS 0.2 0.4 SCN 1 1 m 9 9 l S";
         let base = page_transform(f64::from(SIZE), 1.0);
-        let asked = |renderer: &mut Renderer<'_, Marks>| {
+        let asked = |renderer: &mut Renderer<'_>| {
             let spaces = Spaces::default();
             interpret(content, Matrix::IDENTITY, renderer, &spaces);
             spaces.asked.get()

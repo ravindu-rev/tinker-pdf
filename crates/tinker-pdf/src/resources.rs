@@ -3469,7 +3469,7 @@ impl PageResources {
     /// The `provider` is carried into the nested scope for the reason the
     /// tiling path carries it: without it a form would be the one place in a
     /// document where a `FontProvider` the caller installed does not apply.
-    fn form_resources(&self, name: &[u8]) -> Option<Arc<PageResources>> {
+    pub(crate) fn form_resources(&self, name: &[u8]) -> Option<Arc<PageResources>> {
         let (dict, reference) = self.xobject(name)?;
         let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
         let made = Cell::new(false);
@@ -3496,7 +3496,7 @@ impl PageResources {
     /// every scope, and a name only in this one, whose caches these are.
     /// `None` where the object has none, and the content's names resolve in
     /// the scope that set the `gs` or showed the glyph.
-    fn object_resources(&self, object: u64) -> Option<Arc<PageResources>> {
+    pub(crate) fn object_resources(&self, object: u64) -> Option<Arc<PageResources>> {
         if object == 0 {
             return None;
         }
@@ -5370,16 +5370,19 @@ impl PageResources {
 }
 
 impl GlyphSource for PageResources {
-    fn form_scope(&self, name: &[u8]) -> Option<Arc<PageResources>> {
-        self.form_resources(name)
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<dyn GlyphSource>> {
+        let scope: Arc<dyn GlyphSource> = self.form_resources(name)?;
+        Some(scope)
     }
 
-    fn mask_scope(&self, stream: u64) -> Option<Arc<PageResources>> {
-        self.object_resources(stream)
+    fn mask_scope(&self, stream: u64) -> Option<Arc<dyn GlyphSource>> {
+        let scope: Arc<dyn GlyphSource> = self.object_resources(stream)?;
+        Some(scope)
     }
 
-    fn type3_scope(&self, font: u64) -> Option<Arc<PageResources>> {
-        self.object_resources(font)
+    fn type3_scope(&self, font: u64) -> Option<Arc<dyn GlyphSource>> {
+        let scope: Arc<dyn GlyphSource> = self.object_resources(font)?;
+        Some(scope)
     }
 
     /// The font `font_id` selects here, from the scope's font table: the
@@ -5698,7 +5701,7 @@ impl GlyphSource for PageResources {
 pub(crate) fn paint_cell<G: GlyphSource>(
     request: &tinker_pdf_render::TileRequest,
     glyphs: &G,
-    paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_, G>),
+    paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_>),
 ) -> (
     Canvas,
     Vec<tinker_pdf_render::RenderWarning>,

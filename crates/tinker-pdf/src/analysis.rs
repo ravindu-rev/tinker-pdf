@@ -1107,7 +1107,7 @@ impl Device for Analyser<'_> {
             soft: self.soft,
         });
         // 8.10.1: a form's own `/Resources`, asked as the renderer asks.
-        let nested = self.scope.form_scope(name);
+        let nested = self.scope.form_resources(name);
         let displaced = nested.map(|scope| std::mem::replace(&mut self.scope, Scope::Owned(scope)));
         self.forms.push(displaced);
         true
@@ -1126,7 +1126,7 @@ impl Device for Analyser<'_> {
     fn begin_type3_glyph(&mut self, font: u64) {
         // Table 121: the procedure's names are its font's own `/Resources`,
         // asked as the renderer asks.
-        let nested = self.scope.type3_scope(font);
+        let nested = self.scope.object_resources(font);
         let displaced = nested.map(|scope| std::mem::replace(&mut self.scope, Scope::Owned(scope)));
         self.type3_scopes.push(displaced);
     }
@@ -1208,7 +1208,7 @@ impl Device for Analyser<'_> {
         // renderer asks.
         self.clip = Area::Everywhere;
         self.soft = None;
-        let nested = self.scope.mask_scope(mask.form.stream);
+        let nested = self.scope.object_resources(mask.form.stream);
         let displaced = nested.map(|scope| std::mem::replace(&mut self.scope, Scope::Owned(scope)));
         self.masks_scopes.push(displaced);
         true

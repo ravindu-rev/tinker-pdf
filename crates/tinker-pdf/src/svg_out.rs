@@ -1093,7 +1093,7 @@ impl<'a> Writer<'a> {
         bounds: [f64; 4],
         what: Rasterised,
         name: &[u8],
-        paint: impl FnOnce(&mut Renderer<'_, PageResources>),
+        paint: impl FnOnce(&mut Renderer<'_>),
     ) {
         if self.spent {
             return;
@@ -1476,7 +1476,7 @@ impl Device for Writer<'_> {
 
     fn begin_form(&mut self, _id: u64, name: &[u8]) -> bool {
         self.saved.push(self.clips.clone());
-        let nested = self.glyphs.form_scope(name);
+        let nested = self.glyphs.form_resources(name);
         self.form_scopes
             .push(nested.map(|scope| std::mem::replace(&mut self.glyphs, Scope::Owned(scope))));
         self.form_names.push(name.to_vec());
@@ -1496,7 +1496,7 @@ impl Device for Writer<'_> {
     fn begin_type3_glyph(&mut self, font: u64) {
         // Table 121: the procedure's names are its font's own `/Resources`,
         // asked as the renderer asks.
-        let nested = self.glyphs.type3_scope(font);
+        let nested = self.glyphs.object_resources(font);
         self.type3_scopes
             .push(nested.map(|scope| std::mem::replace(&mut self.glyphs, Scope::Owned(scope))));
     }

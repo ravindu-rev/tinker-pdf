@@ -443,17 +443,17 @@ impl GlyphSource for StreamScope {
         })
     }
 
-    fn form_scope(&self, name: &[u8]) -> Option<Arc<StreamScope>> {
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<dyn GlyphSource>> {
         let child = *self.answers()?.children.get(name)?;
         Some(Arc::new(self.scoped(child)))
     }
 
-    fn mask_scope(&self, stream: u64) -> Option<Arc<StreamScope>> {
+    fn mask_scope(&self, stream: u64) -> Option<Arc<dyn GlyphSource>> {
         let child = *self.answers()?.owned.get(&stream)?;
         Some(Arc::new(self.scoped(child)))
     }
 
-    fn type3_scope(&self, font: u64) -> Option<Arc<StreamScope>> {
+    fn type3_scope(&self, font: u64) -> Option<Arc<dyn GlyphSource>> {
         let child = *self.answers()?.owned.get(&font)?;
         Some(Arc::new(self.scoped(child)))
     }

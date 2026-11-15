@@ -142,11 +142,11 @@ impl<'a> Writer<'a> {
                 entered: true,
                 ..
             } => {
-                let child = self.top().resources.mask_scope(mask.form.stream);
+                let child = self.top().resources.object_resources(mask.form.stream);
                 self.enter_own(mask.form.stream, child);
             }
             Event::BeginType3Glyph { font } => {
-                let child = self.top().resources.type3_scope(*font);
+                let child = self.top().resources.object_resources(*font);
                 self.enter_own(*font, child);
             }
             // An `EndSoftMask` arrives only for a mask that was entered, which
@@ -222,7 +222,7 @@ impl<'a> Writer<'a> {
     /// scope it is in where the form brings none.
     fn enter_form(&mut self, name: &[u8]) {
         let parent = self.top().id;
-        let child = self.top().resources.form_scope(name);
+        let child = self.top().resources.form_resources(name);
         let scoped = match child {
             Some(child) => {
                 let key = (parent, name.to_vec());

@@ -3441,7 +3441,7 @@ impl Page {
         &self,
         options: &RenderOptions,
         content: &[u8],
-        renderer: &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
+        renderer: &mut tinker_pdf_render::Renderer<'_>,
         resources: &resources::PageResources,
     ) {
         if options.content {
@@ -3547,10 +3547,7 @@ impl Page {
         options: &RenderOptions,
         frame: Option<(f64, f64, f64, f64)>,
         op: resources::Operation,
-        paint: impl FnOnce(
-            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
-            &resources::PageResources,
-        ),
+        paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_>, &resources::PageResources),
     ) -> Bitmap {
         let resources =
             resources::PageResources::new_in(&self.doc, &self.inner, self.fonts.as_ref(), op);
@@ -3568,10 +3565,7 @@ impl Page {
         options: &RenderOptions,
         frame: Option<(f64, f64, f64, f64)>,
         resources: &resources::PageResources,
-        paint: impl FnOnce(
-            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
-            &resources::PageResources,
-        ),
+        paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_>, &resources::PageResources),
     ) -> Bitmap {
         let simulation = self.simulation_for(options);
         self.draw_layer(
@@ -3609,10 +3603,7 @@ impl Page {
         resources: &resources::PageResources,
         draws: stats::Draws,
         simulation: Option<separations::Simulation>,
-        paint: impl FnOnce(
-            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
-            &resources::PageResources,
-        ),
+        paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_>, &resources::PageResources),
     ) -> Layer {
         draw_sheet(
             self.sheet(),
@@ -3636,10 +3627,7 @@ impl Page {
         options: &RenderOptions,
         resources: &resources::PageResources,
         plan: Arc<tinker_pdf_render::PlatePlan>,
-        paint: impl FnOnce(
-            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
-            &resources::PageResources,
-        ),
+        paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_>, &resources::PageResources),
     ) -> Sheeted {
         draw_canvas(
             self.sheet(),
@@ -4049,7 +4037,7 @@ pub(crate) fn draw_sheet<S: Drawn>(
     unreadable: Option<usize>,
     locked: Vec<String>,
     simulation: Option<separations::Simulation>,
-    paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_, S>, &S),
+    paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_>, &S),
 ) -> Layer {
     let forced = options.forced_colours;
     let wanted = handed_back(options);
@@ -4202,7 +4190,7 @@ pub(crate) fn draw_canvas<S: Drawn>(
     unreadable: Option<usize>,
     locked: Vec<String>,
     inks: Inks,
-    paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_, S>, &S),
+    paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_>, &S),
 ) -> Sheeted {
     let plates = inks.plan().cloned();
     let View {
