@@ -209,7 +209,9 @@ fn svg_markup(shapes: usize) -> String {
     let mut body = String::new();
     for shape in 0..shapes {
         let (column, row) = (shape % 50, shape / 50 % 50);
-        let colour = (shape * 2_654_435_761) & 0xFF_FFFF;
+        // In `u64`: the product passes a 32-bit `usize`, and each target
+        // must write the same colours.
+        let colour = (shape as u64 * 2_654_435_761) & 0xFF_FFFF;
         body.push_str(&format!(
             r##"<rect x="{x}" y="{y}" width="8" height="8" fill="#{colour:06x}"/>"##,
             x = column * 10,
