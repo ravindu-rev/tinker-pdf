@@ -6,7 +6,12 @@
 //! serialised and encrypted in their order after, so nothing about the
 //! schedule can reach the file: these tests hold that over a rewrite, an
 //! incremental update, the object-stream container and the linearized
-//! layout, encrypted and not, at 2, 3, 4 and 7 threads.
+//! layout, encrypted and not, at 2, 3, 4 and 7 threads. Every document they
+//! write is held to the validate-on-save helper as this engine's own: the
+//! source the builder writes, and each save of it, a sealed one with its
+//! password.
+
+mod written_support;
 
 use std::sync::Arc;
 
@@ -70,7 +75,30 @@ fn source() -> Arc<CosDocument> {
             );
         });
     }
-    Arc::new(CosDocument::open(builder.finish()).expect("the source opens"))
+    Arc::new(written_support::authored(
+        "twelve pages of text",
+        builder.finish(),
+    ))
+}
+
+/// `bytes`, a save of the source, held as this engine's own writing: with
+/// `password`, the one it was sealed with.
+#[track_caller]
+fn held(label: &str, bytes: &[u8], password: Option<&str>) {
+    match password {
+        Some(password) => {
+            written_support::authored(
+                label,
+                written_support::Locked {
+                    bytes: bytes.to_vec(),
+                    key: written_support::Key::Password(password),
+                },
+            );
+        }
+        None => {
+            written_support::authored(label, bytes);
+        }
+    }
 }
 
 /// `editor` with forty-one streams more, each named from the first page so
@@ -150,6 +178,7 @@ fn sealed_editor() -> DocumentEditor {
         encryption: encryption(),
         ..WriteOptions::default()
     });
+    held("the source sealed", &sealed, Some(PASSWORD));
     let doc = CosDocument::open(sealed).expect("the sealed source opens");
     assert_eq!(doc.authenticate(PASSWORD), Ok(AuthLevel::User));
     let mut editor = DocumentEditor::new(Arc::new(doc));
@@ -260,10 +289,16 @@ fn shapes() -> Vec<Shape> {
 fn saves_on_2_3_4_and_7_threads_are_the_serial_bytes() {
     for shape in shapes() {
         let serial = (shape.editor)().save(&shape.options);
+        held(shape.name, &serial, shape.password);
         let uncompressed = (shape.editor)().save(&WriteOptions {
             compress: false,
             ..shape.options.clone()
         });
+        held(
+            &format!("{}, uncompressed", shape.name),
+            &uncompressed,
+            shape.password,
+        );
         assert!(
             serial.len() < uncompressed.len(),
             "{}: compression shrank the file, {} bytes against {}",
@@ -302,6 +337,7 @@ fn saves_on_2_3_4_and_7_threads_are_the_serial_bytes() {
 #[test]
 fn a_serial_or_uncompressed_save_is_the_default_writer() {
     let default = plain_editor().save(&WriteOptions::default());
+    held("the default save", &default, None);
     for parallelism in [
         Parallelism::Serial,
         Parallelism::Threads(0),
