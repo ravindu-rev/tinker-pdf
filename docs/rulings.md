@@ -821,6 +821,20 @@ instead of living in one feature's head.
     | FT-01.8 | Where the CJK fallback face lives, when the collection the census chooses passes `CRATES_IO_CEILING` in every form | a data crate per region, each holding one Source Han Sans region face (JP for Japan1, CN for GB1, TW for CNS1, KR for Korea1 and KR) in WOFF2 under the ceiling; the CIDs only the collection reaches are the price the owner took |
     | FT-01.8 | Who makes a vendored face's WOFF2 bytes | an established WOFF2 encoder, named with its version in the face's provenance; a test decodes each file with `woff.rs` and holds every table to the published face's, so no outside program vouches for the bytes |
 
+24. **A moved pin is decided by correctness, and a decision takes the
+    complete solution.** Binds every pin, golden, fingerprint and pinned
+    table, and every decision a step or a fix meets. When a change moves a
+    pinned value, the change is checked against the specification and the
+    design it implements: if it is correct, its output is correct and the
+    pin is recorded again in the same change, with the move and its cause
+    named in the commit; if it is not, the move is a bug and the
+    implementation is fixed. A moved pin is never sent to the owner for
+    review, and never recorded again without that check. Where a choice
+    has to be made, technical or not, the complete solution is taken and
+    acted on, never a partial one, a stopgap or a question to the owner;
+    the owner is asked only where a change would make something that works
+    today worse.
+
 ## How to add a ruling
 
 State it in one bold sentence, name the features it binds, give the reason
