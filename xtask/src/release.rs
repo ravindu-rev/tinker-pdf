@@ -13,7 +13,7 @@
 //!
 //! ## Why the order is not a list somebody maintains
 //!
-//! crates.io refuses a crate whose path dependency is unpublished, so the ten
+//! crates.io refuses a crate whose path dependency is unpublished, so the
 //! Rust crates must go bottom-up. That order is not written down here: it is
 //! computed from the manifests by a topological sort, and then *checked*
 //! against the same manifests by [`validate_order`]. Both halves exist on
@@ -331,8 +331,9 @@ fn internal_dependencies_of<'a>(
 /// `cargo publish --dry-run` packages the crate, then *verifies* it by
 /// building the package — and that build resolves `tinker-pdf-cos = "0.0.1"`
 /// from the registry, where nothing of that name has ever been published. So
-/// eight of the ten crates could not be dry-run at all, and the pipeline's
-/// claim to have been exercised end to end covered the two leaves.
+/// no crate with an internal dependency can be dry-run that way at all, and a
+/// claim to have exercised the pipeline end to end would cover the leaves
+/// alone.
 ///
 /// `[patch.crates-io]`, injected through `--config`, redirects each of those
 /// requirements at `target/package/<name>-<version>/` — which is the unpacked
@@ -432,8 +433,8 @@ pub const CRATES_IO_CEILING: u64 = 10 * 1024 * 1024;
 /// and beside the point, because build time is *the consumer's* build time.
 /// The excluded crate uploads perfectly and then fails to build for everybody
 /// who downloads it, with `no CMaps under ... the vendored data is missing`,
-/// and every crate above it in the graph inherits the failure. Four crates
-/// would already have been on crates.io by then.
+/// and every crate above it in the graph inherits the failure. Every crate
+/// before it in the publish order would already be on crates.io by then.
 ///
 /// The rule is narrow and mechanical: a crate with a non-empty `data/`
 /// directory must ship files from it. That directory is exactly where this
@@ -1232,7 +1233,7 @@ mod tests {
     /// A separate test rather than a loop over both, because the flag rewrites
     /// exactly the commands the property is about: the crates stage's dry runs.
     /// A `--local-registry` that dropped `--dry-run` while adding its patches
-    /// would publish fifteen crates on the first person who tried it, and the
+    /// would publish every crate on the first person who tried it, and the
     /// test above would not have noticed because it only builds the default
     /// options.
     #[test]
@@ -1314,30 +1315,24 @@ mod tests {
     }
 
     /// With the flag, no crate step carries a "cannot be proved" note; without
-    /// it, twelve do.
+    /// it, fifteen do.
     ///
-    /// The twelve is the measurement the flag exists for: five of the
-    /// seventeen crates have no internal dependencies and could always be
-    /// dry-run, and the other twelve never had been. The five with none are
-    /// `math`, `filters`, `crypto`, `xml` and `css`.
+    /// The fifteen is the measurement the flag exists for: nine of the
+    /// twenty-four crates have no internal dependency and can always be
+    /// dry-run, and the other fifteen cannot be without it. The nine with none
+    /// are `math`, `crypto`, `pool`, `xml`, `css` and the four CJK face crates,
+    /// `font-cjk-cn`, `font-cjk-jp`, `font-cjk-kr` and `font-cjk-tw`.
     ///
-    /// It was ten before the shaping tier: `tinker-pdf-pki` added one with its
-    /// `pki → crypto` edge and `tinker-pdf-shape` another with `shape → font`.
-    /// The number moves whenever a crate gains its first internal dependency,
-    /// and moving it is the deliberate act this assertion exists to force —
-    /// both of those arrived on separate branches, each reading it as ten and
-    /// each setting it to eleven, and only running them together gives twelve.
-    ///
-    /// Thirteen since `tinker-pdf-svg`, which arrived with three edges at once
-    /// (`xml`, `css`, `math`) and is still one crate. It is worth saying which
+    /// The number moves whenever a crate gains its first internal dependency
+    /// (`filters → pool` made `filters` one of the fifteen), and moving it is
+    /// the deliberate act this assertion exists to force: two branches that
+    /// each add a first edge both read the same number and both set it one
+    /// higher, and only running them together gives the sum. A crate that
+    /// arrives with several edges is still one crate. It is worth saying which
     /// way this assertion is meant to fail: a new crate with no internal
-    /// dependency does **not** move it, so a number that did not need changing
-    /// is evidence about the crate rather than about the test.
-    ///
-    /// **Fourteen** since tier 4's `tinker-pdf-archive`, with `archive →
-    /// filters`. This branch read it as twelve and set it to thirteen while
-    /// `svg` was setting it to thirteen on another — which is the collision
-    /// the paragraph above predicts, arriving for the second time.
+    /// dependency, such as a face crate, does **not** move it, so a number that
+    /// did not need changing is evidence about the crate rather than about the
+    /// test.
     #[test]
     fn the_flag_is_what_makes_the_non_leaf_crates_provable() {
         let notes = |local: bool| -> usize {
@@ -1351,7 +1346,7 @@ mod tests {
                 .filter(|step| step.stage == Stage::Crates && step.registry_note.is_some())
                 .count()
         };
-        assert_eq!(notes(false), 14, "the crates a plain dry run cannot reach");
+        assert_eq!(notes(false), 15, "the crates a plain dry run cannot reach");
         assert_eq!(notes(true), 0, "and none of them once it can");
     }
 
