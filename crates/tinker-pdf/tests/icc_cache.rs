@@ -10,7 +10,9 @@
 //! Every count expected here is derived beside it from what the document
 //! holds. A scope reads each name of its `/ColorSpace` once a render, so a
 //! render of a page here asks for six profiles' transforms: the page's two,
-//! its form's two and its annotation appearance's two.
+//! its form's two and its annotation appearance's two. Under a budget that
+//! keeps the form's drawing (P-16.6), a later render of the page replays the
+//! form, whose scope then asks nothing: four.
 
 mod icc_support;
 
@@ -172,9 +174,11 @@ fn same_render(kept: &Bitmap, plain: &Bitmap, what: &str) {
 /// its pages, their forms and their annotations' appearances. Rendered twice
 /// under a budget with room for both profiles' transforms, its forty renders
 /// build two transforms between them — the first render's first question
-/// about each profile's bytes — and find them kept at every other question,
-/// six a render; each page draws what a document with no budget draws, which
-/// builds six a render, one for each of its scopes' names.
+/// about each profile's bytes — and find them kept at every other question:
+/// six a render on the first pass, and four on the second, which replays
+/// each page's form from the drawing the first kept (P-16.6); each page
+/// draws what a document with no budget draws, which builds six a render,
+/// one for each of its scopes' names.
 #[test]
 fn transforms_built_are_at_most_the_distinct_keys() {
     let bytes = many_objects_two_profiles();
@@ -186,6 +190,17 @@ fn transforms_built_are_at_most_the_distinct_keys() {
             let (bitmap, stats) = counted(&document, page);
             built += stats.icc_transform_misses;
             found += stats.icc_transform_hits;
+            let replayed = pass > 0;
+            assert_eq!(
+                (
+                    stats.forms_interpreted,
+                    stats.forms_replayed,
+                    stats.icc_transform_misses + stats.icc_transform_hits
+                ),
+                if replayed { (0, 1, 4) } else { (1, 0, 6) },
+                "pass {pass}, page {page}: the form interpreted, or replayed and \
+                 asking nothing"
+            );
             let (alone, alone_stats) = counted(&plain, page);
             assert_eq!(
                 (
@@ -201,7 +216,7 @@ fn transforms_built_are_at_most_the_distinct_keys() {
     assert_eq!(built, 2, "two profiles, two transforms built");
     assert_eq!(
         found,
-        6 * 2 * PAGES as u64 - 2,
+        (6 + 4) * PAGES as u64 - 2,
         "every other question found its profile's transforms kept"
     );
 }
