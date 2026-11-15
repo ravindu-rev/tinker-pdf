@@ -1956,10 +1956,24 @@ mod tests {
     }
 
     fn ligature(first: u16, rest: &[u16], out: u16) -> Vec<u8> {
-        let mut entry = u16s(&[out, rest.len() as u16 + 1]);
-        entry.extend(u16s(rest));
-        let set = assemble(u16s(&[1, 0]), &[2], &[entry]);
-        assemble(u16s(&[1, 0, 1, 0]), &[2, 6], &[coverage(&[first]), set])
+        ligatures(&[(first, rest, out)])
+    }
+
+    /// `LigatureSubstFormat1` of one ligature set a first glyph: the glyphs
+    /// after it and the ligature they make, the first glyphs in order.
+    fn ligatures(sets: &[(u16, &[u16], u16)]) -> Vec<u8> {
+        let mut head = u16s(&[1, 0, sets.len() as u16]);
+        head.extend(vec![0u8; sets.len() * 2]);
+        let firsts: Vec<u16> = sets.iter().map(|(first, ..)| *first).collect();
+        let mut slots = vec![2usize];
+        let mut parts = vec![coverage(&firsts)];
+        for (n, (_, rest, out)) in sets.iter().enumerate() {
+            let mut entry = u16s(&[*out, rest.len() as u16 + 1]);
+            entry.extend(u16s(rest));
+            slots.push(6 + n * 2);
+            parts.push(assemble(u16s(&[1, 0]), &[2], &[entry]));
+        }
+        assemble(head, &slots, &parts)
     }
 
     /// A format 3 context rule: a coverage per input glyph.
@@ -2069,14 +2083,16 @@ mod tests {
             lookup(7, &[extension(2, 1, single2(&[9], &[5]))]),
             // 12: a type GSUB does not have.
             lookup(9, &[single2(&[1], &[2])]),
-            // 13: three subtables over glyph 5: a ligature it may fail, then
-            // two single substitutions.
+            // 13: three subtables over glyph 5, each of the lookup's type,
+            // as a lookup's subtables are: a ligature it may fail, then two
+            // of one component, single substitutions in effect, the last
+            // over 65 535 as well.
             lookup(
                 4,
                 &[
                     ligature(5, &[6], 0),
-                    single2(&[5], &[2]),
-                    single2(&[5, 65535], &[1, 0]),
+                    ligature(5, &[], 2),
+                    ligatures(&[(5, &[], 1), (65535, &[], 0)]),
                 ],
             ),
             // 14: no subtables at all.
