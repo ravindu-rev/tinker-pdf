@@ -696,10 +696,10 @@ const SHAPING: &str = "d07a70e4ccd9c31c";
 const BIDI: &str = "d77c9e938eb9c996";
 
 /// The vertical fingerprint (FT-07b.8): [`vertical_cases`]' columns. A run's
-/// output, recorded where Linux, Windows and `wasm32-wasip1` agree on it;
-/// until it is, `vertical_shaping_is_stable_across_targets` fails on it alone
-/// and prints the value it computed.
-const VERTICAL: &str = "";
+/// output, recorded where Linux, Windows and `wasm32-wasip1` agree on it; a
+/// move fails `vertical_shaping_is_stable_across_targets` alone, which prints
+/// the value it computed.
+const VERTICAL: &str = "6ae209a70fe0251c";
 
 /// The least each corpus may produce before its fingerprint means anything.
 ///
