@@ -1835,20 +1835,20 @@ fn one_bit_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<(Vec<u8>, Ve
 }
 
 /// Each byte's eight one-bit samples, the most significant bit first, as
-/// bytes of 0 and 1.
-static BIT_SAMPLES: [[u8; 8]; 256] = {
+/// bytes of 0 and 1: built at first use rather than evaluated into the binary
+/// (P-19.1), and taken once an image, before its rows.
+static BIT_SAMPLES: std::sync::LazyLock<[[u8; 8]; 256]> = std::sync::LazyLock::new(bit_samples);
+
+/// [`BIT_SAMPLES`]'s table.
+fn bit_samples() -> [[u8; 8]; 256] {
     let mut table = [[0u8; 8]; 256];
-    let mut byte = 0;
-    while byte < 256 {
-        let mut sample = 0;
-        while sample < 8 {
-            table[byte][sample] = ((byte >> (7 - sample)) & 1) as u8;
-            sample += 1;
+    for (byte, samples) in table.iter_mut().enumerate() {
+        for (sample, value) in samples.iter_mut().enumerate() {
+            *value = u8::from((byte >> (7 - sample)) & 1 == 1);
         }
-        byte += 1;
     }
     table
-};
+}
 
 /// A one-component, one-bit image held as its two colours and one byte a
 /// sample, or `None` where it is held as RGB.
@@ -1880,6 +1880,7 @@ fn two_colour_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<TwoColour
     let (width, height) = (layout.width as usize, layout.height as usize);
     let row_bytes = width.div_ceil(8);
     let mut samples = Vec::with_capacity(width.saturating_mul(height));
+    let bits = &*BIT_SAMPLES;
     for row in 0..height {
         let mut left = width;
         for at in 0..row_bytes {
@@ -1890,7 +1891,7 @@ fn two_colour_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<TwoColour
                 .copied()
                 .unwrap_or(0);
             let take = left.min(8);
-            samples.extend_from_slice(&BIT_SAMPLES[usize::from(byte)][..take]);
+            samples.extend_from_slice(&bits[usize::from(byte)][..take]);
             left -= take;
         }
     }

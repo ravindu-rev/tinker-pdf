@@ -47,9 +47,9 @@ usage:
   cargo xtask written   check that every test that writes a document holds
                         it to the validate-on-save helper, but the files on
                         its pending list, which only shrinks
-  cargo xtask tables    check that the codec and raster crates build every
-                        table they derive at first use, in a `LazyLock`, and
-                        evaluate none into a `static` or a `const`
+  cargo xtask tables    check that every engine crate builds every table it
+                        derives at first use, in a `LazyLock`, and evaluates
+                        none into a `static` or a `const`
   cargo xtask profiles  check that bindings/js and bindings/python, each a
                         workspace root of its own, declare the root's
                         `[profile.release]`, key for key
@@ -1756,39 +1756,43 @@ fn collect_text_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The codec and raster crates, whose derived tables are built at first use
-/// (P-19.1): the stream filters and image codecs, the containers' own
-/// decompressors, the ZIP reader and the rasteriser.
-const TABLE_CRATES: [&str; 4] = [
-    "tinker-pdf-filters",
-    "tinker-pdf-archive",
-    "tinker-pdf-zip",
-    "tinker-pdf-raster",
-];
-
-/// **Every table a codec or raster crate derives is built at first use**, in
-/// a `LazyLock`, and none is evaluated at compile time into a `static` or a
+/// **Every table an engine crate derives is built at first use**, in a
+/// `LazyLock`, and none is evaluated at compile time into a `static` or a
 /// `const` (P-19.1; `docs/verification.md`, "Tools").
 ///
 /// A table evaluated at compile time is bytes in every binary that links its
 /// crate, the wasm module a browser downloads among them; built at first use
-/// it costs its loop once a process and nothing in the binary. So the check
-/// refuses, in every source of [`TABLE_CRATES`], a `static` or `const` whose
-/// type is an array — `[T; N]`, a reference to one or a slice, or a `type`
-/// alias in its file of one — and whose initialiser is a call, which in a
-/// constant is a `const fn`'s, or a block, `const` or not. A table written out
-/// as its defining list, a byte string or an included file passes, and so
-/// does every constant that is not an array; there is no size under which a
-/// derived table is let through and no list of exemptions.
+/// it costs its loop once a process and nothing in the binary. Every crate
+/// under `crates/` is in the wasm or the C ABI, so the check reads them all,
+/// a crate added later with them, where a list of crates would let a derived
+/// table through in any crate it did not name. It refuses, in every source of
+/// every crate, a `static` or `const` whose type is an array — `[T; N]`, a
+/// reference to one or a slice, or a `type` alias in its file of one — and
+/// whose initialiser is a call, which in a constant is a `const fn`'s, or a
+/// block, `const` or not, but for a block of `use` items that ends on the list
+/// itself. A table written out as its defining list, a byte string or an
+/// included file passes, and so does every constant that is not an array;
+/// there is no size under which a derived table is let through and no list of
+/// exemptions.
 fn check_tables() -> Result<(), Vec<String>> {
     let root = repo_root();
     let mut problems = Vec::new();
-    for crate_name in TABLE_CRATES {
+    let mut crates: Vec<PathBuf> = std::fs::read_dir(root.join("crates"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.join("Cargo.toml").is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    crates.sort();
+    if crates.is_empty() {
+        problems.push("no crates under crates/ to read".to_string());
+    }
+    for dir in crates {
         let mut files = Vec::new();
-        collect_rust_files(
-            &root.join("crates").join(crate_name).join("src"),
-            &mut files,
-        );
+        collect_rust_files(&dir.join("src"), &mut files);
         files.sort();
         for file in files {
             let Ok(text) = std::fs::read_to_string(&file) else {
@@ -2080,7 +2084,7 @@ fn is_derived(value: &str) -> bool {
         }
     }
     if block.starts_with('{') {
-        return true;
+        return !is_list_with_imports(block);
     }
     let mut rest = value.strip_prefix('&').map_or(value, str::trim_start);
     loop {
@@ -2106,6 +2110,40 @@ fn is_derived(value: &str) -> bool {
             None => return rest.starts_with('('),
         }
     }
+}
+
+/// Whether `block`, an initialiser that opens with `{`, holds one `use` item
+/// or more and then the defining list itself, as
+/// `{ use Kind as K; &[(1, K::A)] }`: the block exists only to name the paths
+/// the entries are written with, and its value is the list as written. A
+/// block of the list alone has no such reason, and stays refused.
+fn is_list_with_imports(block: &str) -> bool {
+    let Some(inner) = block
+        .strip_prefix('{')
+        .and_then(|inner| inner.trim_end().strip_suffix('}'))
+    else {
+        return false;
+    };
+    let mut rest = inner.trim_start();
+    let mut imports = 0;
+    while let Some(item) = rest
+        .strip_prefix("use")
+        .filter(|item| item.starts_with(char::is_whitespace))
+    {
+        let Some(end) = top_level(item, ';', false) else {
+            return false;
+        };
+        rest = item[end + 1..].trim_start();
+        imports += 1;
+    }
+    if imports == 0 {
+        return false;
+    }
+    let list = rest.trim_end();
+    let list = list.strip_prefix('&').map_or(list, str::trim_start);
+    list.strip_prefix('[').is_some_and(|items| {
+        top_level(items, ']', false).is_some_and(|close| close + 1 == items.len())
+    })
 }
 
 /// The manifests outside the root workspace whose artefacts ship, each a
@@ -2566,7 +2604,8 @@ allow = [
     /// and its name: a `static` or `const` array, a reference to one, a
     /// slice or an alias of one, its length a shift or not, initialised by a
     /// `const fn` call — a path, a method or a turbofish, on the item's line
-    /// or the next — or by a block, `const` or not.
+    /// or the next — or by a block, `const` or not: one of the list alone, and
+    /// one whose `use` items lead to anything but the list it ends on.
     #[test]
     fn a_derived_static_table_is_refused() {
         let source = r#"//! A codec.
@@ -2593,6 +2632,15 @@ pub(super) const INLINE: [u8; 2] = const { [1, 2] };
 const CHAINED: [u8; 8] = Table::<Vec<u8>>::build();
 static SLICE: &[u16] = &crate::tables::make(3);
 static MODES: [Option<(Mode, u8)>; 1 << MODE_BITS] = mode_table();
+static IMPORTED: [u8; 2] = {
+    use crate::tables::make;
+    make(2)
+};
+static AFTER: &[u8] = {
+    use Kind as K;
+    let base = [1, 2];
+    &base
+};
 "#;
         let expected: Vec<(usize, String)> = [
             (4, "TABLE"),
@@ -2605,6 +2653,8 @@ static MODES: [Option<(Mode, u8)>; 1 << MODE_BITS] = mode_table();
             (22, "CHAINED"),
             (23, "SLICE"),
             (24, "MODES"),
+            (25, "IMPORTED"),
+            (29, "AFTER"),
         ]
         .into_iter()
         .map(|(line, name)| (line, name.to_string()))
@@ -2614,8 +2664,9 @@ static MODES: [Option<(Mode, u8)>; 1 << MODE_BITS] = mode_table();
 
     /// **A table built at first use is admitted**, and so is every constant
     /// the rule does not name: a `LazyLock`, its table's length a shift or
-    /// not, a table written out as its list, a byte string, an included
-    /// file, a scalar or a struct from a `const fn`, a function pointer, a
+    /// not, a table written out as its list — bare or in a block of `use`
+    /// items that name its entries' paths — a byte string, an included file,
+    /// a scalar or a struct from a `const fn`, a function pointer, a
     /// compile-time assertion, a thread-local's `const` initialiser, a
     /// `const fn` itself, and anything in a comment or a string.
     #[test]
@@ -2632,6 +2683,11 @@ const BITS: [u8; 1 << 3] = [0; 1 << 3];
 const ZEROS: [u8; 64] = [0; 64];
 const ORDER: [usize; 3] =
     [16, 17, 18];
+static OVERRIDES: &[(u32, u32, Kind)] = {
+    use Kind as K;
+    use Kind::{Begin, End};
+    &[(0x5B, 0x5B, Begin), (0x5D, 0x5D, End), (0x07EB, 0x07F3, K::Mark([0; 2]))]
+};
 pub(crate) const SIGNATURE: [u8; 4] = *b"PK\x03\x04";
 const DICTIONARY: &[u8] = include_bytes!("dictionary.bin");
 static NAMES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/names.bin"));
@@ -2664,7 +2720,7 @@ fn helper<'a>(bytes: &'a [u8]) -> &'a [u8] {
     }
 
     /// The rule runs against this repository, as the graph check does: every
-    /// table the codec and raster crates derive is built at first use.
+    /// table an engine crate derives is built at first use.
     #[test]
     fn this_repository_builds_its_derived_tables_at_first_use() {
         if let Err(problems) = check_tables() {
