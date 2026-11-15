@@ -1406,10 +1406,17 @@ fn auto_is_its_points_written_as_soft_hyphens(language: &str, published: &str, m
 /// each word one its dictionary publishes with its points, so every point the
 /// pair rests on is the dictionary author's.
 ///
-/// Courier at sixteen pixels is 9.6 pixels a character and a combining mark
-/// none, so each measure is chosen to hold the word up to a point and its
-/// hyphen and not the whole word: British English's `univer-` over `sity` at
-/// seventy pixels, Dutch's `aandachts-` over `trekker` at a hundred.
+/// Courier at sixteen pixels is 9.6 pixels a character, so each measure is
+/// chosen to hold the word up to a point and its hyphen and not the whole
+/// word: British English's `univer-` over `sity` at seventy pixels, Dutch's
+/// `aandachts-` over `trekker` at a hundred. Church Slavonic's letters are
+/// not Courier's: no standard face covers Cyrillic, so they fall to the last
+/// resort, the `serif` face, and are measured at Times-Roman's space, four
+/// pixels, where no stand-in face draws them, and the combining acute at
+/// nothing. `клеопа́-` is 33.6 pixels with Courier's hyphen and the word 36,
+/// so at thirty-five the line ends at the point after the accent. Under
+/// `bundled-fonts` a stand-in face draws and measures the letters at its own
+/// advances, and the word breaks at this measure as well.
 #[cfg(feature = "hyphenation")]
 #[test]
 fn hyphens_auto_is_each_vendored_dictionarys_points_as_soft_hyphens() {
@@ -1417,7 +1424,7 @@ fn hyphens_auto_is_each_vendored_dictionarys_points_as_soft_hyphens() {
     auto_is_its_points_written_as_soft_hyphens(
         "cu",
         "\u{43a}\u{43b}\u{435}-\u{43e}-\u{43f}\u{430}\u{301}-\u{442}\u{440}\u{430}",
-        60.0,
+        35.0,
     );
     auto_is_its_points_written_as_soft_hyphens("en-GB", "uni-ver-sity", 70.0);
     auto_is_its_points_written_as_soft_hyphens("ga", "dtiom-\u{e1}int\u{ed}", 60.0);
