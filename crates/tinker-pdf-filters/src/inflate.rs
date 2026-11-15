@@ -1758,8 +1758,9 @@ mod tests {
     /// [`streams`], wrapped in zlib with the checksum of what it decodes to,
     /// gives the same pieces and the same verdict with the fast loop as with
     /// the state machine alone, and the pieces joined are the bytes the
-    /// one-shot read decodes, whether the stream ends, is cut short or is
-    /// damaged.
+    /// one-shot read of the same zlib body decodes, whether the stream ends,
+    /// is cut short or is damaged — a stream that does not end reading the
+    /// checksum's four bytes after it as more of its code, in both reads.
     #[test]
     fn the_streamed_read_takes_the_fast_loop_and_reads_what_the_whole_read_does() {
         for (index, stream) in streams().iter().enumerate() {
@@ -1767,6 +1768,8 @@ mod tests {
             let mut wrapped = vec![0x78, 0x01];
             wrapped.extend_from_slice(stream);
             wrapped.extend_from_slice(&adler32(&whole.0).to_be_bytes());
+            let body = &wrapped[2..];
+            let once = decode_split(body, body.len(), usize::MAX, false);
             STATE_MACHINE_ONLY.with(|only| only.set(true));
             let alone = streamed(&wrapped, Tail::WhiteSpace);
             STATE_MACHINE_ONLY.with(|only| only.set(false));
@@ -1776,7 +1779,7 @@ mod tests {
                 "stream {index}: the fast loop and the state machine alone"
             );
             assert_eq!(
-                fast.0, whole.0,
+                fast.0, once.0,
                 "stream {index}: the pieces and the one-shot read"
             );
         }
