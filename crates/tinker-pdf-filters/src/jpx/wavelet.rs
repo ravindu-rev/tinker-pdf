@@ -497,7 +497,7 @@ pub(crate) fn mul_q24(v: i64, c: i64) -> i64 {
 /// by 24.08 together, and each of the five rounds by at most one, so from
 /// `2^25` no intermediate passes `39.15 * 2^25 + 5`, about `2^30.3`, inside
 /// `i32`'s `2^31`. A job whose samples reach past it lifts in `i64` instead.
-const IN_PLACE_BOUND: u32 = 1 << 25;
+pub(crate) const IN_PLACE_BOUND: u32 = 1 << 25;
 
 /// The columns a 9/7 vertical job past [`IN_PLACE_BOUND`] lifts at a time,
 /// whole rows of them widened into one `i64` block; and the unit a vertical

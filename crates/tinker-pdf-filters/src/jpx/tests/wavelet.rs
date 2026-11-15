@@ -33,7 +33,7 @@ use crate::jpx::codestream::Roi;
 use crate::jpx::wavelet::{
     into_samples, ladder, level_shift, line_at_a_time, lines_copied, maxshift, mul_q24,
     synthesise_97, synthesise_on, synthesise_split, Arith, Exact, Fixed, Realigned, ALPHA, BETA,
-    DELTA, GAMMA, K, MAX_PRODUCT, PLANE_BOUND, Q, QC, TWO_OVER_K,
+    DELTA, GAMMA, IN_PLACE_BOUND, K, MAX_PRODUCT, PLANE_BOUND, Q, QC, TWO_OVER_K,
 };
 use crate::jpx::{boxes, codestream, tier1, tier2};
 use tinker_pdf_pool::Parallelism;
@@ -697,8 +697,11 @@ fn row_blocked_synthesis_is_the_column_synthesis_at_every_shape() {
 ///
 /// Every committed codestream under `tests/jpx/`, reversible and
 /// irreversible, one component and three, reconstructed tile by tile, and
-/// planes of every shape in both arithmetics at the magnitudes an 8- to
-/// 12-bit picture's coefficients take: the passes lift the plane where it
+/// planes of every shape in both arithmetics — the 5/3's coefficients at
+/// 2^14, and the 9/7's at the in-place bound over 40, about 205 sample
+/// units, from which the module's overflow proof keeps every sample either
+/// pass reads within the bound, since a pass multiplies a magnitude by at
+/// most 39.16 and rounds five times: the passes lift the plane where it
 /// lies, and not one line is copied out and back. The count is live — a 9/7
 /// pass over samples past the in-place bound widens its lines to `i64`, and
 /// counts them.
@@ -748,7 +751,7 @@ fn a_synthesis_copies_no_line_into_scratch() {
                     .collect();
                 synthesise_on(&mut exact, w, 0..h, 0..w, 0..w, i0, &Parallelism::Serial);
                 let mut fixed: Vec<Fixed> = (0..w * h)
-                    .map(|_| Fixed::dyadic(noise(&mut seed, 1 << 24), -12))
+                    .map(|_| Fixed::dyadic(noise(&mut seed, i64::from(IN_PLACE_BOUND / 40)), -12))
                     .collect();
                 synthesise_on(&mut fixed, w, 0..h, 0..w, 0..w, i0, &Parallelism::Serial);
             }
