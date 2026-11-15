@@ -133,8 +133,14 @@ How each tree reaches it:
   `lib.rs` then declares the cos reading once, by `#[cfg(test)]` and
   `#[path]`, after the self-alias, and every test module of the crate holds
   through `crate::written_support`; the facade's hold through `subset.rs`'s
-  `#[cfg(test)]` module `tests_support`, which declares the facade reading by
-  `#[path]`.
+  `#[cfg(test)]` module `tests_support`, which re-exports the facade reading
+  that `subset.rs` declares beside it by `#[cfg(test)]` and `#[path]`.
+- **Every declaration stands outside any inline module.** A `#[path]` there
+  resolves from the declaring file's own directory. Inside an inline module
+  it resolves from a directory named for the module, after one named for the
+  file when the file is not `mod.rs`-like, and that directory does not
+  exist: Windows folds the `..` out of such a path by text, and Linux and
+  macOS refuse it.
 
 A `#[cfg(test)]` declaration of the helper's file makes no unit of it:
 `cargo xtask written` never judges the helper's own files, wherever they are

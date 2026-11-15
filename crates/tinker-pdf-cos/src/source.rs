@@ -1424,9 +1424,6 @@ mod tests {
 
     // ---- segments --------------------------------------------------------
 
-    #[path = "../../../tests/written_support/mod.rs"]
-    mod written_support;
-
     /// **A segmented backing reads as the joined bytes.** Over segments cut
     /// every way — not at all, after one byte, a run of one-byte segments, one
     /// large, empty ones between, every few bytes — every window, transient
@@ -1539,7 +1536,7 @@ mod tests {
             });
         }
         let original: Arc<[u8]> = builder.finish().into();
-        written_support::authored("three hundred pages", Arc::clone(&original));
+        crate::written_support::authored("three hundred pages", Arc::clone(&original));
         let base = Arc::new(crate::CosDocument::open(Arc::clone(&original)).expect("it opens"));
         let mut editor = crate::DocumentEditor::new(Arc::clone(&base));
         assert!(editor.rotate_page(7, 90));
@@ -1550,7 +1547,7 @@ mod tests {
             })
             .into();
         let joined = [&original[..], &update[..]].concat();
-        written_support::authored("three hundred pages and an update", joined.clone());
+        crate::written_support::authored("three hundred pages and an update", joined.clone());
 
         let doc = crate::CosDocument::open_appended(Arc::clone(&original), Arc::clone(&update))
             .expect("it opens over two segments");

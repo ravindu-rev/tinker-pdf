@@ -2716,6 +2716,17 @@ mod tests {
     }
 }
 
+/// The validate-on-save helper's facade reading, compiled once for this
+/// crate's own test modules, which reach it through [`tests_support`].
+///
+/// Declared outside any inline module, so that its `#[path]` resolves from
+/// this file's own directory, `src/`. Inside `tests_support` it would resolve
+/// from `src/subset/tests_support/`, which does not exist: Windows folds the
+/// `..` out of such a path by text, and Linux and macOS refuse it.
+#[cfg(test)]
+#[path = "../tests/written_support/mod.rs"]
+pub(crate) mod written_support;
+
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::*;
@@ -2723,11 +2734,10 @@ pub(crate) mod tests_support {
     pub use tinker_pdf_cos::{DocumentBuilder, WriteMode, WriteOptions};
     pub use tinker_pdf_font::{glyf, Sfnt};
 
-    /// The validate-on-save helper's facade reading, compiled once for this
-    /// crate's own test modules: `write.rs`'s and `redact.rs`'s reach it
-    /// through here.
-    #[path = "../../../tests/written_support/mod.rs"]
-    pub mod written_support;
+    /// The validate-on-save helper's facade reading: `write.rs`'s and
+    /// `redact.rs`'s test modules, and the crate's others, reach it through
+    /// here.
+    pub(crate) use super::written_support;
     use written_support::{authored, rewritten};
 
     /// Liberation Serif Regular, read from the directory `bundled-fonts`
