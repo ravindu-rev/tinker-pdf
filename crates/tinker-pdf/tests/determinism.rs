@@ -76,10 +76,16 @@ mod epub_support;
 
 mod render_support;
 use render_support::{
-    axial_page, bilevel_page, blend_grid_page, curvy_font, fallback_face,
-    image_page as analytic_image_page, ink, intents_page, jpeg_minified_page, jpx_minified_page,
-    pen_page, radial_page, substituted_cjk_page, symbol_face, symbols_page,
+    axial_page, bilevel_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink,
+    intents_page, jpeg_minified_page, jpx_minified_page, pen_page, radial_page, symbol_face,
+    symbols_page,
 };
+// The predefined CMaps the substituted CJK page reads its collection through
+// are the `cmap-predefined` feature's; a build without them reports and never
+// guesses (FT-01.3), so that fixture, its face and the way it opens are that
+// build's.
+#[cfg(feature = "cmap-predefined")]
+use render_support::{fallback_face, substituted_cjk_page};
 
 /// How a fixture's document is opened, and which of its pages is hashed.
 ///
@@ -108,6 +114,8 @@ enum Open {
     /// `render_support` byte by byte, as `curvy_font` is — as the host's
     /// provider: a page whose composite fonts embed nothing, drawn by a
     /// substituted face read by character (`docs/design/fallback-faces.md`).
+    /// Built with the `cmap-predefined` feature, whose CMaps it reads through.
+    #[cfg(feature = "cmap-predefined")]
     Substituted,
     /// `Document::open_with`, page 0, with [`symbol_face`] — built in
     /// `render_support`, a box of its own size for each glyph its `post`
@@ -167,6 +175,7 @@ fn book_face() -> Arc<SimpleFontProvider> {
 /// The provider [`Open::Substituted`] opens with: [`fallback_face`], with its
 /// `cmap` and its `vert`, answering symbolic requests too, as a CJK font's
 /// descriptor says it is.
+#[cfg(feature = "cmap-predefined")]
 fn substitute_face() -> Arc<SimpleFontProvider> {
     Arc::new(SimpleFontProvider::new(fallback_face(true, true)).substituting_symbolic())
 }
@@ -198,6 +207,7 @@ fn opened(fixture: &Fixture) -> (Document, u32) {
             ),
             at,
         ),
+        #[cfg(feature = "cmap-predefined")]
         Open::Substituted => (
             converted(
                 "opened",
@@ -2812,7 +2822,10 @@ const GOLDEN: &[Fixture] = &[
     // (`render_support::substituted_cjk_page`). The five boxes cover about
     // 2 200 pixels and the floor is under half: a character drawn as
     // `.notdef` paints a ninth to a quarter of its box, which the floor may
-    // miss, and one read by CID fills its em, both the hash's.
+    // miss, and one read by CID fills its em, both the hash's. A build
+    // without the predefined CMaps cannot reach a CID's character and draws
+    // none of it, so the fixture is the `cmap-predefined` feature's.
+    #[cfg(feature = "cmap-predefined")]
     Fixture {
         name: "substituted_cjk",
         build: substituted_cjk_page,
@@ -3130,7 +3143,8 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     ("intents", ""),
     // A substituted face drawing unembedded Adobe-Japan1 text by character:
     // the inverted `Uni*-UTF32` tables, the face's `cmap` and its `vert`, on
-    // every target.
+    // every target, in a build with the predefined CMaps.
+    #[cfg(feature = "cmap-predefined")]
     ("substituted_cjk", ""),
     // A substituted face drawing every code of Symbol's and ZapfDingbats'
     // built-in encodings by its glyph name, through the face's `post`
@@ -3535,6 +3549,7 @@ fn svg_output_is_stable_across_targets() {
         ("jpeg_minified", ""),
         ("jpx_minified", ""),
         ("intents", ""),
+        #[cfg(feature = "cmap-predefined")]
         ("substituted_cjk", ""),
         ("substituted_symbols", ""),
         ("multiple_master", ""),
@@ -4825,6 +4840,7 @@ const MARK_BOXES: &[(&str, &str)] = &[
     ("jpeg_minified", ""),
     ("jpx_minified", ""),
     ("intents", ""),
+    #[cfg(feature = "cmap-predefined")]
     ("substituted_cjk", ""),
     ("substituted_symbols", ""),
     ("multiple_master", ""),
@@ -5072,6 +5088,7 @@ const COMMAND_STREAMS: &[(&str, &str)] = &[
     ("jpeg_minified", ""),
     ("jpx_minified", ""),
     ("intents", ""),
+    #[cfg(feature = "cmap-predefined")]
     ("substituted_cjk", ""),
     ("substituted_symbols", ""),
     ("multiple_master", ""),
@@ -5332,6 +5349,7 @@ fn opened_under(fixture: &Fixture, limits: CacheLimits) -> (Document, u32) {
             ),
             at,
         ),
+        #[cfg(feature = "cmap-predefined")]
         Open::Substituted => (
             converted(
                 "opened under a budget",
