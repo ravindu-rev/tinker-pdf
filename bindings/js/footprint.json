@@ -33,9 +33,9 @@
   "profiles": {
     "bundled-fonts": {
       "figure": {
-        "bytes": 22654917,
+        "bytes": 22639899,
         "date": "2026-11-15",
-        "run": "9d2db0d0@x86_64-pc-windows-msvc"
+        "run": "8afb4b8d@x86_64-pc-windows-msvc"
       },
       "tolerance": {
         "bytes": 2269,
@@ -55,9 +55,9 @@
     },
     "cjk-fonts": {
       "figure": {
-        "bytes": 20278295,
+        "bytes": 20261421,
         "date": "2026-11-15",
-        "run": "9d2db0d0@x86_64-pc-windows-msvc"
+        "run": "8afb4b8d@x86_64-pc-windows-msvc"
       },
       "tolerance": {
         "bytes": 3098,
@@ -77,9 +77,9 @@
     },
     "default": {
       "figure": {
-        "bytes": 3256877,
+        "bytes": 3242397,
         "date": "2026-11-15",
-        "run": "9d2db0d0@x86_64-pc-windows-msvc"
+        "run": "8afb4b8d@x86_64-pc-windows-msvc"
       },
       "tolerance": {
         "bytes": 5675,
