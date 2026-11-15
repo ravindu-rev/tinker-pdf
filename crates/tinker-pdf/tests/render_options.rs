@@ -1650,8 +1650,9 @@ const FORCED_FORMATS: [PixelFormat; 7] = [
 /// dark on light, light on dark and two hues, is the background plus its
 /// coverage times the difference — coverage read from the black-on-white
 /// render of the same page and the tint computed here — at two scales, with
-/// and without fill-to-stroke; and that black-on-white render holds black,
-/// white and coverage between, so the closed form is held on edges.
+/// and without fill-to-stroke; and that black-on-white render holds white
+/// and coverage between, and a page's two at a scale hold black, so the
+/// closed form is held on edges and on whole coverage.
 #[test]
 fn forced_colours_are_coverage_over_the_two_colours() {
     let pairs = [
@@ -1663,6 +1664,14 @@ fn forced_colours_are_coverage_over_the_two_colours() {
     let mut held = 0usize;
     for (name, bytes) in forced_fixtures() {
         for scale in [1.0, 1.7] {
+            // Black is a whole pixel of coverage. Fill-to-stroke draws each
+            // fill as the thinnest line, eight tenths of a pixel wide
+            // anti-aliased (8.4.3.2), which covers no pixel whole, so a page
+            // whose only whole marks are fills — the shadings page, whose
+            // shadings paint their lightness — holds none under it. Each
+            // render holds white and edges between; each page's two renders
+            // at a scale hold black between them.
+            let mut black = false;
             for fill_to_stroke in [false, true] {
                 let what = format!("{name} at {scale}x, fill-to-stroke {fill_to_stroke}");
                 let coverage = render(
@@ -1670,11 +1679,11 @@ fn forced_colours_are_coverage_over_the_two_colours() {
                     &forced_options(scale, PixelFormat::Gray8, forced(fill_to_stroke)),
                 );
                 assert!(
-                    coverage.data.contains(&0)
-                        && coverage.data.contains(&255)
+                    coverage.data.contains(&255)
                         && coverage.data.iter().any(|v| (1..255).contains(v)),
-                    "{what}: the coverage holds black, white and edges between"
+                    "{what}: the coverage holds white and edges between"
                 );
+                black |= coverage.data.contains(&0);
                 for (foreground, background) in pairs {
                     let colours = ForcedColours {
                         background,
@@ -1706,6 +1715,7 @@ fn forced_colours_are_coverage_over_the_two_colours() {
                     }
                 }
             }
+            assert!(black, "{name} at {scale}x: the coverage holds black");
         }
     }
     println!("forced colours: RAN, {held} renders held to the tint of their coverage");
