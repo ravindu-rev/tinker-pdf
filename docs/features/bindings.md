@@ -638,7 +638,9 @@ the gzipped `.wasm` at 2.5 MiB, with every predefined CMap in; `cmap-predefined`
 off is the switch for a host that renders no CJK. Between releases the
 footprint is local proof: the same `.wasm` is built as the release builds it,
 `wasm-pack build --release --target web --out-dir pkg bindings/js` under the
-release's `RUSTFLAGS=-D warnings`, once per build profile — the default,
+release's `RUSTFLAGS`, `-D warnings` and the flags `cargo xtask remap-paths`
+prints, so the wasm names no path of the machine that built it, once per
+build profile — the default,
 `bundled-fonts`, and `cjk-fonts`, the four CJK fallback faces without the
 Liberation set, each of which the crate forwards to the facade as it
 forwards `cmap-predefined` and the command takes as `-- --features <name>` —
@@ -957,7 +959,13 @@ and verifies them against each other; builds an abi3 wheel per platform
 and installed and rendered in Node, and the NuGet package with its three
 native libraries (linux-x64, win-x64, osx-arm64); runs the browser demo's
 check; and a final job counts the three abi3 wheels, the npm package's
-`.wasm` and the `.nupkg` and fails unless all are there. Then it publishes:
+`.wasm` and the `.nupkg` and fails unless all are there. Each of those builds
+remaps the paths a panic message would carry, the checkout's, cargo's home
+and the toolchain's sources, with the flags `cargo xtask remap-paths` prints
+on the machine that builds it (the wheel's Linux container asks for its own),
+and its job holds the binary to carrying no path of the runner with
+`cargo xtask remap-paths --check`, which reads a wheel entry by entry. Then
+it publishes:
 the crates to crates.io in dependency order by `cargo xtask release --execute
 --only crates`, the wheels to PyPI with `maturin upload --skip-existing`, the
 npm package unless npm already has that version, and the NuGet package with

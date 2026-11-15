@@ -3,9 +3,11 @@
     "Each wasm build profile's gzipped size, held by `cargo xtask footprint",
     "--profile NAME --gzipped BYTES --run REV@HOST --date DAY`. A local run",
     "builds the profile as release.yml's npm job builds the wasm, under the",
-    "job's `RUSTFLAGS` of `-D warnings`: `wasm-pack build --release --target",
-    "web --out-dir pkg bindings/js`, followed by `-- --features bundled-fonts`",
-    "or `-- --features cjk-fonts` for those profiles, counts `gzip -9 -c",
+    "job's `RUSTFLAGS`, `-D warnings` and the `--remap-path-prefix` flags",
+    "`cargo xtask remap-paths` prints, so the wasm names no path of the",
+    "machine: `wasm-pack build --release --target web --out-dir pkg",
+    "bindings/js`, followed by `-- --features bundled-fonts` or `-- --features",
+    "cjk-fonts` for those profiles, counts `gzip -9 -c",
     "bindings/js/pkg/tinker_pdf_js_bg.wasm | wc -c` and passes the number in.",
     "Each feature `bindings/js/Cargo.toml` forwards beside `cmap-predefined`",
     "is a profile of its own name. A size over `figure.bytes` plus",
@@ -25,10 +27,12 @@
     "compiles the revision anew. `cargo xtask check` refuses an entry missing",
     "any of these, or carrying a key nothing reads.",
     "",
-    "The wasm carries the paths of the engine's sources as the build saw them,",
-    "so where a checkout sits can move the size as well. A profile's first",
-    "figure and tolerance are written by hand from its runs; `--record` only",
-    "moves a figure whose tolerance it keeps."
+    "cargo still hashes the absolute path of each engine crate, a path",
+    "dependency outside `bindings/js`'s workspace, into the names of its",
+    "symbols, and their order lays the wasm out, so where a checkout sits can",
+    "still move the size. A profile's first figure and tolerance are written",
+    "by hand from its runs; `--record` only moves a figure whose tolerance it",
+    "keeps."
   ],
   "profiles": {
     "bundled-fonts": {

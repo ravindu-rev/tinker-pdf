@@ -53,7 +53,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::version;
+use crate::{remap, version};
 
 /// A stage of the release, in the order plan 13 gives them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -863,6 +863,26 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         .map(|(name, _)| name)
         .collect();
 
+    // Every command a step runs builds with the paths it would write into an
+    // artefact remapped (`remap`), beside whatever flags this run was given:
+    // the wheel, the wasm and the C ABI it builds are the ones it ships.
+    let rustflags = if options.plan_only {
+        None
+    } else {
+        let flags: Vec<String> = remap::for_this_machine(root)?
+            .iter()
+            .map(remap::Remap::flag)
+            .collect();
+        let encoded = std::env::var("CARGO_ENCODED_RUSTFLAGS").ok();
+        let plain = std::env::var("RUSTFLAGS").ok();
+        let (name, value) = remap::joined(encoded.as_deref(), plain.as_deref(), &flags);
+        println!(
+            "release: every build remaps its paths: {name}={}",
+            value.replace('\x1f', " ")
+        );
+        Some((name, value))
+    };
+
     // Before anything is uploaded, and printed even in a dry run, because the
     // file set is the half of packaging that a dry run of a multi-crate
     // release can still check for every crate rather than only for the leaves.
@@ -923,7 +943,14 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             continue;
         }
         println!("release:   running: {}", command.join(" "));
-        match invoke(root, &step.cwd, &command, options.execute, &released) {
+        match invoke(
+            root,
+            &step.cwd,
+            &command,
+            options.execute,
+            &released,
+            rustflags.as_ref(),
+        ) {
             Outcome::Ok => {
                 println!("release:   ok");
                 ran += 1;
@@ -985,6 +1012,7 @@ fn invoke(
     command: &[String],
     execute: bool,
     released: &[String],
+    rustflags: Option<&(&str, String)>,
 ) -> Outcome {
     let Some((program, args)) = command.split_first() else {
         return Outcome::Failed("empty command".into());
@@ -997,11 +1025,12 @@ fn invoke(
     // and nothing else, so the first end-to-end dry run halted at step 15 of
     // 20 with "program not found" for a program that was plainly on PATH.
     for candidate in program_candidates(program) {
-        match Command::new(&candidate)
-            .args(args)
-            .current_dir(&directory)
-            .output()
-        {
+        let mut spawned = Command::new(&candidate);
+        spawned.args(args).current_dir(&directory);
+        if let Some((name, value)) = rustflags {
+            spawned.env(name, value);
+        }
+        match spawned.output() {
             Ok(got) => {
                 output = Some(got);
                 break;

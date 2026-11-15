@@ -36,7 +36,7 @@ recorded in the roadmap row it closes:
 | Instruction counts, on Linux | `cargo xtask bench-count --group NAME`, a group or a part of one at a time, with valgrind installed |
 | Peak memory, on Linux | `cargo test --release -p tinker-pdf --test peak_memory -- --ignored`, in both builds |
 | The bindings | each surface built, then `cargo xtask bindings-parity --require-all` |
-| The wasm footprint | each profile built as `release.yml`'s npm job builds it, `RUSTFLAGS='-D warnings' wasm-pack build --release --target web --out-dir pkg bindings/js`, with `-- --features bundled-fonts` or `-- --features cjk-fonts` for those profiles, then `cargo xtask footprint --profile NAME --gzipped BYTES --run REV@HOST --date DAY`, the bytes `gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm \| wc -c` |
+| The wasm footprint | each profile built as `release.yml`'s npm job builds it, with the paths the build would write into the wasm remapped, `RUSTFLAGS="-D warnings $(cargo xtask remap-paths)" wasm-pack build --release --target web --out-dir pkg bindings/js`, with `-- --features bundled-fonts` or `-- --features cjk-fonts` for those profiles, then `cargo xtask footprint --profile NAME --gzipped BYTES --run REV@HOST --date DAY`, the bytes `gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm \| wc -c` |
 | Licences | `cargo deny check` |
 | The oracle suites — the EPUB corpus, the VP8 vectors, the CommonMark spec, PngSuite | their fetch scripts, then their tests |
 
@@ -1111,6 +1111,12 @@ against the live index, so each crate is verified instead against the unpacked
 `.crate` archives of the crates before it, which are the same bytes its
 dependents would download.
 
+Every build that ships remaps the paths a panic message would carry — the
+checkout's, cargo's home and the toolchain's sources — with the
+`--remap-path-prefix` flags `cargo xtask remap-paths` prints for the machine
+it runs on, and its job holds the binary to carrying none of that machine's
+paths with `cargo xtask remap-paths --check`, a wheel read entry by entry.
+
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in `crates/tinker-pdf/tests/bounds_ledger.rs`,
@@ -1172,7 +1178,8 @@ so the caps are properties of inputs, not of machines.
   `versions`, `names` (the roadmap names no engine, viewer, validator or
   document tool), `tables` (the codec and raster crates build every table
   they derive at first use), `check`, `corpus-fetch` / `corpus-run` /
-  `corpus-licences`, `release`, `nuget-stage`.
+  `corpus-licences`, `release`, `nuget-stage`, `remap-paths` (the flags that
+  remap a release build's paths, and `--check` over what it built).
 
 `cargo xtask tables` holds every crate under `crates/` to building every
 lookup table it derives from a defining list or a formula at first use, in a

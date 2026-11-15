@@ -268,7 +268,8 @@ request in one of the five collections with it, so no linker drops it.
   tinker-pdf-font --no-verify --allow-dirty` writes under `target/package/`,
   against `CRATES_IO_CEILING`.
 - The CJK profile's wasm, built as `release.yml` builds the default one,
-  `wasm-pack build --release --target web --out-dir pkg bindings/js`, with the
+  `wasm-pack build --release --target web --out-dir pkg bindings/js` with its
+  paths remapped (`docs/verification.md`'s footprint command), with the
   feature forwarded, and gzipped as it gzips it, `gzip -9 -c
   bindings/js/pkg/tinker_pdf_js_bg.wasm`, against the default profile's.
 

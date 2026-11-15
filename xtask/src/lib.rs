@@ -30,6 +30,7 @@ pub mod passwords;
 pub mod peaks;
 pub mod ratchet;
 pub mod release;
+pub mod remap;
 pub mod report;
 pub mod runner;
 pub mod split;

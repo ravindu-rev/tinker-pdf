@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use xtask::version::{internal_dependencies, package_name};
 use xtask::{
     bench, corpus, count, coverage, determinism, diff, fetch, footprint, fuzzaudit, fuzzservice,
-    names, parity, peaks, release, repo_root, split, version, written,
+    names, parity, peaks, release, remap, repo_root, split, version, written,
 };
 
 const USAGE: &str = "\
@@ -81,6 +81,17 @@ release options:
 
   cargo xtask nuget-stage        copy this machine's tinker-pdf-ffi cdylib into
                                  bindings/dotnet/runtimes/<rid>/native/
+
+  cargo xtask remap-paths        print the `--remap-path-prefix` flags a
+                                 release build adds to its RUSTFLAGS, so the
+                                 artefact names no machine: the checkout's
+                                 root, cargo's home and the toolchain's
+                                 sources, from this machine's `rustc`
+  cargo xtask remap-paths --check FILE...
+                                 fail if an artefact carries the checkout, the
+                                 user's or cargo's home or the toolchain, with
+                                 either separator; a ZIP (a wheel) is read
+                                 entry by entry
 
   cargo xtask bindings-parity [options]
                   run the thirteen parity scripts -- nine that write a
@@ -345,6 +356,10 @@ fn main() -> ExitCode {
             )
         }
         "release" => one("release", release::run(&repo_root(), rest)),
+        // The flags are read by a shell into RUSTFLAGS, so nothing follows
+        // them on standard output.
+        "remap-paths" if rest.is_empty() => quiet("remap-paths", remap::print(&repo_root())),
+        "remap-paths" => one("remap-paths", remap::run(&repo_root(), rest)),
         "nuget-stage" => one(
             "nuget-stage",
             release::stage_native_library(&repo_root()).map(|what| {
@@ -1321,6 +1336,12 @@ const SPAWNERS: &[(&str, &str)] = &[
     (
         "xtask/src/fuzzaudit.rs",
         "PERMANENT: `cargo check` over `fuzz/`, which is its own workspace and          so is stepped past by every `--workspace` command. Build machinery,          which reads no document and adjudicates none",
+    ),
+    (
+        "xtask/src/remap.rs",
+        "PERMANENT: asks `rustc` for its sysroot and commit, which name the \
+         toolchain's sources in a release build's remapping. Build machinery, \
+         which reads no document",
     ),
     (
         "xtask/src/release.rs",

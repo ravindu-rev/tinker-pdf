@@ -29,7 +29,13 @@
 # So every artefact job ends by asserting the artefact is there and is the
 # right shape -- an abi3 tag in the wheel's filename, a `.wasm` in the npm
 # tarball, a `runtimes/<rid>/native/` entry in the `.nupkg` -- and a final job
-# collects all four and fails unless it can count them. `if-no-files-found:
+# collects all four and fails unless it can count them.
+#
+# Every build that ships remaps the paths it would write into the binary --
+# the checkout's, cargo's home and the toolchain's, which a panic message
+# names -- with the flags `cargo xtask remap-paths` prints for the machine it
+# runs on, and the job asserts the binary carries none of that machine's
+# paths (`cargo xtask remap-paths --check`), so an artefact names no runner. `if-no-files-found:
 # error` on every upload, because the default is `warn`, which is a green tick.
 name: Release
 
@@ -161,6 +167,19 @@ jobs:
           # wheel built by 3.12 must install on 3.9, and building with 3.9
           # would let a wheel that is secretly version-specific pass.
           python-version: '3.12'
+      # The paths the build would write into the extension module, remapped
+      # (`cargo xtask remap-paths`). On Windows and macOS maturin builds on the
+      # runner, and takes the runner's flags from here. On Linux it builds in a
+      # manylinux container whose cargo and toolchain sit under the
+      # container's own home, so the container asks for its own flags before
+      # it builds, building xtask outside the checkout it shares with the
+      # runner so that no root-owned target directory is left behind in it.
+      - name: Remap the build's paths
+        if: matrix.manylinux == 'off'
+        shell: bash
+        run: |
+          remap=$(cargo run -q -p xtask -- remap-paths)
+          echo "RUSTFLAGS=$RUSTFLAGS $remap" >> "$GITHUB_ENV"
       - name: Build an abi3 wheel
         uses: PyO3/maturin-action@v1
         with:
@@ -168,6 +187,9 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --manifest-path bindings/python/Cargo.toml --out dist
+          before-script-linux: |
+            remap=$(CARGO_TARGET_DIR=/tmp/xtask cargo run -q -p xtask -- remap-paths)
+            export RUSTFLAGS="$RUSTFLAGS $remap"
       # The whole point of the milestone, asserted rather than assumed. Without
       # this the job passes on a per-interpreter wheel, which is what the gap
       # plan says is wrong with the status quo.
@@ -186,6 +208,12 @@ jobs:
             *-abi3-*) echo "abi3 wheel: $name" ;;
             *) echo "::error::$name is not an abi3 wheel, so it covers one interpreter"; exit 1 ;;
           esac
+      # Read entry by entry, since the module inside is deflated. On Linux the
+      # container's own home is not the runner's and this cannot name it; the
+      # checkout, which the container shares, it can.
+      - name: The wheel carries no path of this machine
+        shell: bash
+        run: cargo run -q -p xtask -- remap-paths --check dist/*.whl
       - name: A face to draw with
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
@@ -240,7 +268,12 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - uses: jetli/wasm-pack-action@v0.4.0
-      - run: wasm-pack build --release --target web --out-dir pkg bindings/js
+      - name: Build the wasm package, its paths remapped
+        run: |
+          remap=$(cargo run -q -p xtask -- remap-paths)
+          RUSTFLAGS="$RUSTFLAGS $remap" wasm-pack build --release --target web --out-dir pkg bindings/js
+      - name: The wasm carries no path of this machine
+        run: cargo run -q -p xtask -- remap-paths --check bindings/js/pkg/tinker_pdf_js_bg.wasm
       # Plan 13's budget, and it is a gate rather than a report: the whole
       # argument for externalising the substitute font programs was that a
       # browser should not pay for what it does not use.
@@ -308,7 +341,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p tinker-pdf-ffi
+      - name: Build the C ABI library, its paths remapped
+        shell: bash
+        run: |
+          remap=$(cargo run -q -p xtask -- remap-paths)
+          RUSTFLAGS="$RUSTFLAGS $remap" cargo build --release -p tinker-pdf-ffi
       # `cargo xtask nuget-stage` reads this machine's OS and architecture and
       # puts the library where NuGet expects it. Doing it in xtask rather than
       # in three `cp` lines here is what makes the RID mapping testable, and
@@ -322,6 +359,9 @@ jobs:
           test -n "$(ls bindings/dotnet/runtimes/${{ matrix.rid }}/native/)" \
             || { echo "::error::nothing under runtimes/${{ matrix.rid }}/native/"; exit 1; }
           ls -l bindings/dotnet/runtimes/${{ matrix.rid }}/native/
+      - name: The library carries no path of this machine
+        shell: bash
+        run: cargo run -q -p xtask -- remap-paths --check bindings/dotnet/runtimes/${{ matrix.rid }}/native/*
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.rid }}
@@ -408,7 +448,11 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - uses: jetli/wasm-pack-action@v0.4.0
-      - run: wasm-pack build --release --target web --out-dir pkg bindings/js
+      # The npm job's build, so the page renders through the wasm that ships.
+      - name: Build the wasm package, its paths remapped
+        run: |
+          remap=$(cargo run -q -p xtask -- remap-paths)
+          RUSTFLAGS="$RUSTFLAGS $remap" wasm-pack build --release --target web --out-dir pkg bindings/js
       - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
       - name: Render an uploaded PDF in a real browser
         working-directory: bindings/js/demo
