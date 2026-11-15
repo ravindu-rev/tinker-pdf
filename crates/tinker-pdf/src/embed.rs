@@ -236,9 +236,10 @@ pub enum LeftReason {
     /// A form field's `/DA` may draw it at any character it is ever given
     /// (12.7.3.3), which a cut face cannot.
     FieldResource,
-    /// A Type 3 font's own `/Resources` names it, and the interpreter runs a
-    /// glyph procedure in the enclosing scope, so the codes shown through it
-    /// are credited to another font (9.6.5).
+    /// A Type 3 font's own `/Resources` names it, and the walk that counts
+    /// the codes shown runs a glyph procedure in the enclosing scope, where a
+    /// reader that does not read those resources runs it, so the codes shown
+    /// through it are credited to another font (9.6.5, Table 121).
     Type3Resource,
     /// More distinct codes were shown through it than the pass holds
     /// (`subset::MAX_DRAWN_CODES`).

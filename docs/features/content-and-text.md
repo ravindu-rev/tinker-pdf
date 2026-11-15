@@ -136,7 +136,14 @@ it has none (8.10.1), which `FontSource::mask_scope` answers by `/G`'s
 stream as `form_scope` answers a form's by name. A
 Type 3 glyph is a content stream, not an outline, so it is run the way a
 form is, with `/FontMatrix` inside the placing transform and the advance
-scaled by it (9.6.5). Once its procedure has run — or been passed over for
+scaled by it (9.6.5), in its font's own `/Resources`, whole, or the scope
+that shows it where the font has none (Table 121):
+`FontSource::type3_scope` answers by the font dictionary's reference
+(`Type3Glyph::font`), and `Device::begin_type3_glyph` and
+`end_type3_glyph` bracket a procedure that runs there, so a device that
+resolves names itself changes scope with it. A font written directly into a
+resource dictionary has no reference, and its procedures run in the showing
+scope. Once its procedure has run — or been passed over for
 depth, a cycle or a budget, which are a drawing's limits and not the text's —
 the glyph itself is reported to `Device::show_type3_glyph`, with its code, its
 text, the transform `show_glyph` would have placed it with and the advance

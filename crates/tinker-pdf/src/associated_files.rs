@@ -352,6 +352,20 @@ impl Device for MarkedFiles<'_> {
             self.scope = outer;
         }
     }
+
+    // Table 121: a Type 3 glyph's procedure names what its font's own
+    // `/Resources` hold, where it has them.
+    fn begin_type3_glyph(&mut self, font: u64) {
+        let nested = FontSource::type3_scope(&*self.scope, font);
+        self.outer
+            .push(nested.map(|scope| std::mem::replace(&mut self.scope, scope)));
+    }
+
+    fn end_type3_glyph(&mut self) {
+        if let Some(Some(outer)) = self.outer.pop() {
+            self.scope = outer;
+        }
+    }
 }
 
 /// The file specifications among `entries`, each charged to `copies` for its

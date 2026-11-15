@@ -278,6 +278,8 @@ public final class CommandStream implements AutoCloseable {
                 case PATTERN -> device.pattern(record);
                 case CELL -> device.cell(record);
                 case DEPTH_REFUSED -> device.depthRefused(record);
+                case BEGIN_TYPE3_GLYPH -> device.beginType3Glyph(record);
+                case END_TYPE3_GLYPH -> device.endType3Glyph(record);
             }
         }
     }
@@ -419,6 +421,10 @@ public final class CommandStream implements AutoCloseable {
         default void cell(CommandRecord record) {}
 
         default void depthRefused(CommandRecord record) {}
+
+        default void beginType3Glyph(CommandRecord record) {}
+
+        default void endType3Glyph(CommandRecord record) {}
 
         default void unknown(CommandRecord record) {}
     }

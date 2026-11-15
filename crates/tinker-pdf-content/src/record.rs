@@ -318,6 +318,14 @@ pub enum Event {
         /// The same identity [`Event::BeginForm`] carried.
         id: u64,
     },
+    /// A Type 3 glyph's procedure began running in its font's own
+    /// `/Resources` ([`Device::begin_type3_glyph`], Table 121).
+    BeginType3Glyph {
+        /// The font dictionary's identity, [`crate::Type3Glyph::font`].
+        font: u64,
+    },
+    /// The procedure [`Event::BeginType3Glyph`] began has run.
+    EndType3Glyph,
     /// A transparency group was offered (11.6.6).
     BeginGroup {
         /// The group's own attributes.
@@ -396,6 +404,10 @@ pub enum EventKind {
     BeginForm,
     /// [`Event::EndForm`].
     EndForm,
+    /// [`Event::BeginType3Glyph`].
+    BeginType3Glyph,
+    /// [`Event::EndType3Glyph`].
+    EndType3Glyph,
     /// [`Event::BeginGroup`].
     BeginGroup,
     /// [`Event::EndGroup`].
@@ -435,6 +447,8 @@ impl Event {
             Event::EndMarkedContent => EventKind::EndMarkedContent,
             Event::BeginForm { .. } => EventKind::BeginForm,
             Event::EndForm { .. } => EventKind::EndForm,
+            Event::BeginType3Glyph { .. } => EventKind::BeginType3Glyph,
+            Event::EndType3Glyph => EventKind::EndType3Glyph,
             Event::BeginGroup { .. } => EventKind::BeginGroup,
             Event::EndGroup => EventKind::EndGroup,
             Event::BeginSoftMask { .. } => EventKind::BeginSoftMask,
@@ -934,6 +948,18 @@ impl Device for RecordingDevice {
     fn end_form(&mut self, id: u64) {
         if self.capture.structure {
             self.events.push(Event::EndForm { id });
+        }
+    }
+
+    fn begin_type3_glyph(&mut self, font: u64) {
+        if self.capture.structure {
+            self.events.push(Event::BeginType3Glyph { font });
+        }
+    }
+
+    fn end_type3_glyph(&mut self) {
+        if self.capture.structure {
+            self.events.push(Event::EndType3Glyph);
         }
     }
 

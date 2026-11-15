@@ -407,6 +407,7 @@ func everyKindPage(serif, profile []byte) []byte {
 		"q /Lab0 cs 50 10 10 sc 90 20 10 10 re f Q\n" +
 		"BT /F0 12 Tf 10 120 Td (Glyphs) Tj ET\n" +
 		"BT /Nope 12 Tf 10 140 Td (x) Tj ET\n" +
+		"BT /T3R 12 Tf 60 140 Td (A) Tj ET\n" +
 		"q 20 0 0 20 120 20 cm /Im0 Do Q\n" +
 		"q 10 0 0 10 150 20 cm BI /W 2 /H 2 /CS /G /BPC 8 ID ")
 	content = append(content, 0x00, 0x55, 0xAA, 0xFF)
@@ -422,7 +423,7 @@ func everyKindPage(serif, profile []byte) []byte {
 		[]byte("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
 		[]byte("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 160] /Resources 4 0 R " +
 			"/Contents 5 0 R /Annots [17 0 R] >>"),
-		[]byte("<< /Font << /F0 6 0 R >> " +
+		[]byte("<< /Font << /F0 6 0 R /T3R 19 0 R >> " +
 			"/XObject << /Im0 9 0 R /G 10 0 R /Fm0 11 0 R /Rec 12 0 R >> " +
 			"/Shading << /Sh0 13 0 R >> /Pattern << /P0 15 0 R >> " +
 			"/ColorSpace << " +
@@ -463,6 +464,11 @@ func everyKindPage(serif, profile []byte) []byte {
 			"/Group << /S /Transparency /CS /DeviceGray >>", []byte("0.5 g 0 0 200 160 re f")),
 		[]byte("<< /Type /Annot /Subtype /Square /Rect [150 120 190 150] /AP << /N 18 0 R >> >>"),
 		streamObject("/Type /XObject /Subtype /Form /BBox [0 0 40 30]", []byte("0 0 1 RG 2 w 1 1 38 28 re S")),
+		[]byte("<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] " +
+			"/FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 20 0 R >> " +
+			"/Encoding << /Type /Encoding /Differences [65 /a] >> /FirstChar 65 " +
+			"/LastChar 65 /Widths [1000] /Resources << /ExtGState << /H << /ca 0.5 >> >> >> >>"),
+		streamObject("", []byte("1000 0 d0 /H gs 0 0 800 800 re f")),
 	})
 }
 
@@ -897,6 +903,12 @@ func (r *recorder) Pattern(c tp.CommandRecord) error { return r.note(tp.CommandP
 func (r *recorder) Cell(c tp.CommandRecord) error    { return r.note(tp.CommandCell, c) }
 func (r *recorder) DepthRefused(c tp.CommandRecord) error {
 	return r.note(tp.CommandDepthRefused, c)
+}
+func (r *recorder) BeginType3Glyph(c tp.CommandRecord) error {
+	return r.note(tp.CommandBeginType3Glyph, c)
+}
+func (r *recorder) EndType3Glyph(c tp.CommandRecord) error {
+	return r.note(tp.CommandEndType3Glyph, c)
 }
 func (r *recorder) Unknown(c tp.CommandRecord) error {
 	return fmt.Errorf("a record of kind %d, which this build does not know", c.Number)

@@ -344,6 +344,27 @@ pub trait Device {
         let _ = id;
     }
 
+    /// A Type 3 glyph's procedure is about to run in its font's own
+    /// `/Resources` (9.6.5, Table 121): `font` is the font dictionary's
+    /// identity, [`crate::Type3Glyph::font`], which
+    /// [`crate::FontSource::type3_scope`] answered with a scope.
+    ///
+    /// Table 121 makes the font's `/Resources` the dictionary the
+    /// procedure's names resolve in, and the scope that shows the glyph only
+    /// where the font has none, so a device that resolves names of its own —
+    /// a renderer's images, patterns, shadings and fonts — changes scope
+    /// here, as at a form, and changes back at [`Device::end_type3_glyph`].
+    /// Said only for a procedure that runs in its font's resources: one
+    /// whose font brings none runs in the showing scope, and nothing is said.
+    /// The procedure's paints arrive between the two calls, and every call
+    /// here has its end.
+    fn begin_type3_glyph(&mut self, font: u64) {
+        let _ = font;
+    }
+
+    /// The procedure [`Device::begin_type3_glyph`] began has run.
+    fn end_type3_glyph(&mut self) {}
+
     /// A transparency group is about to be interpreted (11.6.6).
     ///
     /// `state` is the one in force at the `Do`, because that is where the

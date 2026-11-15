@@ -25,8 +25,10 @@ use crate::stats::{self, Work};
 #[derive(Default)]
 struct ScopeAnswers {
     children: HashMap<Vec<u8>, u64>,
-    /// The scopes of the mask groups this scope sets, by the group's stream.
-    masks: HashMap<u64, u64>,
+    /// The scopes of the objects' own resources this scope reaches — the
+    /// mask groups it sets, the Type 3 fonts it shows — by the object's
+    /// identity.
+    owned: HashMap<u64, u64>,
     outlines: HashMap<(u64, u32), usize>,
     identities: HashMap<u64, usize>,
     images: HashMap<(Vec<u8>, u64), usize>,
@@ -78,8 +80,8 @@ impl Replayable {
             let id = index as u64 + 1;
             if let Some(name) = &entry.name {
                 scopes[parent].children.entry(name.clone()).or_insert(id);
-            } else if let Some(stream) = entry.mask {
-                scopes[parent].masks.entry(stream).or_insert(id);
+            } else if let Some(object) = entry.own {
+                scopes[parent].owned.entry(object).or_insert(id);
             }
         }
         for (index, entry) in tables.outlines.iter().enumerate() {
@@ -288,8 +290,9 @@ impl StreamScope {
     }
 
     /// Another scope of the same stream, with nothing noted: what a form's
-    /// scope, a mask group's and an appearance's are each time a render
-    /// enters one, as a page's resources bind a kept scope afresh.
+    /// scope, a mask group's, a Type 3 font's and an appearance's are each
+    /// time a render enters one, as a page's resources bind a kept scope
+    /// afresh.
     pub(crate) fn scoped(&self, scope: u64) -> StreamScope {
         StreamScope {
             stream: Arc::clone(&self.stream),
@@ -446,7 +449,12 @@ impl GlyphSource for StreamScope {
     }
 
     fn mask_scope(&self, stream: u64) -> Option<Arc<StreamScope>> {
-        let child = *self.answers()?.masks.get(&stream)?;
+        let child = *self.answers()?.owned.get(&stream)?;
+        Some(Arc::new(self.scoped(child)))
+    }
+
+    fn type3_scope(&self, font: u64) -> Option<Arc<StreamScope>> {
+        let child = *self.answers()?.owned.get(&font)?;
         Some(Arc::new(self.scoped(child)))
     }
 }

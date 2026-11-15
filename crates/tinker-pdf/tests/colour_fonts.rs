@@ -416,18 +416,17 @@ fn the_written_colour_font_is_structurally_clean() {
         );
     }
     assert_eq!(font.forms.len(), 3);
-    // Each form is named document-wide, the face's name and the glyph's, and
-    // the page names it as the font does: 9.6.5 has a reader look for a
-    // procedure's names in its font's `/Resources`, and this engine runs a
-    // procedure in the scope that shows the text.
+    // Each form is named document-wide, the face's name and the glyph's, in
+    // its font's `/Resources`, where Table 121 (9.6.5) has a reader, this
+    // engine among them, look for a procedure's names; the page that shows
+    // the text names none of them.
     let page = &tinker_pdf_cos::pages::collect(&cos)[0];
     let page = cos.get(page.reference).expect("the page resolves");
     let page_resources = entry(&cos, page.as_dict().expect("a page"), b"Resources");
     let page_xobjects = page_resources
         .as_dict()
         .map(|resources| entry(&cos, resources, b"XObject"))
-        .and_then(|xobjects| xobjects.as_dict().cloned())
-        .expect("the page names XObjects");
+        .and_then(|xobjects| xobjects.as_dict().cloned());
     let font_dict = cos.get(fonts[0].1).expect("the font resolves");
     let font_resources = entry(&cos, font_dict.as_dict().expect("a font"), b"Resources");
     let font_xobjects = font_resources
@@ -437,11 +436,16 @@ fn the_written_colour_font_is_structurally_clean() {
         .expect("the font names its forms");
     for id in 1..=3 {
         let key = cos.intern(format!("C0.g{id}").as_bytes());
-        let in_font = font_xobjects.get_ref(key).expect("the font names the form");
-        assert_eq!(
-            page_xobjects.get_ref(key),
-            Some(in_font),
-            "the page names glyph {id}'s form as its font does"
+        assert!(
+            font_xobjects.get_ref(key).is_some(),
+            "the font names glyph {id}'s form"
+        );
+        assert!(
+            page_xobjects
+                .as_ref()
+                .and_then(|xobjects| xobjects.get_ref(key))
+                .is_none(),
+            "the page leaves glyph {id}'s form to its font"
         );
     }
     for (glyph, form) in &font.forms {

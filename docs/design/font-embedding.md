@@ -149,7 +149,7 @@ Left, and named, before the provider is asked:
 | --- | --- |
 | One written directly into a resource dictionary | there is no object for a rewrite to address (`NotAnObject`) |
 | One the AcroForm `/DR` names | a field's next value may draw any character, and a cut face cannot (`FieldResource`, 12.7.3.3) |
-| One a Type 3 font's own `/Resources` names | the interpreter runs a procedure in the enclosing scope, so the codes are credited to another font (`Type3Resource`, 9.6.5) |
+| One a Type 3 font's own `/Resources` names | the walk that counts the codes runs a procedure in the enclosing scope, where a reader that does not read those resources runs it, so the codes are credited to another font (`Type3Resource`, 9.6.5, Table 121) |
 | One shown more than 65 536 distinct codes | the pass holds every code it checks (`TooManyCodes`) |
 
 ### What the provider answers

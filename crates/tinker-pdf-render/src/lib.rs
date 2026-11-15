@@ -1003,6 +1003,20 @@ pub trait GlyphSource {
         None
     }
 
+    /// The resources a Type 3 font brings for its glyph procedures, if it
+    /// has its own (9.6.5, Table 121): the device's half of
+    /// `FontSource::type3_scope`, asked about the same font, by its
+    /// dictionary's identity, when the interpreter says a procedure runs
+    /// there (`Device::begin_type3_glyph`), so the two scopes stay in step
+    /// as [`GlyphSource::form_scope`]'s do. `None` keeps the showing scope.
+    fn type3_scope(&self, font: u64) -> Option<Arc<Self>>
+    where
+        Self: Sized,
+    {
+        let _ = font;
+        None
+    }
+
     /// What font `font_id` selects in this scope, for the render's glyph-mask
     /// cache (`docs/design/performance.md`, P-06). The id is the name the
     /// scope's content selects the font by, and a form's scope may bind the
@@ -1762,6 +1776,10 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// `None` for a form that brought no `/Resources` of its own, which is the
     /// common case and costs one `Option` rather than a clone of the page's.
     form_scopes: Vec<Option<(Scope<'g, G>, u64)>>,
+    /// The resource scope each Type 3 glyph procedure running in its font's
+    /// own `/Resources` displaced, innermost last, with the serial it held
+    /// (Table 121); `None` where the source answered none for the font.
+    type3_scopes: Vec<Option<(Scope<'g, G>, u64)>>,
     /// The serial of the scope `glyphs` is: 0 for the one the renderer was
     /// made with, and the next number at each scope a form brings or a caller
     /// pushes. A font written into a scope's dictionary keys its glyph masks
@@ -2206,6 +2224,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             run: None,
             pushed_scopes: Vec::new(),
             form_scopes: Vec::new(),
+            type3_scopes: Vec::new(),
             scope: 0,
             scopes: 0,
             glyph_cache: glyph_cache::GlyphCache::new(),
@@ -7045,6 +7064,26 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
     }
 
+    fn begin_type3_glyph(&mut self, font: u64) {
+        // Table 121: the procedure's names are its font's own `/Resources`.
+        // The interpreter asked its own seam the same question about the
+        // same font, so the two scopes open and close together; the state
+        // the procedure runs under is the `q` and `Q` it is drawn inside.
+        let nested = self.glyphs.type3_scope(font);
+        let displaced = nested.map(|scope| {
+            let outer = mem::replace(&mut self.glyphs, Scope::Owned(scope));
+            (outer, self.next_scope())
+        });
+        self.type3_scopes.push(displaced);
+    }
+
+    fn end_type3_glyph(&mut self) {
+        if let Some(Some((outer, serial))) = self.type3_scopes.pop() {
+            self.glyphs = outer;
+            self.scope = serial;
+        }
+    }
+
     fn begin_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
@@ -7241,6 +7280,8 @@ pub fn ends_image_run(kind: EventKind) -> bool {
         | EventKind::EndMarkedContent
         | EventKind::BeginForm
         | EventKind::EndForm
+        | EventKind::BeginType3Glyph
+        | EventKind::EndType3Glyph
         | EventKind::GroupBudgetSpent
         | EventKind::RecursionRefused
         | EventKind::NestedBudgetSpent
@@ -9504,7 +9545,7 @@ mod tests {
     }
 
     /// Every kind of recorded call, so a test of each holds them all.
-    const EVERY_KIND: [EventKind; 23] = [
+    const EVERY_KIND: [EventKind; 25] = [
         EventKind::BeginText,
         EventKind::ShowGlyph,
         EventKind::EndText,
@@ -9519,6 +9560,8 @@ mod tests {
         EventKind::EndMarkedContent,
         EventKind::BeginForm,
         EventKind::EndForm,
+        EventKind::BeginType3Glyph,
+        EventKind::EndType3Glyph,
         EventKind::BeginGroup,
         EventKind::EndGroup,
         EventKind::BeginSoftMask,
@@ -9653,6 +9696,7 @@ mod tests {
             },
             EventKind::BeginMarkedContent => marked(),
             EventKind::BeginForm => form(),
+            EventKind::BeginType3Glyph => Event::BeginType3Glyph { font: 7 << 16 },
             EventKind::BeginGroup => group(),
             EventKind::BeginSoftMask => mask(),
             EventKind::ClearSoftMask => Event::ClearSoftMask,
@@ -9666,6 +9710,13 @@ mod tests {
                 return vec![marked(), image_draw(10.0), Event::EndMarkedContent]
             }
             EventKind::EndForm => return vec![form(), image_draw(10.0), Event::EndForm { id: 1 }],
+            EventKind::EndType3Glyph => {
+                return vec![
+                    Event::BeginType3Glyph { font: 7 << 16 },
+                    image_draw(10.0),
+                    Event::EndType3Glyph,
+                ]
+            }
             EventKind::EndGroup => return vec![group(), image_draw(10.0), Event::EndGroup],
             EventKind::EndSoftMask => return vec![mask(), image_draw(10.0), Event::EndSoftMask],
         };

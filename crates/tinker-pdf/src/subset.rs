@@ -59,13 +59,15 @@
 //! - **A font any of whose shown codes resolved only by 9.6.6.4's closing
 //!   guess** — read the code as the glyph index. See
 //!   [`crate::resources::Selection`], which carries the argument.
-//! - **A font named in a Type 3 font's own `/Resources`**. 9.6.5 lets a Type 3
-//!   font carry resources for its procedures; this engine's interpreter runs a
-//!   procedure in the *enclosing* scope instead, so a `/F1` inside a procedure
-//!   is attributed to the enclosing `/F1` and the Type 3 font's own `/F1` is
-//!   credited with nothing. The enclosing font merely gains glyphs it does not
-//!   need, which is safe; the Type 3 font's own would lose every glyph it
-//!   does, which is not. See [`UntouchedReason::Type3Resource`].
+//! - **A font named in a Type 3 font's own `/Resources`**. Table 121 (9.6.5)
+//!   runs a procedure in its font's resources, as this engine does, and a
+//!   reader that does not read them runs it in the *enclosing* scope. This
+//!   walk runs it in the enclosing scope, so a `/F1` inside a procedure is
+//!   credited to the enclosing `/F1`, which merely gains glyphs it may not
+//!   need, and walks it again in the font's resources for what it draws
+//!   through them; the Type 3 font's own `/F1` is left whole rather than
+//!   cut to what that second walk shows. See
+//!   [`UntouchedReason::Type3Resource`].
 //!
 //! # When subsetting cannot be done
 //!
@@ -318,9 +320,11 @@ pub enum UntouchedReason {
     /// from a scope this pass never opened. Every font, when the editor's
     /// state could not be viewed as a document to walk ([`apply`]).
     ScopeNotWalked,
-    /// A Type 3 font's own `/Resources` names this font (9.6.5), and this
-    /// engine's interpreter runs a glyph procedure in the enclosing scope, so
-    /// glyphs shown through it would be credited to the wrong font.
+    /// A Type 3 font's own `/Resources` names this font (9.6.5, Table 121):
+    /// a procedure is run in its font's resources by this engine and in the
+    /// enclosing scope by a reader that does not read them, and the walk
+    /// credits the enclosing scope's fonts with what it shows, so this one is
+    /// left whole.
     Type3Resource,
     /// The font is written directly into a resource dictionary rather than by
     /// reference, so there is no object for a rewrite to address.
@@ -999,12 +1003,17 @@ fn walk_one(
     }
 }
 
-/// Content a stream draws that the interpreter does not run, found as it
-/// runs ([`Recorded`]) and walked after it ([`walk`]).
+/// Content a stream draws that the interpreter does not run, or runs where
+/// this engine does not, found as it runs ([`Recorded`]) and walked after it
+/// ([`walk`]).
 ///
-/// Two kinds. A **tiling pattern's cell** (8.7.3.2) is painted by the
-/// renderer itself, at every tile of what the pattern fills, from the
-/// pattern's own `/Resources` or the scope that painted. A **soft mask's
+/// Three kinds. A **Type 3 glyph's procedure** whose font brings
+/// `/Resources` of its own is run by this walk in the scope that shows it
+/// ([`Recorded::type3_scope`]), and walked again in its font's resources,
+/// where this engine runs it (Table 121). A **tiling pattern's cell**
+/// (8.7.3.2) is painted by the renderer itself, at every tile of what the
+/// pattern fills, from the pattern's own `/Resources` or the scope that
+/// painted. A **soft mask's
 /// group** (11.6.5.2) is offered to the device, and this walk's device keeps
 /// no pixels to make a mask of, so it declines; this engine's interpreter
 /// runs an accepted group as it runs a form, in its own `/Resources` where it
@@ -1109,9 +1118,11 @@ fn note_scope(usage: &mut Usage, doc: &CosDocument, scope: &PageResources) {
     for font in scope.font_objects() {
         usage.seen.insert(font);
         // 9.6.5: a Type 3 font may carry its own `/Resources`, which this
-        // engine's interpreter does not enter a glyph procedure under. The
-        // fonts in it would be credited with nothing while the enclosing
-        // scope's fonts of the same name were credited with their glyphs.
+        // walk does not run a glyph procedure under but where a procedure's
+        // second walk shows its text ([`Recorded::type3_scope`]). The fonts
+        // there are left whole rather than cut to that walk alone, while the
+        // enclosing scope's fonts of the same name are credited with their
+        // glyphs.
         for inner in type3_resource_fonts(doc, font) {
             usage.refuse(inner, UntouchedReason::Type3Resource);
         }
@@ -1276,6 +1287,18 @@ impl FontSource for Recorded {
         }))
     }
 
+    /// `None`, the one answer that is not the inner scope's: this walk runs
+    /// a glyph procedure in the scope that shows it, where a reader that
+    /// does not read the font's `/Resources` runs it, so the fonts there are
+    /// credited with what the procedure shows; [`Recorded::type3_glyph`]
+    /// queues it to be walked again in the font's resources, where this
+    /// engine runs it (Table 121), and every font those name directly is
+    /// left whole besides ([`UntouchedReason::Type3Resource`]). A reader
+    /// either way keeps every glyph it draws.
+    fn type3_scope(&self, _font: u64) -> Option<Arc<Self>> {
+        None
+    }
+
     fn type3_glyph(&self, font: &[u8], code: u32) -> Option<tinker_pdf_content::Type3Glyph> {
         let procedure = self.inner.type3_glyph(font, code)?;
         // A Type 3 font written directly into the resources has no object;
@@ -1287,6 +1310,19 @@ impl FontSource for Recorded {
         }
         // The procedure runs in this scope, and paints with what it names.
         self.cells(&procedure.content, &self.inner);
+        // Table 121: this engine runs it in its font's own `/Resources`, where
+        // the font has them, so it is walked there too, after the stream.
+        if let Some(own) = FontSource::type3_scope(&*self.inner, procedure.font) {
+            let stream = ObjRef::new(
+                u32::try_from(procedure.stream >> 16).unwrap_or(0),
+                (procedure.stream & 0xFFFF) as u16,
+            );
+            if procedure.stream != 0 {
+                if let Ok(mut unrun) = self.unrun.lock() {
+                    unrun.push(stream, own, false);
+                }
+            }
+        }
         Some(procedure)
     }
 

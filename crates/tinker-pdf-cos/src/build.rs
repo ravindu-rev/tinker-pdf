@@ -1443,16 +1443,6 @@ struct ResourceSet {
     fonts: Vec<(Vec<u8>, ObjRef)>,
     images: Vec<(Vec<u8>, ObjRef)>,
     forms: Vec<(Vec<u8>, ObjRef)>,
-    /// The form of each colour glyph a run has drawn
-    /// ([`DocumentBuilder::colour_glyph_run`]), under the document-wide name
-    /// its procedure's `Do` gives it. The Type 3 font's own `/Resources` name
-    /// it, as 9.6.5 has a reader look there; and so does every scope a run
-    /// can be shown in, since this engine's renderer runs a glyph procedure
-    /// in the scope that shows the text (`docs/design/icc.md`, the scopes).
-    /// A colour glyph's own form leaves the others out
-    /// ([`ResourceSet::procedure_dict`]), so no form's resources grow with
-    /// the glyphs drawn before it.
-    glyph_forms: Vec<(Vec<u8>, ObjRef)>,
     ext_gstates: Vec<(Vec<u8>, ObjRef)>,
     shadings: Vec<(Vec<u8>, ObjRef)>,
     patterns: Vec<(Vec<u8>, ObjRef)>,
@@ -1491,21 +1481,8 @@ impl ResourceSet {
     /// replaces it — the same last-registration-wins rule two images under one
     /// name already follow.
     fn dict(&self, names: &NameTable) -> Dict {
-        self.assembled(names, true)
-    }
-
-    /// [`ResourceSet::dict`] less the colour glyphs' forms: the resources a
-    /// colour glyph's own form is written under, which draws no other glyph.
-    fn procedure_dict(&self, names: &NameTable) -> Dict {
-        self.assembled(names, false)
-    }
-
-    /// The `/Resources` dictionary, with the colour glyphs' forms in its
-    /// `/XObject` after every other form where `glyph_forms` says so.
-    fn assembled(&self, names: &NameTable, glyph_forms: bool) -> Dict {
         let mut xobjects = Dict::new();
-        let glyphs = self.glyph_forms.iter().filter(|_| glyph_forms);
-        for (resource, reference) in self.images.iter().chain(self.forms.iter()).chain(glyphs) {
+        for (resource, reference) in self.images.iter().chain(self.forms.iter()) {
             xobjects.insert(names.intern(resource), Object::Ref(*reference));
         }
 
@@ -6398,7 +6375,7 @@ impl DocumentBuilder {
     /// glyph has a procedure already, when the advance is not a number, and
     /// when the content is not empty and its box encloses no area.
     pub fn add_colour_glyph(&mut self, font: &[u8], glyph: &ColourGlyph<'_>) -> bool {
-        let resources = self.resources.procedure_dict(&self.names);
+        let resources = self.resources.dict(&self.names);
         let Some(face) = self.colour_fonts.iter_mut().find(|f| f.resource == font) else {
             return false;
         };
@@ -6450,10 +6427,9 @@ impl DocumentBuilder {
     /// font's place after a full stop — so a run whose glyphs lie in several
     /// fonts selects each with `Tf` as it reaches it, and a page begun after
     /// this call names every font it needs. A glyph's form is named then too,
-    /// the face's name and `.g` and the glyph's id, in its font's `/Resources`
-    /// and in every page, form and pattern registered after the call: 9.6.5
-    /// has a reader look for a procedure's names in its font's, and this
-    /// engine's renderer runs the procedure in the scope that shows the text.
+    /// the face's name and `.g` and the glyph's id, in its font's
+    /// `/Resources`, where 9.6.5's Table 121 has a reader, this engine among
+    /// them, look for a procedure's names.
     ///
     /// Returns false, having written nothing, when `font` is no colour face,
     /// when there are no glyphs, when a glyph has no procedure, or when the
@@ -6511,16 +6487,14 @@ impl DocumentBuilder {
             };
             face.parts[part].glyphs.push(id);
             face.codes.insert(id, (part, code));
-            // A glyph that draws something has its form named now, before
-            // any page that shows it is begun, in the document's resources
-            // as well as in its font's: this engine's renderer runs the
-            // procedure in the scope that shows the text, and 9.6.5 has a
-            // reader look in the font's own `/Resources`.
+            // A glyph that draws something has its form named now, under a
+            // name of the document's own, which its font's `/Resources` give
+            // it at `finish`: Table 121 has a reader look for a procedure's
+            // names there (9.6.5).
             if face.glyphs.get(&id).is_some_and(|p| p.bbox.is_some()) {
                 let mut name = face.resource.clone();
                 name.extend_from_slice(format!(".g{id}").as_bytes());
                 let form_ref = self.allocate();
-                self.resources.glyph_forms.push((name.clone(), form_ref));
                 if let Some(procedure) = self.colour_fonts[at].glyphs.get_mut(&id) {
                     procedure.form = Some((name, form_ref));
                 }

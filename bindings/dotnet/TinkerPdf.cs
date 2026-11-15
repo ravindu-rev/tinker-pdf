@@ -482,6 +482,12 @@ public enum CommandKind
 
     /// <summary>A nested stream past the depth cap, not run.</summary>
     DepthRefused = 45,
+
+    /// <summary>A Type 3 glyph's procedure begins running in its font's own resources.</summary>
+    BeginType3Glyph = 46,
+
+    /// <summary>That procedure has run.</summary>
+    EndType3Glyph = 47,
 }
 
 /// <summary>What a command-stream field holds (<c>TpdfCommandFieldTag</c>).</summary>

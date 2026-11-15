@@ -85,6 +85,12 @@ pub struct Type3Glyph {
     /// run itself for ever, and is run once — from one that shows another
     /// glyph of its font.
     pub stream: u64,
+    /// The font dictionary's own indirect reference, packed as
+    /// [`Form::stream`] packs a form's, and `0` for a font written directly
+    /// into a resource dictionary: the identity
+    /// [`FontSource::type3_scope`] is asked by, since the font's
+    /// `/Resources` are the procedure's (Table 121).
+    pub font: u64,
 }
 
 /// A transparency group XObject's attributes (11.6.6).
@@ -492,6 +498,26 @@ pub trait FontSource {
         Self: Sized,
     {
         let _ = stream;
+        None
+    }
+
+    /// The resources a Type 3 font brings for its glyph procedures, if it
+    /// has its own (9.6.5, Table 121): the procedure's named resources are
+    /// the font's `/Resources`, and the scope that shows the glyph only
+    /// where the font has none, which is what `None` keeps. `font` is
+    /// [`Type3Glyph::font`]; `0`, a font with no object, keeps the showing
+    /// scope too.
+    ///
+    /// Whole, as a form's are: a name the font's resources lack resolves
+    /// nowhere, not in the showing scope. The device is told the procedure
+    /// runs there through [`Device::begin_type3_glyph`], so the two seams
+    /// change scope together, as [`FontSource::form_scope`] and
+    /// [`Device::begin_form`] do.
+    fn type3_scope(&self, font: u64) -> Option<Arc<Self>>
+    where
+        Self: Sized,
+    {
+        let _ = font;
         None
     }
 
@@ -1761,6 +1787,22 @@ impl<D: Device> Device for Out<'_, D> {
         self.device.end_form(id);
         if self.tape.taping() {
             self.tape.recorder.end_form(id);
+            self.tape.record();
+        }
+    }
+
+    fn begin_type3_glyph(&mut self, font: u64) {
+        self.device.begin_type3_glyph(font);
+        if self.tape.taping() {
+            self.tape.recorder.begin_type3_glyph(font);
+            self.tape.record();
+        }
+    }
+
+    fn end_type3_glyph(&mut self) {
+        self.device.end_type3_glyph();
+        if self.tape.taping() {
+            self.tape.recorder.end_type3_glyph();
             self.tape.record();
         }
     }
@@ -4120,6 +4162,21 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     // the text space of the showing operator, and it is the
                     // content stream its patterns are resources of (8.7.2).
                     self.gs.pattern_space = self.gs.ctm;
+                    // Table 121: its named resources are the font's own
+                    // `/Resources`, whole, as a form's are, and the defaults
+                    // read there are its own (8.6.5.6); a font with none
+                    // runs it in the scope that shows the glyph. The device
+                    // is told, so it changes scope with the same answer.
+                    let outer = (glyph.font != 0)
+                        .then(|| self.fonts.type3_scope(glyph.font))
+                        .flatten()
+                        .map(|scope| mem::replace(&mut self.fonts, Scope::Owned(scope)));
+                    let outer_defaults = outer
+                        .is_some()
+                        .then(|| mem::replace(&mut self.defaults, self.fonts.device_defaults()));
+                    if outer.is_some() {
+                        self.device.begin_type3_glyph(glyph.font);
+                    }
                     self.depth += 1;
                     self.device.save_state();
                     self.run(&glyph.content);
@@ -4127,6 +4184,13 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                     self.close_open_saves();
                     self.device.restore_state();
                     self.depth -= 1;
+                    if let Some(outer) = outer {
+                        self.device.end_type3_glyph();
+                        self.fonts = outer;
+                    }
+                    if let Some(outer) = outer_defaults {
+                        self.defaults = outer;
+                    }
 
                     self.saved = saved_stack;
                     self.marked = saved_marked;
@@ -4619,6 +4683,7 @@ mod tests {
                     ..Matrix::IDENTITY
                 },
                 stream: 0,
+                font: 0,
             })
         }
     }
@@ -4860,6 +4925,7 @@ mod tests {
                     ..Matrix::IDENTITY
                 },
                 stream: 0x100 + u64::from(code),
+                font: 0,
             })
         }
     }
@@ -5155,6 +5221,105 @@ mod tests {
             mask: None,
             glyphs: Vec::new(),
         }
+    }
+
+    /// The font `/T3`, its dictionary `7 << 16`, every code's procedure
+    /// `/Im Do`; where `own` is set, the font brings resources of its own,
+    /// in which `/Im` is a form, and the scope that shows the glyph names
+    /// no `/Im` at all.
+    struct Fonted {
+        own: bool,
+        holds_form: bool,
+    }
+
+    impl FontSource for Fonted {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn form(&self, name: &[u8]) -> Option<Form> {
+            (self.holds_form && name == b"Im").then(|| Form {
+                content: b"0 0 1 1 re f".to_vec(),
+                matrix: Matrix::IDENTITY,
+                bbox: None,
+                group: None,
+                stream: 9 << 16,
+            })
+        }
+        fn type3_glyph(&self, font: &[u8], _code: u32) -> Option<Type3Glyph> {
+            (font == b"T3").then(|| Type3Glyph {
+                content: b"1000 0 d0 /Im Do".to_vec(),
+                matrix: Matrix::scale(0.001, 0.001),
+                stream: 8 << 16,
+                font: 7 << 16,
+            })
+        }
+        fn type3_scope(&self, font: u64) -> Option<Arc<Self>> {
+            (self.own && font == 7 << 16).then(|| {
+                Arc::new(Fonted {
+                    own: false,
+                    holds_form: true,
+                })
+            })
+        }
+    }
+
+    /// **A Type 3 glyph's procedure runs in its font's own resources**
+    /// (9.6.5, Table 121): where the font brings them, the procedure's `/Im`
+    /// is the form they hold, and the device hears the bracket the procedure
+    /// runs in, by the font's dictionary, around the procedure's own `q` and
+    /// `Q`; where the font brings none, `/Im` is looked up where the glyph is
+    /// shown, which holds no form, and nothing is bracketed.
+    #[test]
+    fn a_type3_procedure_runs_in_its_fonts_own_resources() {
+        let content = b"BT /T3 12 Tf (A) Tj ET";
+        let mut device = RecordingDevice::new();
+        interpret(
+            content,
+            Matrix::IDENTITY,
+            &mut device,
+            &Fonted {
+                own: true,
+                holds_form: false,
+            },
+        );
+        let kinds = device.kinds();
+        let at = |kind: EventKind| kinds.iter().position(|k| *k == kind);
+        let (begin, form, end) = (
+            at(EventKind::BeginType3Glyph).expect("the bracket opens"),
+            at(EventKind::BeginForm).expect("the font's own form is drawn"),
+            at(EventKind::EndType3Glyph).expect("the bracket closes"),
+        );
+        assert!(begin < form && form < end, "{kinds:?}");
+        assert_eq!(kinds[begin + 1], EventKind::SaveState, "{kinds:?}");
+        assert_eq!(kinds[end - 1], EventKind::RestoreState, "{kinds:?}");
+        assert!(device
+            .events()
+            .contains(&Event::BeginType3Glyph { font: 7 << 16 }));
+
+        let mut device = RecordingDevice::new();
+        interpret(
+            content,
+            Matrix::IDENTITY,
+            &mut device,
+            &Fonted {
+                own: false,
+                holds_form: false,
+            },
+        );
+        let kinds = device.kinds();
+        assert!(
+            !kinds.contains(&EventKind::BeginType3Glyph)
+                && !kinds.contains(&EventKind::EndType3Glyph)
+                && !kinds.contains(&EventKind::BeginForm)
+                && kinds.contains(&EventKind::DrawImage),
+            "{kinds:?}"
+        );
     }
 
     /// **Content nested past the depth cap is refused, and the device hears

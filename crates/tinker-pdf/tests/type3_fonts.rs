@@ -18,6 +18,12 @@ use tinker_pdf::{Document, RenderOptions, SvgOptions};
 /// `matrix` is the `/FontMatrix`; a Type 3 font picks its own glyph-space
 /// units, which is why the entry is required rather than assumed to be 1/1000.
 fn document(proc_bytes: &str, matrix: &str, content: &str) -> Vec<u8> {
+    document_with(proc_bytes, matrix, content, "")
+}
+
+/// [`document`], the font's own `/Resources` holding `resources`: where a
+/// procedure's names resolve (9.6.5, Table 121).
+fn document_with(proc_bytes: &str, matrix: &str, content: &str, resources: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"%PDF-1.7\n");
     bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
@@ -32,7 +38,7 @@ fn document(proc_bytes: &str, matrix: &str, content: &str) -> Vec<u8> {
              /FontMatrix {matrix}\n\
              /CharProcs << /a 5 0 R >>\n\
              /Encoding << /Type /Encoding /Differences [97 /a] >>\n\
-             /FirstChar 97 /LastChar 97 /Widths [1000] /Resources << >> >>\nendobj\n"
+             /FirstChar 97 /LastChar 97 /Widths [1000] /Resources << {resources} >> >>\nendobj\n"
         )
         .as_bytes(),
     );
@@ -220,11 +226,14 @@ fn an_unmapped_code_draws_nothing() {
 #[test]
 fn a_glyph_that_shows_itself_draws_once_and_says_so() {
     // The procedure fills its glyph's lower half, then shows itself twice at
-    // the size of the whole glyph, over the same square and the next.
-    let bitmap = render(document(
+    // the size of the whole glyph, over the same square and the next: its
+    // font's own `/Resources` name the font, which is where the procedure's
+    // `/F0` resolves (Table 121).
+    let bitmap = render(document_with(
         "1000 0 d0 0 0 1000 500 re f BT /F0 1000 Tf (aa) Tj ET",
         "[0.001 0 0 0.001 0 0]",
         "BT /F0 50 Tf 10 20 Td (a) Tj ET",
+        "/Font << /F0 4 0 R >>",
     ));
     assert!(
         bitmap

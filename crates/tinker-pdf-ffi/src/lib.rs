@@ -5240,6 +5240,8 @@ endobj
             (TpdfCommandKind::Pattern, 43),
             (TpdfCommandKind::Cell, 44),
             (TpdfCommandKind::DepthRefused, 45),
+            (TpdfCommandKind::BeginType3Glyph, 46),
+            (TpdfCommandKind::EndType3Glyph, 47),
         ];
         for (kind, number) in KINDS {
             assert_eq!(*kind as i32, *number, "{kind:?}");

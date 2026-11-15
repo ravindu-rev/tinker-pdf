@@ -3473,26 +3473,29 @@ impl PageResources {
         built.as_ref().map(|kept| self.bind(kept))
     }
 
-    /// The scope a soft mask's group runs in where it brings `/Resources` of
-    /// its own (11.6.5.2, 8.10.1): `/G` is a form XObject, reached through
-    /// `/SMask` by its stream rather than by a name, so it is built as
-    /// [`PageResources::form_resources`] builds a form's and kept beside
-    /// them under the same key, its stream. `None` where the group has none,
-    /// and its names resolve in the scope that set the `gs`.
-    fn mask_resources(&self, stream: u64) -> Option<Arc<PageResources>> {
-        if stream == 0 {
+    /// The scope content runs in where the object `object` names brings
+    /// `/Resources` of its own, the object reached by its identity rather
+    /// than by a name: a soft mask's group, `/G` being a form XObject
+    /// reached through `/SMask` by its stream (11.6.5.2, 8.10.1), and a
+    /// Type 3 font, whose `/Resources` are its glyph procedures' (9.6.5,
+    /// Table 121). Built as [`PageResources::form_resources`] builds a
+    /// form's and kept beside them under the same key, the object's packed
+    /// reference. `None` where the object has none, and the content's names
+    /// resolve in the scope that set the `gs` or showed the glyph.
+    fn object_resources(&self, object: u64) -> Option<Arc<PageResources>> {
+        if object == 0 {
             return None;
         }
-        let reference = ObjRef::new(u32::try_from(stream >> 16).ok()?, (stream & 0xFFFF) as u16);
+        let reference = ObjRef::new(u32::try_from(object >> 16).ok()?, (object & 0xFFFF) as u16);
         let made = Cell::new(false);
-        let built = self.caches.form_scopes.read(stream, || {
+        let built = self.caches.form_scopes.read(object, || {
             made.set(true);
             self.count(Counter::FormScopeMisses);
             let dict = self
                 .doc
                 .get(reference)
                 .ok()
-                .and_then(|object| object.as_dict().cloned());
+                .and_then(|value| value.as_dict().cloned());
             Filled::Keep(dict.and_then(|dict| self.build_own_resources(&dict)))
         });
         if !made.get() {
@@ -3513,9 +3516,10 @@ impl PageResources {
         self.build_own_resources(dict)
     }
 
-    /// The scope a stream's own `/Resources` make, `None` where it has none:
-    /// a form's, and a mask group's, which is a form whatever its
-    /// `/Subtype` says, since nothing but `/SMask` reaches it.
+    /// The scope an object's own `/Resources` make, `None` where it has
+    /// none: a form's; a mask group's, which is a form whatever its
+    /// `/Subtype` says, since nothing but `/SMask` reaches it; and a Type 3
+    /// font's, which only its glyph procedures run in.
     fn build_own_resources(&self, dict: &Dict) -> Option<Arc<PageResources>> {
         let own = self
             .doc
@@ -4556,6 +4560,10 @@ impl FontSource for PageResources {
             // tells a procedure that shows its own glyph from one that shows
             // another.
             stream: crate::structure::stream_id(reference),
+            // The font's, which its `/Resources` are kept by (Table 121); a
+            // font written into the scope has none, and its procedures run
+            // where it is shown.
+            font: found.object.map_or(0, crate::structure::stream_id),
         })
     }
 
@@ -4564,7 +4572,11 @@ impl FontSource for PageResources {
     }
 
     fn mask_scope(&self, stream: u64) -> Option<Arc<PageResources>> {
-        self.mask_resources(stream)
+        self.object_resources(stream)
+    }
+
+    fn type3_scope(&self, font: u64) -> Option<Arc<PageResources>> {
+        self.object_resources(font)
     }
 
     /// As much as the document's budget, and at most what a retained page
@@ -5342,7 +5354,11 @@ impl GlyphSource for PageResources {
     }
 
     fn mask_scope(&self, stream: u64) -> Option<Arc<PageResources>> {
-        self.mask_resources(stream)
+        self.object_resources(stream)
+    }
+
+    fn type3_scope(&self, font: u64) -> Option<Arc<PageResources>> {
+        self.object_resources(font)
     }
 
     /// The font `font_id` selects here, from the scope's font table: the
@@ -6275,7 +6291,7 @@ impl PageResources {
     ) -> Option<ColorSpace> {
         let own = match contents {
             Contents::OwnScope => self.form_resources(name),
-            Contents::Mask(stream) => self.mask_resources(stream),
+            Contents::Mask(stream) => self.object_resources(stream),
         };
         let scope: &PageResources = own.as_deref().unwrap_or(self);
         self.read_space(cs, 0, name, scope.painted())

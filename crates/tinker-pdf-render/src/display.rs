@@ -592,6 +592,20 @@ impl Device for DisplayRecorder {
         }
     }
 
+    fn begin_type3_glyph(&mut self, font: u64) {
+        if !self.overflowed {
+            self.events.begin_type3_glyph(font);
+            self.count();
+        }
+    }
+
+    fn end_type3_glyph(&mut self) {
+        if !self.overflowed {
+            self.events.end_type3_glyph();
+            self.count();
+        }
+    }
+
     fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {
         if self.overflowed {
             return false;

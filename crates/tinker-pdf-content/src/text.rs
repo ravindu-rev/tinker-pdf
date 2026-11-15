@@ -4019,6 +4019,7 @@ mod tests {
                 content: content.to_vec(),
                 matrix: Matrix::scale(0.001, 0.001),
                 stream: 0,
+                font: 0,
             })
         }
     }

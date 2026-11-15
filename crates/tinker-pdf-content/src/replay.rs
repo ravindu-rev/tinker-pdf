@@ -269,6 +269,8 @@ impl Cursor {
                 scope.props.as_ref(),
             ),
             Event::EndMarkedContent => device.end_marked_content(),
+            Event::BeginType3Glyph { font } => device.begin_type3_glyph(*font),
+            Event::EndType3Glyph => device.end_type3_glyph(),
             Event::BeginForm { id, name, entered } => {
                 let now = device.begin_form(*id, name);
                 if now != *entered {
@@ -613,6 +615,12 @@ mod tests {
         }
         fn end_form(&mut self, id: u64) {
             self.call().end_form(id);
+        }
+        fn begin_type3_glyph(&mut self, font: u64) {
+            self.call().begin_type3_glyph(font);
+        }
+        fn end_type3_glyph(&mut self) {
+            self.call().end_type3_glyph();
         }
         fn begin_group(&mut self, group: crate::interpret::Group, state: &GraphicsState) -> bool {
             self.call().begin_group(group, state)

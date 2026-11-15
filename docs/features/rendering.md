@@ -335,9 +335,10 @@ is read in the scope the stream's other names resolve in: a page's stops at a
 form or a cell with `/Resources` of its own, empty ones included (8.10.1), a
 form's applies inside it only, and a form group's `/CS` is remapped by the
 scope its contents run in. A soft-mask group runs as a form does, in its own
-`/Resources` or, where it has none, the scope that set the `gs`, and reads
-its defaults there; a Type 3 glyph runs in the scope that invokes it, and so
-do its defaults ([design/icc.md](../design/icc.md)). A group keeps only its space's shape,
+`/Resources` or, where it has none, the scope that set the `gs`, and a Type 3
+glyph's procedure in its font's `/Resources` or, where the font has none, the
+scope that shows it (Table 121); each reads its defaults there
+([design/icc.md](../design/icc.md)). A group keeps only its space's shape,
 which a default cannot change, so remapping its `/CS` moves no pixel; the
 `/BC` is where it shows. `cs` resets to the device space's initial colour
 carried into the default, so `/DeviceCMYK cs` paints what `0 0 0 1 k` paints
@@ -1728,9 +1729,9 @@ handed them over, where it compiled from them; an image XObject's entry holds
 beside its frame the bytes the writing document's budget leaves its decode
 (`PageResources::image_room`), which a draw's reduction is read against; each tiling cell is interpreted once, as `PageResources::tile`
 interprets it, into a stream of its own in the cell's resources or the
-asking scope's, to the depth the renderer reaches; and each form and each
-soft mask's group that brings resources, and each appearance, is a scope of
-its own, its record saying
+asking scope's, to the depth the renderer reaches; and each form, soft
+mask's group and Type 3 font that brings resources, and each appearance, is
+a scope of its own, its record saying
 whether it is a widget's, an appearance `/NoZoom` or `/NoRotate` places at
 render time written placed as a render at magnification 1 places it. The
 page's crop box,
@@ -2276,9 +2277,9 @@ pattern's cell rasterised for a fill no kept cell answered; and a `_hits` and
 a `_misses` for each of
 the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
-`form_scope`, a soft mask group's scope counted as a form's, an image the
-document's cache keeps counted as `image` and a transform as `icc_transform`
-too;
+`form_scope`, a soft mask group's scope and a Type 3 font's counted as a
+form's, an image the document's cache keeps counted as `image` and a
+transform as `icc_transform` too;
 `cache_hits` and `cache_misses`, each lookup of the document's cache that
 found its entry kept and each that computed it, of every kind it keeps,
 `cache_evictions`, each entry it evicted to make room for one the operation

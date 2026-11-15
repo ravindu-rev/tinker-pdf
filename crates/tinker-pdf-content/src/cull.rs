@@ -409,6 +409,14 @@ impl<D: Device + ?Sized> Device for Culled<'_, D> {
         self.inner.end_form(id);
     }
 
+    fn begin_type3_glyph(&mut self, font: u64) {
+        self.inner.begin_type3_glyph(font);
+    }
+
+    fn end_type3_glyph(&mut self) {
+        self.inner.end_type3_glyph();
+    }
+
     fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {
         let entered = self.inner.begin_group(group, state);
         self.entered(entered);
@@ -537,6 +545,7 @@ mod tests {
                 content: content.to_vec(),
                 matrix: Matrix::scale(0.001, 0.001),
                 stream: num << 16,
+                font: 0,
             };
             match font {
                 b"T3" => Some(procedure(
@@ -1349,6 +1358,7 @@ mod tests {
                 content: b"1000 0 d0 0 0 1000 1000 re f".to_vec(),
                 matrix: Matrix::scale(0.001, 0.001),
                 stream: 0,
+                font: 0,
             })
         }
     }

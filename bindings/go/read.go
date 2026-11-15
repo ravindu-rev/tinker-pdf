@@ -484,6 +484,8 @@ const (
 	CommandPattern            CommandKind = C.TPDF_COMMAND_KIND_PATTERN
 	CommandCell               CommandKind = C.TPDF_COMMAND_KIND_CELL
 	CommandDepthRefused       CommandKind = C.TPDF_COMMAND_KIND_DEPTH_REFUSED
+	CommandBeginType3Glyph    CommandKind = C.TPDF_COMMAND_KIND_BEGIN_TYPE3_GLYPH
+	CommandEndType3Glyph      CommandKind = C.TPDF_COMMAND_KIND_END_TYPE3_GLYPH
 )
 
 // commandKindNames are the kinds' names in their order, the facade's
@@ -498,12 +500,12 @@ var commandKindNames = [...]string{
 	"Annotation", "MissingFont", "RepairedSpace", "Scope", "Outline",
 	"FontIdentity", "Profile", "ColorSpace", "Image", "InlineImage",
 	"ImageDecode", "ShadingDefinition", "Shading", "Pattern", "Cell",
-	"DepthRefused",
+	"DepthRefused", "BeginType3Glyph", "EndType3Glyph",
 }
 
 // A name for every kind and no more: an index past [1] does not compile, so a
 // kind added to the header without its name here fails the build.
-var _ = [1]struct{}{}[len(commandKindNames)-1-int(CommandDepthRefused)]
+var _ = [1]struct{}{}[len(commandKindNames)-1-int(CommandEndType3Glyph)]
 
 // CommandKinds is every kind this build knows, in their order, the end first.
 func CommandKinds() []CommandKind {
@@ -1067,6 +1069,8 @@ type CommandDevice interface {
 	Pattern(CommandRecord) error
 	Cell(CommandRecord) error
 	DepthRefused(CommandRecord) error
+	BeginType3Glyph(CommandRecord) error
+	EndType3Glyph(CommandRecord) error
 	Unknown(CommandRecord) error
 }
 
@@ -1119,6 +1123,8 @@ func (IgnoreCommands) Shading(CommandRecord) error            { return nil }
 func (IgnoreCommands) Pattern(CommandRecord) error            { return nil }
 func (IgnoreCommands) Cell(CommandRecord) error               { return nil }
 func (IgnoreCommands) DepthRefused(CommandRecord) error       { return nil }
+func (IgnoreCommands) BeginType3Glyph(CommandRecord) error    { return nil }
+func (IgnoreCommands) EndType3Glyph(CommandRecord) error      { return nil }
 func (IgnoreCommands) Unknown(CommandRecord) error            { return nil }
 
 // Replay hands every record, in the stream's order, to the method of device
@@ -1234,6 +1240,10 @@ func replayOne(device CommandDevice, record CommandRecord) error {
 		return device.Cell(record)
 	case CommandDepthRefused:
 		return device.DepthRefused(record)
+	case CommandBeginType3Glyph:
+		return device.BeginType3Glyph(record)
+	case CommandEndType3Glyph:
+		return device.EndType3Glyph(record)
 	}
 	return device.Unknown(record)
 }

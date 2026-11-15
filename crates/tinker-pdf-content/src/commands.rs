@@ -74,8 +74,13 @@ pub const MAJOR: u16 = 1;
 /// Minor 5 appends to [`CommandKind::Scope`] the stream of the soft mask's
 /// group whose own `/Resources` the scope is (11.6.5.2, 8.10.1), written only
 /// for such a scope, so a scope record that ends before it is a form's or an
-/// appearance's.
-pub const MINOR: u16 = 5;
+/// appearance's. Minor 6 adds [`CommandKind::BeginType3Glyph`] and
+/// [`CommandKind::EndType3Glyph`], the bracket of a Type 3 glyph's procedure
+/// that runs in its font's own `/Resources` (9.6.5, Table 121), which a
+/// reader of an earlier minor steps over, and lets that field name the font
+/// dictionary whose own resources a scope is, as it names a mask group's
+/// stream.
+pub const MINOR: u16 = 6;
 
 /// The most glyphs one [`CommandKind::GlyphRun`] holds; a longer run of one
 /// font and state is written as several.
@@ -282,11 +287,13 @@ kinds! {
     36 RecursionRefused "RecursionRefused" []
     37 NestedBudgetSpent "NestedBudgetSpent" []
     38 DepthRefused "DepthRefused" []
+    39 BeginType3Glyph "BeginType3Glyph" ["font"]
+    40 EndType3Glyph "EndType3Glyph" []
     64 Page "Page" ["crop box", "rotation", "group space", "usage", "page index"]
     65 Annotation "Annotation" ["scope", "widget"]
     66 MissingFont "MissingFont" ["name"]
     67 RepairedSpace "RepairedSpace" ["name", "repair"]
-    68 Scope "Scope" ["id", "parent", "name", "mask"]
+    68 Scope "Scope" ["id", "parent", "name", "object"]
     69 Outline "Outline" ["scope", "font id", "code", "found", "operators", "numbers", "missing fonts", "damaged names", "damaged", "repaired names", "repaired"]
     70 FontIdentity "FontIdentity" ["scope", "font id", "identity", "object"]
     71 Profile "Profile" ["bytes"]
@@ -2141,6 +2148,10 @@ impl EventWriter {
                 .with(Field::bytes(name))
                 .with(flag(*entered)),
             Event::EndForm { id } => Record::new(CommandKind::EndForm).with(Field::Unsigned(*id)),
+            Event::BeginType3Glyph { font } => {
+                Record::new(CommandKind::BeginType3Glyph).with(Field::Unsigned(*font))
+            }
+            Event::EndType3Glyph => Record::new(CommandKind::EndType3Glyph),
             Event::BeginGroup {
                 group,
                 entered,
@@ -2992,6 +3003,10 @@ impl EventReader {
             CommandKind::EndForm => Event::EndForm {
                 id: fields.unsigned(0)?,
             },
+            CommandKind::BeginType3Glyph => Event::BeginType3Glyph {
+                font: fields.unsigned(0)?,
+            },
+            CommandKind::EndType3Glyph => Event::EndType3Glyph,
             CommandKind::BeginGroup => Event::BeginGroup {
                 state: self.state_at(fields, 0, meter)?,
                 group: Group {
@@ -3177,7 +3192,12 @@ impl Nesting {
             Event::BeginForm { entered: true, .. } => (Some(CommandKind::BeginForm), None),
             Event::BeginGroup { entered: true, .. } => (Some(CommandKind::BeginGroup), None),
             Event::BeginSoftMask { entered: true, .. } => (Some(CommandKind::BeginSoftMask), None),
+            Event::BeginType3Glyph { .. } => (Some(CommandKind::BeginType3Glyph), None),
             Event::EndForm { .. } => (None, Some((CommandKind::BeginForm, CommandKind::EndForm))),
+            Event::EndType3Glyph => (
+                None,
+                Some((CommandKind::BeginType3Glyph, CommandKind::EndType3Glyph)),
+            ),
             Event::EndGroup => (None, Some((CommandKind::BeginGroup, CommandKind::EndGroup))),
             Event::EndSoftMask => (
                 None,
@@ -3781,6 +3801,10 @@ mod tests {
                 entered: false,
                 state: None,
             },
+            Event::BeginType3Glyph {
+                font: (9 << 16) | 2,
+            },
+            Event::EndType3Glyph,
             Event::EndForm { id: u64::MAX },
             Event::BeginForm {
                 id: 0,
@@ -3841,7 +3865,7 @@ mod tests {
         // Every variant is in the recording, so a variant the codec dropped
         // would fail here and not pass by absence.
         let kinds: std::collections::HashSet<_> = events.iter().map(Event::kind).collect();
-        assert_eq!(kinds.len(), 23, "every Event variant is recorded");
+        assert_eq!(kinds.len(), 25, "every Event variant is recorded");
 
         // The three glyph runs: one font and state, then another font, then
         // the same font in a plain state, and a glyph with no state at all.
@@ -4356,8 +4380,8 @@ mod tests {
                 assert!(kind.is_codec());
             }
         }
-        // Minor 4's DepthRefused is 38, the last command kind.
-        assert_eq!(CommandKind::from_number(39), None);
+        // Minor 6's EndType3Glyph is 40, the last command kind.
+        assert_eq!(CommandKind::from_number(41), None);
         assert_eq!(CommandKind::from_number(80), None);
         assert_eq!(CommandKind::GlyphRun.fields().len(), 12);
         // Minor 3's pattern space is the thirty-first.

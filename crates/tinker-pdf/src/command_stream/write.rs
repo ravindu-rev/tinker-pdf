@@ -34,7 +34,8 @@ use crate::resources::{Frame, PageResources};
 use crate::{DisplayList, Usage};
 
 /// A scope the writer resolves names in: one it borrows — the page's, a
-/// cell's — or one it holds — a form's, a mask group's, an appearance's.
+/// cell's — or one it holds — a form's, a mask group's, a Type 3 font's,
+/// an appearance's.
 #[derive(Clone)]
 enum Held<'a> {
     Borrowed(&'a PageResources),
@@ -78,9 +79,10 @@ pub(crate) struct Writer<'a> {
     floor: usize,
     tables: Tables,
     scope_ids: HashMap<(u64, Vec<u8>), u64>,
-    /// The mask groups' scopes written, by the scope that set the `gs` and
-    /// the group's stream.
-    mask_ids: HashMap<(u64, u64), u64>,
+    /// The scopes of objects' own resources written — a mask group's, a
+    /// Type 3 font's — by the scope that reached the object and its
+    /// identity.
+    own_ids: HashMap<(u64, u64), u64>,
     outlines: HashSet<(u64, u64, u32)>,
     identities: HashSet<(u64, u64)>,
     images: HashSet<(u64, Vec<u8>, u64)>,
@@ -105,7 +107,7 @@ impl<'a> Writer<'a> {
             floor: 1,
             tables: Tables::default(),
             scope_ids: HashMap::new(),
-            mask_ids: HashMap::new(),
+            own_ids: HashMap::new(),
             outlines: HashSet::new(),
             identities: HashSet::new(),
             images: HashSet::new(),
@@ -139,10 +141,18 @@ impl<'a> Writer<'a> {
                 mask,
                 entered: true,
                 ..
-            } => self.enter_mask(mask.form.stream),
+            } => {
+                let child = self.top().resources.mask_scope(mask.form.stream);
+                self.enter_own(mask.form.stream, child);
+            }
+            Event::BeginType3Glyph { font } => {
+                let child = self.top().resources.type3_scope(*font);
+                self.enter_own(*font, child);
+            }
             // An `EndSoftMask` arrives only for a mask that was entered, which
-            // pushed a scope as a form does.
-            Event::EndForm { .. } | Event::EndSoftMask => {
+            // pushed a scope as a form does, and an `EndType3Glyph` for each
+            // `BeginType3Glyph`.
+            Event::EndForm { .. } | Event::EndSoftMask | Event::EndType3Glyph => {
                 if self.stack.len() > self.floor {
                     self.stack.pop();
                 }
@@ -170,7 +180,7 @@ impl<'a> Writer<'a> {
         self.tables.scopes.push(ScopeEntry {
             parent: None,
             name: None,
-            mask: None,
+            own: None,
         });
         let id = self.tables.scopes.len() as u64;
         self.events.body(
@@ -222,7 +232,7 @@ impl<'a> Writer<'a> {
                         self.tables.scopes.push(ScopeEntry {
                             parent: Some(parent),
                             name: Some(name.to_vec()),
-                            mask: None,
+                            own: None,
                         });
                         let id = self.tables.scopes.len() as u64;
                         self.scope_ids.insert(key, id);
@@ -239,26 +249,26 @@ impl<'a> Writer<'a> {
         self.stack.push(scoped);
     }
 
-    /// An accepted `BeginSoftMask`: the renderer asks the scope in force, the
-    /// one that set the `gs`, for the group's own resources and resolves in
-    /// them until `EndSoftMask`, or goes on in the scope it is in where the
-    /// group brings none (11.6.5.2, 8.10.1) — a form's rule, by the group's
-    /// stream rather than a name.
-    fn enter_mask(&mut self, stream: u64) {
+    /// An accepted `BeginSoftMask` and a `BeginType3Glyph`: the renderer asks
+    /// the scope in force — the one that set the `gs`, or showed the glyph —
+    /// for the object's own resources, `child` here, and resolves in them
+    /// until the bracket ends, or goes on in the scope it is in where the
+    /// object brings none (11.6.5.2, 8.10.1, Table 121) — a form's rule, by
+    /// the object's identity rather than a name.
+    fn enter_own(&mut self, object: u64, child: Option<Arc<PageResources>>) {
         let parent = self.top().id;
-        let child = self.top().resources.mask_scope(stream);
         let scoped = match child {
             Some(child) => {
-                let id = match self.mask_ids.get(&(parent, stream)) {
+                let id = match self.own_ids.get(&(parent, object)) {
                     Some(id) => *id,
                     None => {
                         self.tables.scopes.push(ScopeEntry {
                             parent: Some(parent),
                             name: None,
-                            mask: Some(stream),
+                            own: Some(object),
                         });
                         let id = self.tables.scopes.len() as u64;
-                        self.mask_ids.insert((parent, stream), id);
+                        self.own_ids.insert((parent, object), id);
                         id
                     }
                 };
@@ -781,6 +791,14 @@ impl Device for Interpreting<'_, '_> {
 
     fn end_form(&mut self, id: u64) {
         self.deliver(Event::EndForm { id });
+    }
+
+    fn begin_type3_glyph(&mut self, font: u64) {
+        self.deliver(Event::BeginType3Glyph { font });
+    }
+
+    fn end_type3_glyph(&mut self) {
+        self.deliver(Event::EndType3Glyph);
     }
 
     fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {

@@ -356,6 +356,20 @@ impl Device for Collector {
             self.scope = outer;
         }
     }
+
+    // Table 121: an image a Type 3 glyph's procedure draws is named in its
+    // font's own `/Resources` where it has them.
+    fn begin_type3_glyph(&mut self, font: u64) {
+        let nested = FontSource::type3_scope(&*self.scope, font);
+        self.outer
+            .push(nested.map(|scope| std::mem::replace(&mut self.scope, scope)));
+    }
+
+    fn end_type3_glyph(&mut self) {
+        if let Some(Some(outer)) = self.outer.pop() {
+            self.scope = outer;
+        }
+    }
 }
 
 impl Page {

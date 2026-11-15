@@ -723,6 +723,11 @@ pub(crate) struct Analyser<'r> {
     /// The scope each open form displaced, `None` for a form with none of
     /// its own.
     forms: Vec<Option<Scope<'r>>>,
+    /// The scope each open soft mask's group displaced with resources of its
+    /// own (11.6.5.2, 8.10.1), and each Type 3 glyph procedure its font's
+    /// (Table 121): `None` for one that runs where it was reached.
+    masks_scopes: Vec<Option<Scope<'r>>>,
+    type3_scopes: Vec<Option<Scope<'r>>>,
     admission: Admission,
     /// The crop box: what a render's canvas shows.
     page: Rect,
@@ -751,6 +756,8 @@ impl<'r> Analyser<'r> {
             scope: Scope::Borrowed(resources),
             pushed: Vec::new(),
             forms: Vec::new(),
+            masks_scopes: Vec::new(),
+            type3_scopes: Vec::new(),
             admission: Admission::new(),
             page: Rect {
                 x0: x0.min(x1),
@@ -1116,6 +1123,20 @@ impl Device for Analyser<'_> {
         }
     }
 
+    fn begin_type3_glyph(&mut self, font: u64) {
+        // Table 121: the procedure's names are its font's own `/Resources`,
+        // asked as the renderer asks.
+        let nested = self.scope.type3_scope(font);
+        let displaced = nested.map(|scope| std::mem::replace(&mut self.scope, Scope::Owned(scope)));
+        self.type3_scopes.push(displaced);
+    }
+
+    fn end_type3_glyph(&mut self) {
+        if let Some(Some(outer)) = self.type3_scopes.pop() {
+            self.scope = outer;
+        }
+    }
+
     fn begin_group(&mut self, _group: Group, state: &GraphicsState) -> bool {
         // A group in hidden content paints nothing and is declined, as the
         // renderer declines it; any other was asked for, whatever a render's
@@ -1182,9 +1203,14 @@ impl Device for Analyser<'_> {
             bbox: path_box(bbox),
             outside: outside != 0,
         });
-        // A mask group draws under no clip and no mask of its own.
+        // A mask group draws under no clip and no mask of its own, in its
+        // own `/Resources` where it has them (11.6.5.2, 8.10.1), asked as the
+        // renderer asks.
         self.clip = Area::Everywhere;
         self.soft = None;
+        let nested = self.scope.mask_scope(mask.form.stream);
+        let displaced = nested.map(|scope| std::mem::replace(&mut self.scope, Scope::Owned(scope)));
+        self.masks_scopes.push(displaced);
         true
     }
 
@@ -1192,6 +1218,9 @@ impl Device for Analyser<'_> {
         let Some(frame) = self.masks.pop() else {
             return;
         };
+        if let Some(Some(outer)) = self.masks_scopes.pop() {
+            self.scope = outer;
+        }
         self.admission.end_soft_mask();
         self.saved.truncate(frame.saved);
         self.clip = frame.held.clip;

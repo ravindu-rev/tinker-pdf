@@ -1324,6 +1324,16 @@ impl Device for Stamping<'_, '_> {
         self.after();
     }
 
+    fn begin_type3_glyph(&mut self, font: u64) {
+        self.renderer.begin_type3_glyph(font);
+        self.after();
+    }
+
+    fn end_type3_glyph(&mut self) {
+        self.renderer.end_type3_glyph();
+        self.after();
+    }
+
     fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {
         let entered = self.renderer.begin_group(group, state);
         self.after();

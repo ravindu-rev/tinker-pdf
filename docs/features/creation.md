@@ -112,9 +112,8 @@ needs a code when its face's fonts are full spills into a new font,
 registered then under the face's name, a full stop and the font's place
 (`C0.1`), selected with `Tf` where the run reaches it. The glyph's form is
 named then too, for the document — the face's name, `.g` and the glyph's id
-(`C0.g12`) — in its font's `/Resources` and in those of every page, form and
-pattern registered after the run: 9.6.5 has a reader look in the font's, and
-this engine's renderer runs a procedure in the scope that shows the text
+(`C0.g12`) — in its font's `/Resources` alone, where Table 121 (9.6.5) has a
+reader, this engine among them, look for a procedure's names
 ([design](../design/colour-fonts.md), *Where the form is named*). At `finish`
 each font
 gets `/CharProcs` and `/Encoding` for its codes, `/Widths` (0 at 32), a

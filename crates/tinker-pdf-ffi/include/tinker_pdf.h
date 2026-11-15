@@ -731,6 +731,11 @@ typedef enum TpdfCommandKind {
   TPDF_COMMAND_KIND_CELL = 44,
   // `DepthRefused`, kind 38: a nested stream past the depth cap, not run.
   TPDF_COMMAND_KIND_DEPTH_REFUSED = 45,
+  // `BeginType3Glyph`, kind 39: a Type 3 glyph's procedure begins running
+  // in its font's own resources.
+  TPDF_COMMAND_KIND_BEGIN_TYPE3_GLYPH = 46,
+  // `EndType3Glyph`, kind 40: that procedure has run.
+  TPDF_COMMAND_KIND_END_TYPE3_GLYPH = 47,
 } TpdfCommandKind;
 
 // What a field holds: its tag on the wire, the facade's `CommandField`.

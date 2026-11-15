@@ -143,6 +143,11 @@ pub enum TpdfCommandKind {
     Cell = 44,
     /// `DepthRefused`, kind 38: a nested stream past the depth cap, not run.
     DepthRefused = 45,
+    /// `BeginType3Glyph`, kind 39: a Type 3 glyph's procedure begins running
+    /// in its font's own resources.
+    BeginType3Glyph = 46,
+    /// `EndType3Glyph`, kind 40: that procedure has run.
+    EndType3Glyph = 47,
 }
 
 raw_enum!(TpdfCommandKind {
@@ -192,6 +197,8 @@ raw_enum!(TpdfCommandKind {
     Pattern,
     Cell,
     DepthRefused,
+    BeginType3Glyph,
+    EndType3Glyph,
 });
 
 impl TpdfCommandKind {
@@ -244,6 +251,8 @@ impl TpdfCommandKind {
             TpdfCommandKind::Pattern => CommandKind::Pattern,
             TpdfCommandKind::Cell => CommandKind::Cell,
             TpdfCommandKind::DepthRefused => CommandKind::DepthRefused,
+            TpdfCommandKind::BeginType3Glyph => CommandKind::BeginType3Glyph,
+            TpdfCommandKind::EndType3Glyph => CommandKind::EndType3Glyph,
         }
     }
 

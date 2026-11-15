@@ -1069,6 +1069,12 @@ public interface ICommandDevice
     /// <summary>A <see cref="CommandKind.DepthRefused"/> record.</summary>
     void DepthRefused(CommandRecord record) { }
 
+    /// <summary>A <see cref="CommandKind.BeginType3Glyph"/> record.</summary>
+    void BeginType3Glyph(CommandRecord record) { }
+
+    /// <summary>A <see cref="CommandKind.EndType3Glyph"/> record.</summary>
+    void EndType3Glyph(CommandRecord record) { }
+
     /// <summary>A record of a kind this build does not know.</summary>
     void Unknown(CommandRecord record) { }
 }
@@ -1456,6 +1462,8 @@ public sealed class CommandStream : IDisposable
                 case CommandKind.Pattern: device.Pattern(record); break;
                 case CommandKind.Cell: device.Cell(record); break;
                 case CommandKind.DepthRefused: device.DepthRefused(record); break;
+                case CommandKind.BeginType3Glyph: device.BeginType3Glyph(record); break;
+                case CommandKind.EndType3Glyph: device.EndType3Glyph(record); break;
             }
         }
     }

@@ -73,11 +73,6 @@ open of this design — the refused profiles — is listed in the
 - **A bare `/CalGray` or `/CalRGB` name.** `parse_space` reads both arrays'
   white point, gamma and matrix (8.6.5.2–8.6.5.3); a bare name, which carries
   no parameters, is drawn as its device space.
-- **For default colour spaces, the scope a Type 3 glyph runs in.** It runs
-  in the scope that invokes it rather than in its font's `/Resources` (see
-  [the scope a default is read in](#the-scope-a-default-is-read-in)). A
-  default follows the scope the engine resolves its other names in; the
-  scope is the gap, and it is not this design's.
 - **For default colour spaces, PDF/A's and PDF/X's reading.** The validators
   record a default per walk rather than per resource dictionary
   (`crates/tinker-pdf/src/pdfa/colour.rs`), a simplification they name; this
@@ -772,15 +767,14 @@ names they stand for.
 in.** 8.6.5.6 says "the current resource dictionary", and the engine keeps
 one object per such dictionary, `PageResources`. Reading the default from
 the object a `cs /CS0` beside it resolves against means the two are never
-read in different scopes, including in the row below where the
-engine's scope is itself the wrong one.
+read in different scopes.
 
 | Scope | The standard | This engine |
 | --- | --- | --- |
 | Page | its `/Resources`, inherited down the page tree (7.7.3.4) | `PageResources::new`, over the inherited dictionary (`crates/tinker-pdf-cos/src/pages.rs`) |
 | Form XObject | its own `/Resources` (8.10.1); without them, the page's, a construct 7.8.3 calls obsolete | its own (`form_resources`), or the invoking scope when it has none |
 | Tiling pattern | its own `/Resources`, required (Table 75) | its own, or the invoking scope's when absent |
-| Type 3 glyph | the font's `/Resources`, or the page's when absent (9.6.5) | **the enclosing scope**: a glyph procedure runs without changing scope, which `docs/features/editing.md` records for subsetting |
+| Type 3 glyph | the font's `/Resources`, or the page's when absent (9.6.5, Table 121) | the font's own (`object_resources`, kept beside the forms' by the font dictionary's reference), or the scope that shows the glyph when it has none; a font written directly into a resource dictionary has no reference to keep them by, and its procedures run in the showing scope |
 | Annotation appearance | its own `/Resources`, an appearance stream being a form XObject (12.5.5) | its own, or an empty scope when it has none (`crates/tinker-pdf/src/annots.rs`) |
 | Soft-mask group | `/G`'s own `/Resources`, `/G` being a form XObject (11.6.5.2, 8.10.1) | its own (`mask_resources`, kept beside the forms' by `/G`'s stream), or the scope that set the `gs` when it has none, as a form's |
 
@@ -803,14 +797,11 @@ engine's scope is itself the wrong one.
   a form XObject, and 8.10.1 gives a form its own resources. A group with
   none reads the defaults of the scope that set the `gs`, and its `/BC` is
   read in the space so remapped.
-- **A Type 3 glyph** runs in a scope that is not the one 9.6.5 names, for
-  every name in it alike, and the default follows that scope rather than
-  being put right alone (the non-goal above). The clauses that put a
-  soft-mask group in its own resources do not reach it: 11.6.5.2 and 8.10.1
-  are about form XObjects, and a glyph procedure is not one — 9.6.5's
-  Table 121 and 7.8.3 give it its font's `/Resources`, or the page's where
-  the font has none. A `d1` glyph specifies shape only (9.6.5), so only a
-  `d0` glyph's colours are in question.
+- **A Type 3 glyph's procedure reads the defaults of its font's
+  `/Resources`**, the dictionary Table 121 resolves its other names in, whole
+  as a form's are; a font with none reads the defaults of the scope that
+  shows the glyph. A `d1` glyph specifies shape only (9.6.5), so only a `d0`
+  glyph's colours are in question.
 
 **A group's `/CS`: which "current resource dictionary", the standard does
 not say.** For the page group it can only be the page's. For a form's group

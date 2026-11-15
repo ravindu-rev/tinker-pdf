@@ -293,10 +293,11 @@ fn a_name_in_both_resolves_to_the_groups_own() {
 
 /// **The command stream records the mask's scope** (minor 5): a group with
 /// resources of its own is a `Scope` record under the page's, by no form name
-/// and by the group's stream, its appended field; a group with none is none.
+/// and by the group's stream, its appended field, the object whose resources
+/// the scope is; a group with none is none.
 #[test]
 fn the_command_stream_records_the_masks_scope() {
-    assert_eq!(CommandKind::Scope.fields()[3], "mask");
+    assert_eq!(CommandKind::Scope.fields()[3], "object");
     let scope = CommandKind::Scope.number();
     for kind in kinds() {
         let what = kind.what;

@@ -110,7 +110,10 @@ fn inline_image(at: &str) -> Vec<u8> {
 ///   `BeginSoftMask`, `ClearSoftMask` and their ends);
 /// - a tiling pattern (`Pattern`, `Cell`), a form with resources of its own
 ///   (`Scope`), a form that draws itself (`RecursionRefused`), and a square
-///   annotation with an appearance (`Annotation`).
+///   annotation with an appearance (`Annotation`);
+/// - a glyph of a Type 3 font with resources of its own, its procedure
+///   drawing at a graphics state they name (`BeginType3Glyph`,
+///   `EndType3Glyph`).
 ///
 /// The four kinds it does not hold are named where they are pushed by hand
 /// ([`the_command_stream_round_trips_through_the_c_abi`]).
@@ -122,6 +125,7 @@ fn every_kind_page() -> Vec<u8> {
           q /Lab0 cs 50 10 10 sc 90 20 10 10 re f Q\n\
           BT /F0 12 Tf 10 120 Td (Glyphs) Tj ET\n\
           BT /Nope 12 Tf 10 140 Td (x) Tj ET\n\
+          BT /T3R 12 Tf 60 140 Td (A) Tj ET\n\
           q 20 0 0 20 120 20 cm /Im0 Do Q\n"
         .to_vec();
     content.extend(inline_image("10 0 0 10 150 20"));
@@ -139,7 +143,7 @@ fn every_kind_page() -> Vec<u8> {
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 160] /Resources 4 0 R \
           /Contents 5 0 R /Annots [17 0 R] >>"
             .to_vec(),
-        b"<< /Font << /F0 6 0 R >> \
+        b"<< /Font << /F0 6 0 R /T3R 19 0 R >> \
           /XObject << /Im0 9 0 R /G 10 0 R /Fm0 11 0 R /Rec 12 0 R >> \
           /Shading << /Sh0 13 0 R >> /Pattern << /P0 15 0 R >> \
           /ColorSpace << \
@@ -205,6 +209,12 @@ fn every_kind_page() -> Vec<u8> {
             "/Type /XObject /Subtype /Form /BBox [0 0 40 30]",
             b"0 0 1 RG 2 w 1 1 38 28 re S",
         ),
+        b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+          /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 20 0 R >> \
+          /Encoding << /Type /Encoding /Differences [65 /a] >> /FirstChar 65 \
+          /LastChar 65 /Widths [1000] /Resources << /ExtGState << /H << /ca 0.5 >> >> >> >>"
+            .to_vec(),
+        stream_object("", b"1000 0 d0 /H gs 0 0 800 800 re f"),
     ])
 }
 

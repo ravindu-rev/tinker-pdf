@@ -466,6 +466,9 @@ struct Geometry {
 struct Writer<'a> {
     glyphs: Scope<'a>,
     form_scopes: Vec<Option<Scope<'a>>>,
+    /// The scope each Type 3 glyph procedure running in its font's own
+    /// `/Resources` displaced (Table 121), `None` where it runs where shown.
+    type3_scopes: Vec<Option<Scope<'a>>>,
     /// The resource name of every form entered and not yet ended, innermost
     /// last, so a refusal about a group can name the form that carries it.
     form_names: Vec<Vec<u8>>,
@@ -515,6 +518,7 @@ impl<'a> Writer<'a> {
         Writer {
             glyphs: Scope::Borrowed(resources),
             form_scopes: Vec::new(),
+            type3_scopes: Vec::new(),
             form_names: Vec::new(),
             pushed: Vec::new(),
             base,
@@ -1486,6 +1490,20 @@ impl Device for Writer<'_> {
         }
         if let Some(clips) = self.saved.pop() {
             self.clips = clips;
+        }
+    }
+
+    fn begin_type3_glyph(&mut self, font: u64) {
+        // Table 121: the procedure's names are its font's own `/Resources`,
+        // asked as the renderer asks.
+        let nested = self.glyphs.type3_scope(font);
+        self.type3_scopes
+            .push(nested.map(|scope| std::mem::replace(&mut self.glyphs, Scope::Owned(scope))));
+    }
+
+    fn end_type3_glyph(&mut self) {
+        if let Some(Some(outer)) = self.type3_scopes.pop() {
+            self.glyphs = outer;
         }
     }
 

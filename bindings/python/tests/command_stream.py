@@ -86,6 +86,7 @@ def every_kind_page():
         b"q /Lab0 cs 50 10 10 sc 90 20 10 10 re f Q\n"
         b"BT /F0 12 Tf 10 120 Td (Glyphs) Tj ET\n"
         b"BT /Nope 12 Tf 10 140 Td (x) Tj ET\n"
+        b"BT /T3R 12 Tf 60 140 Td (A) Tj ET\n"
         b"q 20 0 0 20 120 20 cm /Im0 Do Q\n"
         b"q 10 0 0 10 150 20 cm BI /W 2 /H 2 /CS /G /BPC 8 ID "
         + bytes([0x00, 0x55, 0xAA, 0xFF])
@@ -103,7 +104,7 @@ def every_kind_page():
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 160] /Resources 4 0 R "
             b"/Contents 5 0 R /Annots [17 0 R] >>",
-            b"<< /Font << /F0 6 0 R >> "
+            b"<< /Font << /F0 6 0 R /T3R 19 0 R >> "
             b"/XObject << /Im0 9 0 R /G 10 0 R /Fm0 11 0 R /Rec 12 0 R >> "
             b"/Shading << /Sh0 13 0 R >> /Pattern << /P0 15 0 R >> "
             b"/ColorSpace << "
@@ -166,6 +167,11 @@ def every_kind_page():
                 "/Type /XObject /Subtype /Form /BBox [0 0 40 30]",
                 b"0 0 1 RG 2 w 1 1 38 28 re S",
             ),
+            b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] "
+            b"/FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 20 0 R >> "
+            b"/Encoding << /Type /Encoding /Differences [65 /a] >> /FirstChar 65 "
+            b"/LastChar 65 /Widths [1000] /Resources << /ExtGState << /H << /ca 0.5 >> >> >> >>",
+            stream_object("", b"1000 0 d0 /H gs 0 0 800 800 re f"),
         ]
     )
 
