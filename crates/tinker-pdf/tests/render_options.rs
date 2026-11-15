@@ -694,19 +694,71 @@ fn blue_first(pixels: &[u8], from: usize, to: usize) -> Vec<u8> {
         .collect()
 }
 
+/// Every blend mode in colour: 11.3.5's twelve separable modes and its four
+/// non-separable ones, a 12-point cell each in four rows of four, each cell
+/// two backdrops under one source, each of the three colours with its red
+/// and its blue apart.
+///
+/// `blend_grid_page`, the grid `determinism.rs` pins, is grey and separable:
+/// a grey pixel is its own reordering, and a separable mode reads each channel
+/// alone, so no render of it can show a channel order. Here the colours'
+/// reds and blues differ, and the non-separable formulas mix the channels
+/// (11.3.5.3).
+fn colour_blend_page() -> Vec<u8> {
+    const CELL: f64 = 12.0;
+    const BACKDROPS: [[f64; 3]; 2] = [[0.9, 0.35, 0.1], [0.15, 0.55, 0.85]];
+    const SOURCE: [f64; 3] = [0.3, 0.75, 0.45];
+    let modes: Vec<BlendMode> = render_support::MODES
+        .into_iter()
+        .chain([
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ])
+        .collect();
+    let mut builder = DocumentBuilder::new();
+    for (index, mode) in modes.iter().enumerate() {
+        assert!(builder.add_ext_gstate(
+            format!("GS{index}").as_bytes(),
+            &ExtGState {
+                blend_mode: Some(*mode),
+                ..ExtGState::default()
+            }
+        ));
+    }
+    builder.add_page(4.0 * CELL, 4.0 * CELL, |page| {
+        for index in 0..modes.len() {
+            let (x, y) = ((index % 4) as f64 * CELL, (3 - index / 4) as f64 * CELL);
+            for (which, [r, g, b]) in BACKDROPS.into_iter().enumerate() {
+                let left = x + which as f64 * CELL / 2.0;
+                let half = CELL / 2.0;
+                page.raw(b"q ");
+                page.set_fill_rgb(r, g, b);
+                page.raw(format!("{left} {y} {half} {CELL} re f ").as_bytes());
+                assert!(page.set_ext_gstate(format!("GS{index}").as_bytes()));
+                page.set_fill_rgb(SOURCE[0], SOURCE[1], SOURCE[2]);
+                page.raw(format!("{left} {y} {half} {CELL} re f ").as_bytes());
+                page.raw(b"Q ");
+            }
+        }
+    });
+    built("every blend mode in colour", builder)
+}
+
 /// **`Bgr8` and `Bgra8` are the `Rgba8` render reordered**, byte for byte:
-/// on the blend grid — twelve modes, four of them non-separable, whose
-/// formulas see the channel order — and on a text page whose grey text and
-/// translucent shape put partial pixels everywhere, with `transparent` and
-/// `premultiplied` each on and off. `Bgra8` is the `Rgba8` render under the
-/// same options with red and blue exchanged; `Bgr8` has no alpha, so like
+/// on every blend mode in colour — sixteen, four of them non-separable,
+/// whose formulas see the channel order — and on a text page whose grey text
+/// and translucent shape put partial pixels everywhere, with `transparent`
+/// and `premultiplied` each on and off. `Bgra8` is the `Rgba8` render under
+/// the same options with red and blue exchanged; `Bgr8` has no alpha, so like
 /// `Rgb8` it is on white whatever `transparent` says, and it is the opaque
 /// `Rgba8` render reordered with its alpha dropped. `to_png` of each writes the
 /// `Rgb8` or `Rgba8` render's file, and a display list's render is the page's.
 #[test]
 fn bgr_and_bgra_are_the_rgba8_render_reordered() {
     for (name, page) in [
-        ("blend grid", blend_grid_page()),
+        ("every blend mode in colour", colour_blend_page()),
         ("text page", layer_page()),
     ] {
         let doc = Document::open(page).expect("the page opens");
