@@ -2943,6 +2943,14 @@ fn linearized_open(
 ) -> Option<(XrefBuild, Linearized)> {
     let view = backing.view();
     let len = backing.len();
+    // The first object is read, and its keys looked up, against a table of
+    // the probe's own. The document keeps nothing of it — only the numbers
+    // read out of it — and a probe that interned into the document's table
+    // would leave there `/Linearized` and the names of an object a buffered
+    // open of the same bytes reads later, if at all: every name the document
+    // interns after them would take another id than that open gives it, and
+    // its objects would not compare equal to that open's.
+    let probe = NameTable::new();
     let mut want = limits::MAX_HEADER_SCAN as u64;
     loop {
         let head = view.window(0, want)?;
@@ -2953,20 +2961,20 @@ fn linearized_open(
         // the file, and a file whose first object is anything else is simply
         // not linearized.
         let at = next_object_header(head.bytes(), 0)?;
-        let Some(first) = parse_indirect_at(head.bytes(), at, &names.table, &mut scratch) else {
+        let Some(first) = parse_indirect_at(head.bytes(), at, &probe, &mut scratch) else {
             if reaches_end {
                 return None;
             }
             want = want.saturating_mul(2);
             continue;
         };
-        let linearized = names.table.intern(b"Linearized");
+        let linearized = probe.intern(b"Linearized");
         let dict = first
             .object
             .as_dict()
             .filter(|d| d.contains_key(linearized))?;
         let number = |key: &[u8]| {
-            dict.get_int(names.table.intern(key))
+            dict.get_int(probe.intern(key))
                 .and_then(|v| u64::try_from(v).ok())
         };
 
@@ -2998,7 +3006,7 @@ fn linearized_open(
         // neither of which needs a hint table. So they are carried as `None`
         // and only a page *other* than the first pays for them.
         let page_count = number(b"N").and_then(|v| u32::try_from(v).ok());
-        let hint = dict.get_array(names.table.intern(b"H")).and_then(|array| {
+        let hint = dict.get_array(probe.intern(b"H")).and_then(|array| {
             let at = array.first()?.as_int()?;
             let len = array.get(1)?.as_int()?;
             Some((u64::try_from(at).ok()?, u64::try_from(len).ok()?))
@@ -3436,6 +3444,42 @@ mod tests {
             .expect("the main table states it");
         bytes[at..at + 10].copy_from_slice(format!("{elsewhere:010}").as_bytes());
         bytes
+    }
+
+    /// **A streamed open of a file that is not linearized interns what a
+    /// buffered open interns.** The probe for Annex F's head-only path reads
+    /// the first object against a table of its own, so neither `/Linearized`
+    /// nor the names of a catalog that no table pre-interns are in the
+    /// streamed document's table before a read puts them there. The two
+    /// documents hold as many names after the open, and objects read in the
+    /// same order — the one after the catalog first, then the catalog — read
+    /// equal, every name in them at the same id.
+    #[test]
+    fn a_streamed_open_interns_what_a_buffered_open_interns() {
+        let bytes = Fixture {
+            bodies: vec![
+                "<< /Type /Catalog /Pages 2 0 R /PageMode /UseOutlines >>".to_string(),
+                "<< /Type /Pages /Count 0 /Kids [] >>".to_string(),
+                "<< /Unusual /Name >>".to_string(),
+            ],
+            ..Fixture::default()
+        }
+        .bytes();
+        let (buffered, streamed) = (buffered(&bytes), streamed(&bytes));
+        assert_eq!(streamed.first_page_end(), None, "not linearized");
+        assert_eq!(
+            streamed.names_table().len(),
+            buffered.names_table().len(),
+            "the open interned nothing the buffered one did not"
+        );
+        for num in [3, 1, 2] {
+            let r = ObjRef::new(num, 0);
+            assert_eq!(
+                streamed.get(r).expect("it reads"),
+                buffered.get(r).expect("it reads"),
+                "object {num}"
+            );
+        }
     }
 
     /// A streamed document's verdict is the ladder level a buffered open of

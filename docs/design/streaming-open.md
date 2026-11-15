@@ -109,7 +109,14 @@ semantic one, handled under determinism below.
 If the head window contains a `/Linearized` parameter dictionary whose `/L`
 equals `source.len()` — Annex F's own rule for detecting that a linearized
 file was incrementally updated and must be read as ordinary — the fast path
-engages. Page one is found through Annex F part 3, the first-page
+engages. The probe reads the file's first object, and looks its keys up,
+against a name table of its own: the document keeps only the numbers read
+out of it, so a file that is not linearized leaves the document's table as a
+buffered open of the same bytes leaves it, and every name the two intern
+afterwards takes the same id in both
+(`a_streamed_open_interns_what_a_buffered_open_interns`,
+`crates/tinker-pdf-cos/src/doc.rs`). Page one is found through Annex F
+part 3, the first-page
 cross-reference section, which sits in the head and is parsed by the same
 walker every other section goes through, and through `/O`, which names the
 first page's object number outright (F.3.3, Table F.1). Page one's objects all
