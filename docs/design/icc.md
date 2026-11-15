@@ -73,10 +73,10 @@ open of this design — the refused profiles — is listed in the
 - **A bare `/CalGray` or `/CalRGB` name.** `parse_space` reads both arrays'
   white point, gamma and matrix (8.6.5.2–8.6.5.3); a bare name, which carries
   no parameters, is drawn as its device space.
-- **For default colour spaces, the scope a Type 3 glyph or a soft-mask group
-  runs in.** Both run in the scope that invokes them rather than in their own
-  `/Resources` (see [the scope a default is read in](#the-scope-a-default-is-read-in)).
-  A default follows the scope the engine resolves their other names in; the
+- **For default colour spaces, the scope a Type 3 glyph runs in.** It runs
+  in the scope that invokes it rather than in its font's `/Resources` (see
+  [the scope a default is read in](#the-scope-a-default-is-read-in)). A
+  default follows the scope the engine resolves its other names in; the
   scope is the gap, and it is not this design's.
 - **For default colour spaces, PDF/A's and PDF/X's reading.** The validators
   record a default per walk rather than per resource dictionary
@@ -772,7 +772,7 @@ names they stand for.
 in.** 8.6.5.6 says "the current resource dictionary", and the engine keeps
 one object per such dictionary, `PageResources`. Reading the default from
 the object a `cs /CS0` beside it resolves against means the two are never
-read in different scopes, including in the two rows below where the
+read in different scopes, including in the row below where the
 engine's scope is itself the wrong one.
 
 | Scope | The standard | This engine |
@@ -782,7 +782,7 @@ engine's scope is itself the wrong one.
 | Tiling pattern | its own `/Resources`, required (Table 75) | its own, or the invoking scope's when absent |
 | Type 3 glyph | the font's `/Resources`, or the page's when absent (9.6.5) | **the enclosing scope**: a glyph procedure runs without changing scope, which `docs/features/editing.md` records for subsetting |
 | Annotation appearance | its own `/Resources`, an appearance stream being a form XObject (12.5.5) | its own, or an empty scope when it has none (`crates/tinker-pdf/src/annots.rs`) |
-| Soft-mask group | `/G`'s own `/Resources`, `/G` being a form XObject (11.6.5.2) | **the scope that set the `gs`**, the deviation FT-28's notes record |
+| Soft-mask group | `/G`'s own `/Resources`, `/G` being a form XObject (11.6.5.2, 8.10.1) | its own (`mask_resources`, kept beside the forms' by `/G`'s stream), or the scope that set the `gs` when it has none, as a form's |
 
 - **A page's default does not reach into a form that has `/Resources` of
   its own**, even resources with no `/ColorSpace`: they are the current
@@ -798,19 +798,28 @@ engine's scope is itself the wrong one.
   own (8.7.3.3).
 - **An image or a shading brings no resources**, so it is read in the scope
   that paints it: `Do`, `sh`, or the fill a shading pattern paints.
-- **A Type 3 glyph and a soft-mask group** run in a scope that is not the one
-  9.6.5 and 11.6.5.2 name, for every name in them alike, and the default
-  follows that scope rather than being put right alone (the non-goal
-  above). A `d1` glyph specifies shape only (9.6.5), so only a `d0`
-  glyph's colours are in question.
+- **A soft-mask group reads the defaults of its own `/Resources`**, the
+  dictionary its other names resolve in, as a form does: 11.6.5.2 makes `/G`
+  a form XObject, and 8.10.1 gives a form its own resources. A group with
+  none reads the defaults of the scope that set the `gs`, and its `/BC` is
+  read in the space so remapped.
+- **A Type 3 glyph** runs in a scope that is not the one 9.6.5 names, for
+  every name in it alike, and the default follows that scope rather than
+  being put right alone (the non-goal above). The clauses that put a
+  soft-mask group in its own resources do not reach it: 11.6.5.2 and 8.10.1
+  are about form XObjects, and a glyph procedure is not one — 9.6.5's
+  Table 121 and 7.8.3 give it its font's `/Resources`, or the page's where
+  the font has none. A `d1` glyph specifies shape only (9.6.5), so only a
+  `d0` glyph's colours are in question.
 
 **A group's `/CS`: which "current resource dictionary", the standard does
 not say.** For the page group it can only be the page's. For a form's group
 it could be the form's own `/Resources`, where its contents are painted, or
 the invoking stream's, where `Do` runs. This design remaps it by the defaults
 of the scope the group's contents run in: the form's own when it has them,
-the invoking scope when it has not, and for a soft-mask group the scope the
-engine runs it in. A group whose `/CS` were remapped by one dictionary and its
+the invoking scope when it has not, and a soft-mask group's alike, the scope
+that set the `gs` standing for the invoking one. A group whose `/CS` were
+remapped by one dictionary and its
 contents by another would paint them in one calibration and composite them in
 another. `form_from` reads a form group's `/CS` where `Do` runs and remaps it
 by the defaults of the scope its contents run in, so what it tolerates is

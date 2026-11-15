@@ -34,7 +34,7 @@ use crate::resources::{Frame, PageResources};
 use crate::{DisplayList, Usage};
 
 /// A scope the writer resolves names in: one it borrows — the page's, a
-/// cell's — or one it holds — a form's, an appearance's.
+/// cell's — or one it holds — a form's, a mask group's, an appearance's.
 #[derive(Clone)]
 enum Held<'a> {
     Borrowed(&'a PageResources),
@@ -78,6 +78,9 @@ pub(crate) struct Writer<'a> {
     floor: usize,
     tables: Tables,
     scope_ids: HashMap<(u64, Vec<u8>), u64>,
+    /// The mask groups' scopes written, by the scope that set the `gs` and
+    /// the group's stream.
+    mask_ids: HashMap<(u64, u64), u64>,
     outlines: HashSet<(u64, u64, u32)>,
     identities: HashSet<(u64, u64)>,
     images: HashSet<(u64, Vec<u8>, u64)>,
@@ -102,6 +105,7 @@ impl<'a> Writer<'a> {
             floor: 1,
             tables: Tables::default(),
             scope_ids: HashMap::new(),
+            mask_ids: HashMap::new(),
             outlines: HashSet::new(),
             identities: HashSet::new(),
             images: HashSet::new(),
@@ -131,7 +135,14 @@ impl<'a> Writer<'a> {
     pub(crate) fn event(&mut self, event: &Event) {
         match event {
             Event::BeginForm { name, .. } => self.enter_form(name),
-            Event::EndForm { .. } => {
+            Event::BeginSoftMask {
+                mask,
+                entered: true,
+                ..
+            } => self.enter_mask(mask.form.stream),
+            // An `EndSoftMask` arrives only for a mask that was entered, which
+            // pushed a scope as a form does.
+            Event::EndForm { .. } | Event::EndSoftMask => {
                 if self.stack.len() > self.floor {
                     self.stack.pop();
                 }
@@ -159,6 +170,7 @@ impl<'a> Writer<'a> {
         self.tables.scopes.push(ScopeEntry {
             parent: None,
             name: None,
+            mask: None,
         });
         let id = self.tables.scopes.len() as u64;
         self.events.body(
@@ -210,9 +222,43 @@ impl<'a> Writer<'a> {
                         self.tables.scopes.push(ScopeEntry {
                             parent: Some(parent),
                             name: Some(name.to_vec()),
+                            mask: None,
                         });
                         let id = self.tables.scopes.len() as u64;
                         self.scope_ids.insert(key, id);
+                        id
+                    }
+                };
+                Scoped {
+                    id,
+                    resources: Held::Owned(child),
+                }
+            }
+            None => self.top().clone(),
+        };
+        self.stack.push(scoped);
+    }
+
+    /// An accepted `BeginSoftMask`: the renderer asks the scope in force, the
+    /// one that set the `gs`, for the group's own resources and resolves in
+    /// them until `EndSoftMask`, or goes on in the scope it is in where the
+    /// group brings none (11.6.5.2, 8.10.1) — a form's rule, by the group's
+    /// stream rather than a name.
+    fn enter_mask(&mut self, stream: u64) {
+        let parent = self.top().id;
+        let child = self.top().resources.mask_scope(stream);
+        let scoped = match child {
+            Some(child) => {
+                let id = match self.mask_ids.get(&(parent, stream)) {
+                    Some(id) => *id,
+                    None => {
+                        self.tables.scopes.push(ScopeEntry {
+                            parent: Some(parent),
+                            name: None,
+                            mask: Some(stream),
+                        });
+                        let id = self.tables.scopes.len() as u64;
+                        self.mask_ids.insert((parent, stream), id);
                         id
                     }
                 };

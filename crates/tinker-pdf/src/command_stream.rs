@@ -358,7 +358,8 @@ mod tests {
     /// face and in a Type 3 font, three kinds of image XObject — RGB samples,
     /// a JPEG and a stencil mask — and an inline image, an axial and a mesh
     /// shading, a tiling pattern whose cell, with resources of its own, draws
-    /// an image, and a form with its own resources drawing an image and text.
+    /// an image, a form with its own resources drawing an image and text, and
+    /// a soft mask whose group, with resources of its own, does the same.
     fn every_question() -> Vec<u8> {
         let widths: Vec<String> = (32..=126).map(|_| "500".to_string()).collect();
         let mut content = b"q 1 0 0 RG 2 w 10 10 m 190 10 l S Q\n\
@@ -371,6 +372,7 @@ mod tests {
              q 100 10 90 40 re W n /Sh1 sh Q\n\
              q /Pattern cs /P0 scn 10 60 80 40 re f Q\n\
              q 1 0 0 1 120 60 cm /Fm0 Do Q\n\
+             q /GM gs 0 0 1 rg 150 10 40 40 re f Q\n\
              q 20 0 0 20 170 60 cm BI /W 2 /H 2 /CS /G /BPC 8 ID "
             .to_vec();
         content.extend_from_slice(&[0x00, 0x40, 0x80, 0xff]);
@@ -386,7 +388,8 @@ mod tests {
                 .to_vec(),
             b"<< /Font << /F0 6 0 R /T3 9 0 R >> \
               /XObject << /Im0 11 0 R /Im1 12 0 R /Im2 13 0 R /Fm0 14 0 R >> \
-              /Shading << /Sh0 16 0 R /Sh1 17 0 R >> /Pattern << /P0 18 0 R >> >>"
+              /Shading << /Sh0 16 0 R /Sh1 17 0 R >> /Pattern << /P0 18 0 R >> \
+              /ExtGState << /GM 20 0 R >> >>"
                 .to_vec(),
             stream("", &content),
             format!(
@@ -450,6 +453,18 @@ mod tests {
                  /BitsPerComponent 8",
                 &rgb(2, 2),
             ),
+            b"<< /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G 21 0 R >> >>".to_vec(),
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 200 200] \
+                 /Group << /S /Transparency /CS /DeviceRGB >> \
+                 /Resources << /XObject << /ImM 22 0 R >> /Font << /FM 6 0 R >> >>",
+                b"q 40 0 0 40 150 10 cm /ImM Do Q BT /FM 12 Tf 150 30 Td (Mask) Tj ET",
+            ),
+            stream(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray \
+                 /BitsPerComponent 8",
+                &[255, 170, 85, 255],
+            ),
         ];
         file(&objects)
     }
@@ -459,6 +474,7 @@ mod tests {
     enum Step {
         Annotation(usize),
         Form(Vec<u8>),
+        Mask(u64),
         Cell(Vec<u8>),
     }
 
@@ -487,6 +503,7 @@ mod tests {
         Pattern(Vec<Step>, Vec<u8>, Option<PatternPaint>),
         Tile(Vec<Step>, Vec<u8>, bool),
         FormScope(Vec<Step>, Vec<u8>, bool),
+        MaskScope(Vec<Step>, u64, bool),
     }
 
     /// The page's resources, every question to them logged with its answer.
@@ -625,6 +642,16 @@ mod tests {
             ));
             answer.map(|scope| Arc::new(self.below(Step::Form(name.to_vec()), scope)))
         }
+
+        fn mask_scope(&self, stream: u64) -> Option<Arc<Logging>> {
+            let answer = self.inner.mask_scope(stream);
+            self.ask(Asked::MaskScope(
+                self.path.clone(),
+                stream,
+                answer.is_some(),
+            ));
+            answer.map(|scope| Arc::new(self.below(Step::Mask(stream), scope)))
+        }
     }
 
     /// The stream and scope a path reaches.
@@ -636,6 +663,12 @@ mod tests {
                 Step::Form(name) => {
                     let id = at.0.tables.scopes.iter().position(|scope| {
                         scope.parent == Some(at.1) && scope.name.as_deref() == Some(name.as_slice())
+                    })?;
+                    (at.0, id as u64 + 1)
+                }
+                Step::Mask(stream) => {
+                    let id = at.0.tables.scopes.iter().position(|scope| {
+                        scope.parent == Some(at.1) && scope.mask == Some(*stream)
                     })?;
                     (at.0, id as u64 + 1)
                 }
@@ -810,7 +843,8 @@ mod tests {
             | Asked::Shading(path, ..)
             | Asked::Pattern(path, ..)
             | Asked::Tile(path, ..)
-            | Asked::FormScope(path, ..) => path,
+            | Asked::FormScope(path, ..)
+            | Asked::MaskScope(path, ..) => path,
         };
         let Some((stream, scope)) = locate(parsed, path) else {
             return Some(format!("no scope at {path:?} for {asked:?}"));
@@ -914,13 +948,21 @@ mod tests {
                     .any(|s| s.parent == Some(scope) && s.name.as_deref() == Some(name.as_slice()));
                 (held != *answered).then(|| format!("a scope held {held} for {asked:?}"))
             }
+            Asked::MaskScope(_, stream, answered) => {
+                let held = tables
+                    .scopes
+                    .iter()
+                    .any(|s| s.parent == Some(scope) && s.mask == Some(*stream));
+                (held != *answered).then(|| format!("a mask's scope held {held} for {asked:?}"))
+            }
         }
     }
 
     /// **The stream answers every question a render asks**: a page holding
     /// text in an embedded face and a Type 3 font, three image kinds and an
     /// inline image, an axial and a mesh shading, a tiling cell holding an
-    /// image and a form with its own resources, rendered from its list
+    /// image, and a form and a soft mask's group each with its own
+    /// resources, rendered from its list
     /// through a logging `GlyphSource` at 0.5 and 2.25 times, asks only
     /// questions the stream's tables answer, each with the value the page's
     /// resources gave — outlines to the bit, images byte for byte, shadings
@@ -1030,6 +1072,14 @@ mod tests {
             .scopes
             .iter()
             .any(|s| s.name.as_deref() == Some(&b"Fm0"[..])));
+        assert!(
+            parsed
+                .tables
+                .scopes
+                .iter()
+                .any(|s| s.mask == Some(21 << 16) && s.parent == Some(0) && s.name.is_none()),
+            "the mask group's own scope, under the page's that set the gs"
+        );
         assert!(parsed.inline.len() == 1, "the inline image");
 
         for scale in [0.5, 2.25] {
@@ -1096,6 +1146,23 @@ mod tests {
                     |a| matches!(a, Asked::Image(path, ..) if path.iter().any(|s| matches!(s, Step::Form(_))))
                 ) > 0,
                 "{scale}: the form's own image, asked in its scope"
+            );
+            assert!(
+                kinds(|a| matches!(a, Asked::MaskScope(_, _, true))) > 0,
+                "{scale}: the mask group's scope"
+            );
+            let in_mask = |path: &[Step]| path.iter().any(|s| matches!(s, Step::Mask(_)));
+            assert!(
+                asked
+                    .iter()
+                    .any(|a| matches!(a, Asked::Image(path, ..) if in_mask(path))),
+                "{scale}: the mask group's own image, asked in its scope"
+            );
+            assert!(
+                asked
+                    .iter()
+                    .any(|a| matches!(a, Asked::Outline(path, ..) if in_mask(path))),
+                "{scale}: the mask group's own font's outlines, asked in its scope"
             );
             let wrong: Vec<String> = asked.iter().filter_map(|a| check(&parsed, a)).collect();
             assert!(

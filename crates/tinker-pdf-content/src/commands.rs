@@ -71,7 +71,11 @@ pub const MAJOR: u16 = 1;
 /// space, which is where a reader of an earlier minor anchored every pattern.
 /// Minor 4 adds [`CommandKind::DepthRefused`], the depth cap's notice, which
 /// a reader of an earlier minor steps over.
-pub const MINOR: u16 = 4;
+/// Minor 5 appends to [`CommandKind::Scope`] the stream of the soft mask's
+/// group whose own `/Resources` the scope is (11.6.5.2, 8.10.1), written only
+/// for such a scope, so a scope record that ends before it is a form's or an
+/// appearance's.
+pub const MINOR: u16 = 5;
 
 /// The most glyphs one [`CommandKind::GlyphRun`] holds; a longer run of one
 /// font and state is written as several.
@@ -282,7 +286,7 @@ kinds! {
     65 Annotation "Annotation" ["scope", "widget"]
     66 MissingFont "MissingFont" ["name"]
     67 RepairedSpace "RepairedSpace" ["name", "repair"]
-    68 Scope "Scope" ["id", "parent", "name"]
+    68 Scope "Scope" ["id", "parent", "name", "mask"]
     69 Outline "Outline" ["scope", "font id", "code", "found", "operators", "numbers", "missing fonts", "damaged names", "damaged", "repaired names", "repaired"]
     70 FontIdentity "FontIdentity" ["scope", "font id", "identity", "object"]
     71 Profile "Profile" ["bytes"]
@@ -1003,6 +1007,17 @@ impl<'a> Fields<'a> {
             return Ok(false);
         }
         self.flag(at)
+    }
+
+    /// An unsigned field a later minor appended to its kind: the value where
+    /// the record carries it, and `None` where the record ends before it —
+    /// written by an earlier minor, or by a writer that writes the field only
+    /// where it is set.
+    pub fn appended_unsigned(&self, at: usize) -> Result<Option<u64>, CommandError> {
+        if at >= self.fields.len() {
+            return Ok(None);
+        }
+        self.unsigned(at).map(Some)
     }
 
     /// A reals field of exactly `len` reals a later minor appended to its

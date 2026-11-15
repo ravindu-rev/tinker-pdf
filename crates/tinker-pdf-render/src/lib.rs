@@ -990,6 +990,19 @@ pub trait GlyphSource {
         None
     }
 
+    /// The resources a soft mask's group brings with it, if it has its own
+    /// (11.6.5.2, 8.10.1): the device's half of `FontSource::mask_scope`,
+    /// asked about the same group, by its stream, when the renderer enters
+    /// it, so the two scopes stay in step as [`GlyphSource::form_scope`]'s
+    /// do. `None` keeps the scope that set the `gs`.
+    fn mask_scope(&self, stream: u64) -> Option<Arc<Self>>
+    where
+        Self: Sized,
+    {
+        let _ = stream;
+        None
+    }
+
     /// What font `font_id` selects in this scope, for the render's glyph-mask
     /// cache (`docs/design/performance.md`, P-06). The id is the name the
     /// scope's content selects the font by, and a form's scope may bind the
@@ -1261,7 +1274,7 @@ struct GroupFrame {
 }
 
 /// A soft-mask group being rendered (11.6.5.2).
-struct MaskFrame {
+struct MaskFrame<'g, G> {
     /// The canvas the render was drawing into.
     parent: Canvas,
     /// Where the mask's buffer sits in it.
@@ -1290,6 +1303,11 @@ struct MaskFrame {
     /// one opened inside it and never closed is closed before it is, so that
     /// the canvas it closes over is its own buffer.
     groups_open: usize,
+    /// The resource scope the group's own `/Resources` displaced, with the
+    /// serial it held (11.6.5.2, 8.10.1): put back as the mask closes,
+    /// wherever it closes from. `None` for a group that brought none, which
+    /// runs in the scope that set the `gs`.
+    scope: Option<(Scope<'g, G>, u64)>,
 }
 
 /// The most pixels a run of images may be held over: a quarter of a page.
@@ -1770,7 +1788,7 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// pops it, so an `/SMask` set inside `q ... Q` does not survive the `Q`.
     soft: Option<Arc<Mask>>,
     /// Soft-mask groups being rendered, innermost last.
-    mask_frames: Vec<MaskFrame>,
+    mask_frames: Vec<MaskFrame<'g, G>>,
     /// How many tiling-pattern cells this renderer is drawing inside
     /// (8.7.3.2), so a pattern that fills with itself terminates.
     ///
@@ -3835,6 +3853,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             frame: self.frame,
             clip_depth: self.clip_stack.len(),
             groups_open: self.groups.len(),
+            scope: None,
         };
         // The buffer a whole-page render would have made, from the same
         // arithmetic as the one above.
@@ -3864,6 +3883,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             return;
         };
         self.admission.end_soft_mask();
+        // The scope the group's own resources displaced, put back wherever
+        // the mask closes from.
+        if let Some((outer, serial)) = frame.scope {
+            self.glyphs = outer;
+            self.scope = serial;
+        }
         self.clip_stack.truncate(frame.clip_depth);
         let buffer = std::mem::replace(&mut self.canvas, frame.parent);
         self.clip = frame.clip;
@@ -7068,6 +7093,18 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         let entered = self.open_soft_mask(mask, bbox);
         if entered {
             tally(&mut self.counts.drawn_soft_masks);
+            // 11.6.5.2 and 8.10.1: `/G`'s own `/Resources`, if it brought
+            // any, as a form's. The interpreter asks its own seam the same
+            // question about the same group, so the two scopes open and
+            // close together; the mask's frame puts this one back.
+            let nested = self.glyphs.mask_scope(mask.form.stream);
+            let displaced = nested.map(|scope| {
+                let outer = mem::replace(&mut self.glyphs, Scope::Owned(scope));
+                (outer, self.next_scope())
+            });
+            if let Some(frame) = self.mask_frames.last_mut() {
+                frame.scope = displaced;
+            }
         }
         self.entered_stream(entered);
         entered

@@ -169,19 +169,30 @@ impl PageRecord {
 
 /// A scope a renderer resolves names in, beside the page's (scope 0): a
 /// form's own resources, by the scope that names the form and the form's
-/// name, or an annotation appearance's, by neither.
+/// name; a soft mask group's own resources, by the scope that set the `gs`
+/// and the group's stream (11.6.5.2, 8.10.1), from minor 5; or an annotation
+/// appearance's, by none of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ScopeEntry {
     pub(crate) parent: Option<u64>,
     pub(crate) name: Option<Vec<u8>>,
+    /// The mask group's stream, packed as `Form::stream` packs it: never 0,
+    /// which is no stream.
+    pub(crate) mask: Option<u64>,
 }
 
 impl ScopeEntry {
     fn record(&self, id: u64) -> Record {
-        Record::new(CommandKind::Scope)
+        let record = Record::new(CommandKind::Scope)
             .with(Field::Unsigned(id))
             .with(reference(self.parent))
-            .with(optional_bytes(self.name.as_deref()))
+            .with(optional_bytes(self.name.as_deref()));
+        // Appended by minor 5, and written only for a mask group's scope, so
+        // a form's and an appearance's are the records minor 4 wrote.
+        match self.mask {
+            Some(stream) => record.with(Field::Unsigned(stream)),
+            None => record,
+        }
     }
 
     fn read(fields: &Fields<'_>, expected: u64) -> Result<ScopeEntry, CommandError> {
@@ -190,15 +201,24 @@ impl ScopeEntry {
         }
         let parent = fields.reference(1)?;
         let name = fields.optional_bytes(2)?.map(|n| n.to_vec());
-        if parent.is_some() != name.is_some() {
-            return Err(
-                fields.wrong("a scope with a parent and no form name, or a name and no parent")
-            );
+        let mask = fields.appended_unsigned(3)?;
+        match (parent.is_some(), name.is_some(), mask) {
+            (false, false, None) | (true, true, None) => {}
+            (true, false, Some(stream)) if stream != 0 => {}
+            (_, _, Some(0)) => return Err(fields.wrong("a mask group's scope of stream 0")),
+            (_, _, Some(_)) => {
+                return Err(fields.wrong("a mask group's scope with a form name, or with no parent"))
+            }
+            _ => {
+                return Err(
+                    fields.wrong("a scope with a parent and no form name, or a name and no parent")
+                )
+            }
         }
         if parent.is_some_and(|parent| parent >= expected) {
             return Err(fields.wrong("a scope whose parent does not precede it"));
         }
-        Ok(ScopeEntry { parent, name })
+        Ok(ScopeEntry { parent, name, mask })
     }
 }
 

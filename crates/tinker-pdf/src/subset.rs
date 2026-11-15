@@ -1007,9 +1007,11 @@ fn walk_one(
 /// pattern's own `/Resources` or the scope that painted. A **soft mask's
 /// group** (11.6.5.2) is offered to the device, and this walk's device keeps
 /// no pixels to make a mask of, so it declines; this engine's interpreter
-/// runs an accepted group in the scope that set it, and 8.10.1 puts its
-/// names in its own `/Resources`, so it is walked in both — a reader either
-/// way draws it.
+/// runs an accepted group as it runs a form, in its own `/Resources` where it
+/// has them (8.10.1) and in the scope that set it where it has none, and a
+/// reader that runs it in the scope that set it draws it there, so a group
+/// with resources of its own is walked in both — a reader either way draws
+/// it.
 ///
 /// One per [`walk`], and each stream is walked once per scope: a cell drawn
 /// at a thousand tiles, or painted with from a thousand forms in one scope,
@@ -1052,8 +1054,10 @@ impl Unrun {
         }
     }
 
-    /// Queues a soft mask's group: in the scope that set it, and in its own
-    /// `/Resources` when it has them.
+    /// Queues a soft mask's group: in its own `/Resources` when it has them,
+    /// where this engine runs it, and in the scope that set it, where it runs
+    /// a group with none and where a reader that runs every group there
+    /// draws it.
     fn group(&mut self, stream: ObjRef, scope: &Arc<PageResources>) {
         self.push(stream, Arc::clone(scope), false);
         if let Some(own) = scope.own_scope(stream) {
@@ -1256,6 +1260,15 @@ impl FontSource for Recorded {
 
     fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>> {
         let inner = FontSource::form_scope(&*self.inner, name)?;
+        Some(Arc::new(Recorded {
+            inner,
+            ran: Arc::clone(&self.ran),
+            unrun: Arc::clone(&self.unrun),
+        }))
+    }
+
+    fn mask_scope(&self, stream: u64) -> Option<Arc<Self>> {
+        let inner = FontSource::mask_scope(&*self.inner, stream)?;
         Some(Arc::new(Recorded {
             inner,
             ran: Arc::clone(&self.ran),

@@ -3473,6 +3473,34 @@ impl PageResources {
         built.as_ref().map(|kept| self.bind(kept))
     }
 
+    /// The scope a soft mask's group runs in where it brings `/Resources` of
+    /// its own (11.6.5.2, 8.10.1): `/G` is a form XObject, reached through
+    /// `/SMask` by its stream rather than by a name, so it is built as
+    /// [`PageResources::form_resources`] builds a form's and kept beside
+    /// them under the same key, its stream. `None` where the group has none,
+    /// and its names resolve in the scope that set the `gs`.
+    fn mask_resources(&self, stream: u64) -> Option<Arc<PageResources>> {
+        if stream == 0 {
+            return None;
+        }
+        let reference = ObjRef::new(u32::try_from(stream >> 16).ok()?, (stream & 0xFFFF) as u16);
+        let made = Cell::new(false);
+        let built = self.caches.form_scopes.read(stream, || {
+            made.set(true);
+            self.count(Counter::FormScopeMisses);
+            let dict = self
+                .doc
+                .get(reference)
+                .ok()
+                .and_then(|object| object.as_dict().cloned());
+            Filled::Keep(dict.and_then(|dict| self.build_own_resources(&dict)))
+        });
+        if !made.get() {
+            self.count(Counter::FormScopeHits);
+        }
+        built.as_ref().map(|kept| self.bind(kept))
+    }
+
     fn build_form_resources(&self, dict: &Dict) -> Option<Arc<PageResources>> {
         let subtype = self
             .doc
@@ -3482,6 +3510,13 @@ impl PageResources {
         if subtype.as_ref() != b"Form" {
             return None;
         }
+        self.build_own_resources(dict)
+    }
+
+    /// The scope a stream's own `/Resources` make, `None` where it has none:
+    /// a form's, and a mask group's, which is a form whatever its
+    /// `/Subtype` says, since nothing but `/SMask` reaches it.
+    fn build_own_resources(&self, dict: &Dict) -> Option<Arc<PageResources>> {
         let own = self
             .doc
             .resolve_key(dict, Name::RESOURCES)
@@ -4528,6 +4563,10 @@ impl FontSource for PageResources {
         self.form_resources(name)
     }
 
+    fn mask_scope(&self, stream: u64) -> Option<Arc<PageResources>> {
+        self.mask_resources(stream)
+    }
+
     /// As much as the document's budget, and at most what a retained page
     /// may hold, where the document keeps forms' drawings; nothing without
     /// a budget, or with one of zero, which keeps none.
@@ -5189,7 +5228,12 @@ impl PageResources {
         // `/G` is required, and is a form XObject with a transparency group.
         let reference = mask.get_ref(self.name(b"G"))?;
         let group_dict = self.doc.get(reference).ok()?.as_dict()?.clone();
-        let form = self.form_from(&group_dict, reference, name, Contents::ThisScope)?;
+        // The group runs in its own `/Resources` when it brings them, as a
+        // form does (11.6.5.2, 8.10.1), so its `/CS` and the `/BC` measured
+        // in it are remapped by that scope's defaults.
+        let packed = (u64::from(reference.num) << 16) | u64::from(reference.gen);
+        let contents = Contents::Mask(packed);
+        let form = self.form_from(&group_dict, reference, name, contents)?;
 
         // 11.6.5.2: `/S` selects what the rendered group is read as. A name
         // this build does not know is `/Alpha`'s opposite rather than an
@@ -5219,7 +5263,7 @@ impl PageResources {
                     .resolve_key(&group_dict, self.name(b"Group"))
                     .as_dict()
                     .and_then(|g| g.get(self.name(b"CS")).cloned())
-                    .and_then(|cs| self.parse_space(&cs, 0, name));
+                    .and_then(|cs| self.group_colour_space(&cs, name, contents));
                 let (r, g, b) = match space {
                     Some(space) => space.to_rgb(&components),
                     None => by_component_count(&components),
@@ -5295,6 +5339,10 @@ impl PageResources {
 impl GlyphSource for PageResources {
     fn form_scope(&self, name: &[u8]) -> Option<Arc<PageResources>> {
         self.form_resources(name)
+    }
+
+    fn mask_scope(&self, stream: u64) -> Option<Arc<PageResources>> {
+        self.mask_resources(stream)
     }
 
     /// The font `font_id` selects here, from the scope's font table: the
@@ -6201,9 +6249,10 @@ enum Contents {
     /// An XObject's: its own `/Resources` when it brings them (8.10.1), the
     /// invoking scope when it does not.
     OwnScope,
-    /// A soft mask's `/G`, which the interpreter runs in the scope that set
-    /// the `gs` (`docs/design/icc.md`, "The scope a default is read in").
-    ThisScope,
+    /// A soft mask's `/G`, its stream packed as [`tinker_pdf_content::Form::stream`]
+    /// packs it: its own `/Resources` when it brings them, as a form's, and
+    /// the scope that set the `gs` when it does not (11.6.5.2, 8.10.1).
+    Mask(u64),
 }
 
 impl PageResources {
@@ -6226,7 +6275,7 @@ impl PageResources {
     ) -> Option<ColorSpace> {
         let own = match contents {
             Contents::OwnScope => self.form_resources(name),
-            Contents::ThisScope => None,
+            Contents::Mask(stream) => self.mask_resources(stream),
         };
         let scope: &PageResources = own.as_deref().unwrap_or(self);
         self.read_space(cs, 0, name, scope.painted())
@@ -6243,9 +6292,10 @@ impl PageResources {
     /// other.
     ///
     /// `contents` says which scope the form's contents run in, which is the
-    /// one its group's `/CS` is remapped by (11.6.6, 8.6.5.6): an XObject's
-    /// own `/Resources` when it has them, and this scope for a soft mask's
-    /// `/G`, which the interpreter runs where the `gs` was.
+    /// one its group's `/CS` is remapped by (11.6.6, 8.6.5.6): its own
+    /// `/Resources` when it has them, an XObject's and a soft mask's `/G`
+    /// alike, and otherwise the scope that invoked the XObject or set the
+    /// `gs`.
     fn form_from(
         &self,
         dict: &Dict,
@@ -11869,8 +11919,8 @@ mod tests {
 
     /// 11.6.6: a form group's `/CS` is remapped by the defaults of the scope
     /// its contents run in (8.6.5.6) — the form's own `/Resources` when it
-    /// has them, the invoking scope when it has none, and the invoking scope
-    /// for a soft mask's `/G`, which runs where the `gs` was. Today the
+    /// has them, the invoking scope when it has none, and the same for a soft
+    /// mask's `/G`, which runs as a form does (11.6.5.2, 8.10.1). Today the
     /// group keeps only the space's shape, which no default changes, so this
     /// is the one place the scope it is read in shows.
     #[test]
@@ -11912,9 +11962,14 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
             "a form with none remaps by the page's"
         );
         assert_eq!(
-            gamma(res.group_colour_space(&device, b"Own", Contents::ThisScope)),
+            gamma(res.group_colour_space(&device, b"Own", Contents::Mask(5 << 16))),
+            Some(3.0),
+            "a soft mask's group with resources of its own remaps by them"
+        );
+        assert_eq!(
+            gamma(res.group_colour_space(&device, b"Bare", Contents::Mask(6 << 16))),
             Some(2.0),
-            "a soft mask's group remaps where the gs was"
+            "and one with none where the gs was"
         );
     }
 

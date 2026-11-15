@@ -56,7 +56,7 @@ read, for roadmap row RC-18, and names the test that holds each part.
 stream  := magic major minor record* end
 magic   := 89 54 50 43 4D 44 0D 0A          ("\x89TPCMD\r\n")
 major   := u16, little-endian                 (1)
-minor   := u16, little-endian                 (2)
+minor   := u16, little-endian                 (5)
 record  := kind:varint length:varint field*   (length counts the fields' bytes)
 end     := the record of kind 0, with no fields, and nothing after it
 field   := tag:u8 value
@@ -98,7 +98,10 @@ identity, and then with the fill-and-stroke flag before it written too: a
 reader takes a state that ends before it as in the page's own space, where a
 reader of an earlier minor placed every pattern. Minor 4 adds kind 38,
 `DepthRefused`, the depth cap's notice, which a reader of an earlier minor
-steps over.
+steps over. Minor 5 appends a field to `Scope`, the stream of the soft
+mask's group whose own resources the scope is, written only for such a
+scope: a reader takes a scope that ends before it as a form's or an
+appearance's, which is every scope a stream of minor 4 or older holds.
 
 A reference is a field `Unsigned(i)`, the `i`th record of its table counted
 from zero in stream order, or `Nothing` for none. Every definition precedes
@@ -187,7 +190,7 @@ events it stands for, in their order.
 | 65 | `Annotation` | scope: the commands after it, up to the next `Annotation` or `End`, are one annotation's appearance |
 | 66 | `MissingFont` | name: a font the page's interpretation could not resolve, said where the replay reaches it |
 | 67 | `RepairedSpace` | name, repair: a colour space the interpretation read with a repair, likewise |
-| 68 | `Scope` | id, parent scope, form name: a form's resources; with no parent and no name, an annotation appearance's |
+| 68 | `Scope` | id, parent scope, form name: a form's resources; with no parent and no name, an annotation appearance's; and, from minor 5 and only where it is one, a soft mask group's stream: the group's own resources, under the scope that set the `gs` and with no form name (11.6.5.2, 8.10.1) |
 | 69 | `Outline` | scope, font id, code, found, outline operators, outline numbers, notes |
 | 70 | `FontIdentity` | scope, font id, identity (0 none, 1 an object, 2 the scope's own), object |
 | 71 | `Profile` | an ICC profile's bytes |
@@ -211,7 +214,7 @@ again what a cached decode reported.
 ### What a replay asks, and what answers it
 
 A replay draws through the same `Renderer` a direct render does, and the
-renderer asks its `GlyphSource` eight questions. The stream answers each with
+renderer asks its `GlyphSource` its questions. The stream answers each with
 the value the page's resources gave, in the scope the renderer is in:
 
 - **`outline(font id, code)`**: the `Outline` record of the scope, for every
@@ -240,6 +243,12 @@ the value the page's resources gave, in the scope the renderer is in:
 - **`form_scope`**: the `Scope` record whose parent is the asking scope and
   whose name is the form's, a fresh scope each time, as the page's resources
   bind one; none where the form brings no resources.
+- **`mask_scope`**: the `Scope` record whose parent is the asking scope, the
+  one that set the `gs`, and whose mask is the group's stream, a fresh scope
+  each time as a form's is; none where the group brings no resources. The
+  writer asks it at each `BeginSoftMask` a render enters and leaves the
+  scope at its `EndSoftMask`, as it does a form's at `BeginForm` and
+  `EndForm`.
 - **`kept_mask`** and **`keep_mask`**: a stream keeps no masks beyond a
   render, so the render keeps its own.
 

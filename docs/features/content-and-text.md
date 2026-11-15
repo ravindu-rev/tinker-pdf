@@ -130,7 +130,10 @@ CTM and its content clipped to `/BBox` (8.10.2); a transparency group is
 offered to the device, and only if accepted are the alphas and blend mode
 reset inside it (11.6.6) — declining is the default, because a device with
 no buffer must not have `ca 0.5` reset underneath it. A soft-mask group is
-run at the `gs` that installs it, at the CTM in force there (11.6.5.2). A
+run at the `gs` that installs it, at the CTM in force there (11.6.5.2), and
+as a form is: in its own `/Resources`, or the scope that set the `gs` where
+it has none (8.10.1), which `FontSource::mask_scope` answers by `/G`'s
+stream as `form_scope` answers a form's by name. A
 Type 3 glyph is a content stream, not an outline, so it is run the way a
 form is, with `/FontMatrix` inside the placing transform and the advance
 scaled by it (9.6.5). Once its procedure has run — or been passed over for

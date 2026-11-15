@@ -114,7 +114,8 @@ pub enum TpdfCommandKind {
     MissingFont = 31,
     /// `RepairedSpace`, kind 67: a colour space read with a repair.
     RepairedSpace = 32,
-    /// `Scope`, kind 68: a form's or an appearance's resource scope.
+    /// `Scope`, kind 68: a form's, a soft mask group's or an appearance's
+    /// resource scope.
     Scope = 33,
     /// `Outline`, kind 69: a glyph's outline in a scope
     /// ([`tpdf_command_stream_outline`]).

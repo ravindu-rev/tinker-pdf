@@ -444,7 +444,7 @@ public enum CommandKind
     /// <summary>A colour space read with a repair.</summary>
     RepairedSpace = 32,
 
-    /// <summary>A form's or an appearance's resource scope.</summary>
+    /// <summary>A form's, a soft mask group's or an appearance's resource scope.</summary>
     Scope = 33,
 
     /// <summary>A glyph's outline in a scope (<see cref="CommandStream.OutlineAt"/>).</summary>

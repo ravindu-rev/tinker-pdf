@@ -334,9 +334,10 @@ selecting; a group's `/CS`, and with it a luminosity mask's `/BC`. A default
 is read in the scope the stream's other names resolve in: a page's stops at a
 form or a cell with `/Resources` of its own, empty ones included (8.10.1), a
 form's applies inside it only, and a form group's `/CS` is remapped by the
-scope its contents run in. A Type 3 glyph and a soft-mask group run in the
-scope that invokes them, and so do their defaults
-([design/icc.md](../design/icc.md)). A group keeps only its space's shape,
+scope its contents run in. A soft-mask group runs as a form does, in its own
+`/Resources` or, where it has none, the scope that set the `gs`, and reads
+its defaults there; a Type 3 glyph runs in the scope that invokes it, and so
+do its defaults ([design/icc.md](../design/icc.md)). A group keeps only its space's shape,
 which a default cannot change, so remapping its `/CS` moves no pixel; the
 `/BC` is where it shows. `cs` resets to the device space's initial colour
 carried into the default, so `/DeviceCMYK cs` paints what `0 0 0 1 k` paints
@@ -1277,7 +1278,14 @@ both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with `/BC` read in the
 mask group's own `/Group /CS` and defaulting to black (fully masked, the
 default that does not invert every drop shadow), and `/TR` read as written —
 so a sampled or a calculator function, a stream, is reached through its
-reference — and sampled to 256 entries. A soft mask is kept at its group's
+reference — and sampled to 256 entries. The group runs as a form does
+(11.6.5.2, 8.10.1): in its own `/Resources`, a name in both being its own,
+or in the scope that set the `gs` where it has none. The renderer asks its
+`GlyphSource` for the group's scope by `/G`'s stream (`mask_scope`), as it
+asks for a form's by name, and the interpreter asks its `FontSource` the
+same, so the two change scope together; a display list replays the scope
+so, and a command stream records it from minor 5
+(`tests/soft_mask_scopes.rs`). A soft mask is kept at its group's
 box, beside the value it reads outside it — `/BC`'s luminosity through `/TR`,
 zero for black and for `/Alpha` — so a pale backdrop costs the box as a black
 one does, and a tile holds the box clipped to the tile with the same value
@@ -1720,8 +1728,9 @@ handed them over, where it compiled from them; an image XObject's entry holds
 beside its frame the bytes the writing document's budget leaves its decode
 (`PageResources::image_room`), which a draw's reduction is read against; each tiling cell is interpreted once, as `PageResources::tile`
 interprets it, into a stream of its own in the cell's resources or the
-asking scope's, to the depth the renderer reaches; and each form that brings
-resources and each appearance is a scope of its own, its record saying
+asking scope's, to the depth the renderer reaches; and each form and each
+soft mask's group that brings resources, and each appearance, is a scope of
+its own, its record saying
 whether it is a widget's, an appearance `/NoZoom` or `/NoRotate` places at
 render time written placed as a render at magnification 1 places it. The
 page's crop box,
@@ -2267,8 +2276,9 @@ pattern's cell rasterised for a fill no kept cell answered; and a `_hits` and
 a `_misses` for each of
 the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
-`form_scope`, an image the document's cache keeps counted as `image` and a
-transform as `icc_transform` too;
+`form_scope`, a soft mask group's scope counted as a form's, an image the
+document's cache keeps counted as `image` and a transform as `icc_transform`
+too;
 `cache_hits` and `cache_misses`, each lookup of the document's cache that
 found its entry kept and each that computed it, of every kind it keeps,
 `cache_evictions`, each entry it evicted to make room for one the operation

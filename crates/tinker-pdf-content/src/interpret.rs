@@ -477,6 +477,24 @@ pub trait FontSource {
         None
     }
 
+    /// The resources a soft mask's group brings with it, if it has its own
+    /// (11.6.5.2, 8.10.1): `/G` is a form XObject, so its content runs in
+    /// its `/Resources` as a form's does, and in the scope that set the `gs`
+    /// where it has none, which is what `None` keeps. `stream` is the group's
+    /// [`Form::stream`], the one identity a mask group has: it is reached
+    /// through `/SMask`, not by a name.
+    ///
+    /// The device is asked the same question about the same group through
+    /// [`Device::begin_soft_mask`], so the two seams change scope together,
+    /// as [`FontSource::form_scope`] and [`Device::begin_form`] do.
+    fn mask_scope(&self, stream: u64) -> Option<Arc<Self>>
+    where
+        Self: Sized,
+    {
+        let _ = stream;
+        None
+    }
+
     /// The most bytes, as [`crate::record::Event::kept_bytes`] counts them, a
     /// recording of one form's drawing may hold for this source to be offered
     /// it ([`FontSource::form_drawn`]); `0`, the default, keeps none, and the
@@ -3883,6 +3901,18 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             &self.gs,
         );
         if accepted {
+            // 11.6.5.2 and 8.10.1: `/G` is a form XObject, so its content
+            // names what its own `/Resources` hold, as a form's does, and the
+            // defaults read there are its own (8.6.5.6); a group with none
+            // runs in the scope that set the `gs`. The device switched with
+            // the same question.
+            let outer = self
+                .fonts
+                .mask_scope(mask.form.stream)
+                .map(|scope| mem::replace(&mut self.fonts, Scope::Owned(scope)));
+            let outer_defaults = outer
+                .is_some()
+                .then(|| mem::replace(&mut self.defaults, self.fonts.device_defaults()));
             self.run_group();
             self.spend_nested_work(mask.form.content.len());
             // 8.10.2 still clips the group to its box, and 11.6.6 still
@@ -3901,6 +3931,12 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             self.close_open_marked_content();
             self.close_open_saves();
             self.device.end_soft_mask();
+            if let Some(outer) = outer {
+                self.fonts = outer;
+            }
+            if let Some(outer) = outer_defaults {
+                self.defaults = outer;
+            }
         }
 
         if pushed_stream {
