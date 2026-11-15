@@ -270,6 +270,43 @@ fn every_declared_mapping_survives_the_build() {
     );
 }
 
+/// **Every code a UTF-16 or UTF-8 CMap declares maps as its own text says.**
+///
+/// `build.rs` holds each `-UTF16-` and `-UTF8-` CMap whose ranges are the
+/// form of its `-UTF32-` sibling's as that sibling, and the crate encodes the
+/// sibling's ranges when one is read. The bounds of each range are checked
+/// above with every other CMap's; this reads every code between them too,
+/// through the second reader, so a form cut a code early or late, or a CID
+/// carried across a cut wrongly, fails here against Adobe's text rather than
+/// against the encoder that made it.
+#[test]
+fn every_code_a_utf16_or_utf8_cmap_declares_maps_as_its_text_says() {
+    let registry = registry();
+    let mut forms = 0;
+    let mut codes = 0usize;
+    for (name, source) in &registry {
+        let sibling = ["-UTF16-", "-UTF8-"].iter().find_map(|marker| {
+            let (stem, rest) = name.split_once(marker)?;
+            Some(format!("{stem}-UTF32-{rest}"))
+        });
+        let Some(sibling) = sibling else { continue };
+        if !registry.iter().any(|(other, _)| *other == sibling) {
+            continue;
+        }
+        forms += 1;
+        let cmap = CMap::predefined(name.as_bytes()).expect("vendored");
+        for (low, high, cid) in declared(source) {
+            for code in low..=high {
+                let want = cid + (code - low);
+                assert_eq!(cmap.cid(code), Some(want), "{name}: <{code:04X}>");
+                codes += 1;
+            }
+        }
+    }
+    assert_eq!(forms, 30, "every family's UTF-16 and UTF-8 CMaps, H and V");
+    assert!(codes > forms, "the forms declare codes");
+}
+
 /// The registry's `Identity-H` and this crate's are the same CMap.
 ///
 /// `CMap::predefined` answers that name from `CMap::identity`, a rule rather

@@ -440,8 +440,15 @@ around a chain — is refused by source comparison, not by name. All 202 CMaps
 of Adobe's registry (9.7.5.2) are vendored
 ([THIRDPARTY](../../THIRDPARTY.md)) and compiled by `tinker-pdf-font`'s
 `build.rs` into delta-encoded, deflated tables behind the `cmap-predefined`
-feature, default on; with it off, the codespaces still ship so strings split
-correctly, and `CMap::is_approximate` says the CIDs are guesses. A name
+feature, default on. A family's `-UTF16-` and `-UTF8-` CMaps state its
+`-UTF32-` CMap's mapping again in another encoding form, so each one that is,
+range for range, the UTF-16 or UTF-8 form of its UTF-32 sibling's ranges —
+the build compares the two before it decides — is held as the sibling and the
+form, and its ranges are encoded from the sibling's when it is read
+(`src/predefined/form.rs`, which `build.rs` includes, so the comparison and
+the reading are one code). With the feature off, the codespaces still ship so
+strings split correctly, and `CMap::is_approximate` says the CIDs are
+guesses. A name
 outside the registry answers `None` and is warned about, never approximated
 silently.
 
@@ -2620,7 +2627,13 @@ corpora already vendored here. So every name stays on the list.
 - `crates/tinker-pdf-font/tests/predefined_cmaps.rs` — 805 632 range bounds
   and 474 codespace bounds (all 237 declared codespaces) checked against
   Adobe's own text through a second, deliberately different reader, because a
-  round trip through the engine's encoder proves only self-agreement;
+  round trip through the engine's encoder proves only self-agreement, and
+  every code of each UTF-16 and UTF-8 CMap held as a form of its UTF-32
+  sibling the same way
+  (`every_code_a_utf16_or_utf8_cmap_declares_maps_as_its_text_says`);
+  `predefined.rs`'s
+  `the_utf16_and_utf8_cmaps_are_held_as_forms_of_their_utf32_sibling` holds
+  which are, and `form.rs` holds the forms' runs to every scalar value's code;
   `predefined_cmaps_absent.rs` pins the `cmap-predefined`-off behaviour.
 - `crates/tinker-pdf/tests/type3_fonts.rs` — glyph procedures run as content
   under `/FontMatrix`, and their text extracted and found where the glyphs

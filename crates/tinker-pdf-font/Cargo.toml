@@ -27,11 +27,11 @@ exclude = ["target/"]
 [features]
 default = ["cmap-predefined"]
 # The predefined CMaps of 9.7.5.2, compiled from the vendored registry. About
-# a megabyte of deflated tables; plan 05 makes it a feature so a wasm host can
-# drop it. Identity-H and Identity-V are built in either way, and every other
-# registry name still splits its strings correctly from the always-compiled
-# codespace table -- it just reports an approximate mapping instead of
-# inventing CIDs.
+# half a megabyte of tables, deflated or held as the UTF-16 or UTF-8 form of a
+# UTF-32 sibling; plan 05 makes it a feature so a wasm host can drop it.
+# Identity-H and Identity-V are built in either way, and every other registry
+# name still splits its strings correctly from the always-compiled codespace
+# table -- it just reports an approximate mapping instead of inventing CIDs.
 cmap-predefined = []
 # The twelve Liberation faces, embedded with `include_bytes!`. Off by default,
 # and the default is the interesting half: a host with faces of its own should

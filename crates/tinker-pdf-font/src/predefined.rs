@@ -8,9 +8,12 @@
 //!   the codespaces are what decide where one code ends and the next begins
 //!   and a build that gets that wrong mis-splits every Shift-JIS string
 //!   before any mapping happens.
-//! - **CIDs** — the code-to-CID ranges themselves, one deflate stream per
-//!   CMap, about a megabyte. Present only with `cmap-predefined`, which is on
-//!   by default. Without it the codespaces still answer, the CIDs do not, and
+//! - **CIDs** — the code-to-CID ranges themselves, about half a megabyte:
+//!   a deflate stream per CMap, except where a CMap is the UTF-16 or UTF-8
+//!   form of its UTF-32 sibling, which is held as the sibling and the form
+//!   and encoded from the sibling's ranges when it is read ([`form`]).
+//!   Present only with `cmap-predefined`, which is on by default. Without it
+//!   the codespaces still answer, the CIDs do not, and
 //!   [`super::CMap::is_approximate`] is true so a caller can say which CMap
 //!   this build could not resolve rather than guessing one.
 //!
@@ -22,12 +25,16 @@
 
 use std::sync::OnceLock;
 
+#[cfg(feature = "cmap-predefined")]
+mod form;
+
 /// Names, writing modes, parents and codespaces. Always present.
 static NAMES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmap_names.bin"));
 
-/// Deflated code-to-CID tables. `build.rs` writes this empty when
-/// `cmap-predefined` is off, and the reader is compiled out with it, so the
-/// megabyte and the `tinker-pdf-filters` edge both disappear together.
+/// The code-to-CID tables, deflated or held as a form of a sibling.
+/// `build.rs` writes this empty when `cmap-predefined` is off, and the reader
+/// is compiled out with it, so the tables and the `tinker-pdf-filters` edge
+/// both disappear together.
 #[cfg(feature = "cmap-predefined")]
 static CIDS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cmap_cids.bin"));
 
@@ -96,8 +103,32 @@ fn at(want: impl Fn(&[u8], u16) -> bool) -> Option<Entry> {
 /// or the blob is not the one this code was compiled against. Both are the
 /// same thing to a caller — the mapping is not known — and neither is a
 /// reason to invent one.
+///
+/// A CMap held as a form of its UTF-32 sibling ([`form`]) is the sibling's
+/// ranges in that form, which `build.rs` compared range for range against the
+/// CMap's own text before it held the CMap so. The sibling is always a table
+/// of its own; a form of a form is not read.
 #[cfg(feature = "cmap-predefined")]
 pub(crate) fn ranges(index: u16) -> Option<Vec<(u32, u32, u32)>> {
+    let (&tag, rest) = held(index)?.split_first()?;
+    if tag == form::STORED {
+        return stored(rest);
+    }
+    let (_, form) = form::FORMS
+        .into_iter()
+        .find(|&(held_as, _)| held_as == tag)?;
+    let sibling = Reader::new(rest).u16()?;
+    let (&sibling_tag, table) = held(sibling)?.split_first()?;
+    if sibling_tag != form::STORED {
+        return None;
+    }
+    form.ranges(&stored(table)?)
+}
+
+/// What the CID blob holds for the CMap at `index`: a tag, then a table or a
+/// sibling's index.
+#[cfg(feature = "cmap-predefined")]
+fn held(index: u16) -> Option<&'static [u8]> {
     let mut header = Reader::new(CIDS);
     let count = header.u32()?;
     if u32::from(index) >= count {
@@ -109,8 +140,12 @@ pub(crate) fn ranges(index: u16) -> Option<Vec<(u32, u32, u32)>> {
     let offset = slot.u32()? as usize;
     let length = slot.u32()? as usize;
     let payload = 4 + count as usize * 8;
-    let packed = CIDS.get(payload + offset..payload + offset + length)?;
+    CIDS.get(payload + offset..payload + offset + length)
+}
 
+/// A table of a CMap's own: its delta-encoded ranges, deflated.
+#[cfg(feature = "cmap-predefined")]
+fn stored(packed: &[u8]) -> Option<Vec<(u32, u32, u32)>> {
     // The tables are ours and their sizes are known, so the ceiling is a
     // guard against a corrupt blob rather than against a document.
     let limits = tinker_pdf_filters::Limits::new(8 << 20);
@@ -588,5 +623,65 @@ mod tests {
             let _ = r.codespaces();
         }
         assert!(ranges(u16::MAX).is_none(), "past the end of the table");
+    }
+
+    /// Every registry name, by index.
+    #[cfg(feature = "cmap-predefined")]
+    fn names() -> Vec<String> {
+        let mut r = Reader::new(NAMES);
+        let count = r.u32().expect("the blob has a header");
+        (0..count)
+            .map(|_| {
+                let name = r.bytes().expect("a name");
+                let _ = (r.u8(), r.u16(), r.codespaces());
+                String::from_utf8(name.to_vec()).expect("registry names are ASCII")
+            })
+            .collect()
+    }
+
+    /// **A family's UTF-16 and UTF-8 CMaps are held as forms of its UTF-32
+    /// one**: each of the vendored `-UTF16-` and `-UTF8-` CMaps with a
+    /// `-UTF32-` sibling, horizontal and vertical, thirty in all, is held as
+    /// that sibling and its form and reads back as the sibling's ranges in it;
+    /// every sibling is a table of its own, and so is every other CMap.
+    /// Whether a form is the CMap the registry states is read against the
+    /// registry's text in `tests/predefined_cmaps.rs`.
+    #[cfg(feature = "cmap-predefined")]
+    #[test]
+    fn the_utf16_and_utf8_cmaps_are_held_as_forms_of_their_utf32_sibling() {
+        let names = names();
+        let mut forms = 0;
+        for (index, name) in names.iter().enumerate() {
+            let index = u16::try_from(index).expect("202 fits");
+            let held = held(index).expect("every CMap is held");
+            let expected = form::FORMS.into_iter().find_map(|(tag, form)| {
+                let marker = match form {
+                    form::Form::Utf16 => "-UTF16-",
+                    form::Form::Utf8 => "-UTF8-",
+                };
+                let (stem, rest) = name.split_once(marker)?;
+                let sibling = format!("{stem}-UTF32-{rest}");
+                let at = names.iter().position(|n| *n == sibling)?;
+                Some((tag, form, u16::try_from(at).expect("202 fits")))
+            });
+            let Some((tag, form, sibling)) = expected else {
+                assert_eq!(held.first(), Some(&form::STORED), "{name} is a table");
+                continue;
+            };
+            forms += 1;
+            assert_eq!(held.first(), Some(&tag), "{name} is a form");
+            assert_eq!(held.get(1..3), Some(&sibling.to_le_bytes()[..]), "{name}");
+            let source = held_table(sibling).expect("the sibling is a table");
+            assert_eq!(ranges(index), form.ranges(&source), "{name}");
+        }
+        assert_eq!(forms, 30, "every family's UTF-16 and UTF-8 CMaps");
+    }
+
+    /// The ranges of a CMap held as a table of its own, and `None` for one
+    /// held as a form.
+    #[cfg(feature = "cmap-predefined")]
+    fn held_table(index: u16) -> Option<Vec<(u32, u32, u32)>> {
+        let (&tag, table) = held(index)?.split_first()?;
+        (tag == form::STORED).then(|| stored(table)).flatten()
     }
 }
