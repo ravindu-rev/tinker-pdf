@@ -1476,10 +1476,16 @@ struct Steps {
     operators: u64,
 }
 
-fn interpret_steps<D: Device, F: FontSource>(
+/// The interpretation itself, over the device as a trait object, so that the
+/// interpreter is compiled once for every device a build drives rather than
+/// once for each: it is the largest code a content stream runs, and a copy of
+/// it a device is what the wasm footprint pays for (ruling 19). A device
+/// hears of an operator at most once per operator, so the call through the
+/// object is nothing beside the work the call asks of it.
+fn interpret_steps<F: FontSource>(
     content: &[u8],
     initial: Matrix,
-    device: &mut D,
+    device: &mut dyn Device,
     fonts: &F,
 ) -> Steps {
     let mut interp = Interpreter::new(device, fonts, initial, content.len());
@@ -1498,8 +1504,8 @@ fn interpret_steps<D: Device, F: FontSource>(
 /// recorded on while a recording is open ([`FontSource::form_drawn`]): every
 /// call the device is handed is copied onto the tape with the answer the
 /// device gave, so a recording is what this device was told.
-struct Out<'d, D: Device> {
-    device: &'d mut D,
+struct Out<'d> {
+    device: &'d mut dyn Device,
     tape: Tape,
 }
 
@@ -1658,7 +1664,7 @@ impl Tape {
     }
 }
 
-impl<D: Device> Out<'_, D> {
+impl Out<'_> {
     /// Sets the tape's answers to the device's before a question is copied.
     fn answered(&mut self, change: impl FnOnce(&mut Answers)) {
         let mut answers = self.tape.recorder.answers();
@@ -1667,7 +1673,7 @@ impl<D: Device> Out<'_, D> {
     }
 }
 
-impl<D: Device> Device for Out<'_, D> {
+impl Device for Out<'_> {
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
         self.device.show_glyph(glyph, state);
         if self.tape.taping() {
@@ -1904,8 +1910,8 @@ impl<D: Device> Device for Out<'_, D> {
     }
 }
 
-struct Interpreter<'d, D: Device, F: FontSource> {
-    device: Out<'d, D>,
+struct Interpreter<'d, F: FontSource> {
+    device: Out<'d>,
     fonts: Scope<'d, F>,
     /// What [`FontSource::device_defaults`] answered for the scope in force,
     /// asked when the scope came into force and never per operator (8.6.5.6).
@@ -1978,10 +1984,10 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     texts_handed: u64,
 }
 
-impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
+impl<'d, F: FontSource> Interpreter<'d, F> {
     /// An interpretation of a stream of `len` bytes into `device` over
     /// `fonts`, from the initial state under `initial`.
-    fn new(device: &'d mut D, fonts: &'d F, initial: Matrix, len: usize) -> Self {
+    fn new(device: &'d mut dyn Device, fonts: &'d F, initial: Matrix, len: usize) -> Self {
         let colorants = device.composites_colorants();
         let queries = device.glyph_queries();
         Interpreter {
