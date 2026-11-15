@@ -3409,7 +3409,7 @@ a colour, in both builds alike, since every face they draw is embedded:
 | `epub_shaped.rs`'s `the_shaped_page_renders_to_the_bytes_it_always_did` | the Arabic page's shaped runs |
 | `render_options.rs`'s `ink_output_is_pinned`, `transparent_and_premultiplied_output_is_pinned`, `hard_edged_output_is_pinned` and `the_default_is_unchanged` | the ink, layer and hard-edge pages' lines |
 | `render_goldens.rs`'s `text` golden | its line of text |
-| `surface_goldens.rs`'s `annotation-appearances` and `visible-signature` goldens | the text the annotations' appearances and the signature's appearance draw |
+| `surface_goldens.rs`'s `annotation-appearances`, `visible-signature`, `epub-page`, `html-page`, `markdown-page`, `fb2-page`, `svg-page` and `xps-page` goldens | the text the annotations' appearances and the signature's appearance draw, and each converted page's text |
 
 The other pins draw no glyph, or draw one only through a stroke, a pattern, a
 clip or a Type 3 procedure — the `type3-glyph` golden among them — and do not
