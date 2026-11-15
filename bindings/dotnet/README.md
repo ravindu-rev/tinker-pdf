@@ -72,8 +72,12 @@ folder feed — **not** a `ProjectReference`. A project reference resolves the
 managed assembly and finds the cdylib wherever cargo left it, so it passes on
 a package that carries no native library at all, which is the one failure this
 smoke exists to catch. Its `nuget.config` clears the source list before adding the
-folder, so a restore that cannot find the local package fails rather than
-quietly taking something of the same name from nuget.org.
+folder and maps `TinkerPdf` to the folder alone, so a restore that cannot find
+the local package fails rather than quietly taking something of the same name
+from nuget.org. nuget.org is in the list for the SDK's own net8.0 targeting and
+app-host packs and is mapped nothing else: an SDK newer than the packs
+installed beside it restores them as packages, and without a source for them
+the smoke cannot build at all.
 
 As in the Python and JavaScript smoke tests, the render is asserted twice —
 blank without a face, inked with one — because `testdata/simple-text.pdf`

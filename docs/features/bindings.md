@@ -1418,9 +1418,12 @@ cargo xtask bindings-coverage
 - Smoke tests run against an *installed* artifact, never the source tree:
   `bindings/python/tests/wheel_smoke.py` against a `pip install`ed wheel,
   `bindings/js/tests/node_smoke.mjs` against an `npm install`ed tarball,
-  `bindings/dotnet/tests/Smoke` against a local folder feed with the source
-  list cleared so a missing package fails rather than resolving from
-  nuget.org. Each asserts the blank-then-inked render. `wheel_smoke.py`
+  `bindings/dotnet/tests/Smoke` against a local folder feed, the source list
+  cleared and `TinkerPdf` mapped to the folder alone so a missing package
+  fails rather than resolving from nuget.org, which is mapped only the SDK's
+  own net8.0 targeting and app-host packs, restored from it when the SDK
+  asks for a version the machine does not have installed. Each asserts the
+  blank-then-inked render. `wheel_smoke.py`
   also opens a generated four-megabyte file by path and from its bytes —
   the same page count and page-one text, and the path open streamed — and
   a damaged file and a linearized one updated since, whose path opens warn
