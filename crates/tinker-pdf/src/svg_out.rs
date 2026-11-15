@@ -2184,7 +2184,10 @@ mod tests {
 
         let mut builder = tinker_pdf_cos::DocumentBuilder::new();
         builder.add_page(40.0, 30.0, |page| page.fill_rect(1.0, 1.0, 2.0, 2.0, 0.0));
-        let doc = crate::Document::open(builder.finish()).expect("it opens");
+        let doc = crate::subset::tests_support::written_support::authored(
+            "a page the two-colour images are written on",
+            builder.finish(),
+        );
         let page = doc.page(0).expect("a page");
         let resources = PageResources::new(&page.doc, &page.inner, None);
         let write = |image: &DecodedImage, state: &GraphicsState| {
@@ -2207,7 +2210,9 @@ mod tests {
                 e: 3.0,
                 f: 4.0,
             },
-            ..GraphicsState::default()
+            // The initial state's opaque fill: the derived default's alpha
+            // of 0 writes every picture at `opacity="0"`.
+            ..GraphicsState::new(Matrix::IDENTITY)
         };
 
         let (width, height) = (13u32, 9u32);
@@ -2269,8 +2274,11 @@ mod tests {
                         plates: None,
                     };
                     let written = write(&two, &state);
+                    // A PNG under `REUSE_AT` is written in place, in the
+                    // body, and one at or over it defined once and used:
+                    // either way the body draws the picture.
                     assert!(
-                        !written.0.is_empty() && !written.1.is_empty(),
+                        written.1.contains("<image ") || written.1.contains("<use "),
                         "{colours:?}, stencil {stencil}: the picture is written"
                     );
                     assert_eq!(
