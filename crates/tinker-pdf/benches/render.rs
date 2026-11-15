@@ -1289,7 +1289,7 @@ fn render(c: &mut Criterion) {
     // dpi reuses"). The planning baseline has no cache, and its arm draws the
     // page a second time decoding everything again.
     group.operation(
-        "a second render of the quarter-size JPEG page at 300 dpi under a 64 MiB budget",
+        "the quarter-size JPEG page at 300 dpi, second render in 64 MiB",
         |op| {
             op.per(renders(&jpeg_quarter, 300.0, 1));
             #[cfg(not(tinker_planning_baseline))]

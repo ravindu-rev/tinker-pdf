@@ -1272,9 +1272,9 @@ the child is this repository's own, so it hosts and adjudicates nothing. A
 timed run needs the release `tpdf` built before it measures, and
 `cargo test --benches` needs a debug one built first.
 
-The render group's second render, `a second render of the quarter-size JPEG
-page at 300 dpi under a 64 MiB budget`, opens its page under the budget P-16
-sets for it, stated at open, and draws it at 150 dpi untimed before the
+The render group's second render, `the quarter-size JPEG page at 300 dpi,
+second render in 64 MiB`, opens its page under the budget P-16 sets for it,
+stated at open, and draws it at 150 dpi untimed before the
 render at 300 dpi it times: at both resolutions its JPEG is drawn larger than
 half its samples, so both ask its full-size decode and the timed render is
 served by the document's cache. Its definition holds that before its runs —
