@@ -280,7 +280,9 @@ fn compression_shrinks_a_written_file_and_it_still_opens() {
 
 /// A stream that already declares a filter is left alone: its bytes are
 /// encoded already, and wrapping them again would need the filter array
-/// rewritten and would usually make them bigger.
+/// rewritten and would usually make them bigger. Its data is one run of
+/// hexadecimal digits and the one `>` that ends it (7.4.2), long enough
+/// that deflating it would shrink it.
 #[test]
 fn an_already_filtered_stream_is_not_compressed_twice() {
     use std::sync::Arc;
@@ -296,13 +298,9 @@ trailer\n<< /Size 3 /Root 1 0 R >>\n%%EOF\n";
     let r = editor.allocate();
     let mut dict = tinker_pdf_cos::Dict::new();
     dict.insert(Name::FILTER, Object::Name(editor.intern(b"ASCIIHexDecode")));
-    editor.put_stream(
-        r,
-        StreamData {
-            dict,
-            data: b"48656C6C6F>".repeat(60),
-        },
-    );
+    let mut data = b"48656C6C6F".repeat(60);
+    data.push(b'>');
+    editor.put_stream(r, StreamData { dict, data });
 
     let saved = held_save(
         "an already filtered stream is not compressed twice",
