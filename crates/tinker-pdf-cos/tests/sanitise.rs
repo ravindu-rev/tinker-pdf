@@ -216,7 +216,7 @@ fn objects(editor: &DocumentEditor) -> BTreeMap<u32, Object> {
 fn saved(editor: &DocumentEditor, mode: WriteMode) -> (Vec<u8>, CosDocument) {
     let bytes = held_save(
         "saved",
-        &editor,
+        editor,
         &WriteOptions {
             mode,
             ..WriteOptions::default()

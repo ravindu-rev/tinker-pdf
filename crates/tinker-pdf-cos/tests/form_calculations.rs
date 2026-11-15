@@ -185,7 +185,7 @@ fn value_of(editor: &DocumentEditor, name: &str) -> String {
 fn saved(editor: &DocumentEditor) -> String {
     let bytes = held_save(
         "saved",
-        &editor,
+        editor,
         &WriteOptions {
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()

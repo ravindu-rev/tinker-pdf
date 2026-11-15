@@ -79,7 +79,7 @@ trailer
 fn saved(editor: &DocumentEditor, mode: WriteMode) -> CosDocument {
     let bytes = held_save(
         "saved",
-        &editor,
+        editor,
         &WriteOptions {
             mode,
             ..WriteOptions::default()

@@ -30,7 +30,7 @@ fn blank() -> Arc<CosDocument> {
 fn reopen(editor: &DocumentEditor) -> CosDocument {
     let bytes = held_save(
         "reopen",
-        &editor,
+        editor,
         &WriteOptions {
             mode: WriteMode::Incremental,
             ..WriteOptions::default()

@@ -34,7 +34,7 @@ fn incremental() -> WriteOptions {
 }
 
 fn reopen(editor: &DocumentEditor) -> CosDocument {
-    CosDocument::open(held_save("reopen", &editor, &incremental())).expect("the save reopens")
+    CosDocument::open(held_save("reopen", editor, &incremental())).expect("the save reopens")
 }
 
 fn name_of(doc: &CosDocument, object: Option<&Object>) -> Option<String> {

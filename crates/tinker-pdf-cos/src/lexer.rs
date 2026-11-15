@@ -1247,7 +1247,7 @@ mod tests {
             panic!("{token:?}")
         };
         assert!(
-            value <= f64::MAX && value >= f64::MAX * (1.0 - 1e-15),
+            (f64::MAX * (1.0 - 1e-15)..=f64::MAX).contains(&value),
             "{value}"
         );
         assert_eq!(

@@ -517,7 +517,7 @@ fn an_instance_the_face_cannot_give_registers_nothing() {
         "no composite font is registered under F1"
     );
     builder.add_page(100.0, 100.0, |_| {});
-    let doc = written_support::authored("nothing registered", &builder.finish());
+    let doc = written_support::authored("nothing registered", builder.finish());
     let pages = tinker_pdf_cos::pages::collect(&doc);
     let page = pages.first().expect("a page");
     if let Some(resources) = page.resources.as_ref() {
@@ -549,7 +549,7 @@ fn two_instances_of_one_face_are_two_programs() {
             page.text(b"F0", 24.0, 20.0, 60.0, TEXT);
             page.text(b"F1", 24.0, 20.0, 20.0, TEXT);
         });
-        let doc = written_support::authored(name, &builder.finish());
+        let doc = written_support::authored(name, builder.finish());
         let (light_program, _, _) = embedded(&doc, b"F0");
         let (heavy_program, _, _) = embedded(&doc, b"F1");
         assert!(light_program != heavy_program, "{name}: two programs");
@@ -693,7 +693,7 @@ fn a_glyph_run_advances_by_the_instances_widths() {
             "{name}: no adjustment, the pen moving by the instance's advances"
         );
         builder.add_page(300.0, 100.0, |page| page.raw(&run));
-        written_support::authored(name, &builder.finish());
+        written_support::authored(name, builder.finish());
     }
 }
 

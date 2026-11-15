@@ -133,7 +133,7 @@ trailer
 fn save(editor: &DocumentEditor, mode: WriteMode) -> Vec<u8> {
     held_save(
         "save",
-        &editor,
+        editor,
         &WriteOptions {
             mode,
             ..WriteOptions::default()

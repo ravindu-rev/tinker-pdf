@@ -27,7 +27,7 @@ fn document(pages: usize, label: &str) -> Arc<CosDocument> {
 fn saved(editor: &DocumentEditor) -> CosDocument {
     let bytes = held_save(
         "saved",
-        &editor,
+        editor,
         &WriteOptions {
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()

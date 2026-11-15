@@ -29,7 +29,7 @@ fn bare() -> Arc<CosDocument> {
 fn saved(editor: &DocumentEditor, mode: WriteMode) -> CosDocument {
     CosDocument::open(held_save(
         "saved",
-        &editor,
+        editor,
         &WriteOptions {
             mode,
             ..WriteOptions::default()
