@@ -359,8 +359,9 @@ first such font in page order, so a fold in completion order would change the
 report. The pages read their streams through the pass's one set of decoded
 streams, which is single-flight (`tinker_pdf_cos::DecodedStreams` over
 `tinker_pdf_cos::Flights`): the first page to read a stream decodes it and a
-page asking for it meanwhile waits for that decode, so each stream is still
-decoded once. The programs cut, the report and every byte saved are the
+page asking for it meanwhile waits for that decode, from inside a fill of its
+own too — each page's scope fills a font's program from the program's stream
+— so each stream is still decoded once. The programs cut, the report and every byte saved are the
 serial save's at any thread count, and a counted save asked for threads counts
 where each page was walked (`Stats::pool_items_on_workers` and
 `pool_items_on_caller`, [rendering](rendering.md)); a save asked for none

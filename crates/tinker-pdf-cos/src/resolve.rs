@@ -221,14 +221,24 @@ type Decode = Result<Arc<Vec<u8>>, CosError>;
 ///
 /// One an operation, made by the door the operation goes through and dropped
 /// when it returns: it holds every stream the operation reads until then.
-/// **Single-flight** ([`Flights`]): the threads of one pooled operation that
-/// read one stream at once decode it once — the first runs the chain, outside
-/// the lock, and the others wait for its answer — and a read made inside
-/// another fill never waits, so no read can deadlock, a stream whose own
-/// `/Length` points into it included.
-#[derive(Debug, Default)]
+/// **Single-flight**, a map of leaf fills ([`Flights::of_leaves`]): a decode
+/// runs a stream's chain and waits on nothing, so the threads of one pooled
+/// operation that read one stream at once decode it once — the first runs
+/// the chain, outside the lock, and the others wait for its answer, from
+/// inside fills of their own too, as a scope's font program is filled — and a
+/// read made inside another decode never waits, so no read can deadlock, a
+/// stream whose own `/Length` points into it included.
+#[derive(Debug)]
 pub struct DecodedStreams {
     streams: Flights<ObjRef, Decode>,
+}
+
+impl Default for DecodedStreams {
+    fn default() -> Self {
+        DecodedStreams {
+            streams: Flights::of_leaves(),
+        }
+    }
 }
 
 impl DecodedStreams {
@@ -244,8 +254,11 @@ impl DecodedStreams {
     /// chain's refusal ([`CosError::Filter`]).
     ///
     /// Two threads that read one stream at once run `decode` once: the
-    /// second waits for the first's answer, unless it is itself decoding a
-    /// stream, when it decodes this one for itself and keeps nothing.
+    /// second waits for the first's answer, whatever fills of other maps it
+    /// has open, unless it is itself decoding a stream, when it decodes this
+    /// one for itself and keeps nothing. `decode` waits on nothing (rule 6 of
+    /// [`Flights`]): it runs a stream's chain, and every single-flight read it
+    /// makes computes rather than waits.
     ///
     /// # Errors
     /// What `decode` answered, now or at the first read.
@@ -538,5 +551,40 @@ mod tests {
                 });
             }
         });
+    }
+
+    /// **A stream two scopes read at once from inside fills of their own is
+    /// decoded once** (`Flights`' rule 6): two threads, each inside a fill of
+    /// a map of its own — two pages' scopes filling one font's program — read
+    /// one stream through the operation's streams, every decode slow enough
+    /// that the second read comes while the first decodes, and the second
+    /// waits for that decode rather than running the chain again.
+    #[test]
+    fn a_stream_read_from_inside_fills_of_other_maps_is_decoded_once() {
+        let doc = document();
+        let work = Work::new();
+        let streams = DecodedStreams::new();
+        let stream = ObjRef::new(2, 0);
+        let started = std::sync::Barrier::new(2);
+        let scopes: [Flights<u32, Vec<u8>>; 2] = [Flights::new(), Flights::new()];
+        std::thread::scope(|threads| {
+            for scope in &scopes {
+                let (doc, work, streams, started) = (&doc, &work, &streams, &started);
+                threads.spawn(move || {
+                    let program = scope.read(1, || {
+                        started.wait();
+                        let read = streams.read(stream, || {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            doc.stream_decoded_counted(stream, Some(work))
+                        });
+                        Filled::Keep(read.expect("it decodes").as_ref().clone())
+                    });
+                    assert_eq!(program, PLAIN);
+                });
+            }
+        });
+        let stats = work.stats();
+        assert_eq!(stats.streams_decoded, 1, "one run for both scopes");
+        assert_eq!(stats.most_decodes_of_one_stream, 1);
     }
 }

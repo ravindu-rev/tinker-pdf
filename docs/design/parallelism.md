@@ -319,13 +319,27 @@ transforms and form scopes:
 5. A fill that unwinds releases its slot and wakes its waiters, so a waiter
    never waits on a fill that will not finish; the first of them claims the
    slot in turn.
+6. A map of leaf fills (`Flights::of_leaves`) is one whose fills wait on
+   nothing: an operation's decoded streams (`DecodedStreams`), whose fill
+   runs a stream's chain. A miss on a slot another thread is filling there
+   waits for it whatever fills of other maps this thread has open, and
+   computes for itself only when this thread is inside a leaf fill itself; a
+   second thread-local count, of the leaf fills a thread has open, says
+   which.
 
-Only a thread with no fill open ever waits, so no thread waits on a thread
-that is waiting, and no cycle of waits can form, across any number of maps.
-The price of rule 3 is a second computation where fills nest across threads
-under contention; the values are the same, so only a count can see it, and a
-guard that counts fills — four renders of one list decode a shared JPEG and a
-Flate image once each — draws images whose fills open no other.
+A thread inside a leaf fill has a fill open, so rule 3 keeps it from waiting
+in any other map and rule 6 in a map of leaf fills: a leaf fill's thread
+never waits, and a wait for one always ends. So a thread waits either with
+no fill open, on a thread that can wait only for a leaf fill, or for a leaf
+fill, on a thread that is not waiting; every chain of waits ends at a thread
+that is not waiting, and no cycle of waits can form, across any number of
+maps. The price of rule 3 is a second computation where fills of other maps
+nest across threads under contention; the values are the same, so only a
+count can see it, and a guard that counts fills — four renders of one list
+decode a shared JPEG and a Flate image once each — draws images whose fills
+open no other. A stream costs no such price: two scopes that read one at
+once from inside fills of their own, as two pages of a save's font pass each
+fill a font's program, decode it once.
 
 A fill never reads a render's cancel token: a cancelled render stops between
 draws, never inside a fill, so what a fill publishes is what every render
@@ -498,8 +512,8 @@ page walk.
 | A parallel path's bytes depend on the schedule | Every result is written to its own slot and joined in index order; A9 compares every page walk and every banded render with its serial run at 2, 3, 4 and 7 threads, pixels and warnings, in both builds and on three targets (P-15.9) |
 | A band cut splits an image run and the stitched page differs from the page (ruling 5's named exception) | No cut inside the rows of a sequence of two or more image draws; the planner shares the renderer's flush predicate; the exception's own page is in A9's band leg; RC-21 lifts the constraint |
 | A page whose image sequence covers it, such as a scan of strips, gains nothing from bands | It renders as one band, correct and no slower than serial; tier P's band relation is held on the text, paths and JPEG pages, and RC-21 decides runs in the page frame |
-| Two threads fill one cache and decode twice, so a counted guard flakes | `Flights` makes the fill single-flight; only a thread with no fill open waits, so there is no deadlock, and the guard's images open no nested fill, so its count is exact |
-| A wait deadlocks on same-thread re-entry, as `OnceLock` would | A thread with a fill open never waits; re-entry computes, as today's uncached read does (`store.rs`'s reason) |
+| Two threads fill one cache and decode twice, so a counted guard flakes | `Flights` makes the fill single-flight; only a thread with no fill open waits, or one waiting for a leaf fill, whose thread never waits, so there is no deadlock; a guard's images open no nested fill, and a stream is a leaf fill, so its count is exact |
+| A wait deadlocks on same-thread re-entry, as `OnceLock` would | A thread with a fill open never waits but for a leaf fill, and one inside a leaf fill never waits; re-entry computes, as today's uncached read does (`store.rs`'s reason) |
 | A fill that panics leaves its waiters waiting forever | The fill's guard releases the slot and wakes the waiters when it unwinds; ruling 1 keeps fills from panicking at all |
 | A banded render's warnings come out in another order, or twice | Stamped with the ordinal of the device call first met at, merged at the least ordinal, deduplicated by value; A9 compares the lists |
 | A counted guard that counts per worker flakes with the schedule | Guards count only `pool_items_on_workers` and `pool_items_on_caller`, which the schedule cannot move; distinct workers are proved by a barrier in the items, or read from `waves`' fixed columns |

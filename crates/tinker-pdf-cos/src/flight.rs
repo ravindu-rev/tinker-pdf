@@ -30,11 +30,25 @@
 //! 5. A fill that unwinds — or answers a value that is not to be kept —
 //!    releases its slot and wakes its waiters, so no waiter waits on a fill
 //!    that will not publish; the first of them claims the slot in turn.
+//! 6. A map of **leaf fills** ([`Flights::of_leaves`]) is one whose fills
+//!    wait on nothing: a stream's decode. A read of a slot another thread is
+//!    filling there waits for it whatever fills of other maps this thread has
+//!    open, and computes for itself only when this thread is inside a leaf
+//!    fill itself. A second count, of the leaf fills a thread has open, says
+//!    which.
 //!
-//! Only a thread with no fill open ever waits, so no thread waits on a thread
-//! that is waiting, and no cycle of waits can form, across any number of
-//! maps. The price of rule 3 is a second computation where fills nest across
-//! threads; the values are the same, so only a count can see it.
+//! A thread inside a leaf fill has a fill open, so rule 3 keeps it from
+//! waiting in any map that is not of leaf fills and rule 6 in any that is: a
+//! leaf fill's thread never waits, and a wait for one always ends. So a
+//! thread waits either with no fill open, on a thread that can wait only for
+//! a leaf fill, or for a leaf fill, on a thread that is not waiting: every
+//! chain of waits ends at a thread that is not waiting, and no cycle of waits
+//! can form, across any number of maps. The price of rule 3 is a second
+//! computation where fills of maps not of leaf fills nest across threads; the
+//! values are the same, so only a count can see it. Fills of other maps
+//! cost a leaf map nothing so: a stream two scopes read at once from inside
+//! fills of their own is decoded once, and only a read from inside another
+//! leaf fill computes a leaf key for itself.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -59,13 +73,23 @@ pub struct Flights<K, V> {
     slots: Mutex<HashMap<K, Slot<V>>>,
     /// Signalled whenever a slot is published or released.
     settled: Condvar,
+    /// Whether this is a map of leaf fills (rule 6).
+    leaves: bool,
 }
 
 impl<K, V> Default for Flights<K, V> {
     fn default() -> Self {
+        Flights::with_leaves(false)
+    }
+}
+
+impl<K, V> Flights<K, V> {
+    /// A map that has filled nothing, of leaf fills where `leaves` says so.
+    fn with_leaves(leaves: bool) -> Flights<K, V> {
         Flights {
             slots: Mutex::new(HashMap::new()),
             settled: Condvar::new(),
+            leaves,
         }
     }
 }
@@ -81,8 +105,11 @@ enum Slot<V> {
 
 thread_local! {
     /// How many fills this thread has open, of any key in any map: a thread
-    /// with one open never waits (rule 3).
+    /// with one open never waits (rule 3), but for a leaf fill (rule 6).
     static OPEN: Cell<usize> = const { Cell::new(0) };
+    /// How many of those are leaf fills (rule 6): a thread with one open
+    /// never waits, in a map of leaf fills or any other.
+    static LEAVES: Cell<usize> = const { Cell::new(0) };
 }
 
 /// A lock that a panic elsewhere cannot poison: nothing here panics while
@@ -98,10 +125,21 @@ impl<K: Eq + Hash + Clone, V: Clone> Flights<K, V> {
         Flights::default()
     }
 
+    /// A map of leaf fills that has filled nothing (rule 6): one whose every
+    /// fill waits on nothing — it takes no lock a reader of the map may hold
+    /// while it reads, and starts no `OnceLock` one may be starting — as a
+    /// stream's decode does. Its readers wait for a fill another thread is
+    /// making whatever fills of other maps they have open, so a key read at
+    /// once from inside fills of other maps is filled once.
+    #[must_use]
+    pub fn of_leaves() -> Flights<K, V> {
+        Flights::with_leaves(true)
+    }
+
     /// The value of `key`: the published one, or what `fill` answers, which
     /// this read computes when no other thread is filling the key — or when
-    /// one is and this thread has a fill of its own open — and otherwise
-    /// waits for.
+    /// one is and this thread has a fill of its own open, one of leaf fills
+    /// where this map is of them — and otherwise waits for.
     pub fn read(&self, key: K, fill: impl FnOnce() -> Filled<V>) -> V {
         let me = thread::current().id();
         let mut slots = lock(&self.slots);
@@ -109,12 +147,12 @@ impl<K: Eq + Hash + Clone, V: Clone> Flights<K, V> {
             match slots.get(&key) {
                 Some(Slot::Ready(value)) => return value.clone(),
                 Some(Slot::Filling(owner)) => {
-                    // Rules 3 and 4: a thread with a fill open, or the one
-                    // filling this key, computes for itself and publishes
-                    // nothing, so that it never waits on anyone.
-                    if *owner == me || OPEN.with(Cell::get) > 0 {
+                    // Rules 3, 4 and 6: the thread filling this key, and one
+                    // that may not wait, compute for themselves and publish
+                    // nothing, so that no wait can close a cycle.
+                    if *owner == me || !self.may_wait() {
                         drop(slots);
-                        let _open = Open::enter();
+                        let _open = Open::enter(self.leaves);
                         return match fill() {
                             Filled::Keep(value) | Filled::Once(value) => value,
                         };
@@ -130,12 +168,19 @@ impl<K: Eq + Hash + Clone, V: Clone> Flights<K, V> {
                     let claim = Claim {
                         flights: self,
                         key: Some(key),
-                        _open: Open::enter(),
+                        _open: Open::enter(self.leaves),
                     };
                     return claim.fill(fill);
                 }
             }
         }
+    }
+
+    /// Whether this thread may wait for a fill another thread is making of a
+    /// key of this map: with no fill open (rule 3), or, in a map of leaf
+    /// fills, with no leaf fill open (rule 6).
+    fn may_wait(&self) -> bool {
+        OPEN.with(Cell::get) == 0 || (self.leaves && LEAVES.with(Cell::get) == 0)
     }
 
     /// Whether `key` has a published value.
@@ -162,7 +207,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Flights<K, V> {
 /// Whether this thread has a fill open in any single-flight map — a
 /// [`Flights`], or a table that keeps these rules under a lock of its own
 /// and marks its fills with [`OpenFill`] — and so must compute rather than
-/// wait (rule 3).
+/// wait in any table but a map of leaf fills (rule 3).
 #[must_use]
 pub fn fill_open() -> bool {
     OPEN.with(Cell::get) > 0
@@ -183,24 +228,33 @@ impl OpenFill {
     /// Marks a fill open on this thread until the guard is dropped.
     pub fn enter() -> OpenFill {
         OpenFill {
-            _open: Open::enter(),
+            _open: Open::enter(false),
         }
     }
 }
 
-/// One open fill on this thread, for as long as it lives.
-struct Open;
+/// One open fill on this thread, a leaf fill where `leaf` says so, for as
+/// long as it lives.
+struct Open {
+    leaf: bool,
+}
 
 impl Open {
-    fn enter() -> Open {
+    fn enter(leaf: bool) -> Open {
         OPEN.with(|open| open.set(open.get().saturating_add(1)));
-        Open
+        if leaf {
+            LEAVES.with(|leaves| leaves.set(leaves.get().saturating_add(1)));
+        }
+        Open { leaf }
     }
 }
 
 impl Drop for Open {
     fn drop(&mut self) {
         OPEN.with(|open| open.set(open.get().saturating_sub(1)));
+        if self.leaf {
+            LEAVES.with(|leaves| leaves.set(leaves.get().saturating_sub(1)));
+        }
     }
 }
 
@@ -507,5 +561,85 @@ mod tests {
             40,
             "only the claim published"
         );
+    }
+
+    /// **A reader inside a fill of its own waits for a leaf fill** (rule 6):
+    /// one thread fills a key of a map of leaf fills while another, inside a
+    /// fill of a map that is not, reads the key — two scopes filling their
+    /// font programs and reading one stream. It waits for the first's value
+    /// rather than computing its own, so the key is filled once, and neither
+    /// thread has a fill open after.
+    #[test]
+    fn a_reader_inside_a_fill_waits_for_a_leaf_fill() {
+        let streams: Flights<u32, u32> = Flights::of_leaves();
+        let scope: Flights<u32, u32> = Flights::new();
+        let fills = AtomicUsize::new(0);
+        let claimed = Barrier::new(2);
+        let (first, second) = std::thread::scope(|threads| {
+            let first = threads.spawn(|| {
+                let value = streams.read(1, || {
+                    fills.fetch_add(1, Ordering::SeqCst);
+                    claimed.wait();
+                    // Long enough that the other thread reads while this fill
+                    // runs; one that read after it would find the value
+                    // published, the same answer.
+                    std::thread::sleep(Duration::from_millis(100));
+                    Filled::Keep(10)
+                });
+                (value, fill_open())
+            });
+            let second = threads.spawn(|| {
+                let value = scope.read(7, || {
+                    claimed.wait();
+                    Filled::Keep(streams.read(1, || {
+                        fills.fetch_add(1, Ordering::SeqCst);
+                        Filled::Keep(11)
+                    }))
+                });
+                (value, fill_open())
+            });
+            (
+                first.join().expect("no panic"),
+                second.join().expect("no panic"),
+            )
+        });
+        assert_eq!(
+            (first, second),
+            ((10, false), (10, false)),
+            "the first's value, waited for"
+        );
+        assert_eq!(fills.load(Ordering::SeqCst), 1, "one fill for both");
+    }
+
+    /// **A thread inside a leaf fill never waits** (rule 6): two threads each
+    /// fill a key of a map of leaf fills and, inside the fill, read the key
+    /// the other is filling — a decode read from inside a decode — and each
+    /// computes it for itself, as crossed fills of any map do. Neither fill
+    /// publishes until both have read the other's key.
+    #[test]
+    fn crossed_leaf_fills_compute_rather_than_deadlock() {
+        let flights: Flights<u32, u32> = Flights::of_leaves();
+        let claimed = Barrier::new(2);
+        let crossed = Barrier::new(2);
+        let (one, two) = std::thread::scope(|scope| {
+            let one = scope.spawn(|| {
+                flights.read(1, || {
+                    claimed.wait();
+                    let other = flights.read(2, || Filled::Keep(20));
+                    crossed.wait();
+                    Filled::Keep(10 + other)
+                })
+            });
+            let two = scope.spawn(|| {
+                flights.read(2, || {
+                    claimed.wait();
+                    let other = flights.read(1, || Filled::Keep(10));
+                    crossed.wait();
+                    Filled::Keep(20 + other)
+                })
+            });
+            (one.join().expect("no panic"), two.join().expect("no panic"))
+        });
+        assert_eq!((one, two), (30, 30));
     }
 }

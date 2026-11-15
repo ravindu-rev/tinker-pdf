@@ -3809,7 +3809,7 @@ second to decode again.
 | What a page draws depends on what was rendered before it | The only budget-dependent choice, a reduction, is a function of the image and the stated budget, never of what the cache holds |
 | Eviction depends on hash order | One request counter and one ordered index decide it; the maps are looked up and never iterated |
 | Threads make a counted guard flake | The fills are single-flight, and the guards read a serial run; on threads only the counts move, never a pixel, a text or a warning |
-| A thread waits on a fill that waits on it | `Flights`' rules: only a thread with no fill open waits, and re-entry computes |
+| A thread waits on a fill that waits on it | `Flights`' rules: only a thread with no fill open waits, or one waiting for a leaf fill — a stream's decode — whose thread never waits, and re-entry computes |
 | A dropped object reads back other than it was | Parsing is pure over immutable bytes; an object a caller holds is never dropped, and the table and the object-stream index never are |
 | A budget is read as a bound on the whole process | It bounds the caches; MS-05 reads it as the peak under the budget less the unbudgeted peak, and says so |
 | A document grows memory it never held, unasked | No default budget: with none stated an entry lives as long as its render, as today |
