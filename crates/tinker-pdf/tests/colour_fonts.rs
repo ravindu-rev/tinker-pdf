@@ -2940,7 +2940,6 @@ fn svg_glyphs_draw_their_document() {
         let (bytes, warnings) =
             colour_document(&face, "AB", PaletteChoice::Default, DocumentBuilder::new());
         assert!(warnings.is_empty(), "{warnings:?}");
-        std::fs::write("C:/Users/ravin/AppData/Local/Temp/claude/54cd9edf2323493e/5a5578ec-ca6b-4110-ba24-8cf02203e725/scratchpad/L8/svgglyph.pdf", &bytes).expect("written");
         let (bitmap, text) = rendered(bytes);
         assert_eq!(text, "AB");
         let samples: [(u16, [f64; 2], u8); 9] = [
